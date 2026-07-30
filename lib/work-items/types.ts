@@ -30,6 +30,7 @@ export interface WorkItemRecord {
   relatedItems: string[];
   designs: string[];
   plans: string[];
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -79,6 +80,7 @@ export interface UpdateWorkItemInput {
   relatedItems?: string[];
   designs?: string[];
   plans?: string[];
+  archived?: boolean;
   actor?: WorkItemActor;
   conversationId?: string;
 }

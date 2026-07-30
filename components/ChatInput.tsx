@@ -897,7 +897,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
 
-      if (e.key === "Enter" && !e.shiftKey) {
+      // On desktop, Enter sends (Shift+Enter inserts a newline). On mobile,
+      // Enter inserts a newline so users can compose multi-line messages;
+      // sending uses the dedicated send button.
+      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
           // Default Enter sends as steer if available, else followup
@@ -907,7 +910,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
 
   const handleInput = useCallback(() => {

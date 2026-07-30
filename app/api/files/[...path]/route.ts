@@ -135,14 +135,14 @@ function protectedWriteReason(filePath: string): string | null {
   if (normalized.endsWith("/.pi/workspace.yaml")) {
     return "workspace.yaml is managed through the Workspace settings";
   }
-  if (/\/(?:requirements\/REQ-\d+|bugs\/BUG-\d+)\/(?:item\.yaml|events\.jsonl)$/.test(normalized)) {
+  if (/\/(?:requirements\/REQ-\d+(?:-[^/]+)?|bugs\/BUG-\d+(?:-[^/]+)?)\/(?:item\.yaml|events\.jsonl)$/.test(normalized)) {
     return "Work Item metadata and events are managed through the Work Item API";
   }
   return null;
 }
 
 function workItemReadme(filePath: string): boolean {
-  return /\/(?:requirements\/REQ-\d+|bugs\/BUG-\d+)\/README\.md$/.test(
+  return /\/(?:requirements\/REQ-\d+(?:-[^/]+)?|bugs\/BUG-\d+(?:-[^/]+)?)\/README\.md$/.test(
     normalizeSlashes(filePath),
   );
 }

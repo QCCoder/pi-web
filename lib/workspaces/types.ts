@@ -1,6 +1,12 @@
 export const WORKSPACE_SCHEMA_VERSION = 1 as const;
 
 export type WorkspaceTemplateId = "empty" | "software-development";
+export type WorkspaceCapability =
+  | "sessions"
+  | "explorer"
+  | "work-items"
+  | "repositories"
+  | "overview";
 export type WorkspaceRepositoryKind = "code" | "knowledge";
 export type WorkspaceRepositoryStatus = "active" | "removed";
 
@@ -71,6 +77,10 @@ export interface WorkspaceSummary {
   name: string;
   path: string;
   templateId: WorkspaceTemplateId;
+  templateVersion: number;
+  capabilities: WorkspaceCapability[];
+  available: boolean;
+  configStatus: "ready" | "directory-unavailable" | "config-missing" | "config-invalid";
   skills: string[];
   repositories: WorkspaceRepository[];
   repositoryCount: number;
@@ -83,12 +93,33 @@ export interface WorkspaceTemplateInfo {
   name: string;
   description: string;
   version: number;
+  capabilities: WorkspaceCapability[];
+}
+
+export interface WorkspaceIndexEntry {
+  id: string;
+  path: string;
+  name: string;
+  templateId: string;
+  templateVersion: number;
+  addedAt: string;
+  lastOpenedAt: string;
+}
+
+export interface WorkspaceIndex {
+  schemaVersion: 1;
+  workspaces: WorkspaceIndexEntry[];
 }
 
 export interface CreateWorkspaceInput {
   name: string;
   slug: string;
   templateId: WorkspaceTemplateId;
+}
+
+export interface ImportWorkspaceInput {
+  path: string;
+  asCopy?: boolean;
 }
 
 export interface UpdateWorkspaceInput {

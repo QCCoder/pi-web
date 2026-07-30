@@ -3,7 +3,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
@@ -20,7 +19,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
-import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
+import { buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
@@ -49,10 +48,6 @@ export function AppShell() {
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
-  const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
-    () => initialNavigation.requestedCwd ? "validating" : "idle",
-  );
-  const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
@@ -62,11 +57,8 @@ export function AppShell() {
   const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
   const [workspaceManagerOpen, setWorkspaceManagerOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [workspacesLoaded, setWorkspacesLoaded] = useState(false);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceSummary | null>(null);
-  const [directoryMode, setDirectoryMode] = useState(
-    () => !searchParams.get("workspace")
-      && (initialNavigation.requestedCwd !== null || initialNavigation.sessionId !== null),
-  );
   const [workspaceView, setWorkspaceView] = useState<"overview" | "settings" | "work-items" | "chat">("overview");
   const [selectedWorkItemKey, setSelectedWorkItemKey] = useState<string | null>(null);
   const [createWorkItemRequest, setCreateWorkItemRequest] = useState<{
@@ -80,7 +72,6 @@ export function AppShell() {
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
   const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [mobileSidebarPane, setMobileSidebarPane] = useState<"work-items" | "conversations" | "explorer">("conversations");
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
@@ -169,7 +160,6 @@ export function AppShell() {
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) {
       setActiveTopPanel(null);
-      setMobileSidebarPane("conversations");
     }
     setSidebarOpen((open) => !open);
   }, [isMobile]);
@@ -202,28 +192,14 @@ export function AppShell() {
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
 
-  // Same @mention format as the chat input's @ autocomplete, so the agent's
-  // read tool resolves it the same way (it strips the @ prefix).
-  const handleAtMention = useCallback((relativePath: string, isDir: boolean) => {
-    chatInputRef.current?.insertText(buildAtMentionText(relativePath, isDir));
-  }, []);
-
-  const handleAtMentions = useCallback((relativePaths: string[]) => {
-    const mentions = buildFileAtMentionsText(relativePaths);
-    if (mentions) chatInputRef.current?.insertText(mentions);
-  }, []);
-
   const handleFileLineMention = useCallback((relativePath: string, startLine: number, endLine: number) => {
     chatInputRef.current?.insertText(buildFileLineMentionText(relativePath, startLine, endLine));
   }, []);
 
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
-  const activeProjectRootRef = useRef<string | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
-  // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
-  const suppressCwdBumpRef = useRef(false);
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -237,14 +213,14 @@ export function AppShell() {
         const next = current
           ? nextWorkspaces.find((workspace) => workspace.id === current.id)
           : nextWorkspaces.find((workspace) => workspace.id === requestedId);
-        if (!next) return null;
-        setDirectoryMode(false);
+        if (!next?.available) return null;
         setActiveCwd(next.path);
-        activeProjectRootRef.current = next.path;
         return next;
       });
     } catch (error) {
       console.error("Failed to load workspaces:", error);
+    } finally {
+      setWorkspacesLoaded(true);
     }
   }, [searchParams]);
 
@@ -258,85 +234,6 @@ export function AppShell() {
       .catch(() => {});
   }, [loadWorkspaces]);
 
-  useEffect(() => {
-    const requestedCwd = initialNavigation.requestedCwd;
-    if (!requestedCwd) return;
-
-    const controller = new AbortController();
-    setInitialCwdStatus("validating");
-    setInitialCwdError(null);
-
-    void fetch("/api/cwd/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: requestedCwd }),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        const data = await response.json().catch(() => ({})) as { cwd?: string; error?: string };
-        if (!response.ok || !data.cwd) {
-          throw new Error(data.error ?? `HTTP ${response.status}`);
-        }
-
-        // The sidebar will notify us when it adopts this cwd. Avoid remounting
-        // the just-created empty chat during that initial synchronization.
-        suppressCwdBumpRef.current = true;
-        setNewSessionCwd(data.cwd);
-        setInitialCwdStatus("ready");
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        setInitialCwdError(error instanceof Error ? error.message : String(error));
-        setInitialCwdStatus("error");
-      });
-
-    return () => controller.abort();
-  }, [initialNavigation]);
-
-  const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
-    setActiveCwd(cwd);
-    // Skip if cwd is null (initial mount).
-    if (!cwd) return;
-    const newProject = projectRoot ?? cwd;
-    const currentProject = activeProjectRootRef.current
-      ?? (selectedSession ? (selectedSession.projectRoot ?? selectedSession.cwd) : null);
-    activeProjectRootRef.current = newProject;
-
-    // Keep the project identity in sync during the initial URL restore without
-    // remounting the just-created or restored chat.
-    if (suppressCwdBumpRef.current) {
-      suppressCwdBumpRef.current = false;
-      return;
-    }
-    // Worktrees of one repo share a project root. Moving the effective cwd
-    // within the same project (e.g. switching worktree, or clicking a session
-    // that lives in another worktree) must not close the open session.
-    if (currentProject === newProject) {
-      return;
-    }
-    // Close any session that belongs to a different project — it no longer
-    // matches the selected project directory.
-    setSelectedSession(null);
-    setNewSessionCwd((prev) => {
-      if (prev && prev !== cwd) return null;
-      return prev;
-    });
-    setSessionKey((k) => k + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
-    // File tabs are keyed by absolute path, so tabs opened in the previous
-    // project would otherwise linger after switching to a different project.
-    // Reached only past the same-project early return above, so worktrees of
-    // one repo keep their open tabs. Mirror handleCloseFileTab and close the
-    // now-empty right panel.
-    setFileTabs([]);
-    setActiveFileTabId(null);
-    setRightPanelOpen(false);
-    router.replace("/", { scroll: false });
-  }, [router, selectedSession]);
-
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     setNewSessionCwd(null);
     setSelectedSession(session);
@@ -346,11 +243,6 @@ export function AppShell() {
     setInitialSessionRestored(true);
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
     if (isMobile && !isRestore) setSidebarOpen(false);
-    if (isRestore) {
-      // Suppress the redundant sessionKey bump that would come from the
-      // onCwdChange effect firing after setSelectedCwd in the sidebar
-      suppressCwdBumpRef.current = true;
-    }
     // Skip router.replace when restoring from URL — the param is already correct
     // and calling replace in production Next.js triggers a Suspense remount loop
     if (!isRestore) {
@@ -362,21 +254,56 @@ export function AppShell() {
   }, [activeWorkspace, router, isMobile]);
 
   useEffect(() => {
-    if (!activeWorkspace || !initialSessionId || initialSessionRestored || selectedSession) return;
+    if (!workspacesLoaded || !initialSessionId || initialSessionRestored || selectedSession) return;
     let cancelled = false;
-    void fetch("/api/sessions")
-      .then(async (response) => response.ok
-        ? response.json() as Promise<{ sessions?: SessionInfo[] }>
-        : null)
-      .then((data) => {
-        if (cancelled) return;
+    void (async () => {
+      try {
+        const response = await fetch("/api/sessions");
+        const data = response.ok
+          ? await response.json() as { sessions?: SessionInfo[] }
+          : null;
         const session = data?.sessions?.find((item) => item.id === initialSessionId);
-        if (session) handleSelectSession(session, true);
-        else setInitialSessionRestored(true);
-      })
-      .catch(() => {
+        if (cancelled) return;
+        if (!session) {
+          setInitialSessionRestored(true);
+          return;
+        }
+        if (activeWorkspace) {
+          handleSelectSession(session, true);
+          return;
+        }
+        const importResponse = await fetch("/api/workspaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: session.cwd }),
+        });
+        const imported = await importResponse.json() as {
+          workspace?: WorkspaceSummary;
+          error?: string;
+        };
+        if (!importResponse.ok || !imported.workspace) {
+          throw new Error(imported.error ?? `HTTP ${importResponse.status}`);
+        }
+        if (cancelled) return;
+        const workspace = imported.workspace;
+        setWorkspaces((current) => current.some((item) => item.id === workspace.id)
+          ? current.map((item) => item.id === workspace.id ? workspace : item)
+          : [...current, workspace]);
+        setActiveWorkspace(workspace);
+        setActiveCwd(workspace.path);
+        setWorkspaceView("chat");
+        setNewSessionCwd(null);
+        setSelectedSession(session);
+        setSessionKey((key) => key + 1);
+        setInitialSessionRestored(true);
+        router.replace(
+          `?workspace=${encodeURIComponent(workspace.id)}&session=${encodeURIComponent(session.id)}`,
+          { scroll: false },
+        );
+      } catch {
         if (!cancelled) setInitialSessionRestored(true);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -385,36 +312,23 @@ export function AppShell() {
     handleSelectSession,
     initialSessionId,
     initialSessionRestored,
+    router,
     selectedSession,
+    workspacesLoaded,
   ]);
-
-  const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
-    setDirectoryMode(true);
-    setActiveWorkspace(null);
-    setSelectedSession(null);
-    setNewSessionCwd(cwd);
-    setSessionKey((k) => k + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
-    if (isMobile) setSidebarOpen(false);
-    router.replace("/", { scroll: false });
-  }, [router, isMobile]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
     setWorkspaceManagerOpen(false);
     setWorkspaces((current) => current.some((item) => item.id === workspace.id)
       ? current.map((item) => item.id === workspace.id ? workspace : item)
       : [...current, workspace]);
-    setDirectoryMode(false);
     setActiveWorkspace(workspace);
-    setWorkspaceView("overview");
+    const hasOverview = workspace.capabilities.includes("overview");
+    setWorkspaceView(hasOverview ? "overview" : "chat");
     setSelectedWorkItemKey(null);
     setSelectedSession(null);
-    setNewSessionCwd(null);
+    setNewSessionCwd(hasOverview ? null : workspace.path);
     setActiveCwd(workspace.path);
-    activeProjectRootRef.current = workspace.path;
     setSessionKey((key) => key + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
@@ -441,7 +355,6 @@ export function AppShell() {
   }, [activeWorkspace, isMobile, router]);
 
   const handleReturnHome = useCallback(() => {
-    setDirectoryMode(false);
     setActiveWorkspace(null);
     setWorkspaceView("overview");
     setSelectedSession(null);
@@ -461,15 +374,6 @@ export function AppShell() {
     }
   }, [activeWorkspace, handleReturnHome]);
 
-  const handleOpenDirectoryMode = useCallback(() => {
-    setDirectoryMode(true);
-    setActiveWorkspace(null);
-    setSelectedSession(null);
-    setNewSessionCwd(null);
-    setActiveCwd(null);
-    router.replace("/", { scroll: false });
-  }, [router]);
-
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
     setWorkspaceView("work-items");
     setSelectedWorkItemKey(null);
@@ -479,7 +383,10 @@ export function AppShell() {
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
-    onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd),
+    onNewSession: () => {
+      if (activeWorkspace) handleWorkspaceNewSession();
+      else handleReturnHome();
+    },
     activeCwd,
   });
 
@@ -558,13 +465,11 @@ export function AppShell() {
       workspaceId: workspace.id,
       key: item.key,
     };
-    setDirectoryMode(false);
     setActiveWorkspace(workspace);
     setWorkspaceView("chat");
     setSelectedSession(null);
     setNewSessionCwd(workspace.path);
     setActiveCwd(workspace.path);
-    activeProjectRootRef.current = workspace.path;
     setSessionKey((key) => key + 1);
     router.replace(`?workspace=${encodeURIComponent(workspace.id)}`, { scroll: false });
     const prompt = `请继续处理工作项 ${item.key}（${item.title}）。先调用 workspace_get_work_item 读取现状，再按 Workspace 的 AGENTS.md 和已选 Pi skills 协作；只把关键里程碑写回工作项。`;
@@ -621,10 +526,6 @@ export function AppShell() {
     setAutoNameStatus({ kind: "idle" });
   }, [selectedSession?.id]);
 
-  const handleExplorerRefresh = useCallback(() => {
-    setExplorerRefreshKey((k) => k + 1);
-  }, []);
-
   const handleSessionForked = useCallback((newSessionId: string) => {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
@@ -636,25 +537,6 @@ export function AppShell() {
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
   }, [router, hydrateSelectedSession]);
-
-  const handleInitialRestoreDone = useCallback(() => {
-    setInitialSessionRestored(true);
-  }, []);
-
-  const handleSessionDeleted = useCallback((sessionId: string) => {
-    setRefreshKey((k) => k + 1);
-    if (selectedSession?.id === sessionId) {
-      const cwd = selectedSession.cwd;
-      setSelectedSession(null);
-      setNewSessionCwd(cwd ?? null);
-      setSessionKey((k) => k + 1);
-      setBranchTree([]);
-      setBranchActiveLeafId(null);
-      setSystemPrompt(null);
-      setActiveTopPanel(null);
-      router.replace("/", { scroll: false });
-    }
-  }, [selectedSession, router]);
 
   const handleOpenFile = useCallback((
     filePath: string,
@@ -719,8 +601,7 @@ export function AppShell() {
   }, [selectedSession]);
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
-  const effectiveNewSessionCwd = newSessionCwd
-    ?? (directoryMode && selectedSession === null && activeCwd ? activeCwd : null);
+  const effectiveNewSessionCwd = newSessionCwd;
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   const settingsCwd = activeWorkspace?.path
@@ -791,94 +672,7 @@ export function AppShell() {
     return () => observer.disconnect();
   }, [windowTitle]);
 
-  const directorySidebarContent = (
-    <>
-      <SessionSidebar
-        selectedSessionId={selectedSession?.id ?? null}
-        onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
-        initialSessionId={initialSessionId}
-        skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
-        onInitialRestoreDone={handleInitialRestoreDone}
-        refreshKey={refreshKey}
-        onSessionDeleted={handleSessionDeleted}
-        selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
-        onCwdChange={handleCwdChange}
-        onOpenFile={handleOpenFile}
-        explorerRefreshKey={explorerRefreshKey}
-        onExplorerRefresh={handleExplorerRefresh}
-        onAtMention={handleAtMention}
-        onAtMentions={handleAtMentions}
-        mobilePane={isMobile
-          ? (mobileSidebarPane === "explorer" ? "explorer" : "conversations")
-          : undefined}
-      />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
-        {([
-          {
-             label: translate("common.models"),
-            onClick: () => setModelsConfigOpen(true),
-            disabled: false,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-                <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-              </svg>
-            ),
-          },
-          {
-             label: translate("common.skills"),
-            onClick: () => setSkillsConfigOpen(true),
-            disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            ),
-          },
-          {
-             label: translate("common.plugins"),
-            onClick: () => setPluginsConfigOpen(true),
-            disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 7V2" />
-                <path d="M15 7V2" />
-                <path d="M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0Z" />
-                <path d="M12 19v3" />
-              </svg>
-            ),
-          },
-        ] as { label: string; onClick: () => void; disabled: boolean; icon: React.ReactNode }[]).map(({ label, onClick, disabled, icon }) => (
-          <button
-            key={label}
-            onClick={onClick}
-            disabled={disabled}
-            title={label}
-            style={{
-              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              height: 32, padding: 0, background: "none", border: "none",
-              borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-              fontSize: 12, opacity: disabled ? 0.35 : 1,
-              transition: "background 0.12s, color 0.12s",
-            }}
-            onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {icon}
-            {label}
-          </button>
-        ))}
-      </div>
-    </>
-  );
-
-  const sidebarContent = directoryMode ? directorySidebarContent : (
+  const sidebarContent = (
     <WorkspaceSidebar
       activeWorkspace={activeWorkspace}
       workspaces={workspaces}
@@ -886,7 +680,6 @@ export function AppShell() {
       selectedWorkItemKey={selectedWorkItemKey}
       refreshKey={refreshKey}
       explorerRefreshKey={explorerRefreshKey}
-      mobilePane={isMobile ? mobileSidebarPane : undefined}
       onSelectWorkspace={handleOpenWorkspace}
       onCreateWorkspace={() => {
         setWorkspaceManagerOpen(true);
@@ -895,7 +688,7 @@ export function AppShell() {
         setSelectedSession(null);
         setNewSessionCwd(null);
       }}
-      onOpenDirectoryMode={handleOpenDirectoryMode}
+      onImportWorkspace={handleOpenWorkspace}
       onReturnHome={handleReturnHome}
       onOpenWorkspaceSettings={() => {
         setOpenRepositoryFormRequest(undefined);
@@ -920,7 +713,6 @@ export function AppShell() {
       onOpenPlugins={() => setPluginsConfigOpen(true)}
     />
   );
-
   return (
     <>
     <style>{`
@@ -991,15 +783,6 @@ export function AppShell() {
         .sidebar-container.sidebar-mobile-pending.sidebar-open {
           transform: translateX(-100%);
           box-shadow: none;
-        }
-        .app-shell-center {
-          padding-bottom: 54px;
-        }
-        .right-panel-container {
-          padding-bottom: 54px;
-        }
-        .mobile-workspace-nav {
-          display: grid !important;
         }
       }
     `}</style>
@@ -1687,7 +1470,7 @@ export function AppShell() {
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {!directoryMode && activeWorkspace && workspaceView === "overview" ? (
+          {activeWorkspace && workspaceView === "overview" ? (
             <WorkspaceOverview
               workspace={activeWorkspace}
               onNewSession={handleWorkspaceNewSession}
@@ -1697,8 +1480,13 @@ export function AppShell() {
               }}
               onOpenWorkItems={() => setWorkspaceView("work-items")}
               onCreateWorkItem={handleCreateWorkItem}
+              onSelectSession={handleSelectSession}
+              onSessionDeleted={(id) => {
+                setRefreshKey((key) => key + 1);
+                setSelectedSession((prev) => (prev?.id === id ? null : prev));
+              }}
             />
-          ) : !directoryMode && activeWorkspace
+          ) : activeWorkspace
             && (workspaceView === "settings" || workspaceView === "work-items") ? (
             <WorkspaceManager
               open
@@ -1712,8 +1500,9 @@ export function AppShell() {
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
               onWorkspaceDeleted={handleWorkspaceDeleted}
+              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
             />
-          ) : !directoryMode && !activeWorkspace && workspaceManagerOpen ? (
+          ) : !activeWorkspace && workspaceManagerOpen ? (
             <WorkspaceManager
               open
               embedded
@@ -1724,6 +1513,7 @@ export function AppShell() {
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
               onWorkspaceDeleted={handleWorkspaceDeleted}
+              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
             />
           ) : showChat ? (
             <ChatWindow
@@ -1742,27 +1532,6 @@ export function AppShell() {
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
             />
-          ) : initialCwdStatus === "validating" ? (
-            <div
-              role="status"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
-            >
-               <div style={{ fontSize: 14, color: "var(--text)" }}>{translate("workspace.opening")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                {initialNavigation.requestedCwd}
-              </div>
-            </div>
-          ) : initialCwdStatus === "error" ? (
-            <div
-              role="alert"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
-            >
-               <div style={{ fontSize: 14, color: "#dc2626" }}>{translate("workspace.unable")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                {initialNavigation.requestedCwd}
-              </div>
-              <div style={{ maxWidth: 720, fontSize: 12 }}>{initialCwdError}</div>
-            </div>
           ) : showPlaceholder ? (
             activeCwd ? (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 15 }}>
@@ -1833,75 +1602,6 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    <nav
-      className="mobile-workspace-nav"
-      aria-label="Mobile navigation"
-      style={{
-        display: "none",
-        position: "fixed",
-        left: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: 350,
-        gridTemplateColumns: "repeat(3, 1fr)",
-        height: 54,
-        paddingBottom: "env(safe-area-inset-bottom)",
-        borderTop: "1px solid var(--border)",
-        background: "color-mix(in srgb, var(--bg-panel) 94%, transparent)",
-        backdropFilter: "blur(12px)",
-      }}
-    >
-      {([
-        {
-          label: "工作项",
-          icon: "✓",
-          action: () => {
-            setRightPanelOpen(false);
-            setMobileSidebarPane("work-items");
-            setSidebarOpen(true);
-          },
-        },
-        {
-          label: "会话",
-          icon: "◌",
-          action: () => {
-            setRightPanelOpen(false);
-            setMobileSidebarPane("conversations");
-            setSidebarOpen(true);
-          },
-        },
-        {
-          label: "Explorer",
-          icon: "⌘",
-          action: () => {
-            setRightPanelOpen(false);
-            setMobileSidebarPane("explorer");
-            setSidebarOpen(true);
-          },
-        },
-      ] as const).map((item) => (
-        <button
-          key={item.label}
-          type="button"
-          onClick={item.action}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 2,
-            border: 0,
-            background: "transparent",
-            color: "var(--text-muted)",
-            font: "inherit",
-            fontSize: 10,
-          }}
-        >
-          <span aria-hidden="true" style={{ minHeight: 17, fontSize: 15, lineHeight: 1 }}>{item.icon}</span>
-          <span>{item.label}</span>
-        </button>
-      ))}
-    </nav>
     {/* File panel toggle — always visible at top-right */}
     <button
       onClick={() => setRightPanelOpen((v) => !v)}
@@ -1937,7 +1637,7 @@ export function AppShell() {
     {skillsConfigOpen && settingsCwd && (
       <SkillsConfig
         cwd={settingsCwd}
-        globalOnly={!activeWorkspace && !directoryMode}
+        globalOnly={!activeWorkspace}
         onClose={() => setSkillsConfigOpen(false)}
       />
     )}

@@ -132,6 +132,7 @@ export function createWorkspaceWorkItemExtension(
           ])),
           repositories: Type.Optional(Type.Array(Type.String())),
           tags: Type.Optional(Type.Array(Type.String())),
+          archived: Type.Optional(Type.Boolean()),
         }),
         execute: async (_callId, params, _signal, _update, ctx) => {
           const conversationId = ctx.sessionManager.getSessionId();
@@ -144,6 +145,7 @@ export function createWorkspaceWorkItemExtension(
             ...(params.priority !== undefined ? { priority: params.priority as WorkItemPriority } : {}),
             ...(params.repositories !== undefined ? { repositories: params.repositories } : {}),
             ...(params.tags !== undefined ? { tags: params.tags } : {}),
+            ...(params.archived !== undefined ? { archived: params.archived } : {}),
             conversations: [...new Set([...current.item.conversations, conversationId])],
             actor: "agent",
             conversationId,

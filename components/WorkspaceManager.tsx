@@ -50,6 +50,7 @@ interface Props {
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
   onWorkspaceDeleted?: (workspace: WorkspaceSummary) => void;
+  onWorkItemsChanged?: () => void;
 }
 
 const STATUS_OPTIONS: WorkItemStatus[] = ["open", "in_progress", "blocked", "done", "cancelled"];
@@ -154,6 +155,7 @@ export function WorkspaceManager({
   onOpenWorkspace,
   onOpenWorkItemConversation,
   onWorkspaceDeleted,
+  onWorkItemsChanged,
 }: Props) {
   const [section, setSection] = useState<ManagerSection>(initialSection);
   const [workspaceData, setWorkspaceData] = useState<WorkspaceListResponse | null>(null);
@@ -163,13 +165,13 @@ export function WorkspaceManager({
   const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
   const [selectedWorkItem, setSelectedWorkItem] = useState<WorkItemDetail | null>(null);
   const [filter, setFilter] = useState<WorkItemFilter>("all");
+  const [showArchived, setShowArchived] = useState(false);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [itemsLoading, setItemsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
-  const [workspaceSlug, setWorkspaceSlug] = useState("");
   const [workspaceTemplate, setWorkspaceTemplate] = useState<WorkspaceTemplateId>("software-development");
   const [repositoryFormOpen, setRepositoryFormOpen] = useState(false);
   const [repositoryMode, setRepositoryMode] = useState<"clone" | "init">("clone");
@@ -192,6 +194,16 @@ export function WorkspaceManager({
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
   ) ?? null;
+
+  const openCreateWorkItem = useCallback((type?: WorkItemType) => {
+    if (type) setWorkItemType(type);
+    setWorkItemRepositories(
+      selectedWorkspace?.repositories
+        .filter((repository) => repository.status === "active" && repository.kind === "code")
+        .map((repository) => repository.id) ?? [],
+    );
+    setCreateWorkItemOpen(true);
+  }, [selectedWorkspace]);
 
   const loadWorkspaces = useCallback(async () => {
     setLoading(true);
@@ -271,9 +283,28 @@ export function WorkspaceManager({
       setRepositories([]);
       return;
     }
-    void loadWorkItems(selectedWorkspaceId);
-    void loadRepositories(selectedWorkspaceId);
-  }, [embedded, loadRepositories, loadWorkItems, open, selectedWorkspaceId]);
+    if (selectedWorkspace?.capabilities.includes("work-items")) {
+      void loadWorkItems(selectedWorkspaceId);
+    } else {
+      setWorkItemData({ items: [], invalid: [] });
+    }
+    if (selectedWorkspace?.capabilities.includes("repositories")) {
+      void loadRepositories(selectedWorkspaceId);
+    } else {
+      setRepositories([]);
+    }
+  }, [
+    embedded,
+    loadRepositories,
+    loadWorkItems,
+    open,
+    selectedWorkspace,
+    selectedWorkspaceId,
+  ]);
+
+  useEffect(() => {
+    setShowArchived(false);
+  }, [selectedWorkspaceId]);
 
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspace) {
@@ -306,9 +337,8 @@ export function WorkspaceManager({
   useEffect(() => {
     if ((!open && !embedded) || !createWorkItemRequest) return;
     setSection("work-items");
-    setWorkItemType(createWorkItemRequest.type);
-    setCreateWorkItemOpen(true);
-  }, [createWorkItemRequest, embedded, open]);
+    openCreateWorkItem(createWorkItemRequest.type);
+  }, [createWorkItemRequest, embedded, open, openCreateWorkItem]);
 
   useEffect(() => {
     if ((!open && !embedded) || !createWorkspaceOnOpen) return;
@@ -325,13 +355,14 @@ export function WorkspaceManager({
   const visibleWorkItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return workItemData.items.filter((item) => {
+      if (showArchived !== Boolean(item.archivedAt)) return false;
       if (filter !== "all" && item.type !== filter) return false;
       if (!normalizedQuery) return true;
       return item.key.toLowerCase().includes(normalizedQuery)
         || item.title.toLowerCase().includes(normalizedQuery)
         || item.tags.some((tag) => tag.toLowerCase().includes(normalizedQuery));
     });
-  }, [filter, query, workItemData.items]);
+  }, [filter, query, showArchived, workItemData.items]);
 
   const createWorkspace = useCallback(async () => {
     setSaving(true);
@@ -343,14 +374,13 @@ export function WorkspaceManager({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: workspaceName,
-            slug: workspaceSlug || slugify(workspaceName),
+            slug: slugify(workspaceName),
             templateId: workspaceTemplate,
           }),
         }),
       );
       setCreateWorkspaceOpen(false);
       setWorkspaceName("");
-      setWorkspaceSlug("");
       await loadWorkspaces();
       setSelectedWorkspaceId(data.workspace.id);
     } catch (createError) {
@@ -358,10 +388,10 @@ export function WorkspaceManager({
     } finally {
       setSaving(false);
     }
-  }, [loadWorkspaces, workspaceName, workspaceSlug, workspaceTemplate]);
+  }, [loadWorkspaces, workspaceName, workspaceTemplate]);
 
-  const trashWorkspace = useCallback(async (workspace: WorkspaceSummary) => {
-    if (!window.confirm(`将 ${workspace.name} 移到回收站？远程 Git 仓库不会被删除。`)) return;
+  const removeWorkspace = useCallback(async (workspace: WorkspaceSummary) => {
+    if (!window.confirm(`从列表移除 ${workspace.name}？目录和 Workspace 配置不会被删除。`)) return;
     setSaving(true);
     setError(null);
     try {
@@ -371,8 +401,8 @@ export function WorkspaceManager({
       setSelectedWorkItem(null);
       await loadWorkspaces();
       onWorkspaceDeleted?.(workspace);
-    } catch (trashError) {
-      setError(trashError instanceof Error ? trashError.message : String(trashError));
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : String(removeError));
     } finally {
       setSaving(false);
     }
@@ -507,6 +537,7 @@ export function WorkspaceManager({
       setSelectedWorkItem(detail);
       setContentDraft(detail.content);
       await loadWorkItems(selectedWorkspaceId);
+      onWorkItemsChanged?.();
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : String(createError));
     } finally {
@@ -520,10 +551,12 @@ export function WorkspaceManager({
     workItemRepositories,
     workItemTitle,
     workItemType,
+    onWorkItemsChanged,
   ]);
 
   const patchWorkItem = useCallback(async (
-    patch: Partial<Pick<WorkItemRecord, "status" | "phase" | "priority" | "title" | "repositories">>,
+    patch: Partial<Pick<WorkItemRecord, "status" | "phase" | "priority" | "title" | "repositories">>
+      & { archived?: boolean },
   ) => {
     if (!selectedWorkspaceId || !selectedWorkItem) return;
     setSaving(true);
@@ -545,12 +578,22 @@ export function WorkspaceManager({
       setSelectedWorkItem(detail);
       setContentDraft(detail.content);
       await loadWorkItems(selectedWorkspaceId);
+      onWorkItemsChanged?.();
     } catch (patchError) {
       setError(patchError instanceof Error ? patchError.message : String(patchError));
     } finally {
       setSaving(false);
     }
-  }, [loadWorkItems, selectedWorkItem, selectedWorkspaceId]);
+  }, [loadWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
+
+  const toggleWorkItemArchive = useCallback(async () => {
+    if (!selectedWorkItem) return;
+    const archived = Boolean(selectedWorkItem.item.archivedAt);
+    if (!archived && !window.confirm(`归档 ${selectedWorkItem.item.key}？归档后默认列表将不再显示。`)) {
+      return;
+    }
+    await patchWorkItem({ archived: !archived });
+  }, [patchWorkItem, selectedWorkItem]);
 
   const saveContent = useCallback(async () => {
     if (!selectedWorkspaceId || !selectedWorkItem) return;
@@ -574,12 +617,13 @@ export function WorkspaceManager({
       setContentDraft(detail.content);
       setContentEditing(false);
       await loadWorkItems(selectedWorkspaceId);
+      onWorkItemsChanged?.();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
       setSaving(false);
     }
-  }, [contentDraft, loadWorkItems, selectedWorkItem, selectedWorkspaceId]);
+  }, [contentDraft, loadWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
 
   const trashWorkItem = useCallback(async () => {
     if (!selectedWorkspaceId || !selectedWorkItem) return;
@@ -595,12 +639,13 @@ export function WorkspaceManager({
       );
       setSelectedWorkItem(null);
       await loadWorkItems(selectedWorkspaceId);
+      onWorkItemsChanged?.();
     } catch (trashError) {
       setError(trashError instanceof Error ? trashError.message : String(trashError));
     } finally {
       setSaving(false);
     }
-  }, [loadWorkItems, selectedWorkItem, selectedWorkspaceId]);
+  }, [loadWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
 
   if (!open && !embedded) return null;
 
@@ -939,14 +984,15 @@ export function WorkspaceManager({
             >
               Workspaces
             </button>
-            <button
-              className="workspace-manager-tab"
-              data-active={section === "work-items"}
-              onClick={() => setSection("work-items")}
-              disabled={!selectedWorkspace}
-            >
-              工作项
-            </button>
+            {selectedWorkspace?.capabilities.includes("work-items") && (
+              <button
+                className="workspace-manager-tab"
+                data-active={section === "work-items"}
+                onClick={() => setSection("work-items")}
+              >
+                工作项
+              </button>
+            )}
           </nav>
           {!embedded && (
             <button className="workspace-icon-button" onClick={onClose} aria-label="Close">×</button>
@@ -963,6 +1009,7 @@ export function WorkspaceManager({
             {workspaceData?.workspaces.map((workspace) => (
               <button
                 key={workspace.id}
+                disabled={!workspace.available}
                 className="workspace-rail-item"
                 data-active={workspace.id === selectedWorkspaceId}
                 onClick={() => {
@@ -971,9 +1018,11 @@ export function WorkspaceManager({
                 }}
               >
                 <strong>{workspace.name}</strong>
-                <span className="workspace-rail-meta">workspace-{workspace.slug}</span>
+                <span className="workspace-rail-meta">{workspace.path}</span>
                 <span className="workspace-rail-meta">
-                  {workspace.templateId} · {workspace.repositoryCount} repos
+                  {workspace.available
+                    ? `${workspace.templateId} · ${workspace.repositoryCount} repos`
+                    : "目录或配置不可用"}
                 </span>
               </button>
             ))}
@@ -997,9 +1046,9 @@ export function WorkspaceManager({
                       <button
                         className="workspace-action"
                         disabled={saving}
-                        onClick={() => void trashWorkspace(selectedWorkspace)}
+                        onClick={() => void removeWorkspace(selectedWorkspace)}
                       >
-                        移到回收站
+                        从列表移除
                       </button>
                     </>
                   )}
@@ -1012,20 +1061,9 @@ export function WorkspaceManager({
                         <span>名称</span>
                         <input
                           value={workspaceName}
-                          onChange={(event) => {
-                            setWorkspaceName(event.target.value);
-                            if (!workspaceSlug) setWorkspaceSlug(slugify(event.target.value));
-                          }}
+                          onChange={(event) => setWorkspaceName(event.target.value)}
                           placeholder="Ecommerce"
                           autoFocus
-                        />
-                      </label>
-                      <label className="workspace-field">
-                        <span>目录标识</span>
-                        <input
-                          value={workspaceSlug}
-                          onChange={(event) => setWorkspaceSlug(slugify(event.target.value))}
-                          placeholder="ecommerce"
                         />
                       </label>
                       <label className="workspace-field">
@@ -1047,7 +1085,7 @@ export function WorkspaceManager({
                       <button className="workspace-action" onClick={() => setCreateWorkspaceOpen(false)}>取消</button>
                       <button
                         className="workspace-action"
-                        disabled={saving || !workspaceName.trim() || !workspaceSlug}
+                        disabled={saving || !slugify(workspaceName)}
                         onClick={() => void createWorkspace()}
                       >
                         {saving ? "创建中…" : "创建 Workspace"}
@@ -1143,6 +1181,7 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
+                    {selectedWorkspace.capabilities.includes("repositories") && (
                     <section className="repository-section">
                       <div className="repository-section-header">
                         <h3>Git 仓库</h3>
@@ -1256,6 +1295,7 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
+                    )}
                   </>
                 ) : (
                   <div className="workspace-summary-card">
@@ -1286,6 +1326,13 @@ export function WorkspaceManager({
                       onClick={() => setContentEditing((value) => !value)}
                     >
                       {contentEditing ? "预览" : "编辑正文"}
+                    </button>
+                    <button
+                      className="workspace-action"
+                      disabled={saving}
+                      onClick={() => void toggleWorkItemArchive()}
+                    >
+                      {selectedWorkItem.item.archivedAt ? "取消归档" : "归档"}
                     </button>
                   </div>
                   <div className="work-item-fields">
@@ -1400,8 +1447,8 @@ export function WorkspaceManager({
                 <>
                   <div className="workspace-page-header">
                     <h2>{selectedWorkspace.name} · 工作项</h2>
-                    <button className="workspace-action" onClick={() => setCreateWorkItemOpen(true)}>
-                      新建需求 / Bug
+                    <button className="workspace-action" onClick={() => openCreateWorkItem()}>
+                      + 新建工作项
                     </button>
                   </div>
                   {createWorkItemOpen && (
@@ -1504,6 +1551,13 @@ export function WorkspaceManager({
                       onChange={(event) => setQuery(event.target.value)}
                       placeholder="搜索编号、标题或标签"
                     />
+                    <button
+                      className="workspace-action"
+                      data-active={showArchived}
+                      onClick={() => setShowArchived((current) => !current)}
+                    >
+                      {showArchived ? "返回未归档" : "查看归档"}
+                    </button>
                   </div>
                   <div className="work-item-list">
                     {visibleWorkItems.map((item) => (
@@ -1520,7 +1574,9 @@ export function WorkspaceManager({
                       </button>
                     ))}
                     {!itemsLoading && visibleWorkItems.length === 0 && (
-                      <div className="workspace-summary-card">没有匹配的工作项。</div>
+                      <div className="workspace-summary-card">
+                        {showArchived ? "没有匹配的归档工作项。" : "没有匹配的工作项。"}
+                      </div>
                     )}
                     {workItemData.invalid.map((item) => (
                       <div className="workspace-error" key={item.path}>

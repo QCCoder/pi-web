@@ -36,6 +36,7 @@ import {
 } from "./types.ts";
 
 const WORK_ITEM_KEY_RE = /^(REQ|BUG)-\d{4,}$/;
+const WORK_ITEM_DIRECTORY_RE = /^((?:REQ|BUG)-\d{4,})(?:-|$)/;
 const WORK_ITEM_STATUSES: readonly WorkItemStatus[] = [
   "open",
   "in_progress",
@@ -102,8 +103,34 @@ function workItemTypeFromKey(key: string): WorkItemType {
   return key.startsWith("REQ-") ? "requirement" : "bug";
 }
 
-function workItemDirectory(workspacePath: string, type: WorkItemType, key: string): string {
-  return join(workspacePath, workItemDirectoryName(type), key);
+function workItemKeyFromDirectoryName(name: string): string | null {
+  return name.match(WORK_ITEM_DIRECTORY_RE)?.[1] ?? null;
+}
+
+function workItemTitleSlug(title: string): string {
+  const normalized = title
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+  return Array.from(normalized).slice(0, 48).join("").replace(/-+$/g, "") || "未命名";
+}
+
+async function findWorkItemDirectory(
+  workspacePath: string,
+  type: WorkItemType,
+  key: string,
+): Promise<string> {
+  const root = join(workspacePath, workItemDirectoryName(type));
+  const exactPath = join(root, key);
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    const match = entries.find((entry) =>
+      entry.isDirectory() && workItemKeyFromDirectoryName(entry.name) === key
+    );
+    return match ? join(root, match.name) : exactPath;
+  } catch {
+    return exactPath;
+  }
 }
 
 function serializeWorkItem(item: WorkItemRecord): string {
@@ -123,6 +150,7 @@ function serializeWorkItem(item: WorkItemRecord): string {
     related_items: item.relatedItems,
     designs: item.designs,
     plans: item.plans,
+    archived_at: item.archivedAt,
     created_at: item.createdAt,
     updated_at: item.updatedAt,
   }, { lineWidth: 0 });
@@ -157,6 +185,9 @@ export function parseWorkItem(value: unknown): WorkItemRecord {
     relatedItems: requireStringArray(record.related_items, "related_items"),
     designs: requireStringArray(record.designs, "designs"),
     plans: requireStringArray(record.plans, "plans"),
+    archivedAt: record.archived_at === undefined || record.archived_at === null
+      ? null
+      : requireText(record.archived_at, "archived_at"),
     createdAt: requireText(record.created_at, "created_at"),
     updatedAt: requireText(record.updated_at, "updated_at"),
   };
@@ -268,7 +299,7 @@ function validateRepositorySelection(manifest: WorkspaceManifest, repositories: 
 
 export async function readWorkItem(workspacePath: string, key: string): Promise<WorkItemDetail> {
   const type = workItemTypeFromKey(key);
-  const path = workItemDirectory(workspacePath, type, key);
+  const path = await findWorkItemDirectory(workspacePath, type, key);
   let metadata: string;
   try {
     metadata = await readFile(join(path, "item.yaml"), "utf8");
@@ -276,8 +307,8 @@ export async function readWorkItem(workspacePath: string, key: string): Promise<
     throw new WorkItemNotFoundError(`Work Item not found: ${key}`);
   }
   const item = parseWorkItem(parse(metadata));
-  if (item.key !== basename(path)) {
-    throw new WorkItemValidationError(`Work Item directory must be named ${item.key}`);
+  if (item.key !== workItemKeyFromDirectoryName(basename(path))) {
+    throw new WorkItemValidationError(`Work Item directory must begin with ${item.key}`);
   }
   const [content, eventContent] = await Promise.all([
     readFile(join(path, "README.md"), "utf8"),
@@ -308,12 +339,14 @@ export async function listWorkItems(
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
       const path = join(root, entry.name);
+      const key = workItemKeyFromDirectoryName(entry.name);
       try {
-        items.push((await readWorkItem(workspacePath, entry.name)).item);
+        if (!key) throw new WorkItemValidationError(`Invalid Work Item directory: ${entry.name}`);
+        items.push((await readWorkItem(workspacePath, key)).item);
       } catch (error) {
         invalid.push({
           path,
-          key: entry.name,
+          key: key ?? entry.name,
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -358,10 +391,15 @@ export async function createWorkItem(
     relatedItems: [],
     designs: [],
     plans: [],
+    archivedAt: null,
     createdAt: now,
     updatedAt: now,
   };
-  const finalPath = workItemDirectory(workspacePath, type, key);
+  const finalPath = join(
+    workspacePath,
+    workItemDirectoryName(type),
+    `${key}-${workItemTitleSlug(title)}`,
+  );
   const temporaryPath = `${finalPath}.creating-${createUlid()}`;
   await mkdir(join(temporaryPath, "attachments"), { recursive: true });
   try {
@@ -396,6 +434,7 @@ function changedFields(before: WorkItemRecord, after: WorkItemRecord): Record<st
     "relatedItems",
     "designs",
     "plans",
+    "archivedAt",
   ] as const) {
     if (JSON.stringify(before[field]) !== JSON.stringify(after[field])) {
       changes[field] = { from: before[field], to: after[field] };
@@ -432,6 +471,12 @@ export async function updateWorkItem(
     if (input.relatedItems !== undefined) next.relatedItems = requireStringArray(input.relatedItems, "relatedItems");
     if (input.designs !== undefined) next.designs = requireStringArray(input.designs, "designs");
     if (input.plans !== undefined) next.plans = requireStringArray(input.plans, "plans");
+    if (input.archived !== undefined) {
+      if (typeof input.archived !== "boolean") {
+        throw new WorkItemValidationError("archived must be a boolean");
+      }
+      next.archivedAt = input.archived ? (next.archivedAt ?? new Date().toISOString()) : null;
+    }
     const changes = changedFields(current.item, next);
     if (Object.keys(changes).length === 0) return current;
     next.revision += 1;

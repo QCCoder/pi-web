@@ -19,19 +19,16 @@ const skillsConfigSource = await readFile(
   "utf8",
 );
 
-test("workspace selection opens an overview instead of implicitly creating a chat", () => {
+test("workspace selection uses template capabilities to choose its landing view", () => {
   assert.match(
     appShellSource,
-    /directoryMode && selectedSession === null && activeCwd/,
-  );
-  assert.match(
-    appShellSource,
-    /setWorkspaceView\("overview"\)[\s\S]*setNewSessionCwd\(null\)/,
+    /const hasOverview = workspace\.capabilities\.includes\("overview"\)[\s\S]*setWorkspaceView\(hasOverview \? "overview" : "chat"\)/,
   );
   assert.match(appShellSource, /workspace=\$\{encodeURIComponent\(workspace\.id\)\}/);
+  assert.doesNotMatch(appShellSource, /directoryMode|requestedCwd/);
 });
 
-test("workspace sidebar exposes persistent collaboration navigation", () => {
+test("workspace sidebar renders navigation from template capabilities", () => {
   for (const label of ["会话", "工作项", "仓库", "Explorer"]) {
     assert.match(workspaceSidebarSource, new RegExp(`label="${label}"`));
   }
@@ -41,6 +38,9 @@ test("workspace sidebar exposes persistent collaboration navigation", () => {
     workspaceSidebarSource,
     /label="仓库"[\s\S]*action=\{onAddRepository\}[\s\S]*actionLabel="添加仓库"/,
   );
+  assert.match(workspaceSidebarSource, /hasCapability\("work-items"\)/);
+  assert.match(workspaceSidebarSource, /hasCapability\("repositories"\)/);
+  assert.match(workspaceSidebarSource, /导入目录…/);
 });
 
 test("workspace settings and work items render as center pages", () => {
@@ -61,8 +61,9 @@ test("deleting the active workspace returns to the home context", () => {
   assert.match(workspaceManagerSource, /onWorkspaceDeleted\?\.\(workspace\)/);
 });
 
-test("mobile workspace navigation has only the three primary destinations", () => {
-  assert.match(appShellSource, /gridTemplateColumns: "repeat\(3, 1fr\)"/);
+test("mobile workspace navigation follows template capabilities", () => {
+  assert.match(appShellSource, /mobileNavigationItems/);
+  assert.match(appShellSource, /capabilities\.includes\("work-items"\)/);
   for (const label of ["工作项", "会话", "Explorer"]) {
     assert.match(appShellSource, new RegExp(`label: "${label}"`));
   }
@@ -70,7 +71,13 @@ test("mobile workspace navigation has only the three primary destinations", () =
 });
 
 test("home skills use an explicit global context instead of the user home directory", () => {
-  assert.match(appShellSource, /<SkillsConfig[\s\S]*globalOnly=\{!activeWorkspace && !directoryMode\}/);
+  assert.match(appShellSource, /<SkillsConfig[\s\S]*globalOnly=\{!activeWorkspace\}/);
   assert.match(skillsConfigSource, /scope=global/);
   assert.match(skillsConfigSource, /globalOnly\?: boolean/);
+});
+
+test("workspace directory slug is derived from the complete name at submit time", () => {
+  assert.match(workspaceManagerSource, /slug: slugify\(workspaceName\)/);
+  assert.doesNotMatch(workspaceManagerSource, /const \[workspaceSlug,/);
+  assert.doesNotMatch(workspaceManagerSource, />目录标识</);
 });

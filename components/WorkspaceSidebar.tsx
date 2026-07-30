@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileExplorer } from "./FileExplorer";
+import { DirectoryPicker } from "./DirectoryPicker";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
-
-type MobilePane = "work-items" | "conversations" | "explorer";
 
 interface Props {
   activeWorkspace: WorkspaceSummary | null;
@@ -15,10 +15,9 @@ interface Props {
   selectedWorkItemKey: string | null;
   refreshKey: number;
   explorerRefreshKey: number;
-  mobilePane?: MobilePane;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCreateWorkspace: () => void;
-  onOpenDirectoryMode: () => void;
+  onImportWorkspace: (workspace: WorkspaceSummary) => void;
   onReturnHome: () => void;
   onOpenWorkspaceSettings: () => void;
   onAddRepository: () => void;
@@ -37,12 +36,12 @@ const sectionButtonStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 7,
-  padding: "7px 10px",
+  padding: "var(--pi-sidebar-section-py) 10px",
   border: 0,
   background: "transparent",
   color: "var(--text-muted)",
   cursor: "pointer",
-  fontSize: 11,
+  fontSize: "var(--pi-sidebar-fs)",
   fontWeight: 700,
   textAlign: "left",
 };
@@ -101,12 +100,12 @@ function rowStyle(active = false): React.CSSProperties {
     display: "flex",
     alignItems: "center",
     gap: 7,
-    padding: "6px 12px 6px 22px",
+    padding: "var(--pi-sidebar-row-py) 12px var(--pi-sidebar-row-py) 22px",
     border: 0,
     background: active ? "var(--bg-selected)" : "transparent",
     color: active ? "var(--text)" : "var(--text-muted)",
     cursor: "pointer",
-    fontSize: 11,
+    fontSize: "var(--pi-sidebar-fs)",
     textAlign: "left",
   };
 }
@@ -118,10 +117,9 @@ export function WorkspaceSidebar({
   selectedWorkItemKey,
   refreshKey,
   explorerRefreshKey,
-  mobilePane,
   onSelectWorkspace,
   onCreateWorkspace,
-  onOpenDirectoryMode,
+  onImportWorkspace,
   onReturnHome,
   onOpenWorkspaceSettings,
   onAddRepository,
@@ -140,8 +138,18 @@ export function WorkspaceSidebar({
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [workItemsOpen, setWorkItemsOpen] = useState(true);
+  const [requirementsOpen, setRequirementsOpen] = useState(true);
+  const [bugsOpen, setBugsOpen] = useState(true);
   const [repositoriesOpen, setRepositoriesOpen] = useState(true);
   const [explorerOpen, setExplorerOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const hasCapability = useCallback(
+    (capability: WorkspaceSummary["capabilities"][number]) =>
+      activeWorkspace?.capabilities.includes(capability) ?? false,
+    [activeWorkspace],
+  );
 
   const loadWorkspaceData = useCallback(async () => {
     if (!activeWorkspace) {
@@ -152,50 +160,133 @@ export function WorkspaceSidebar({
     }
     const [sessionsResponse, itemsResponse, repositoriesResponse] = await Promise.all([
       fetch("/api/sessions"),
-      fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items`),
-      fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/repositories`),
+      hasCapability("work-items")
+        ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items`)
+        : null,
+      hasCapability("repositories")
+        ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/repositories`)
+        : null,
     ]);
     const sessionsData = sessionsResponse.ok
       ? await sessionsResponse.json() as { sessions?: SessionInfo[] }
       : {};
-    const itemsData = itemsResponse.ok
+    const itemsData = itemsResponse?.ok
       ? await itemsResponse.json() as { items?: WorkItemRecord[] }
       : {};
-    const repositoriesData = repositoriesResponse.ok
+    const repositoriesData = repositoriesResponse?.ok
       ? await repositoriesResponse.json() as { repositories?: WorkspaceRepositoryState[] }
       : {};
-    const prefix = `${activeWorkspace.path.replace(/\/+$/, "")}/`;
-    setSessions((sessionsData.sessions ?? []).filter((session) =>
-      session.cwd === activeWorkspace.path || session.cwd.startsWith(prefix)
-    ));
+    setSessions((sessionsData.sessions ?? []).filter((session) => {
+      const owner = workspaces
+        .filter((workspace) => {
+          const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
+          return workspace.available
+            && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
+        })
+        .sort((left, right) => right.path.length - left.path.length)[0];
+      return owner?.id === activeWorkspace.id;
+    }));
     setWorkItems(itemsData.items ?? []);
     setRepositories(repositoriesData.repositories ?? []);
-  }, [activeWorkspace]);
+  }, [activeWorkspace, hasCapability, workspaces]);
+
+  const importDirectory = useCallback(async (path: string) => {
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      let asCopy = false;
+      let workspace: WorkspaceSummary | undefined;
+      while (!workspace) {
+        const response = await fetch("/api/workspaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, ...(asCopy ? { asCopy: true } : {}) }),
+        });
+        const data = await response.json() as { workspace?: WorkspaceSummary; error?: string };
+        if (response.ok && data.workspace) {
+          workspace = data.workspace;
+          break;
+        }
+        const message = data.error ?? `HTTP ${response.status}`;
+        if (
+          !asCopy
+          && response.status === 409
+          && message.includes("already registered")
+          && window.confirm("这个目录是现有 Workspace 的副本。要生成新的 Workspace ID 并作为副本导入吗？")
+        ) {
+          asCopy = true;
+          continue;
+        }
+        throw new Error(message);
+      }
+      setImportOpen(false);
+      onImportWorkspace(workspace);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImportBusy(false);
+    }
+  }, [onImportWorkspace]);
 
   useEffect(() => {
     void loadWorkspaceData();
   }, [loadWorkspaceData, refreshKey]);
 
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    const prefix = `pi-work-item-groups:${activeWorkspace.id}:`;
+    setRequirementsOpen(localStorage.getItem(`${prefix}requirements`) !== "closed");
+    setBugsOpen(localStorage.getItem(`${prefix}bugs`) !== "closed");
+  }, [activeWorkspace]);
+
+  const toggleWorkItemGroup = useCallback((
+    group: "requirements" | "bugs",
+    current: boolean,
+  ) => {
+    const next = !current;
+    if (activeWorkspace) {
+      localStorage.setItem(
+        `pi-work-item-groups:${activeWorkspace.id}:${group}`,
+        next ? "open" : "closed",
+      );
+    }
+    if (group === "requirements") setRequirementsOpen(next);
+    else setBugsOpen(next);
+  }, [activeWorkspace]);
+
+  const isMobile = useIsMobile();
+  const collapsedSecondaryOnMobileRef = useRef(false);
+  useEffect(() => {
+    // On mobile the drawer is narrow; default-collapse the secondary sections
+    // (work items, repositories) so 会话 is prominent on first open. Runs once.
+    if (isMobile && !collapsedSecondaryOnMobileRef.current) {
+      collapsedSecondaryOnMobileRef.current = true;
+      setWorkItemsOpen(false);
+      setRepositoriesOpen(false);
+    }
+  }, [isMobile]);
+
   const groupedWorkItems = useMemo(() => ({
-    requirements: workItems.filter((item) => item.type === "requirement"),
-    bugs: workItems.filter((item) => item.type === "bug"),
+    requirements: workItems.filter((item) => item.type === "requirement" && !item.archivedAt),
+    bugs: workItems.filter((item) => item.type === "bug" && !item.archivedAt),
   }), [workItems]);
 
   if (!activeWorkspace) {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
         <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ fontSize: 15, fontWeight: 750, color: "var(--text)" }}>Pi Web</div>
-          <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>选择工作区后开始协作</div>
+          <div style={{ fontSize: "var(--pi-sidebar-fs-title)", fontWeight: 750, color: "var(--text)" }}>Pi Web</div>
+          <div style={{ marginTop: 4, fontSize: "var(--pi-sidebar-fs)", color: "var(--text-dim)" }}>选择工作区后开始协作</div>
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px" }}>
           <div style={{ display: "flex", alignItems: "center", padding: "2px 4px 8px" }}>
-            <strong style={{ flex: 1, fontSize: 12, color: "var(--text)" }}>Workspaces</strong>
+            <strong style={{ flex: 1, fontSize: "var(--pi-sidebar-fs)", color: "var(--text)" }}>Workspaces</strong>
             <button className="workspace-action" onClick={onCreateWorkspace}>新建</button>
           </div>
           {workspaces.map((workspace) => (
             <button
               key={workspace.id}
+              disabled={!workspace.available}
               onClick={() => onSelectWorkspace(workspace)}
               style={{
                 width: "100%",
@@ -207,26 +298,29 @@ export function WorkspaceSidebar({
                 borderRadius: 8,
                 background: "var(--bg)",
                 color: "var(--text)",
-                cursor: "pointer",
+                cursor: workspace.available ? "pointer" : "default",
+                opacity: workspace.available ? 1 : 0.6,
                 textAlign: "left",
               }}
             >
-              <strong style={{ fontSize: 12 }}>{workspace.name}</strong>
-              <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
-                {workspace.repositoryCount} repositories
+              <strong style={{ fontSize: "var(--pi-sidebar-fs)" }}>{workspace.name}</strong>
+              <span style={{ fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
+                {workspace.available
+                  ? `${workspace.templateId} · ${workspace.repositoryCount} repositories`
+                  : "目录或配置不可用"}
               </span>
             </button>
           ))}
           {workspaces.length === 0 && (
-            <div style={{ padding: 12, color: "var(--text-dim)", fontSize: 11 }}>
+            <div style={{ padding: 12, color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs)" }}>
               尚未创建 Workspace。
             </div>
           )}
           <button
-            onClick={onOpenDirectoryMode}
+            onClick={() => setImportOpen(true)}
             style={{ ...rowStyle(), padding: "9px 10px", marginTop: 10 }}
           >
-            打开普通目录…
+            导入目录…
           </button>
         </div>
         <SettingsBar
@@ -236,13 +330,17 @@ export function WorkspaceSidebar({
           onOpenSkills={onOpenSkills}
           onOpenPlugins={onOpenPlugins}
         />
+        {importOpen && (
+          <DirectoryPicker
+            onCancel={() => setImportOpen(false)}
+            onSelect={(path) => void importDirectory(path)}
+            busy={importBusy}
+            error={importError}
+          />
+        )}
       </div>
     );
   }
-
-  const showConversations = mobilePane === undefined || mobilePane === "conversations";
-  const showWorkItems = mobilePane === undefined || mobilePane === "work-items";
-  const showExplorer = mobilePane === undefined || mobilePane === "explorer";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -306,6 +404,7 @@ export function WorkspaceSidebar({
             {workspaces.map((workspace) => (
               <button
                 key={workspace.id}
+                disabled={!workspace.available}
                 style={rowStyle(workspace.id === activeWorkspace.id)}
                 onClick={() => {
                   setWorkspaceMenuOpen(false);
@@ -316,7 +415,7 @@ export function WorkspaceSidebar({
               </button>
             ))}
             <button style={rowStyle()} onClick={onCreateWorkspace}>＋ 新建 Workspace</button>
-            <button style={rowStyle()} onClick={onOpenDirectoryMode}>打开普通目录…</button>
+            <button style={rowStyle()} onClick={() => setImportOpen(true)}>导入目录…</button>
             <button style={rowStyle()} onClick={onReturnHome}>返回首页</button>
           </div>
         )}
@@ -325,7 +424,7 @@ export function WorkspaceSidebar({
           style={{
             width: "100%",
             marginTop: 8,
-            padding: "8px 10px",
+            padding: "var(--pi-sidebar-section-py) 10px",
             border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))",
             borderRadius: 7,
             background: "color-mix(in srgb, var(--accent) 10%, transparent)",
@@ -339,7 +438,7 @@ export function WorkspaceSidebar({
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-        {showConversations && (
+        {(
           <>
             <SectionHeader
               label="会话"
@@ -360,7 +459,7 @@ export function WorkspaceSidebar({
                   </button>
                 ))}
                 {sessions.length === 0 && (
-                  <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: 10 }}>
+                  <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
                     暂无会话
                   </div>
                 )}
@@ -369,7 +468,7 @@ export function WorkspaceSidebar({
           </>
         )}
 
-        {showWorkItems && (
+        {hasCapability("work-items") && (
           <>
             <SectionHeader
               label="工作项"
@@ -383,24 +482,28 @@ export function WorkspaceSidebar({
                 <WorkItemGroup
                   label="需求"
                   items={groupedWorkItems.requirements}
+                  open={requirementsOpen}
                   selectedKey={selectedWorkItemKey}
                   onSelect={onSelectWorkItem}
-                  onCreate={() => onCreateWorkItem("requirement")}
+                  onToggle={() => toggleWorkItemGroup("requirements", requirementsOpen)}
                 />
                 <WorkItemGroup
                   label="Bug"
                   items={groupedWorkItems.bugs}
+                  open={bugsOpen}
                   selectedKey={selectedWorkItemKey}
                   onSelect={onSelectWorkItem}
-                  onCreate={() => onCreateWorkItem("bug")}
+                  onToggle={() => toggleWorkItemGroup("bugs", bugsOpen)}
                 />
               </div>
             )}
           </>
         )}
 
-        {showExplorer && (
+        {(
           <>
+            {hasCapability("repositories") && (
+              <>
             <SectionHeader
               label="仓库"
               open={repositoriesOpen}
@@ -417,7 +520,7 @@ export function WorkspaceSidebar({
                   if (items.length === 0) return null;
                   return (
                     <div key={kind}>
-                      <div style={{ padding: "4px 12px 3px 22px", color: "var(--text-dim)", fontSize: 10 }}>
+                      <div style={{ padding: "4px 12px 3px 22px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
                         {kind === "code" ? "代码" : "知识库"}
                       </div>
                       {items.map((repository) => (
@@ -427,7 +530,7 @@ export function WorkspaceSidebar({
                           onClick={() => setExplorerOpen(true)}
                         >
                           <span style={{ flex: 1 }}>{repository.name}</span>
-                          <span style={{ color: "var(--text-dim)", fontSize: 9 }}>
+                          <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
                             {repository.branch || "—"}{repository.dirty ? " · modified" : ""}
                           </span>
                         </button>
@@ -436,27 +539,33 @@ export function WorkspaceSidebar({
                   );
                 })}
                 {repositories.filter((repository) => repository.status === "active").length === 0 && (
-                  <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: 10 }}>
+                  <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
                     暂无仓库
                   </div>
                 )}
               </div>
             )}
+              </>
+            )}
 
-            <SectionHeader
-              label="Explorer"
-              open={explorerOpen}
-              onToggle={() => setExplorerOpen((current) => !current)}
-            />
-            {explorerOpen && (
-              <div style={{ minHeight: 220 }}>
-            <FileExplorer
-              cwd={activeWorkspace.path}
-              onOpenFile={onOpenFile}
-              refreshKey={explorerRefreshKey}
-              changesCollapsed={false}
-            />
-              </div>
+            {hasCapability("explorer") && (
+              <>
+                <SectionHeader
+                  label="Explorer"
+                  open={explorerOpen}
+                  onToggle={() => setExplorerOpen((current) => !current)}
+                />
+                {explorerOpen && (
+                  <div style={{ minHeight: 220 }}>
+                    <FileExplorer
+                      cwd={activeWorkspace.path}
+                      onOpenFile={onOpenFile}
+                      refreshKey={explorerRefreshKey}
+                      changesCollapsed={false}
+                    />
+                  </div>
+                )}
+              </>
             )}
           </>
         )}
@@ -469,6 +578,14 @@ export function WorkspaceSidebar({
         onOpenSkills={onOpenSkills}
         onOpenPlugins={onOpenPlugins}
       />
+      {importOpen && (
+        <DirectoryPicker
+          onCancel={() => setImportOpen(false)}
+          onSelect={(path) => void importDirectory(path)}
+          busy={importBusy}
+          error={importError}
+        />
+      )}
     </div>
   );
 }
@@ -476,35 +593,47 @@ export function WorkspaceSidebar({
 function WorkItemGroup({
   label,
   items,
+  open,
   selectedKey,
   onSelect,
-  onCreate,
+  onToggle,
 }: {
   label: string;
   items: WorkItemRecord[];
+  open: boolean;
   selectedKey: string | null;
   onSelect: (item: WorkItemRecord) => void;
-  onCreate: () => void;
+  onToggle: () => void;
 }) {
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", padding: "4px 10px 3px 22px" }}>
-        <span style={{ flex: 1, color: "var(--text-dim)", fontSize: 10 }}>{label}</span>
-        <button
-          onClick={onCreate}
-          aria-label={`新建${label}`}
-          style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}
+      <button
+        onClick={onToggle}
+        aria-expanded={open}
+        style={{
+          ...sectionButtonStyle,
+          padding: "calc(var(--pi-sidebar-row-py) - 2px) 10px calc(var(--pi-sidebar-row-py) - 2px) 22px",
+          color: "var(--text-dim)",
+          fontSize: "var(--pi-sidebar-fs-meta)",
+          fontWeight: 500,
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
         >
-          +
-        </button>
-      </div>
-      {items.map((item) => (
+          ›
+        </span>
+        <span style={{ flex: 1 }}>{label}</span>
+        <span>{items.length}</span>
+      </button>
+      {open && items.map((item) => (
         <button
           key={item.id}
           style={rowStyle(item.key === selectedKey)}
           onClick={() => onSelect(item)}
         >
-          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 9 }}>
+          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
             {item.key}
           </span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -536,7 +665,7 @@ function SettingsBar({
         style={{
           padding: "0 3px 5px",
           color: "var(--text-dim)",
-          fontSize: 9,
+          fontSize: "var(--pi-sidebar-fs-meta)",
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -556,13 +685,13 @@ function SettingsBar({
             key={label as string}
             onClick={action as () => void}
             style={{
-              minHeight: 30,
+              minHeight: "var(--pi-sidebar-btn-h)",
               border: "1px solid var(--border)",
               borderRadius: 6,
               background: "var(--bg)",
               color: "var(--text-muted)",
               cursor: "pointer",
-              fontSize: 10,
+              fontSize: "var(--pi-sidebar-btn-fs)",
             }}
           >
             {label as string}

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   getWorkspace,
-  trashWorkspace,
+  removeWorkspace,
   updateWorkspace,
   WorkspaceConflictError,
   WorkspaceNotFoundError,
@@ -54,7 +54,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    return NextResponse.json(await trashWorkspace(id));
+    return NextResponse.json(await removeWorkspace(id));
   } catch (error) {
     return errorResponse(error);
   }

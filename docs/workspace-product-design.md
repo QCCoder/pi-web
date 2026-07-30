@@ -13,7 +13,7 @@ The `feature/2026-07-29/workspace-mvp` implementation includes:
 - file-discovered Empty and Software Development Workspaces;
 - file-backed Requirements and Bugs with revision-safe metadata and append-only events;
 - Workspace, repository, Work Item, content, and milestone APIs;
-- repository clone, registration, status, unregistration, and recoverable trash;
+- repository clone, registration, status, and unregistration;
 - a first-party Pi extension for Work Item tools;
 - Pi-native skill discovery with per-Workspace selection applied by `ResourceLoader`;
 - Work Item-to-Conversation start/continue links;
@@ -69,17 +69,20 @@ Pi Agent owns model execution, tools, sessions, retries, compaction, token and c
 
 ### Destructive actions are recoverable
 
-Disabling a repository does not move or delete its files, and it can be restored from the Workspace UI. Deleting a Workspace moves it to a server-side trash area.
+Disabling a repository does not move or delete its files, and it can be restored from the Workspace UI. Removing a Workspace only removes its entry from the global index; its directory and local manifest remain untouched.
 
 ## Workspace storage
 
-The default local layout is configurable through an environment variable and resolves to `~/pi-workspaces` outside containers.
+New template-based Workspaces are created under the directory configured by
+`PI_WORKSPACES_DIR`, which defaults to `~/.pi/workspaces`. Existing directories
+can be imported in place as Empty Workspaces and are never copied or moved.
 
 ```text
-~/pi-workspaces/
+~/.pi/
+├── workspace.yaml                 # authoritative global path index
+└── workspaces/
 ├── .pi/
 │   ├── workspace-templates/
-│   ├── trash/
 │   └── state.sqlite
 ├── workspace-ecommerce/
 │   ├── AGENTS.md
@@ -96,7 +99,15 @@ The default local layout is configurable through an environment variable and res
     └── .pi/workspace.yaml
 ```
 
-There is no authoritative central Workspace registry. Discovery scans `workspace-*` directories for a valid `.pi/workspace.yaml`. `state.sqlite` can be rebuilt from those manifests and Work Item files.
+The global `~/.pi/workspace.yaml` is the authoritative index of Workspace IDs,
+current paths, template snapshots, and recent-open timestamps. Each Workspace's
+own `.pi/workspace.yaml` remains authoritative for its identity and template
+configuration. On first upgrade, existing `workspace-*` directories are scanned
+once and added to the global index.
+
+Importing an unconfigured directory creates only its local `.pi/workspace.yaml`
+using the Empty template. Re-importing a directory restores the global relationship
+from that local manifest.
 
 ### Workspace identity and naming
 
@@ -235,7 +246,7 @@ Sequence allocation is atomic. The human key is used in the UI, Conversations, b
 Each Work Item is a directory:
 
 ```text
-bugs/BUG-0001/
+bugs/BUG-0001-login-page-blank/
 ├── item.yaml
 ├── README.md
 ├── events.jsonl
@@ -243,6 +254,10 @@ bugs/BUG-0001/
 ```
 
 Requirements use the equivalent path under `requirements/`.
+
+New Work Item directories use the immutable human key plus a sanitized snapshot of
+the creation title. Renaming a Work Item does not rename its directory. Legacy
+key-only directories such as `bugs/BUG-0001/` remain supported.
 
 `item.yaml` contains validated, structured metadata:
 
@@ -503,12 +518,14 @@ A Workspace export includes:
 
 It excludes API keys, authentication material, caches, and Conversations by default. Full repositories may be included explicitly. Import validates paths and manifests before creating a Workspace.
 
-Workspace deletion moves the whole Workspace into the global trash directory. Repository removal only marks it inactive and leaves its working copy in place.
+Workspace removal only deletes the global directory relationship. It never moves
+or deletes the Workspace directory. Repository removal only marks it inactive and
+leaves its working copy in place.
 
 ## MVP acceptance criteria
 
 1. A user can create `workspace-<slug>` from Empty or Software Development.
-2. Workspace discovery works after deleting the SQLite cache.
+2. Existing managed Workspaces are migrated into the global index on first use.
 3. A user can switch Workspaces and the Explorer root changes safely.
 4. A software-development Workspace contains the agreed directories, collaboration policy, and management Git repository.
 5. A user can clone, initialize, disable, and restore multiple code and knowledge repositories.

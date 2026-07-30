@@ -5,13 +5,14 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { createUlid } from "./id.ts";
@@ -32,6 +33,8 @@ import {
   type AddWorkspaceRepositoryInput,
   type UpdateWorkspaceInput,
   type WorkspaceManifest,
+  type WorkspaceIndex,
+  type WorkspaceIndexEntry,
   type WorkspaceRepository,
   type WorkspaceRepositoryKind,
   type WorkspaceRepositoryState,
@@ -42,6 +45,7 @@ import {
 const execFileAsync = promisify(execFile);
 const WORKSPACE_DIRECTORY_RE = /^workspace-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 const WORKSPACE_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const WORKSPACE_INDEX_SCHEMA_VERSION = 1 as const;
 
 export class WorkspaceValidationError extends Error {}
 export class WorkspaceConflictError extends Error {}
@@ -109,11 +113,21 @@ export async function withWorkspaceWriteLock<T>(
 
 export function getWorkspaceRoot(): string {
   const configured = process.env.PI_WORKSPACES_DIR?.trim();
-  return resolve(configured || join(homedir(), "pi-workspaces"));
+  return resolve(configured || join(homedir(), ".pi", "workspaces"));
+}
+
+export function getWorkspaceIndexPath(root?: string): string {
+  const configured = process.env.PI_WORKSPACE_INDEX_FILE?.trim();
+  return root
+    ? join(resolve(root), ".pi", "workspace.yaml")
+    : resolve(configured || join(homedir(), ".pi", "workspace.yaml"));
 }
 
 export function listWorkspaceTemplates(): WorkspaceTemplateInfo[] {
-  return BUILT_IN_WORKSPACE_TEMPLATES.map((template) => ({ ...template }));
+  return BUILT_IN_WORKSPACE_TEMPLATES.map((template) => ({
+    ...template,
+    capabilities: [...template.capabilities],
+  }));
 }
 
 export function validateWorkspaceSlug(slug: string): string {
@@ -198,9 +212,7 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     throw new WorkspaceValidationError("template is required");
   }
   const templateRecord = template as Record<string, unknown>;
-  if (!isWorkspaceTemplateId(templateRecord.id)) {
-    throw new WorkspaceValidationError(`Unknown workspace template: ${String(templateRecord.id)}`);
-  }
+  const templateId = requireNonEmptyString(templateRecord.id, "template.id");
   const skills = record.skills ?? [];
   if (!Array.isArray(skills) || skills.some((skill) => typeof skill !== "string" || !skill.trim())) {
     throw new WorkspaceValidationError("skills must be an array of non-empty strings");
@@ -245,7 +257,7 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     slug,
     name: requireNonEmptyString(record.name, "name"),
     template: {
-      id: templateRecord.id,
+      id: templateId as WorkspaceManifest["template"]["id"],
       version: parsePositiveInteger(templateRecord.version, "template.version"),
     },
     skills: [...new Set((skills as string[]).map((skill) => skill.trim()))],
@@ -357,23 +369,23 @@ export async function reserveWorkItemKey(
 export async function readWorkspaceManifest(workspacePath: string): Promise<WorkspaceManifest> {
   const filePath = join(workspacePath, ".pi", "workspace.yaml");
   const content = await readFile(filePath, "utf8");
-  const manifest = parseWorkspaceManifest(parse(content));
-  const directoryMatch = basename(workspacePath).match(WORKSPACE_DIRECTORY_RE);
-  if (!directoryMatch || directoryMatch[1] !== manifest.slug) {
-    throw new WorkspaceValidationError(
-      `Workspace directory must be named workspace-${manifest.slug}`,
-    );
-  }
-  return manifest;
+  return parseWorkspaceManifest(parse(content));
 }
 
 export function workspaceSummary(workspacePath: string, manifest: WorkspaceManifest): WorkspaceSummary {
+  const template = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
+    candidate.id === manifest.template.id && candidate.version === manifest.template.version
+  );
   return {
     id: manifest.id,
     slug: manifest.slug,
     name: manifest.name,
     path: workspacePath,
     templateId: manifest.template.id,
+    templateVersion: manifest.template.version,
+    capabilities: template ? [...template.capabilities] : ["sessions", "explorer"],
+    available: true,
+    configStatus: "ready",
     skills: [...manifest.skills],
     repositories: manifest.repositories.map((repository) => ({ ...repository })),
     repositoryCount: manifest.repositories.filter((repository) => repository.status === "active").length,
@@ -451,7 +463,7 @@ async function repositoryRemote(repositoryPath: string): Promise<string | undefi
 
 export async function listWorkspaceRepositories(
   idOrSlug: string,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<WorkspaceRepositoryState[]> {
   const workspace = await findWorkspace(idOrSlug, root);
   return Promise.all(workspace.manifest.repositories.map(async (repository) => {
@@ -486,7 +498,7 @@ export async function listWorkspaceRepositories(
 export async function addWorkspaceRepository(
   idOrSlug: string,
   input: AddWorkspaceRepositoryInput,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<WorkspaceRepository> {
   const workspace = await findWorkspace(idOrSlug, root);
   const alias = validateRepositoryAlias(requireNonEmptyString(input.alias, "alias"));
@@ -566,7 +578,7 @@ export async function addWorkspaceRepository(
 export async function removeWorkspaceRepository(
   idOrSlug: string,
   repositoryId: string,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<{ repository: WorkspaceRepository }> {
   const workspace = await findWorkspace(idOrSlug, root);
   return withWorkspaceWriteLock(workspace.path, async () => {
@@ -592,7 +604,7 @@ export async function removeWorkspaceRepository(
 export async function restoreWorkspaceRepository(
   idOrSlug: string,
   repositoryId: string,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<{ repository: WorkspaceRepository }> {
   const workspace = await findWorkspace(idOrSlug, root);
   return withWorkspaceWriteLock(workspace.path, async () => {
@@ -614,27 +626,272 @@ export async function restoreWorkspaceRepository(
   });
 }
 
-export async function discoverWorkspaces(root = getWorkspaceRoot()): Promise<WorkspaceSummary[]> {
+function parseWorkspaceIndex(value: unknown): WorkspaceIndex {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new WorkspaceValidationError("Global Workspace index must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.schema_version !== WORKSPACE_INDEX_SCHEMA_VERSION) {
+    throw new WorkspaceValidationError(
+      `Unsupported global Workspace index schema: ${String(record.schema_version)}`,
+    );
+  }
+  if (!Array.isArray(record.workspaces)) {
+    throw new WorkspaceValidationError("Global Workspace index workspaces must be an array");
+  }
+  const ids = new Set<string>();
+  const paths = new Set<string>();
+  const workspaces = record.workspaces.map((value, index): WorkspaceIndexEntry => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new WorkspaceValidationError(`workspaces[${index}] must be an object`);
+    }
+    const entry = value as Record<string, unknown>;
+    const id = requireNonEmptyString(entry.id, `workspaces[${index}].id`);
+    const path = resolve(requireNonEmptyString(entry.path, `workspaces[${index}].path`));
+    if (ids.has(id)) throw new WorkspaceValidationError(`Duplicate Workspace id: ${id}`);
+    if (paths.has(path)) throw new WorkspaceValidationError(`Duplicate Workspace path: ${path}`);
+    ids.add(id);
+    paths.add(path);
+    return {
+      id,
+      path,
+      name: requireNonEmptyString(entry.name, `workspaces[${index}].name`),
+      templateId: requireNonEmptyString(entry.template_id, `workspaces[${index}].template_id`),
+      templateVersion: parsePositiveInteger(
+        entry.template_version,
+        `workspaces[${index}].template_version`,
+      ),
+      addedAt: requireNonEmptyString(entry.added_at, `workspaces[${index}].added_at`),
+      lastOpenedAt: requireNonEmptyString(
+        entry.last_opened_at,
+        `workspaces[${index}].last_opened_at`,
+      ),
+    };
+  });
+  return { schemaVersion: WORKSPACE_INDEX_SCHEMA_VERSION, workspaces };
+}
+
+function serializeWorkspaceIndex(index: WorkspaceIndex): string {
+  return stringify({
+    schema_version: index.schemaVersion,
+    workspaces: index.workspaces.map((workspace) => ({
+      id: workspace.id,
+      path: workspace.path,
+      name: workspace.name,
+      template_id: workspace.templateId,
+      template_version: workspace.templateVersion,
+      added_at: workspace.addedAt,
+      last_opened_at: workspace.lastOpenedAt,
+    })),
+  }, { lineWidth: 0 });
+}
+
+async function readWorkspaceIndex(root?: string): Promise<{
+  index: WorkspaceIndex;
+  exists: boolean;
+}> {
+  try {
+    const content = await readFile(getWorkspaceIndexPath(root), "utf8");
+    return { index: parseWorkspaceIndex(parse(content)), exists: true };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        index: { schemaVersion: WORKSPACE_INDEX_SCHEMA_VERSION, workspaces: [] },
+        exists: false,
+      };
+    }
+    throw error;
+  }
+}
+
+async function writeWorkspaceIndex(index: WorkspaceIndex, root?: string): Promise<void> {
+  await writeFileAtomic(getWorkspaceIndexPath(root), serializeWorkspaceIndex(index));
+}
+
+async function updateWorkspaceIndex(
+  operation: (index: WorkspaceIndex) => void,
+  root?: string,
+): Promise<void> {
+  const indexPath = getWorkspaceIndexPath(root);
+  await withWorkspaceWriteLock(indexPath, async () => {
+    const { index } = await readWorkspaceIndex(root);
+    operation(index);
+    await writeWorkspaceIndex(index, root);
+  });
+}
+
+function indexEntryFromManifest(
+  path: string,
+  manifest: WorkspaceManifest,
+  existing?: WorkspaceIndexEntry,
+): WorkspaceIndexEntry {
+  const now = new Date().toISOString();
+  return {
+    id: manifest.id,
+    path,
+    name: manifest.name,
+    templateId: manifest.template.id,
+    templateVersion: manifest.template.version,
+    addedAt: existing?.addedAt ?? now,
+    lastOpenedAt: existing?.lastOpenedAt ?? now,
+  };
+}
+
+async function registerWorkspacePath(
+  workspacePath: string,
+  manifest: WorkspaceManifest,
+  root?: string,
+  touch = true,
+): Promise<void> {
+  const indexPath = getWorkspaceIndexPath(root);
+  await withWorkspaceWriteLock(indexPath, async () => {
+    const { index } = await readWorkspaceIndex(root);
+    const pathIndex = index.workspaces.findIndex((entry) => entry.path === workspacePath);
+    const idIndex = index.workspaces.findIndex((entry) => entry.id === manifest.id);
+    if (idIndex >= 0 && idIndex !== pathIndex) {
+      const original = index.workspaces[idIndex];
+      let originalExists = false;
+      try {
+        originalExists = (await stat(original.path)).isDirectory();
+      } catch {
+        originalExists = false;
+      }
+      if (originalExists) {
+        throw new WorkspaceConflictError(
+          `Workspace id ${manifest.id} is already registered at ${original.path}`,
+        );
+      }
+      index.workspaces.splice(idIndex, 1);
+    }
+    const currentPathIndex = index.workspaces.findIndex((entry) => entry.path === workspacePath);
+    const existing = currentPathIndex >= 0 ? index.workspaces[currentPathIndex] : undefined;
+    const entry = indexEntryFromManifest(workspacePath, manifest, existing);
+    if (touch) entry.lastOpenedAt = new Date().toISOString();
+    if (currentPathIndex >= 0) index.workspaces[currentPathIndex] = entry;
+    else index.workspaces.push(entry);
+    await writeWorkspaceIndex(index, root);
+  });
+}
+
+function unavailableWorkspaceSummary(
+  entry: WorkspaceIndexEntry,
+  status: WorkspaceSummary["configStatus"],
+): WorkspaceSummary {
+  const template = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
+    candidate.id === entry.templateId && candidate.version === entry.templateVersion
+  );
+  return {
+    id: entry.id,
+    slug: basename(entry.path),
+    name: entry.name,
+    path: entry.path,
+    templateId: entry.templateId as WorkspaceManifest["template"]["id"],
+    templateVersion: entry.templateVersion,
+    capabilities: template ? [...template.capabilities] : ["sessions", "explorer"],
+    available: false,
+    configStatus: status,
+    skills: [],
+    repositories: [],
+    repositoryCount: 0,
+    createdAt: entry.addedAt,
+    updatedAt: entry.lastOpenedAt,
+  };
+}
+
+async function migrateManagedWorkspaces(root: string, indexRoot?: string): Promise<WorkspaceIndex> {
   await mkdir(root, { recursive: true });
   const entries = await readdir(root, { withFileTypes: true });
-  const workspaces: WorkspaceSummary[] = [];
+  const index: WorkspaceIndex = {
+    schemaVersion: WORKSPACE_INDEX_SCHEMA_VERSION,
+    workspaces: [],
+  };
   for (const entry of entries) {
     if (!entry.isDirectory() || !WORKSPACE_DIRECTORY_RE.test(entry.name)) continue;
     const workspacePath = join(root, entry.name);
     try {
       const manifest = await readWorkspaceManifest(workspacePath);
-      workspaces.push(workspaceSummary(workspacePath, manifest));
+      index.workspaces.push(indexEntryFromManifest(workspacePath, manifest));
     } catch {
-      // Invalid directories remain on disk and can be diagnosed separately;
-      // they are not treated as usable Workspaces.
+      // Malformed legacy directories stay untouched and are not registered.
     }
   }
-  return workspaces.sort((left, right) => left.name.localeCompare(right.name));
+  await writeWorkspaceIndex(index, indexRoot);
+  return index;
+}
+
+export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummary[]> {
+  const workspaceRoot = root ?? getWorkspaceRoot();
+  const stored = await readWorkspaceIndex(root);
+  const index = stored.exists
+    ? stored.index
+    : await migrateManagedWorkspaces(workspaceRoot, root);
+  const summaries: Array<{ summary: WorkspaceSummary; lastOpenedAt: string }> = [];
+  let snapshotsChanged = false;
+  for (const entry of index.workspaces) {
+    try {
+      const directory = await stat(entry.path);
+      if (!directory.isDirectory()) {
+        summaries.push({
+          summary: unavailableWorkspaceSummary(entry, "directory-unavailable"),
+          lastOpenedAt: entry.lastOpenedAt,
+        });
+        continue;
+      }
+    } catch {
+      summaries.push({
+        summary: unavailableWorkspaceSummary(entry, "directory-unavailable"),
+        lastOpenedAt: entry.lastOpenedAt,
+      });
+      continue;
+    }
+    try {
+      const manifest = await readWorkspaceManifest(entry.path);
+      if (manifest.id !== entry.id) {
+        summaries.push({
+          summary: unavailableWorkspaceSummary(entry, "config-invalid"),
+          lastOpenedAt: entry.lastOpenedAt,
+        });
+        continue;
+      }
+      const nextEntry = indexEntryFromManifest(entry.path, manifest, entry);
+      nextEntry.lastOpenedAt = entry.lastOpenedAt;
+      if (
+        nextEntry.name !== entry.name
+        || nextEntry.templateId !== entry.templateId
+        || nextEntry.templateVersion !== entry.templateVersion
+      ) {
+        Object.assign(entry, nextEntry);
+        snapshotsChanged = true;
+      }
+      summaries.push({
+        summary: workspaceSummary(entry.path, manifest),
+        lastOpenedAt: entry.lastOpenedAt,
+      });
+    } catch (error) {
+      summaries.push({
+        summary: unavailableWorkspaceSummary(
+          entry,
+          (error as NodeJS.ErrnoException).code === "ENOENT"
+            ? "config-missing"
+            : "config-invalid",
+        ),
+        lastOpenedAt: entry.lastOpenedAt,
+      });
+    }
+  }
+  if (snapshotsChanged) await writeWorkspaceIndex(index, root);
+  return summaries
+    .sort((left, right) => {
+      if (left.summary.available !== right.summary.available) {
+        return left.summary.available ? -1 : 1;
+      }
+      return right.lastOpenedAt.localeCompare(left.lastOpenedAt);
+    })
+    .map(({ summary }) => summary);
 }
 
 async function ensureWorkspaceRoot(root: string): Promise<void> {
   await mkdir(join(root, ".pi", "workspace-templates"), { recursive: true });
-  await mkdir(join(root, ".pi", "trash"), { recursive: true });
 }
 
 async function initializeSoftwareDevelopmentWorkspace(
@@ -654,15 +911,16 @@ async function initializeSoftwareDevelopmentWorkspace(
 
 export async function createWorkspace(
   input: CreateWorkspaceInput,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<WorkspaceSummary> {
+  const workspaceRoot = root ?? getWorkspaceRoot();
   const name = requireNonEmptyString(input.name, "name");
   const slug = validateWorkspaceSlug(input.slug);
   if (!isWorkspaceTemplateId(input.templateId)) {
     throw new WorkspaceValidationError(`Unknown workspace template: ${String(input.templateId)}`);
   }
-  await ensureWorkspaceRoot(root);
-  const workspacePath = join(root, `workspace-${slug}`);
+  await ensureWorkspaceRoot(workspaceRoot);
+  const workspacePath = join(workspaceRoot, `workspace-${slug}`);
   try {
     await access(workspacePath);
     throw new WorkspaceConflictError(`Workspace already exists: workspace-${slug}`);
@@ -670,7 +928,7 @@ export async function createWorkspace(
     if (error instanceof WorkspaceConflictError) throw error;
   }
 
-  const temporaryPath = join(root, `.creating-workspace-${slug}-${createUlid()}`);
+  const temporaryPath = join(workspaceRoot, `.creating-workspace-${slug}-${createUlid()}`);
   const now = new Date().toISOString();
   const template = getWorkspaceTemplate(input.templateId);
   const manifest: WorkspaceManifest = {
@@ -707,12 +965,13 @@ export async function createWorkspace(
     await rm(temporaryPath, { recursive: true, force: true });
     throw error;
   }
+  await registerWorkspacePath(workspacePath, manifest, root);
   return workspaceSummary(workspacePath, manifest);
 }
 
 async function findWorkspace(
   idOrSlug: string,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<{ path: string; manifest: WorkspaceManifest }> {
   const workspaces = await discoverWorkspaces(root);
   const summary = workspaces.find((workspace) =>
@@ -724,15 +983,17 @@ async function findWorkspace(
 
 export async function getWorkspace(
   idOrSlug: string,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<{ path: string; manifest: WorkspaceManifest }> {
-  return findWorkspace(idOrSlug, root);
+  const workspace = await findWorkspace(idOrSlug, root);
+  await registerWorkspacePath(workspace.path, workspace.manifest, root);
+  return workspace;
 }
 
 export async function updateWorkspace(
   idOrSlug: string,
   input: UpdateWorkspaceInput,
-  root = getWorkspaceRoot(),
+  root?: string,
 ): Promise<WorkspaceSummary> {
   const current = await findWorkspace(idOrSlug, root);
   return withWorkspaceWriteLock(current.path, async () => {
@@ -750,29 +1011,100 @@ export async function updateWorkspace(
     latest.updatedAt = new Date().toISOString();
     await writeWorkspaceManifest(current.path, latest);
     await commitWorkspaceChanges(current.path, "workspace: update settings", latest);
+    await registerWorkspacePath(current.path, latest, root, false);
     return workspaceSummary(current.path, latest);
   });
 }
 
-export async function trashWorkspace(
+export async function removeWorkspace(
   idOrSlug: string,
-  root = getWorkspaceRoot(),
-): Promise<{ trashedPath: string }> {
-  const current = await findWorkspace(idOrSlug, root);
-  const resolvedRoot = resolve(root);
-  const resolvedWorkspace = resolve(current.path);
-  if (!resolvedWorkspace.startsWith(`${resolvedRoot}${sep}`)) {
-    throw new WorkspaceValidationError("Workspace is outside the configured root");
+  root?: string,
+): Promise<{ removed: true }> {
+  await updateWorkspaceIndex((index) => {
+    const entryIndex = index.workspaces.findIndex((entry) =>
+      entry.id === idOrSlug || basename(entry.path) === `workspace-${idOrSlug}`
+    );
+    if (entryIndex < 0) throw new WorkspaceNotFoundError(`Workspace not found: ${idOrSlug}`);
+    index.workspaces.splice(entryIndex, 1);
+  }, root);
+  return { removed: true };
+}
+
+function slugFromDirectoryName(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+  return slug || `workspace-${createUlid().slice(-8).toLowerCase()}`;
+}
+
+export async function importWorkspace(
+  inputPath: string,
+  root?: string,
+  asCopy = false,
+): Promise<WorkspaceSummary> {
+  const requestedPath = resolve(requireNonEmptyString(inputPath, "path"));
+  let workspacePath: string;
+  try {
+    workspacePath = await realpath(requestedPath);
+    if (!(await stat(workspacePath)).isDirectory()) {
+      throw new WorkspaceValidationError(`Not a directory: ${workspacePath}`);
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceValidationError) throw error;
+    throw new WorkspaceValidationError(`Directory is unavailable: ${requestedPath}`);
   }
-  await ensureWorkspaceRoot(root);
-  const trashDirectory = join(root, ".pi", "trash", "workspaces");
-  await mkdir(trashDirectory, { recursive: true });
-  const trashedPath = join(
-    trashDirectory,
-    `${basename(current.path)}-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+
+  const existing = (await discoverWorkspaces(root)).find((workspace) =>
+    workspace.path === workspacePath
   );
-  await rename(current.path, trashedPath);
-  return { trashedPath };
+  if (existing) {
+    if (!existing.available) {
+      throw new WorkspaceValidationError(`Workspace configuration is not usable: ${workspacePath}`);
+    }
+    const manifest = await readWorkspaceManifest(workspacePath);
+    await registerWorkspacePath(workspacePath, manifest, root);
+    return workspaceSummary(workspacePath, manifest);
+  }
+
+  let manifest: WorkspaceManifest;
+  try {
+    manifest = await readWorkspaceManifest(workspacePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const now = new Date().toISOString();
+    manifest = {
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
+      id: createUlid(),
+      slug: slugFromDirectoryName(basename(workspacePath)),
+      name: basename(workspacePath),
+      template: { id: "empty", version: getWorkspaceTemplate("empty").version },
+      skills: [],
+      repositories: [],
+      agent: {},
+      workItems: {
+        nextRequirementNumber: 1,
+        nextBugNumber: 1,
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    await writeWorkspaceManifest(workspacePath, manifest);
+  }
+  if (asCopy) {
+    const now = new Date().toISOString();
+    manifest = {
+      ...manifest,
+      id: createUlid(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    await writeWorkspaceManifest(workspacePath, manifest);
+  }
+  await registerWorkspacePath(workspacePath, manifest, root);
+  return workspaceSummary(workspacePath, manifest);
 }
 
 export async function isWorkspaceDirectory(path: string): Promise<boolean> {

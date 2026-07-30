@@ -11,12 +11,14 @@ export const BUILT_IN_WORKSPACE_TEMPLATES: readonly WorkspaceTemplateInfo[] = [
     name: "Empty",
     description: "Only create the Workspace manifest and leave the directory structure open.",
     version: 1,
+    capabilities: ["sessions", "explorer"],
   },
   {
     id: "software-development",
     name: "Software Development",
     description: "Requirements, bugs, designs, plans, typed repositories, and collaboration rules.",
     version: 1,
+    capabilities: ["sessions", "work-items", "repositories", "explorer", "overview"],
   },
 ];
 
