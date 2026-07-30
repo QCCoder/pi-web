@@ -9,36 +9,30 @@ import {
   isFilePathAllowed,
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
+import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
+import {
+  IGNORED_NAMES,
+  IGNORED_SUFFIXES,
+  MAX_REPO_ROOTS,
+  mergeFileLists,
+  repoPrefix,
+  type FileListing,
+} from "@/lib/file-index";
 
 const execFileAsync = promisify(execFile);
 
-// Same skip lists as /api/files — only used for the non-git readdir fallback.
-// Git-tracked repos rely on .gitignore instead (matches the TUI's fd behavior).
-const IGNORED_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store",
-]);
-
-const IGNORED_SUFFIXES = [".pyc"];
-
 /** Cap on the plain (no-query) response used as the client-side index */
 const MAX_FILES = 5000;
-/** Hard caps on the full in-memory listing that ?q= searches against */
+/** Hard cap on the full in-memory listing that ?q= searches against */
 const GIT_HARD_CAP = 200_000;
-const WALK_HARD_CAP = 50_000;
-const MAX_WALK_DEPTH = 8;
 const MAX_QUERY_LENGTH = 500;
 const CACHE_TTL_MS = 10_000;
 const CACHE_MAX_ENTRIES = 20;
 
-interface FileListing {
-  /** Full listing up to the hard cap (not the client cap) */
-  files: string[];
-  /** True when even the hard cap was exceeded */
-  hardTruncated: boolean;
-}
+/** Backstop against symlink cycles and runaway trees during repo discovery.
+ *  IGNORED_NAMES already prunes build output; 32 is generous for nesting. */
+const MAX_DISCOVER_DEPTH = 32;
 
 interface CacheEntry {
   listing: FileListing;
@@ -59,52 +53,98 @@ function getIndexCache(): Map<string, CacheEntry> {
   return globalThis.__piFileIndexCache;
 }
 
-async function listWithGit(cwd: string): Promise<FileListing | null> {
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
-    );
-    const all = stdout.split("\0").filter(Boolean);
-    if (all.length > GIT_HARD_CAP) {
-      return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
-    }
-    return { files: all, hardTruncated: false };
-  } catch {
-    // Not a git repo (or git unavailable) — caller falls back to readdir walk.
-    return null;
-  }
-}
+/**
+ * Walk the cwd tree once to discover nested git repository roots (any
+ * directory containing a `.git`, whether a submodule gitlink file or an
+ * independent repo directory) and to collect "scattered" files that live
+ * outside every repo.
+ *
+ * Files inside any repo boundary are NOT collected here — each repo's own
+ * `git ls-files` lists them (honoring that repo's .gitignore). We still
+ * recurse into repos so deeper nested repos are discovered. This is what makes
+ * submodules, independent nested repos, and worktrees all visible to @.
+ */
+function discoverReposAndScattered(cwd: string): {
+  repoRoots: string[];
+  scatteredFiles: string[];
+} {
+  const repoRoots: string[] = [];
+  const repoRootSet = new Set<string>();
+  const scatteredFiles: string[] = [];
 
-function listWithWalk(cwd: string): FileListing {
-  const files: string[] = [];
-  // BFS so shallow files win when the cap truncates the listing.
-  const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
+  // BFS carrying whether any ancestor directory was a git repo. A file is only
+  // "scattered" (collected here) if no ancestor — and its own directory — is a
+  // repo; otherwise the owning repo's git ls-files lists it. We still recurse
+  // into repos so deeper nested repos are discovered.
+  const queue: Array<{ abs: string; rel: string; depth: number; ancestorIsRepo: boolean }> = [
+    { abs: cwd, rel: "", depth: 0, ancestorIsRepo: false },
+  ];
+
   while (queue.length > 0) {
-    const { abs, rel, depth } = queue.shift()!;
+    const { abs, rel, depth, ancestorIsRepo } = queue.shift()!;
     let dirents: fs.Dirent[];
     try {
       dirents = fs.readdirSync(abs, { withFileTypes: true });
     } catch {
       continue;
     }
+
+    const isRepo = dirents.some((d) => d.name === ".git");
+    if (isRepo && !repoRootSet.has(abs) && repoRoots.length < MAX_REPO_ROOTS) {
+      repoRootSet.add(abs);
+      repoRoots.push(abs);
+    }
+    const ownsFiles = isRepo || ancestorIsRepo;
+
+    if (depth >= MAX_DISCOVER_DEPTH) continue;
+
     for (const d of dirents) {
+      if (d.name === ".git") continue; // never descend into a .git
       if (IGNORED_NAMES.has(d.name) || IGNORED_SUFFIXES.some((s) => d.name.endsWith(s))) continue;
       const childRel = rel ? `${rel}/${d.name}` : d.name;
-      if (d.isDirectory()) {
-        if (depth + 1 <= MAX_WALK_DEPTH) {
-          queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
-        }
-      } else if (d.isFile()) {
-        if (files.length >= WALK_HARD_CAP) {
-          return { files, hardTruncated: true };
-        }
-        files.push(childRel);
+      const childAbs = path.join(abs, d.name);
+      const childIsDir = resolveDirentIsDirectory(d, childAbs);
+      if (childIsDir === null) continue; // unreadable / broken symlink
+      if (childIsDir) {
+        queue.push({ abs: childAbs, rel: childRel, depth: depth + 1, ancestorIsRepo: ownsFiles });
+      } else if (!ownsFiles) {
+        scatteredFiles.push(childRel);
       }
     }
   }
-  return { files, hardTruncated: false };
+
+  return { repoRoots, scatteredFiles };
+}
+
+/** List one repo's files via git, prefixed relative to cwd. Best-effort: any
+ *  git error (missing submodule checkout, corrupt .git, timeout) returns []. */
+async function listGitFiles(repoRoot: string, prefix: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", repoRoot, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
+    );
+    const files = stdout.split("\0").filter(Boolean);
+    return prefix ? files.map((f) => `${prefix}/${f}`) : files;
+  } catch {
+    return [];
+  }
+}
+
+/** Unified listing: discover all nested repos + scattered files, git-list each
+ *  repo in parallel, merge with the ignore post-filter, then apply the hard
+ *  cap. Replaces the old single-repo listWithGit / readdir listWithWalk. */
+async function listAllFiles(cwd: string): Promise<FileListing> {
+  const { repoRoots, scatteredFiles } = discoverReposAndScattered(cwd);
+  const gitLists = await Promise.all(
+    repoRoots.map((root) => listGitFiles(root, repoPrefix(cwd, root))),
+  );
+  const all = mergeFileLists([scatteredFiles, ...gitLists]);
+  if (all.length > GIT_HARD_CAP) {
+    return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
+  }
+  return { files: all, hardTruncated: false };
 }
 
 // GET /api/file-index?cwd=/abs/path[&q=query]
@@ -113,7 +153,10 @@ function listWithWalk(cwd: string): FileListing {
 // With q: { matches: { path, isDir }[] } — ranked against the FULL listing so
 // repos larger than MAX_FILES still find deep files (cap applied after
 // matching, like the TUI passing the query to fd).
-// Guarded by the same allow-list as /api/files.
+// The listing spans the cwd repo AND every nested git repo it contains
+// (submodules, independent nested repos, worktrees) plus scattered files
+// outside any repo — each repo's own .gitignore is honored. Guarded by the
+// same allow-list as /api/files.
 export async function GET(req: NextRequest) {
   try {
     const cwd = req.nextUrl.searchParams.get("cwd")?.trim() ?? "";
@@ -144,7 +187,7 @@ export async function GET(req: NextRequest) {
     const now = Date.now();
     let cached = cache.get(cwd);
     if (!cached || cached.expiresAt <= now) {
-      const listing = (await listWithGit(cwd)) ?? listWithWalk(cwd);
+      const listing = await listAllFiles(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
       }

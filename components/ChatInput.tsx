@@ -12,6 +12,7 @@ import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
+import { abbreviateFilePathParts } from "@/lib/file-paths";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
@@ -1454,8 +1455,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   ) : (
                     atMatches.map((entry, index) => {
                       const active = index === atActiveIndex;
-                      const name = entry.path.split("/").pop() ?? entry.path;
-                      const dirPrefix = entry.path.slice(0, entry.path.length - name.length);
+                      // Display-only abbreviation: the full path is still inserted
+                      // as the @mention via applyAtCompletion(entry) below.
+                      const { dir: dirPrefix, name } = abbreviateFilePathParts(entry.path);
                       return (
                         <button
                           key={`${entry.isDir ? "d" : "f"}:${entry.path}`}
