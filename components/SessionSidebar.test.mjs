@@ -25,6 +25,6 @@ test("opts the dynamic new-session button out of Firefox disabled-state restorat
   );
   assert.match(
     headerSource,
-    /onClick=\{handleNewSession\}\s+\{\.\.\.\{ autocomplete: "off" \}\}\s+disabled=\{!selectedCwd\}/,
+    /onClick=\{handleNewSession\}\s+\{\.\.\.\{ autoComplete: "off" \}\}\s+disabled=\{!selectedCwd\}/,
   );
 });

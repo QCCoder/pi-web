@@ -847,7 +847,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleNewSession}
-              {...{ autocomplete: "off" }}
+              {...{ autoComplete: "off" }}
               disabled={!selectedCwd}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,

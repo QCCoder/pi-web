@@ -14,6 +14,10 @@ const workspaceManagerSource = await readFile(
   new URL("./WorkspaceManager.tsx", import.meta.url),
   "utf8",
 );
+const skillsConfigSource = await readFile(
+  new URL("./SkillsConfig.tsx", import.meta.url),
+  "utf8",
+);
 
 test("workspace selection opens an overview instead of implicitly creating a chat", () => {
   assert.match(
@@ -63,4 +67,10 @@ test("mobile workspace navigation has only the three primary destinations", () =
     assert.match(appShellSource, new RegExp(`label: "${label}"`));
   }
   assert.doesNotMatch(appShellSource, /label: "更多"/);
+});
+
+test("home skills use an explicit global context instead of the user home directory", () => {
+  assert.match(appShellSource, /<SkillsConfig[\s\S]*globalOnly=\{!activeWorkspace && !directoryMode\}/);
+  assert.match(skillsConfigSource, /scope=global/);
+  assert.match(skillsConfigSource, /globalOnly\?: boolean/);
 });

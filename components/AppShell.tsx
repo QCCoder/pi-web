@@ -1935,7 +1935,11 @@ export function AppShell() {
       />
     )}
     {skillsConfigOpen && settingsCwd && (
-      <SkillsConfig cwd={settingsCwd} onClose={() => setSkillsConfigOpen(false)} />
+      <SkillsConfig
+        cwd={settingsCwd}
+        globalOnly={!activeWorkspace && !directoryMode}
+        onClose={() => setSkillsConfigOpen(false)}
+      />
     )}
     {pluginsConfigOpen && settingsCwd && (
       <PluginsConfig
