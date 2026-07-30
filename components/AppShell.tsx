@@ -8,6 +8,7 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
+import { ArchiveModal } from "./ArchiveModal";
 import { PluginsConfig } from "./PluginsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { WorkspaceManager } from "./WorkspaceManager";
@@ -54,6 +55,7 @@ export function AppShell() {
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
   const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
   const [workspaceManagerOpen, setWorkspaceManagerOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
@@ -711,6 +713,11 @@ export function AppShell() {
       onOpenModels={() => setModelsConfigOpen(true)}
       onOpenSkills={() => setSkillsConfigOpen(true)}
       onOpenPlugins={() => setPluginsConfigOpen(true)}
+      onOpenArchive={() => setArchiveOpen(true)}
+      onSessionRemoved={(id) => {
+        if (selectedSession?.id === id) setSelectedSession(null);
+        setRefreshKey((k) => k + 1);
+      }}
     />
   );
   return (
@@ -1623,6 +1630,14 @@ export function AppShell() {
       </svg>
     </button>
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
+    {archiveOpen && activeWorkspace && (
+      <ArchiveModal
+        workspaceId={activeWorkspace.id}
+        workspacePath={activeWorkspace.path}
+        onClose={() => setArchiveOpen(false)}
+        onChanged={() => setRefreshKey((k) => k + 1)}
+      />
+    )}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}

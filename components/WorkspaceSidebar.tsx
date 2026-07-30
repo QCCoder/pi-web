@@ -29,6 +29,8 @@ interface Props {
   onOpenModels: () => void;
   onOpenSkills: () => void;
   onOpenPlugins: () => void;
+  onOpenArchive: () => void;
+  onSessionRemoved?: (id: string) => void;
 }
 
 const sectionButtonStyle: React.CSSProperties = {
@@ -131,8 +133,11 @@ export function WorkspaceSidebar({
   onOpenModels,
   onOpenSkills,
   onOpenPlugins,
+  onOpenArchive,
+  onSessionRemoved,
 }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [archivedCount, setArchivedCount] = useState(0);
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
@@ -156,15 +161,20 @@ export function WorkspaceSidebar({
       setSessions([]);
       setWorkItems([]);
       setRepositories([]);
+      setArchivedCount(0);
       return;
     }
-    const [sessionsResponse, itemsResponse, repositoriesResponse] = await Promise.all([
+    const [sessionsResponse, itemsResponse, repositoriesResponse, archivedSessionsResponse, archivedItemsResponse] = await Promise.all([
       fetch("/api/sessions"),
       hasCapability("work-items")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items`)
         : null,
       hasCapability("repositories")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/repositories`)
+        : null,
+      fetch("/api/sessions?archived"),
+      hasCapability("work-items")
+        ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items?archived`)
         : null,
     ]);
     const sessionsData = sessionsResponse.ok
@@ -176,6 +186,16 @@ export function WorkspaceSidebar({
     const repositoriesData = repositoriesResponse?.ok
       ? await repositoriesResponse.json() as { repositories?: WorkspaceRepositoryState[] }
       : {};
+    const archivedSessionsData = archivedSessionsResponse?.ok
+      ? await archivedSessionsResponse.json() as { sessions?: { cwd: string }[] }
+      : { sessions: [] };
+    const archivedItemsData = archivedItemsResponse?.ok
+      ? await archivedItemsResponse.json() as { items?: unknown[] }
+      : { items: [] };
+    const wsPrefix = `${activeWorkspace.path.replace(/\/+$/, "")}/`;
+    const archivedSessionsInWs = (archivedSessionsData.sessions ?? []).filter((session) =>
+      session.cwd === activeWorkspace.path || session.cwd.startsWith(wsPrefix));
+    setArchivedCount(archivedSessionsInWs.length + (archivedItemsData.items ?? []).length);
     setSessions((sessionsData.sessions ?? []).filter((session) => {
       const owner = workspaces
         .filter((workspace) => {
@@ -189,6 +209,16 @@ export function WorkspaceSidebar({
     setWorkItems(itemsData.items ?? []);
     setRepositories(repositoriesData.repositories ?? []);
   }, [activeWorkspace, hasCapability, workspaces]);
+
+  const archiveWorkItem = useCallback(async (item: WorkItemRecord) => {
+    if (!activeWorkspace) return;
+    await fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items/${encodeURIComponent(item.key)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevision: item.revision, archived: true }),
+    });
+    await loadWorkspaceData();
+  }, [activeWorkspace, loadWorkspaceData]);
 
   const importDirectory = useCallback(async (path: string) => {
     setImportBusy(true);
@@ -448,15 +478,14 @@ export function WorkspaceSidebar({
             {sessionsOpen && (
               <div>
                 {sessions.map((session) => (
-                  <button
+                  <SessionRow
                     key={session.id}
-                    style={rowStyle(session.id === selectedSessionId)}
-                    onClick={() => onSelectSession(session)}
-                  >
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {session.name || session.firstMessage || "未命名会话"}
-                    </span>
-                  </button>
+                    session={session}
+                    isSelected={session.id === selectedSessionId}
+                    onSelect={() => onSelectSession(session)}
+                    onChanged={() => void loadWorkspaceData()}
+                    onRemoved={onSessionRemoved}
+                  />
                 ))}
                 {sessions.length === 0 && (
                   <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
@@ -486,6 +515,7 @@ export function WorkspaceSidebar({
                   selectedKey={selectedWorkItemKey}
                   onSelect={onSelectWorkItem}
                   onToggle={() => toggleWorkItemGroup("requirements", requirementsOpen)}
+                  onArchive={archiveWorkItem}
                 />
                 <WorkItemGroup
                   label="Bug"
@@ -494,6 +524,7 @@ export function WorkspaceSidebar({
                   selectedKey={selectedWorkItemKey}
                   onSelect={onSelectWorkItem}
                   onToggle={() => toggleWorkItemGroup("bugs", bugsOpen)}
+                  onArchive={archiveWorkItem}
                 />
               </div>
             )}
@@ -571,6 +602,8 @@ export function WorkspaceSidebar({
         )}
       </div>
 
+      <ArchiveBarButton count={archivedCount} onOpen={onOpenArchive} />
+
       <SettingsBar
         scopeLabel={activeWorkspace.name}
         workspaceScoped
@@ -597,6 +630,7 @@ function WorkItemGroup({
   selectedKey,
   onSelect,
   onToggle,
+  onArchive,
 }: {
   label: string;
   items: WorkItemRecord[];
@@ -604,6 +638,7 @@ function WorkItemGroup({
   selectedKey: string | null;
   onSelect: (item: WorkItemRecord) => void;
   onToggle: () => void;
+  onArchive?: (item: WorkItemRecord) => void;
 }) {
   return (
     <div>
@@ -628,18 +663,13 @@ function WorkItemGroup({
         <span>{items.length}</span>
       </button>
       {open && items.map((item) => (
-        <button
+        <WorkItemRow
           key={item.id}
-          style={rowStyle(item.key === selectedKey)}
-          onClick={() => onSelect(item)}
-        >
-          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
-            {item.key}
-          </span>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {item.title}
-          </span>
-        </button>
+          item={item}
+          isSelected={item.key === selectedKey}
+          onSelect={() => onSelect(item)}
+          onArchive={onArchive ? () => onArchive(item) : undefined}
+        />
       ))}
     </div>
   );
@@ -698,6 +728,131 @@ function SettingsBar({
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+const hoverActionBtn: React.CSSProperties = {
+  flexShrink: 0,
+  border: "1px solid var(--border)",
+  borderRadius: 6,
+  background: "var(--bg-hover)",
+  color: "var(--text-muted)",
+  cursor: "pointer",
+  fontSize: 11,
+  padding: "2px 8px",
+};
+
+function ArchiveBarButton({ count, onOpen }: { count: number; onOpen: () => void }) {
+  return (
+    <button
+      onClick={onOpen}
+      style={{
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 8,
+        padding: "7px 12px",
+        border: 0,
+        borderTop: "1px solid var(--border)",
+        background: "transparent",
+        color: "var(--text-muted)",
+        cursor: "pointer",
+        fontSize: "var(--pi-sidebar-fs)",
+        textAlign: "left",
+      }}
+    >
+      <span>归档</span>
+      {count > 0 && (
+        <span style={{
+          fontSize: 11,
+          color: "var(--text-dim)",
+          background: "var(--bg-hover)",
+          borderRadius: 10,
+          padding: "1px 8px",
+        }}>{count}</span>
+      )}
+    </button>
+  );
+}
+
+function WorkItemRow({
+  item,
+  isSelected,
+  onSelect,
+  onArchive,
+}: {
+  item: WorkItemRecord;
+  isSelected: boolean;
+  onSelect: () => void;
+  onArchive?: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onClick={onSelect}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{ ...rowStyle(isSelected) }}
+    >
+      <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>
+        {item.key}
+      </span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+        {item.title}
+      </span>
+      {hovered && onArchive && (
+        <button title="归档" onClick={(e) => { e.stopPropagation(); onArchive(); }} style={hoverActionBtn}>归档</button>
+      )}
+    </div>
+  );
+}
+
+function SessionRow({
+  session,
+  isSelected,
+  onSelect,
+  onChanged,
+  onRemoved,
+}: {
+  session: SessionInfo;
+  isSelected: boolean;
+  onSelect: () => void;
+  onChanged: () => void;
+  onRemoved?: (id: string) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const label = session.name || session.firstMessage || "未命名会话";
+
+  const archive = useCallback(async () => {
+    setBusy(true);
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
+      onRemoved?.(session.id);
+      onChanged();
+    } finally { setBusy(false); }
+  }, [session.id, onChanged, onRemoved]);
+
+  return (
+    <div
+      onClick={onSelect}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        ...rowStyle(isSelected),
+        justifyContent: "space-between",
+        opacity: busy ? 0.5 : 1,
+        background: isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
+      }}
+    >
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{label}</span>
+      {hovered && !busy && (
+        <div style={{ display: "flex", gap: 4, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+          <button title="归档" onClick={() => void archive()} style={hoverActionBtn}>归档</button>
+        </div>
+      )}
     </div>
   );
 }
