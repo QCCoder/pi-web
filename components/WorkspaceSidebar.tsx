@@ -21,6 +21,7 @@ interface Props {
   onOpenDirectoryMode: () => void;
   onReturnHome: () => void;
   onOpenWorkspaceSettings: () => void;
+  onAddRepository: () => void;
   onNewSession: () => void;
   onSelectSession: (session: SessionInfo) => void;
   onSelectWorkItem: (item: WorkItemRecord) => void;
@@ -123,6 +124,7 @@ export function WorkspaceSidebar({
   onOpenDirectoryMode,
   onReturnHome,
   onOpenWorkspaceSettings,
+  onAddRepository,
   onNewSession,
   onSelectSession,
   onSelectWorkItem,
@@ -403,6 +405,8 @@ export function WorkspaceSidebar({
               label="仓库"
               open={repositoriesOpen}
               onToggle={() => setRepositoriesOpen((current) => !current)}
+              action={onAddRepository}
+              actionLabel="添加仓库"
             />
             {repositoriesOpen && (
               <div>

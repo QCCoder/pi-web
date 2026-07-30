@@ -73,6 +73,7 @@ export function AppShell() {
     type: "requirement" | "bug";
     id: number;
   } | null>(null);
+  const [openRepositoryFormRequest, setOpenRepositoryFormRequest] = useState<number | undefined>();
   const [globalSettingsCwd, setGlobalSettingsCwd] = useState<string | null>(null);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
@@ -896,7 +897,15 @@ export function AppShell() {
       }}
       onOpenDirectoryMode={handleOpenDirectoryMode}
       onReturnHome={handleReturnHome}
-      onOpenWorkspaceSettings={() => setWorkspaceView("settings")}
+      onOpenWorkspaceSettings={() => {
+        setOpenRepositoryFormRequest(undefined);
+        setWorkspaceView("settings");
+      }}
+      onAddRepository={() => {
+        setWorkspaceView("settings");
+        setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
+        if (isMobile) setSidebarOpen(false);
+      }}
       onNewSession={handleWorkspaceNewSession}
       onSelectSession={handleSelectSession}
       onSelectWorkItem={(item) => {
@@ -1682,7 +1691,10 @@ export function AppShell() {
             <WorkspaceOverview
               workspace={activeWorkspace}
               onNewSession={handleWorkspaceNewSession}
-              onOpenSettings={() => setWorkspaceView("settings")}
+              onOpenSettings={() => {
+                setOpenRepositoryFormRequest(undefined);
+                setWorkspaceView("settings");
+              }}
               onOpenWorkItems={() => setWorkspaceView("work-items")}
               onCreateWorkItem={handleCreateWorkItem}
             />
@@ -1695,6 +1707,7 @@ export function AppShell() {
               activeWorkspacePath={activeWorkspace.path}
               initialWorkItemKey={selectedWorkItemKey}
               createWorkItemRequest={createWorkItemRequest}
+              openRepositoryFormRequest={openRepositoryFormRequest}
               onClose={() => setWorkspaceView("overview")}
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}

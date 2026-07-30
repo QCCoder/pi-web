@@ -45,6 +45,7 @@ interface Props {
   initialWorkItemKey?: string | null;
   createWorkItemRequest?: { type: WorkItemType; id: number } | null;
   createWorkspaceOnOpen?: boolean;
+  openRepositoryFormRequest?: number;
   onClose: () => void;
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
@@ -148,6 +149,7 @@ export function WorkspaceManager({
   initialWorkItemKey,
   createWorkItemRequest,
   createWorkspaceOnOpen = false,
+  openRepositoryFormRequest,
   onClose,
   onOpenWorkspace,
   onOpenWorkItemConversation,
@@ -313,6 +315,12 @@ export function WorkspaceManager({
     setSection("workspaces");
     setCreateWorkspaceOpen(true);
   }, [createWorkspaceOnOpen, embedded, open]);
+
+  useEffect(() => {
+    if ((!open && !embedded) || openRepositoryFormRequest === undefined) return;
+    setSection("workspaces");
+    setRepositoryFormOpen(true);
+  }, [embedded, open, openRepositoryFormRequest]);
 
   const visibleWorkItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();

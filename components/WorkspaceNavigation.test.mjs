@@ -33,12 +33,20 @@ test("workspace sidebar exposes persistent collaboration navigation", () => {
   }
   assert.match(workspaceSidebarSource, /＋ 新建会话/);
   assert.match(workspaceSidebarSource, /模型：全局 · Skills \/ 插件：/);
+  assert.match(
+    workspaceSidebarSource,
+    /label="仓库"[\s\S]*action=\{onAddRepository\}[\s\S]*actionLabel="添加仓库"/,
+  );
 });
 
 test("workspace settings and work items render as center pages", () => {
   assert.match(appShellSource, /<WorkspaceManager[\s\S]*embedded/);
   assert.match(workspaceManagerSource, /workspace-manager-page/);
   assert.match(workspaceManagerSource, /进入 Workspace/);
+  assert.match(
+    workspaceManagerSource,
+    /openRepositoryFormRequest[\s\S]*setRepositoryFormOpen\(true\)/,
+  );
 });
 
 test("deleting the active workspace returns to the home context", () => {
