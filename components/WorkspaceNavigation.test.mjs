@@ -41,6 +41,14 @@ test("workspace settings and work items render as center pages", () => {
   assert.match(workspaceManagerSource, /进入 Workspace/);
 });
 
+test("deleting the active workspace returns to the home context", () => {
+  assert.match(
+    appShellSource,
+    /activeWorkspace\?\.id === workspace\.id[\s\S]*handleReturnHome\(\)/,
+  );
+  assert.match(workspaceManagerSource, /onWorkspaceDeleted\?\.\(workspace\)/);
+});
+
 test("mobile workspace navigation has only the three primary destinations", () => {
   assert.match(appShellSource, /gridTemplateColumns: "repeat\(3, 1fr\)"/);
   for (const label of ["工作项", "会话", "Explorer"]) {

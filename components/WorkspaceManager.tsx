@@ -48,6 +48,7 @@ interface Props {
   onClose: () => void;
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
+  onWorkspaceDeleted?: (workspace: WorkspaceSummary) => void;
 }
 
 const STATUS_OPTIONS: WorkItemStatus[] = ["open", "in_progress", "blocked", "done", "cancelled"];
@@ -150,6 +151,7 @@ export function WorkspaceManager({
   onClose,
   onOpenWorkspace,
   onOpenWorkItemConversation,
+  onWorkspaceDeleted,
 }: Props) {
   const [section, setSection] = useState<ManagerSection>(initialSection);
   const [workspaceData, setWorkspaceData] = useState<WorkspaceListResponse | null>(null);
@@ -360,12 +362,13 @@ export function WorkspaceManager({
       );
       setSelectedWorkItem(null);
       await loadWorkspaces();
+      onWorkspaceDeleted?.(workspace);
     } catch (trashError) {
       setError(trashError instanceof Error ? trashError.message : String(trashError));
     } finally {
       setSaving(false);
     }
-  }, [loadWorkspaces]);
+  }, [loadWorkspaces, onWorkspaceDeleted]);
 
   const addRepository = useCallback(async () => {
     if (!selectedWorkspaceId) return;

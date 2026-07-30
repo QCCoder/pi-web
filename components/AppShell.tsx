@@ -453,6 +453,13 @@ export function AppShell() {
     router.replace("/", { scroll: false });
   }, [router]);
 
+  const handleWorkspaceDeleted = useCallback((workspace: WorkspaceSummary) => {
+    setWorkspaces((current) => current.filter((item) => item.id !== workspace.id));
+    if (activeWorkspace?.id === workspace.id) {
+      handleReturnHome();
+    }
+  }, [activeWorkspace, handleReturnHome]);
+
   const handleOpenDirectoryMode = useCallback(() => {
     setDirectoryMode(true);
     setActiveWorkspace(null);
@@ -1691,6 +1698,7 @@ export function AppShell() {
               onClose={() => setWorkspaceView("overview")}
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
+              onWorkspaceDeleted={handleWorkspaceDeleted}
             />
           ) : !directoryMode && !activeWorkspace && workspaceManagerOpen ? (
             <WorkspaceManager
@@ -1702,6 +1710,7 @@ export function AppShell() {
               onClose={() => setWorkspaceManagerOpen(false)}
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
+              onWorkspaceDeleted={handleWorkspaceDeleted}
             />
           ) : showChat ? (
             <ChatWindow
