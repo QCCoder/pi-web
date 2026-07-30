@@ -1,6 +1,6 @@
-import { enLocale } from "./messages/en";
-import { zhCNLocale } from "./messages/zh-CN";
-import type { Locale, LocalePlugin } from "./types";
+import { enLocale } from "./messages/en.ts";
+import { zhCNLocale } from "./messages/zh-CN.ts";
+import type { Locale, LocalePlugin } from "./types.ts";
 
 const localePlugins = new Map<string, LocalePlugin>();
 

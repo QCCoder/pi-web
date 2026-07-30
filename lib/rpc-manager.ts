@@ -11,6 +11,8 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+import { createWorkspaceWorkItemExtension } from "./work-items/extension";
+import { findWorkspaceForPath } from "./workspaces/service";
 
 // ============================================================================
 // Types
@@ -1137,9 +1139,28 @@ export async function startRpcSession(
     // Gate untrusted project extensions so opening a repository does not run
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
+    const workspace = await findWorkspaceForPath(cwd);
+    const selectedWorkspaceSkills = new Set(workspace?.manifest.skills ?? []);
     const services = await createAgentSessionServices({
       cwd,
       agentDir,
+      ...(workspace
+        ? {
+            resourceLoaderOptions: {
+              extensionFactories: [
+                createWorkspaceWorkItemExtension(workspace.manifest.id, workspace.path),
+              ],
+              ...(selectedWorkspaceSkills.size > 0
+                ? {
+                    skillsOverride: (base) => ({
+                      ...base,
+                      skills: base.skills.filter((skill) => selectedWorkspaceSkills.has(skill.name)),
+                    }),
+                  }
+                : {}),
+            },
+          }
+        : {}),
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
     const { session: inner } = await createAgentSessionFromServices({

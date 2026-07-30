@@ -39,14 +39,17 @@ interface FileData {
   content: string;
   language: string;
   size: number;
+  modified: number;
+  editable: boolean;
 }
 
-type DisplayMode = "source" | "preview" | "diff";
+type DisplayMode = "source" | "preview" | "diff" | "edit";
 
 const DISPLAY_MODE_LABELS: Record<DisplayMode, string> = {
   source: "Source",
   preview: "Preview",
   diff: "Diff",
+  edit: "Edit",
 };
 
 const FILE_CODE_STYLE: CSSProperties = {
@@ -811,6 +814,9 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [selectedLineRange, setSelectedLineRange] = useState<SelectedLineRange | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [savingFile, setSavingFile] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const fetchContent = useCallback((filePath: string) => {
     return fetch(getFileApiUrl(filePath, "read", sourceSessionId))
@@ -859,6 +865,8 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     setData(null);
     setGitDiff(null);
     setDisplayMode("source");
+    setEditDraft("");
+    setSaveError(null);
     setWrapLines(false);
     setWatching(false);
 
@@ -905,6 +913,10 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       setDisplayMode("preview");
     }
   }, [data?.language, initialDisplayMode]);
+
+  useEffect(() => {
+    if (data && displayMode !== "edit") setEditDraft(data.content);
+  }, [data, displayMode]);
 
   const hasGitDiff = gitDiff?.supported === true && typeof gitDiff.patch === "string";
   const isDeletedDiff = hasGitDiff && gitDiff.status === "deleted";
@@ -968,6 +980,39 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const handleMentionSelectedLines = useCallback(() => {
     mentionLineRange(selectedLineRange);
   }, [mentionLineRange, selectedLineRange]);
+
+  const saveFile = useCallback(async () => {
+    if (!data || !data.editable) return;
+    setSavingFile(true);
+    setSaveError(null);
+    try {
+      const response = await fetch(getFileApiUrl(filePath, "read", sourceSessionId), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: editDraft,
+          expectedModified: data.modified,
+        }),
+      });
+      const next = await response.json() as FileData & { error?: string };
+      if (!response.ok || next.error) throw new Error(next.error ?? `HTTP ${response.status}`);
+      setData(next);
+      setEditDraft(next.content);
+      setDisplayMode("source");
+      await fetchGitDiff(filePath);
+    } catch (saveFileError) {
+      setSaveError(saveFileError instanceof Error ? saveFileError.message : String(saveFileError));
+    } finally {
+      setSavingFile(false);
+    }
+  }, [data, editDraft, fetchGitDiff, filePath, sourceSessionId]);
+
+  const cancelEditing = useCallback(() => {
+    if (data && editDraft !== data.content && !window.confirm("Discard unsaved changes?")) return;
+    setEditDraft(data?.content ?? "");
+    setSaveError(null);
+    setDisplayMode(data?.language === "markdown" ? "preview" : "source");
+  }, [data, editDraft]);
 
   useEffect(() => {
     if (!onMentionLines || displayMode !== "source") return;
@@ -1086,6 +1131,42 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
           )}
 
           <div className="file-viewer-actions">
+            {effectiveDisplayMode !== "edit" && data?.editable && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditDraft(data.content);
+                  setSaveError(null);
+                  setDisplayMode("edit");
+                }}
+                title="Edit file"
+                aria-label="Edit file"
+                className="file-viewer-mode-button"
+              >
+                Edit
+              </button>
+            )}
+            {effectiveDisplayMode === "edit" && (
+              <>
+                <button
+                  type="button"
+                  onClick={cancelEditing}
+                  disabled={savingFile}
+                  className="file-viewer-mode-button"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveFile()}
+                  disabled={savingFile || editDraft === data?.content}
+                  className="file-viewer-mode-button"
+                  style={{ color: "var(--accent)" }}
+                >
+                  {savingFile ? "Saving…" : "Save"}
+                </button>
+              </>
+            )}
             {effectiveDisplayMode === "source" && (
               <>
                 <button
@@ -1128,7 +1209,43 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
 
       {/* Content area */}
       <div ref={contentRef} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
-        {effectiveDisplayMode === "diff" && hasGitDiff ? (
+        {effectiveDisplayMode === "edit" ? (
+          <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+            {saveError && (
+              <div
+                role="alert"
+                style={{
+                  padding: "8px 12px",
+                  borderBottom: "1px solid var(--border)",
+                  color: "#f87171",
+                  fontSize: 12,
+                }}
+              >
+                {saveError}
+              </div>
+            )}
+            <textarea
+              value={editDraft}
+              onChange={(event) => setEditDraft(event.target.value)}
+              spellCheck={data?.language === "markdown" || data?.language === "text"}
+              aria-label={`Edit ${getRelativeFilePath(filePath, cwd)}`}
+              style={{
+                flex: 1,
+                width: "100%",
+                minHeight: 0,
+                resize: "none",
+                border: 0,
+                outline: 0,
+                padding: "14px 16px",
+                background: "var(--bg)",
+                color: "var(--text)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 13,
+                lineHeight: 1.6,
+              }}
+            />
+          </div>
+        ) : effectiveDisplayMode === "diff" && hasGitDiff ? (
           <DiffView patch={gitDiff.patch!} />
         ) : isHtml && effectiveDisplayMode === "preview" ? (
           <iframe

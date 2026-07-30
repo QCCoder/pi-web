@@ -11,6 +11,9 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
+import { WorkspaceManager } from "./WorkspaceManager";
+import { WorkspaceOverview } from "./WorkspaceOverview";
+import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -23,6 +26,8 @@ import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
+import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -55,11 +60,26 @@ export function AppShell() {
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
   const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
+  const [workspaceManagerOpen, setWorkspaceManagerOpen] = useState(false);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceSummary | null>(null);
+  const [directoryMode, setDirectoryMode] = useState(
+    () => !searchParams.get("workspace")
+      && (initialNavigation.requestedCwd !== null || initialNavigation.sessionId !== null),
+  );
+  const [workspaceView, setWorkspaceView] = useState<"overview" | "settings" | "work-items" | "chat">("overview");
+  const [selectedWorkItemKey, setSelectedWorkItemKey] = useState<string | null>(null);
+  const [createWorkItemRequest, setCreateWorkItemRequest] = useState<{
+    type: "requirement" | "bug";
+    id: number;
+  } | null>(null);
+  const [globalSettingsCwd, setGlobalSettingsCwd] = useState<string | null>(null);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
   const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileSidebarPane, setMobileSidebarPane] = useState<"work-items" | "conversations" | "explorer">("conversations");
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
@@ -70,6 +90,10 @@ export function AppShell() {
     setMobileSidebarReady(true);
   }, []);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
+  const pendingWorkItemConversationRef = useRef<{
+    workspaceId: string;
+    key: string;
+  } | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   const languageBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -142,7 +166,10 @@ export function AppShell() {
   }, [isMobile]);
 
   const handleSidebarToggle = useCallback(() => {
-    if (isMobile) setActiveTopPanel(null);
+    if (isMobile) {
+      setActiveTopPanel(null);
+      setMobileSidebarPane("conversations");
+    }
     setSidebarOpen((open) => !open);
   }, [isMobile]);
 
@@ -196,6 +223,39 @@ export function AppShell() {
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
+
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      const response = await fetch("/api/workspaces");
+      if (!response.ok) return;
+      const data = await response.json() as { workspaces?: WorkspaceSummary[] };
+      const nextWorkspaces = data.workspaces ?? [];
+      setWorkspaces(nextWorkspaces);
+      setActiveWorkspace((current) => {
+        const requestedId = searchParams.get("workspace");
+        const next = current
+          ? nextWorkspaces.find((workspace) => workspace.id === current.id)
+          : nextWorkspaces.find((workspace) => workspace.id === requestedId);
+        if (!next) return null;
+        setDirectoryMode(false);
+        setActiveCwd(next.path);
+        activeProjectRootRef.current = next.path;
+        return next;
+      });
+    } catch (error) {
+      console.error("Failed to load workspaces:", error);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    void loadWorkspaces();
+    void fetch("/api/home")
+      .then(async (response) => response.ok
+        ? response.json() as Promise<{ home?: string }>
+        : null)
+      .then((data) => setGlobalSettingsCwd(data?.home ?? null))
+      .catch(() => {});
+  }, [loadWorkspaces]);
 
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
@@ -279,6 +339,7 @@ export function AppShell() {
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     setNewSessionCwd(null);
     setSelectedSession(session);
+    if (activeWorkspace) setWorkspaceView("chat");
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
     setInitialSessionRestored(true);
@@ -292,11 +353,43 @@ export function AppShell() {
     // Skip router.replace when restoring from URL — the param is already correct
     // and calling replace in production Next.js triggers a Suspense remount loop
     if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      const workspaceQuery = activeWorkspace
+        ? `workspace=${encodeURIComponent(activeWorkspace.id)}&`
+        : "";
+      router.replace(`?${workspaceQuery}session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
-  }, [router, isMobile]);
+  }, [activeWorkspace, router, isMobile]);
+
+  useEffect(() => {
+    if (!activeWorkspace || !initialSessionId || initialSessionRestored || selectedSession) return;
+    let cancelled = false;
+    void fetch("/api/sessions")
+      .then(async (response) => response.ok
+        ? response.json() as Promise<{ sessions?: SessionInfo[] }>
+        : null)
+      .then((data) => {
+        if (cancelled) return;
+        const session = data?.sessions?.find((item) => item.id === initialSessionId);
+        if (session) handleSelectSession(session, true);
+        else setInitialSessionRestored(true);
+      })
+      .catch(() => {
+        if (!cancelled) setInitialSessionRestored(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeWorkspace,
+    handleSelectSession,
+    initialSessionId,
+    initialSessionRestored,
+    selectedSession,
+  ]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
+    setDirectoryMode(true);
+    setActiveWorkspace(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
@@ -307,6 +400,74 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
     router.replace("/", { scroll: false });
   }, [router, isMobile]);
+
+  const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
+    setWorkspaceManagerOpen(false);
+    setWorkspaces((current) => current.some((item) => item.id === workspace.id)
+      ? current.map((item) => item.id === workspace.id ? workspace : item)
+      : [...current, workspace]);
+    setDirectoryMode(false);
+    setActiveWorkspace(workspace);
+    setWorkspaceView("overview");
+    setSelectedWorkItemKey(null);
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setActiveCwd(workspace.path);
+    activeProjectRootRef.current = workspace.path;
+    setSessionKey((key) => key + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
+    setSystemPrompt(null);
+    setActiveTopPanel(null);
+    setFileTabs([]);
+    setActiveFileTabId(null);
+    setRightPanelOpen(false);
+    if (isMobile) setSidebarOpen(false);
+    router.replace(`?workspace=${encodeURIComponent(workspace.id)}`, { scroll: false });
+  }, [isMobile, router]);
+
+  const handleWorkspaceNewSession = useCallback(() => {
+    if (!activeWorkspace) return;
+    setWorkspaceView("chat");
+    setSelectedSession(null);
+    setNewSessionCwd(activeWorkspace.path);
+    setSessionKey((key) => key + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
+    setSystemPrompt(null);
+    if (isMobile) setSidebarOpen(false);
+    router.replace(`?workspace=${encodeURIComponent(activeWorkspace.id)}`, { scroll: false });
+  }, [activeWorkspace, isMobile, router]);
+
+  const handleReturnHome = useCallback(() => {
+    setDirectoryMode(false);
+    setActiveWorkspace(null);
+    setWorkspaceView("overview");
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setActiveCwd(null);
+    setSelectedWorkItemKey(null);
+    setFileTabs([]);
+    setActiveFileTabId(null);
+    setRightPanelOpen(false);
+    router.replace("/", { scroll: false });
+  }, [router]);
+
+  const handleOpenDirectoryMode = useCallback(() => {
+    setDirectoryMode(true);
+    setActiveWorkspace(null);
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setActiveCwd(null);
+    router.replace("/", { scroll: false });
+  }, [router]);
+
+  const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
+    setWorkspaceView("work-items");
+    setSelectedWorkItemKey(null);
+    setCreateWorkItemRequest({ type, id: Date.now() });
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -335,8 +496,81 @@ export function AppShell() {
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [router, hydrateSelectedSession]);
+    const workspaceQuery = activeWorkspace
+      ? `workspace=${encodeURIComponent(activeWorkspace.id)}&`
+      : "";
+    router.replace(`?${workspaceQuery}session=${encodeURIComponent(session.id)}`, { scroll: false });
+    const pending = pendingWorkItemConversationRef.current;
+    pendingWorkItemConversationRef.current = null;
+    if (pending) {
+      const url = `/api/workspaces/${encodeURIComponent(pending.workspaceId)}/work-items/${encodeURIComponent(pending.key)}`;
+      void fetch(url)
+        .then(async (response) => {
+          if (!response.ok) return;
+          const detail = await response.json() as WorkItemDetail;
+          const conversations = [...new Set([...detail.item.conversations, session.id])];
+          return fetch(url, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              expectedRevision: detail.item.revision,
+              conversations,
+              actor: "system",
+              conversationId: session.id,
+            }),
+          });
+        })
+        .catch(() => {});
+    }
+  }, [activeWorkspace, router, hydrateSelectedSession]);
+
+  const handleOpenWorkItemConversation = useCallback(async (
+    workspace: WorkspaceSummary,
+    item: WorkItemRecord,
+  ) => {
+    const primaryConversationId = item.conversations[0];
+    if (primaryConversationId) {
+      try {
+        const response = await fetch("/api/sessions");
+        if (response.ok) {
+          const data = await response.json() as { sessions: SessionInfo[] };
+          const existing = data.sessions.find((session) => session.id === primaryConversationId);
+          if (existing) {
+            setWorkspaceManagerOpen(false);
+            handleSelectSession(existing);
+            return;
+          }
+        }
+      } catch {
+        // A missing local Conversation falls through to a new Workspace session.
+      }
+    }
+
+    pendingWorkItemConversationRef.current = {
+      workspaceId: workspace.id,
+      key: item.key,
+    };
+    setDirectoryMode(false);
+    setActiveWorkspace(workspace);
+    setWorkspaceView("chat");
+    setSelectedSession(null);
+    setNewSessionCwd(workspace.path);
+    setActiveCwd(workspace.path);
+    activeProjectRootRef.current = workspace.path;
+    setSessionKey((key) => key + 1);
+    router.replace(`?workspace=${encodeURIComponent(workspace.id)}`, { scroll: false });
+    const prompt = `请继续处理工作项 ${item.key}（${item.title}）。先调用 workspace_get_work_item 读取现状，再按 Workspace 的 AGENTS.md 和已选 Pi skills 协作；只把关键里程碑写回工作项。`;
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      if (chatInputRef.current) {
+        chatInputRef.current.insertIfEmpty(prompt);
+        window.clearInterval(timer);
+      } else if (attempts >= 20) {
+        window.clearInterval(timer);
+      }
+    }, 50);
+  }, [handleSelectSession, router]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -477,9 +711,15 @@ export function AppShell() {
   }, [selectedSession]);
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
-  const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
+  const effectiveNewSessionCwd = newSessionCwd
+    ?? (directoryMode && selectedSession === null && activeCwd ? activeCwd : null);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
+  const settingsCwd = activeWorkspace?.path
+    ?? selectedSession?.cwd
+    ?? effectiveNewSessionCwd
+    ?? activeCwd
+    ?? globalSettingsCwd;
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
@@ -543,7 +783,7 @@ export function AppShell() {
     return () => observer.disconnect();
   }, [windowTitle]);
 
-  const sidebarContent = (
+  const directorySidebarContent = (
     <>
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
@@ -561,6 +801,9 @@ export function AppShell() {
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
+        mobilePane={isMobile
+          ? (mobileSidebarPane === "explorer" ? "explorer" : "conversations")
+          : undefined}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -625,6 +868,41 @@ export function AppShell() {
         ))}
       </div>
     </>
+  );
+
+  const sidebarContent = directoryMode ? directorySidebarContent : (
+    <WorkspaceSidebar
+      activeWorkspace={activeWorkspace}
+      workspaces={workspaces}
+      selectedSessionId={selectedSession?.id ?? null}
+      selectedWorkItemKey={selectedWorkItemKey}
+      refreshKey={refreshKey}
+      explorerRefreshKey={explorerRefreshKey}
+      mobilePane={isMobile ? mobileSidebarPane : undefined}
+      onSelectWorkspace={handleOpenWorkspace}
+      onCreateWorkspace={() => {
+        setWorkspaceManagerOpen(true);
+        setActiveWorkspace(null);
+        setActiveCwd(null);
+        setSelectedSession(null);
+        setNewSessionCwd(null);
+      }}
+      onOpenDirectoryMode={handleOpenDirectoryMode}
+      onReturnHome={handleReturnHome}
+      onOpenWorkspaceSettings={() => setWorkspaceView("settings")}
+      onNewSession={handleWorkspaceNewSession}
+      onSelectSession={handleSelectSession}
+      onSelectWorkItem={(item) => {
+        setSelectedWorkItemKey(item.key);
+        setWorkspaceView("work-items");
+        if (isMobile) setSidebarOpen(false);
+      }}
+      onCreateWorkItem={handleCreateWorkItem}
+      onOpenFile={handleOpenFile}
+      onOpenModels={() => setModelsConfigOpen(true)}
+      onOpenSkills={() => setSkillsConfigOpen(true)}
+      onOpenPlugins={() => setPluginsConfigOpen(true)}
+    />
   );
 
   return (
@@ -698,6 +976,15 @@ export function AppShell() {
           transform: translateX(-100%);
           box-shadow: none;
         }
+        .app-shell-center {
+          padding-bottom: 54px;
+        }
+        .right-panel-container {
+          padding-bottom: 54px;
+        }
+        .mobile-workspace-nav {
+          display: grid !important;
+        }
       }
     `}</style>
     <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
@@ -732,7 +1019,7 @@ export function AppShell() {
       </div>
 
       {/* Center: chat */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+      <div className="app-shell-center" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
           <button
@@ -1384,7 +1671,39 @@ export function AppShell() {
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {showChat ? (
+          {!directoryMode && activeWorkspace && workspaceView === "overview" ? (
+            <WorkspaceOverview
+              workspace={activeWorkspace}
+              onNewSession={handleWorkspaceNewSession}
+              onOpenSettings={() => setWorkspaceView("settings")}
+              onOpenWorkItems={() => setWorkspaceView("work-items")}
+              onCreateWorkItem={handleCreateWorkItem}
+            />
+          ) : !directoryMode && activeWorkspace
+            && (workspaceView === "settings" || workspaceView === "work-items") ? (
+            <WorkspaceManager
+              open
+              embedded
+              initialSection={workspaceView === "settings" ? "workspaces" : "work-items"}
+              activeWorkspacePath={activeWorkspace.path}
+              initialWorkItemKey={selectedWorkItemKey}
+              createWorkItemRequest={createWorkItemRequest}
+              onClose={() => setWorkspaceView("overview")}
+              onOpenWorkspace={handleOpenWorkspace}
+              onOpenWorkItemConversation={handleOpenWorkItemConversation}
+            />
+          ) : !directoryMode && !activeWorkspace && workspaceManagerOpen ? (
+            <WorkspaceManager
+              open
+              embedded
+              initialSection="workspaces"
+              activeWorkspacePath={null}
+              createWorkspaceOnOpen
+              onClose={() => setWorkspaceManagerOpen(false)}
+              onOpenWorkspace={handleOpenWorkspace}
+              onOpenWorkItemConversation={handleOpenWorkItemConversation}
+            />
+          ) : showChat ? (
             <ChatWindow
               key={sessionKey}
               session={selectedSession}
@@ -1492,6 +1811,75 @@ export function AppShell() {
         </div>
       </div>
     </div>
+    <nav
+      className="mobile-workspace-nav"
+      aria-label="Mobile navigation"
+      style={{
+        display: "none",
+        position: "fixed",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 350,
+        gridTemplateColumns: "repeat(3, 1fr)",
+        height: 54,
+        paddingBottom: "env(safe-area-inset-bottom)",
+        borderTop: "1px solid var(--border)",
+        background: "color-mix(in srgb, var(--bg-panel) 94%, transparent)",
+        backdropFilter: "blur(12px)",
+      }}
+    >
+      {([
+        {
+          label: "工作项",
+          icon: "✓",
+          action: () => {
+            setRightPanelOpen(false);
+            setMobileSidebarPane("work-items");
+            setSidebarOpen(true);
+          },
+        },
+        {
+          label: "会话",
+          icon: "◌",
+          action: () => {
+            setRightPanelOpen(false);
+            setMobileSidebarPane("conversations");
+            setSidebarOpen(true);
+          },
+        },
+        {
+          label: "Explorer",
+          icon: "⌘",
+          action: () => {
+            setRightPanelOpen(false);
+            setMobileSidebarPane("explorer");
+            setSidebarOpen(true);
+          },
+        },
+      ] as const).map((item) => (
+        <button
+          key={item.label}
+          type="button"
+          onClick={item.action}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 2,
+            border: 0,
+            background: "transparent",
+            color: "var(--text-muted)",
+            font: "inherit",
+            fontSize: 10,
+          }}
+        >
+          <span aria-hidden="true" style={{ minHeight: 17, fontSize: 15, lineHeight: 1 }}>{item.icon}</span>
+          <span>{item.label}</span>
+        </button>
+      ))}
+    </nav>
     {/* File panel toggle — always visible at top-right */}
     <button
       onClick={() => setRightPanelOpen((v) => !v)}
@@ -1524,12 +1912,12 @@ export function AppShell() {
         onConfirm={() => void handleTrustProject()}
       />
     )}
-    {skillsConfigOpen && projectTrustCwd && (
-      <SkillsConfig cwd={projectTrustCwd} onClose={() => setSkillsConfigOpen(false)} />
+    {skillsConfigOpen && settingsCwd && (
+      <SkillsConfig cwd={settingsCwd} onClose={() => setSkillsConfigOpen(false)} />
     )}
-    {pluginsConfigOpen && projectTrustCwd && (
+    {pluginsConfigOpen && settingsCwd && (
       <PluginsConfig
-        cwd={projectTrustCwd}
+        cwd={settingsCwd}
         sessionId={selectedSession?.id ?? null}
         onClose={() => setPluginsConfigOpen(false)}
         onReloaded={() => setSessionKey((k) => k + 1)}
