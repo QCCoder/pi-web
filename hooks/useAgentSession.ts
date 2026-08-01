@@ -1586,6 +1586,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState.state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(agentState.state.queuedMessages));
         }
       });
+    } else {
+      // session 为空（新建会话 / 切到无活跃会话的 workspace）：清空历史消息，
+      // 否则单实例 ChatWindow 会残留上一个 session 的内容。
+      sessionIdRef.current = null;
+      setData(null);
+      setActiveLeafId(null);
+      setMessages([]);
+      setEntryIds([]);
+      setCurrentModelOverride(null);
+      setError(null);
     }
     return () => {
       bashRecoveryIdRef.current += 1;
