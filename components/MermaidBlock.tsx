@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -82,7 +82,7 @@ export function MermaidBlock({ code, isStreaming, defaultPreview = false }: Merm
   );
 
   if (!previewVisible) {
-    return <CodeBlock code={code} lang="mermaid" headerAction={previewButton} />;
+    return <CodeBlock code={code} lang="mermaid" headerAction={previewButton} plain={isStreaming} />;
   }
 
   const body = renderState?.key === currentKey && renderState.status === "error" ? (
@@ -224,13 +224,18 @@ interface CodeBlockProps {
   code: string;
   lang: string;
   headerAction?: ReactNode;
+  /** Render untokenized plain text instead of running Prism. Use while a message
+   * is streaming: Prism is O(code length) and re-runs on every token, so a
+   * growing code block is O(n²) over the stream and freezes the main thread. */
+  plain?: boolean;
 }
 
 /**
  * Syntax-highlighted code block with copy button.
  * Used as the "source" view for mermaid blocks and for all non-mermaid code fences.
+ * Memoized so a completed block never re-highlights unless its code changes.
  */
-export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
+export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, plain }: CodeBlockProps) {
   const { isDark } = useTheme();
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -241,6 +246,30 @@ export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
       setTimeout(() => setCopied(false), 1500);
     });
   };
+
+  const body = plain ? (
+    <pre style={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))", overflow: "auto" }}>
+      <code style={{ fontFamily: "var(--font-mono)", whiteSpace: "pre" }}>{code}</code>
+    </pre>
+  ) : (
+    <SyntaxHighlighter
+      language={lang || "text"}
+      style={isDark ? vscDarkPlus : vs}
+      showLineNumbers
+      lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
+      customStyle={{
+        margin: 0,
+        padding: "11px 13px",
+        fontSize: 12.5,
+        lineHeight: 1.62,
+        borderRadius: 0,
+        background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
+      }}
+      codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+    >
+      {code}
+    </SyntaxHighlighter>
+  );
 
   return (
     <div className="markdown-code-block">
@@ -256,23 +285,7 @@ export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
           </button>
         </div>
       </div>
-      <SyntaxHighlighter
-        language={lang || "text"}
-        style={isDark ? vscDarkPlus : vs}
-        showLineNumbers
-        lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
-        customStyle={{
-          margin: 0,
-          padding: "11px 13px",
-          fontSize: 12.5,
-          lineHeight: 1.62,
-          borderRadius: 0,
-          background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
-        }}
-        codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-      >
-        {code}
-      </SyntaxHighlighter>
+      {body}
     </div>
   );
-}
+});
