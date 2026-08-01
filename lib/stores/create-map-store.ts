@@ -159,13 +159,27 @@ export function useStoreSlice<K, V, S>(
     () => store.keyVersion(key),
     () => 0,
   );
-  // 版本号驱动：只在版本变化时才重新计算 selector，保证返回值引用稳定。
-  const ref = useRef<{ version: number; slice: S } | null>(null);
-  const current = ref.current;
-  if (current === null || current.version !== version) {
-    ref.current = { version, slice: selector(store.get(key)) };
+  // 版本号 + key 双驱动：只在版本变化 OR key 变化时才重算 selector，保证
+  // 返回值引用稳定。忽略 key 变化会导致切到另一个 key 时，若两者版本号恰好
+  // 相等（都很常见，比如各加载过一次都是 1），返回上一个 key 的旧 slice。
+  const ref = useRef<{ key: K; version: number; slice: S } | null>(null);
+  if (!isSliceCacheValid(ref.current, key, version)) {
+    ref.current = { key, version, slice: selector(store.get(key)) };
   }
   return ref.current!.slice;
+}
+
+/**
+ * useStoreSlice 缓存是否仍然有效。提取为纯函数以便单测：key 或 version 任一
+ * 变化都必须失效——尤其是「key 变了但版本号恰好相等」这种情况（切会话时高发），
+ * 否则会返回上一个 key 的旧 slice。
+ */
+export function isSliceCacheValid<K>(
+  prev: { key: K; version: number } | null,
+  key: K,
+  version: number,
+): boolean {
+  return prev !== null && prev.key === key && prev.version === version;
 }
 
 /** 订阅整个 store 的条目列表（任意 key 增删改都触发更新）。用于列表场景。 */
