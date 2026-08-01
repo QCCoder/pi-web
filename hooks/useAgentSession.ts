@@ -9,7 +9,6 @@ import type {
   SessionInfo,
   SessionTreeNode,
 } from "@/lib/types";
-import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -17,6 +16,7 @@ import { getCachedSession, setCachedSession, dropCachedSession, sessionMessagesC
 import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
 import { useStoreSlice } from "@/lib/stores/create-map-store";
 import { sessionRuntimeStore, setSessionRuntime, updateSessionRuntime, getSessionRuntime, createDefaultSessionRuntimeState, EMPTY_RUNTIME, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
+import { globalAgentEvents } from "@/lib/sse/global-agent-events";
 
 export interface SessionData {
   sessionId: string;
@@ -54,11 +54,6 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
     default:
       return state;
   }
-}
-
-interface AgentEvent {
-  type: string;
-  [key: string]: unknown;
 }
 
 interface CompactCommandResult {
@@ -169,18 +164,12 @@ const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
-const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
-
-type EventStreamConnectionResult = {
-  status: EventStreamConnectionStatus;
-  source: EventSource;
-};
 
 class EventStreamConnectionError extends Error {
   constructor(public readonly status: Exclude<EventStreamConnectionStatus, "connected">) {
@@ -379,11 +368,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     queuedMessages, pendingBash,
   } = runtime;
 
-  const eventSourceRef = useRef<EventSource | null>(null);
   const loadSessionAbortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const bashRecoveryIdRef = useRef(0);
-  const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
@@ -693,61 +680,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [ensureNewSession]);
 
-  const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
-    eventSourceRef.current = es;
-
-    return new Promise((resolve) => {
-      let settled = false;
-      const settle = (status: EventStreamConnectionStatus) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        resolve({ status, source: es });
-      };
-      const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
-
-      es.onmessage = (e) => {
-        try {
-          const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") settle("connected");
-          handleAgentEventRef.current?.(event);
-        } catch {
-          // ignore
-        }
-      };
-      es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) {
-          // Fatal error (404/500/content-type mismatch): browser won't
-          // auto-reconnect. Settle the Promise and manually reconnect for
-          // already-running sessions.
-          settle("closed");
-          if (eventSourceRef.current === es && readRuntimeFor(runtimeKeyRef).agentRunning) {
-            eventSourceRef.current = null;
-            setTimeout(() => {
-              if (readRuntimeFor(runtimeKeyRef).agentRunning) void connectEvents(sid);
-            }, 1000);
-          }
-        }
-        // Recoverable errors (CONNECTING): let EventSource auto-reconnect.
-        // The timeout above resolves only to let callers decide whether this
-        // connection must be ready before they continue.
-      };
-    });
-  }, []);
-
-  const ensureEventsConnected = useCallback(async (sid: string) => {
-    const result = await connectEvents(sid);
-    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
-    if (eventSourceRef.current === result.source) eventSourceRef.current = null;
-    result.source.close();
-    throw new EventStreamConnectionError(result.status);
-  }, [connectEvents]);
-
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
     response: { value: string } | { confirmed: boolean } | { cancelled: true },
@@ -793,62 +725,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, []);
 
-  const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
-    switch (request.method) {
-      case "select":
-      case "confirm":
-      case "input":
-      case "editor":
-        setExtensionDialog(request);
-        break;
-      case "notify": {
-        addNotice({
-          id: request.id,
-          message: request.message,
-          type: request.notifyType ?? "info",
-        });
-        break;
-      }
-      case "setStatus":
-        patchRuntime((rt) => {
-          const rest = rt.extensionStatuses.filter((item) => item.key !== request.statusKey);
-          return {
-            ...rt,
-            extensionStatuses: request.statusText !== undefined
-              ? [...rest, { key: request.statusKey, text: request.statusText }]
-              : rest,
-          };
-        });
-        break;
-      case "setWidget":
-        patchRuntime((rt) => {
-          const rest = rt.extensionWidgets.filter((item) => item.key !== request.widgetKey);
-          return {
-            ...rt,
-            extensionWidgets: request.widgetLines
-              ? [...rest, {
-                  key: request.widgetKey,
-                  lines: request.widgetLines,
-                  placement: request.widgetPlacement ?? "aboveEditor",
-                }]
-              : rest,
-          };
-        });
-        break;
-      case "setTitle":
-        if (request.title) document.title = request.title;
-        break;
-      case "set_editor_text":
-        opts.chatInputRef?.current?.insertText(request.text);
-        break;
-      case "custom":
-        setExtensionCustomUi((current) => {
-          if (request.closed) return current?.id === request.id ? null : current;
-          return request;
-        });
-        break;
-    }
-  }, [addNotice, opts.chatInputRef, patchRuntime]);
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId?: number) => {
     // Bail out before loadSession too: a stale finish for a previous run
@@ -981,154 +857,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [agentRunning, reconcileAgentState]);
 
-  const handleAgentEvent = useCallback((event: AgentEvent) => {
-    switch (event.type) {
-      case "agent_start":
-        patchRuntime({ agentRunning: true, agentPhase: { kind: "waiting_model" } });
-        dispatch({ type: "start" });
-        break;
-      case "agent_end":
-        // A late agent_end can arrive over SSE after reconcileAgentState
-        // already finished this run — don't re-trigger completion.
-        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
-        patchRuntime({ agentRunning: false, agentPhase: null, retryInfo: null });
-        dispatch({ type: "end" });
-        if (sessionIdRef.current) {
-          loadSession(sessionIdRef.current);
-          fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
-            .then((r) => r.json())
-            .then((d: { state?: AgentStateResponse }) => {
-              const patch: Partial<SessionRuntimeState> = {};
-              if (d.state?.contextUsage !== undefined) patch.contextUsage = d.state.contextUsage ?? null;
-              if (d.state?.systemPrompt !== undefined) patch.systemPrompt = d.state.systemPrompt ?? null;
-              if (d.state?.extensionStatuses !== undefined) patch.extensionStatuses = d.state.extensionStatuses ?? [];
-              if (d.state?.extensionWidgets !== undefined) patch.extensionWidgets = d.state.extensionWidgets ?? [];
-              // Aborted turns can leave messages queued in pi (delivered with the
-              // next turn); dead wrapper (no state) means the queue is gone.
-              patch.queuedMessages = normalizeQueuedMessages(d.state?.queuedMessages);
-              patchRuntime(patch);
-            })
-            .catch(() => {});
-        }
-        onAgentEnd?.();
-        break;
-      case "prompt_done":
-        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
-        void finishPromptWithoutStream(sessionIdRef.current);
-        break;
-      case "prompt_error":
-        addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
-        break;
-      case "extension_error":
-        addNotice({
-          type: "error",
-          message: (event.error as string | undefined) ?? "Extension command failed",
-        });
-        break;
-      case "message_start":
-      case "message_update": {
-        // Ignore streaming events arriving after this run already finished
-        // (e.g. SSE data buffered while the tab was frozen, flushed after
-        // reconcile) — they would resurrect a ghost streaming bubble.
-        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
-        const msg = event.message as Partial<AgentMessage> | undefined;
-        if (msg?.role === "user") {
-          break;
-        }
-        if (msg) {
-          dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
-        }
-        patchRuntime({ agentPhase: null });
-        break;
-      }
-      case "message_end": {
-        // Same late-event guard: after reconcile finished this run,
-        // loadSession already loaded this message from the session file —
-        // appending it again would duplicate it.
-        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
-        const completed = event.message as AgentMessage | undefined;
-        if (completed && completed.role === "user") {
-          // Delivered steering/follow-up messages surface here as user
-          // messages. The run's initial prompt also emits one, but handleSend
-          // already appended it optimistically. Consume only the still-adjacent
-          // optimistic bubble; later same-text queue deliveries must render.
-          const delivered = normalizeToolCalls(completed);
-          const deliveredKey = userMessageKey(delivered);
-          const optimisticKey = readRuntimeFor(runtimeKeyRef).optimisticUserMessageKey;
-          patchRuntime({ optimisticUserMessageKey: null });
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
-              return optimisticKey === deliveredKey
-                ? prev
-                : [...prev.slice(0, -1), delivered];
-            }
-            return [...prev, delivered];
-          });
-        } else if (completed) {
-          setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
-        }
-        dispatch({ type: "reset" });
-        patchRuntime({ agentPhase: { kind: "waiting_model" } });
-        break;
-      }
-      case "tool_execution_start": {
-        const id = event.toolCallId as string;
-        const name = event.toolName as string;
-        patchRuntime((rt) => {
-          const tools = rt.agentPhase?.kind === "running_tools" ? [...rt.agentPhase.tools] : [];
-          if (!tools.some((t) => t.id === id)) tools.push({ id, name });
-          return { ...rt, agentPhase: { kind: "running_tools", tools } };
-        });
-        break;
-      }
-      case "tool_execution_end": {
-        const id = event.toolCallId as string;
-        patchRuntime((rt) => {
-          if (rt.agentPhase?.kind !== "running_tools") return rt;
-          const tools = rt.agentPhase.tools.filter((t) => t.id !== id);
-          return { ...rt, agentPhase: tools.length === 0 ? { kind: "waiting_model" } : { kind: "running_tools", tools } };
-        });
-        break;
-      }
-      case "queue_update":
-        patchRuntime({
-          queuedMessages: {
-            steering: [...((event.steering as string[] | undefined) ?? [])],
-            followUp: [...((event.followUp as string[] | undefined) ?? [])],
-          },
-        });
-        break;
-      case "auto_retry_start":
-        patchRuntime({ retryInfo: { attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined } });
-        break;
-      case "auto_retry_end":
-        patchRuntime({ retryInfo: null });
-        break;
-      case "auto_compaction_start":
-      case "compaction_start":
-        patchRuntime({ isCompacting: true, compactError: null, compactResult: null });
-        break;
-      case "auto_compaction_end":
-      case "compaction_end":
-        if (event.errorMessage) {
-          patchRuntime({ isCompacting: false, compactError: event.errorMessage as string, compactResult: null });
-        } else if (!event.aborted) {
-          patchRuntime({
-            isCompacting: false,
-            compactResult: readCompactResult(event.result, (event.reason as string | undefined) ?? "auto"),
-          });
-          if (sessionIdRef.current) loadSession(sessionIdRef.current);
-        } else {
-          patchRuntime({ isCompacting: false });
-        }
-        break;
-      case "extension_ui_request":
-        handleExtensionUiRequest(event as ExtensionUiRequest);
-        break;
-    }
-  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd, patchRuntime, dispatch, setMessages]);
-  handleAgentEventRef.current = handleAgentEvent;
+  // 确保全局 SSE 已连上（发 prompt 前调用，防漏 agent_start）。连接失败抛
+  // EventStreamConnectionError，由 handleSend 的 catch 走乐观消息回滚 + 文本恢复。
+  const ensureSseConnected = useCallback(async (sid: string) => {
+    const status = await globalAgentEvents.ensureConnected(sid);
+    if (status !== "connected") throw new EventStreamConnectionError(status);
+  }, []);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
@@ -1192,7 +926,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
             }
           }
-          await ensureEventsConnected(sid);
+          await ensureSseConnected(sid);
           await sendAgentCommand(sid, {
             type: "prompt",
             message,
@@ -1202,7 +936,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       } else if (session) {
         sentSessionId = session.id;
-        await ensureEventsConnected(session.id);
+        await ensureSseConnected(session.id);
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
@@ -1233,7 +967,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchRuntime({ optimisticUserMessageKey: null, agentRunning: false, agentPhase: null });
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime, dispatch, setMessages]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureSseConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime, dispatch, setMessages]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
@@ -1583,7 +1317,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             patchRuntime({ agentRunning: true, agentPhase: agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" } });
             dispatch({ type: "start" });
-            void connectEvents(session.id);
+            void globalAgentEvents.ensureConnected(session.id);
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
               void waitForPromptSettlement(session.id);
             }
@@ -1616,8 +1350,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     return () => {
       bashRecoveryIdRef.current += 1;
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, reloadSignal]);
@@ -1714,6 +1446,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const setForkingEntryId = useCallback((id: string | null) => patchRuntime({ forkingEntryId: id }), [patchRuntime]);
   const setAgentRunning = useCallback((v: boolean) => patchRuntime({ agentRunning: v }), [patchRuntime]);
 
+  // 注册当前 active session 的 UI effect handlers 给全局 SSE 管理器（B4b）：后台 session
+  // 事件写 store/cache；UI effects（notice / 对话框 / 完成音 / editor 注入 / slash 完成）
+  // 只送达 active session。
+  useEffect(() => {
+    globalAgentEvents.setActive(runtimeKey, {
+      onAgentEnd,
+      addNotice,
+      setExtensionDialog,
+      resolveExtensionCustomUi: (request) => setExtensionCustomUi((current) =>
+        request.closed ? (current?.id === request.id ? null : current) : request),
+      editorInsertText: (text) => opts.chatInputRef?.current?.insertText(text),
+      finishPromptWithoutStream: (sid) => void finishPromptWithoutStream(sid),
+    });
+    return () => { globalAgentEvents.setActive(null, null); };
+  }, [runtimeKey, onAgentEnd, addNotice, setExtensionDialog, setExtensionCustomUi, finishPromptWithoutStream, opts.chatInputRef]);
+
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
@@ -1726,7 +1474,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase,
     isNew,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
@@ -1736,7 +1484,5 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
-    // Subscriptions
-    handleAgentEventRef,
   };
 }

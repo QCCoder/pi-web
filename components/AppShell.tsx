@@ -22,6 +22,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSessionActivity } from "@/hooks/useSessionActivity";
+import { useGlobalAgentEvents } from "@/hooks/useGlobalAgentEvents";
 import { copyText } from "@/lib/clipboard";
 import { clearDraft, getDraft } from "@/lib/draft-store";
 import { getFileName } from "@/lib/file-paths";
@@ -81,6 +82,8 @@ export function AppShell() {
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const sessionActivity = useSessionActivity(selectedSession?.id ?? null, refreshKey);
+  // 全局 SSE：为每个 running session 维护一条事件流，后台 session 事件不丢（决策 8 / B4b）。
+  useGlobalAgentEvents(sessionActivity.runningIds);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
