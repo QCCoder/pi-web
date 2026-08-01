@@ -146,6 +146,8 @@ export interface UseAgentSessionOptions {
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
+  /** 变化时强制重新加载当前 session（替代原 key={sessionKey} 的整树重建）。 */
+  reloadSignal?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
@@ -325,7 +327,7 @@ type SlashCommandsResponse = {
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, reloadSignal, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
@@ -518,7 +520,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, []);
+  }, [applySessionData]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -1520,8 +1522,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     completionScrollAllowedRef.current = false;
   }, []);
 
-  // Load session on mount
+  // Load session whenever the active session id or reloadSignal changes. ChatWindow is
+  // now session-stable (no key remount), so this effect drives loading on switch.
   useEffect(() => {
+    // Reset transient run-state from the previous session so it does not bleed
+    // into the new one before loadSession applies fresh data.
+    agentRunningRef.current = false;
+    setAgentRunning(false);
+    bashRunningRef.current = false;
+    setBashRunning(false);
+    setPendingBash(null);
+    dispatch({ type: "reset" });
+    setForkingEntryId(null);
+    setRetryInfo(null);
+    initialScrollDoneRef.current = false;
+
     if (session) {
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
@@ -1560,7 +1575,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [session?.id, reloadSignal]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);

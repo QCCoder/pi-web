@@ -1889,7 +1889,7 @@ export function AppShell() {
             />
           ) : showChat ? (
             <ChatWindow
-              key={sessionKey}
+              reloadSignal={sessionKey}
               session={selectedSession}
               newSessionCwd={effectiveNewSessionCwd}
               onAgentEnd={handleAgentEnd}
