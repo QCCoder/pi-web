@@ -336,7 +336,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
-  const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
@@ -354,7 +353,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   runtimeKeyRef.current = runtimeKey;
   const runtime = useStoreSlice(sessionRuntimeStore, runtimeKey, (s) => s ?? EMPTY_RUNTIME);
   const {
-    agentRunning, bashRunning, agentPhase, retryInfo,
+    agentRunning, bashRunning, agentPhase, retryInfo, streamState,
     contextUsage, systemPrompt, thinkingLevel, sessionStatsOverride,
     isCompacting, compactError, compactResult, currentModelOverride,
     forkingEntryId, activeLeafId, extensionStatuses, extensionWidgets,
@@ -389,6 +388,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       else setSessionRuntime(key, patch);
     },
     [],
+  );
+  // streamState 走 store（阶段 B3c）：dispatch 复用 streamReducer 纯函数，把结果写回 store slice。
+  const dispatch = useCallback(
+    (action: StreamAction) => patchRuntime((rt) => ({ ...rt, streamState: streamReducer(rt.streamState, action) })),
+    [patchRuntime],
   );
 
   // models 走全局 modelsStore（按 cwd 分片，REQ-0001 决策 11 / 阶段 B2）：同一 cwd 的
@@ -825,7 +829,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
-  }, [loadSession, onAgentEnd, patchRuntime]);
+  }, [loadSession, onAgentEnd, patchRuntime, dispatch]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
@@ -1088,7 +1092,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd, patchRuntime]);
+  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd, patchRuntime, dispatch]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1182,7 +1186,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchRuntime({ optimisticUserMessageKey: null, agentRunning: false, agentPhase: null });
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime, dispatch]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
