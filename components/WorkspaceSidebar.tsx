@@ -361,6 +361,10 @@ export function WorkspaceSidebar({
               aria-label="新建 / 导入"
               style={{
                 width: 34,
+                height: 34,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
                 border: "1px solid var(--border)",
                 borderRadius: 7,
                 background: "var(--bg)",
@@ -406,6 +410,10 @@ export function WorkspaceSidebar({
             aria-label="Workspace 设置"
             style={{
               width: 34,
+              height: 34,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
               border: "1px solid var(--border)",
               borderRadius: 7,
               background: "var(--bg)",
