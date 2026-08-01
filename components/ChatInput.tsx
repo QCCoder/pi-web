@@ -1058,7 +1058,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+      {/* On mobile, lay this column out as a flexbox so the toolbar can be
+          reordered above the input (order), keeping the model selector and
+          other controls out of thumb range while typing. Desktop stays block. */}
+      <div style={{ maxWidth: 820, margin: "0 auto", ...(isMobile ? { display: "flex", flexDirection: "column" } : null) }}>
         <ModelErrorBanner error={modelError} />
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
@@ -1187,7 +1190,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         )}
 
         {/* Main input */}
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative", ...(isMobile ? { order: 2 } : null) }}>
           {historyMenuOpen && inputHistory.length > 0 && (
             <div
               ref={historyMenuRef}
@@ -1647,18 +1650,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
         {/* Bash mode status label */}
         {bashMode && (
-          <div className="text-xs px-2 py-1" style={{ color: bashExcluded ? "var(--text-muted)" : "var(--accent)", marginTop: 4 }}>
+          <div className="text-xs px-2 py-1" style={{ color: bashExcluded ? "var(--text-muted)" : "var(--accent)", marginTop: 4, ...(isMobile ? { order: 3 } : null) }}>
              {t("chat.shell")} · {bashExcluded ? t("chat.outputLocal") : t("chat.outputModel")}
           </div>
         )}
 
-        {/* Bottom bar: left | center (context) | right */}
+        {/* Bottom bar: left | center (context) | right.
+            On mobile this sits ABOVE the input (order: 1) so the model
+            selector and other controls are away from the thumb while typing. */}
         <div style={{
-          marginTop: 8,
+          marginTop: isMobile ? 0 : 8,
+          marginBottom: isMobile ? 8 : 0,
           display: isMobile ? "grid" : "flex",
           gridTemplateColumns: isMobile ? "minmax(0, 1fr) auto" : undefined,
           alignItems: "center",
           gap: 6,
+          ...(isMobile ? { order: 1 } : null),
         }}>
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}

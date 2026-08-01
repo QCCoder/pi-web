@@ -920,7 +920,6 @@ export function AppShell() {
       onSelectWorkspace={handleOpenWorkspace}
       onCreateWorkspace={handleCreateWorkspace}
       onImportDirectory={() => setImportPickerOpen(true)}
-      onReturnHome={handleReturnHome}
       onOpenWorkspaceSettings={() => {
         setOpenRepositoryFormRequest(undefined);
         navigateWorkspaceView("settings");
@@ -1109,26 +1108,6 @@ export function AppShell() {
                 <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
               </svg>
             )}
-           </button>
-           <button
-             onClick={handleReturnHome}
-             title={translate("common.home")}
-             aria-label={translate("common.home")}
-             style={{
-               display: "flex", alignItems: "center", justifyContent: "center",
-               width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
-               background: "none", border: "none", borderRight: "1px solid var(--border)",
-               color: "var(--text-muted)",
-               cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-             }}
-             onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-             onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-           >
-             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-               <path d="M3 9.5L12 3l9 6.5" />
-               <path d="M5 10v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V10" />
-               <path d="M9 21v-6h6v6" />
-             </svg>
            </button>
            <button
              ref={languageBtnRef}
@@ -1728,9 +1707,6 @@ export function AppShell() {
           tabIds={tabs.map((t) => t.id)}
           activeWorkspaceId={activeWorkspace?.id ?? null}
           activityByWorkspaceId={workspaceActivity}
-          homeActivity={Object.values(workspaceActivity).includes("running")
-            ? "running"
-            : Object.values(workspaceActivity).includes("completed") ? "completed" : undefined}
           onSelectHome={handleReturnHome}
           onSelectWorkspace={handleOpenWorkspace}
           onCloseWorkspace={handleCloseWorkspaceTab}

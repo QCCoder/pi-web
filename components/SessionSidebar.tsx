@@ -412,6 +412,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [uploadTargetRel, setUploadTargetRel] = useState("");
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
@@ -1573,7 +1574,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               <ToolbarIconButton
                 onClick={() => fileExplorerRef.current?.openUploadPicker()}
                 disabled={explorerUploadBusy}
-                title={t("sidebar.uploadFilesTitle")}
+                title={
+                  uploadTargetRel
+                    ? t("sidebar.uploadFilesToTitle", { path: uploadTargetRel })
+                    : t("sidebar.uploadFilesTitle")
+                }
                 color="var(--text-dim)"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1619,6 +1624,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onAtMention={onAtMention}
                 onAtMentions={onAtMentions}
                 onUploadBusyChange={setExplorerUploadBusy}
+                onUploadTargetChange={setUploadTargetRel}
                 changesCollapsed={changesCollapsed}
                 onChangesCountChange={setChangesCount}
               />

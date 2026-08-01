@@ -8,7 +8,6 @@ interface Props {
   tabIds: string[];
   activeWorkspaceId: string | null;
   activityByWorkspaceId: Record<string, "running" | "completed" | undefined>;
-  homeActivity?: "running" | "completed";
   onSelectHome: () => void;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCloseWorkspace: (workspaceId: string) => void;
@@ -47,7 +46,6 @@ export function WorkspaceTabBar({
   tabIds,
   activeWorkspaceId,
   activityByWorkspaceId,
-  homeActivity,
   onSelectHome,
   onSelectWorkspace,
   onCloseWorkspace,
@@ -106,7 +104,6 @@ export function WorkspaceTabBar({
         onClick={onSelectHome}
         style={tabStyle(activeWorkspaceId === null, true)}
       >
-        <ActivityIndicator status={homeActivity} />
         <HomeIcon />
         <span>首页</span>
       </div>
@@ -188,8 +185,8 @@ function tabStyle(active: boolean, pinned = false): React.CSSProperties {
     display: "flex",
     alignItems: "center",
     gap: 7,
-    minWidth: pinned ? 82 : 120,
-    maxWidth: pinned ? 82 : 220,
+    minWidth: pinned ? 96 : 120,
+    maxWidth: pinned ? 96 : 220,
     height: 36,
     padding: pinned ? "0 14px" : "0 5px 0 12px",
     flexShrink: 0,
@@ -202,22 +199,53 @@ function tabStyle(active: boolean, pinned = false): React.CSSProperties {
     fontSize: 12,
     fontWeight: active ? 600 : 450,
     boxSizing: "border-box",
+    whiteSpace: "nowrap",
   };
 }
 
 function ActivityIndicator({ status }: { status: "running" | "completed" | undefined }) {
   if (!status) return null;
+  if (status === "running") {
+    return (
+      <span
+        title="有会话正在运行"
+        aria-label="运行中"
+        style={{
+          width: 12,
+          height: 12,
+          flexShrink: 0,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text)",
+        }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+          <g>
+            <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
+            <animateTransform
+              attributeName="transform"
+              type="rotate"
+              from="0 12 12"
+              to="360 12 12"
+              dur="0.9s"
+              repeatCount="indefinite"
+            />
+          </g>
+        </svg>
+      </span>
+    );
+  }
   return (
     <span
-      title={status === "running" ? "有会话正在运行" : "有会话已完成，尚未查看"}
-      aria-label={status === "running" ? "运行中" : "完成"}
+      title="有会话已完成，尚未查看"
+      aria-label="完成"
       style={{
         width: 7,
         height: 7,
         borderRadius: "50%",
         flexShrink: 0,
-        background: status === "running" ? "var(--accent)" : "#22c55e",
-        boxShadow: status === "running" ? "0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent)" : "none",
+        background: "var(--accent)",
       }}
     />
   );

@@ -105,6 +105,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.creating": "Creating…",
     "sidebar.create": "Create",
     "sidebar.uploadFilesTitle": "Upload files to project root",
+    "sidebar.uploadFilesToTitle": "Upload files to {path}",
     "sidebar.uploadFiles": "Upload files",
     "sidebar.refreshExplorer": "Refresh explorer",
     "sidebar.changedFiles": "{count} changed files",

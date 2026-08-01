@@ -105,6 +105,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.creating": "创建中…",
     "sidebar.create": "创建",
     "sidebar.uploadFilesTitle": "将文件上传到项目根目录",
+    "sidebar.uploadFilesToTitle": "上传文件到 {path}",
     "sidebar.uploadFiles": "上传文件",
     "sidebar.refreshExplorer": "刷新文件浏览器",
     "sidebar.changedFiles": "{count} 个变更文件",
