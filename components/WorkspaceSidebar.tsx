@@ -20,7 +20,6 @@ interface Props {
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCreateWorkspace: () => void;
   onImportDirectory: () => void;
-  onReturnHome: () => void;
   onOpenWorkspaceSettings: () => void;
   onAddRepository: () => void;
   onNewSession: () => void;
@@ -127,7 +126,6 @@ export function WorkspaceSidebar({
   onSelectWorkspace,
   onCreateWorkspace,
   onImportDirectory,
-  onReturnHome,
   onOpenWorkspaceSettings,
   onAddRepository,
   onNewSession,
@@ -160,6 +158,7 @@ export function WorkspaceSidebar({
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [workItemsOpen, setWorkItemsOpen] = useState(true);
   const [requirementsOpen, setRequirementsOpen] = useState(true);
@@ -355,6 +354,52 @@ export function WorkspaceSidebar({
             </span>
             <span aria-hidden="true">⌄</span>
           </button>
+          <div style={{ position: "relative" }}>
+            <button
+              onClick={() => setCreateMenuOpen((current) => !current)}
+              title="新建 / 导入"
+              aria-label="新建 / 导入"
+              style={{
+                width: 34,
+                border: "1px solid var(--border)",
+                borderRadius: 7,
+                background: "var(--bg)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+              }}
+            >
+              ＋
+            </button>
+            {createMenuOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 40,
+                  right: 0,
+                  zIndex: 20,
+                  minWidth: 168,
+                  padding: 5,
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  background: "var(--bg)",
+                  boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
+                }}
+              >
+                <button
+                  style={rowStyle()}
+                  onClick={() => { setCreateMenuOpen(false); onCreateWorkspace(); }}
+                >
+                  ＋ 新建 Workspace
+                </button>
+                <button
+                  style={rowStyle()}
+                  onClick={() => { setCreateMenuOpen(false); onImportDirectory(); }}
+                >
+                  ＋ 导入目录…
+                </button>
+              </div>
+            )}
+          </div>
           <button
             onClick={onOpenWorkspaceSettings}
             title="Workspace 设置"
@@ -399,9 +444,6 @@ export function WorkspaceSidebar({
                 {workspace.name}
               </button>
             ))}
-            <button style={rowStyle()} onClick={onCreateWorkspace}>＋ 新建 Workspace</button>
-            <button style={rowStyle()} onClick={onImportDirectory}>＋ 导入目录…</button>
-            <button style={rowStyle()} onClick={onReturnHome}>返回首页</button>
           </div>
         )}
         <button
@@ -798,21 +840,47 @@ function SessionRow({
       }}
     >
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{label}</span>
-      {activity && !hovered && (
+      {activity === "running" && !hovered && (
         <span
-          title={activity === "running" ? "运行中" : "完成，尚未查看"}
+          title="运行中"
+          aria-label="运行中"
           style={{
             display: "inline-flex",
             alignItems: "center",
-            gap: 5,
+            justifyContent: "center",
+            width: 12,
+            height: 12,
             flexShrink: 0,
-            color: activity === "running" ? "var(--accent)" : "#22c55e",
-            fontSize: "var(--pi-sidebar-fs-meta)",
+            color: "var(--text)",
           }}
         >
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
-          {activity === "running" ? "运行中" : "完成"}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+            <g>
+              <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
+              <animateTransform
+                attributeName="transform"
+                type="rotate"
+                from="0 12 12"
+                to="360 12 12"
+                dur="0.9s"
+                repeatCount="indefinite"
+              />
+            </g>
+          </svg>
         </span>
+      )}
+      {activity === "completed" && !hovered && (
+        <span
+          title="完成，尚未查看"
+          aria-label="完成"
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            flexShrink: 0,
+            background: "var(--accent)",
+          }}
+        />
       )}
       {hovered && !busy && (
         <div style={{ display: "flex", gap: 4, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
