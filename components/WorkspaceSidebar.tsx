@@ -14,6 +14,7 @@ interface Props {
   selectedWorkItemKey: string | null;
   runningSessionIds: Set<string>;
   completedSessionIds: Set<string>;
+  allSessions: SessionInfo[];
   refreshKey: number;
   explorerRefreshKey: number;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
@@ -120,6 +121,7 @@ export function WorkspaceSidebar({
   selectedWorkItemKey,
   runningSessionIds,
   completedSessionIds,
+  allSessions,
   refreshKey,
   explorerRefreshKey,
   onSelectWorkspace,
@@ -139,7 +141,21 @@ export function WorkspaceSidebar({
   onOpenArchive,
   onSessionRemoved,
 }: Props) {
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  // sessions 直接从 AppShell 已加载的全局列表派生（useSessionActivity，含 SSE 实时），
+  // 不再自己 fetch /api/sessions——切换 workspace 时瞬时过滤，无重复请求与列表闪烁。
+  const sessions = useMemo(() => {
+    if (!activeWorkspace) return [];
+    return allSessions.filter((session) => {
+      const owner = workspaces
+        .filter((workspace) => {
+          const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
+          return workspace.available
+            && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
+        })
+        .sort((left, right) => right.path.length - left.path.length)[0];
+      return owner?.id === activeWorkspace.id;
+    });
+  }, [allSessions, activeWorkspace, workspaces]);
   const [archivedCount, setArchivedCount] = useState(0);
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
@@ -158,14 +174,12 @@ export function WorkspaceSidebar({
 
   const loadWorkspaceData = useCallback(async () => {
     if (!activeWorkspace) {
-      setSessions([]);
       setWorkItems([]);
       setRepositories([]);
       setArchivedCount(0);
       return;
     }
-    const [sessionsResponse, itemsResponse, repositoriesResponse, archivedSessionsResponse, archivedItemsResponse] = await Promise.all([
-      fetch("/api/sessions"),
+    const [itemsResponse, repositoriesResponse, archivedSessionsResponse, archivedItemsResponse] = await Promise.all([
       hasCapability("work-items")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items`)
         : null,
@@ -177,9 +191,6 @@ export function WorkspaceSidebar({
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items?archived`)
         : null,
     ]);
-    const sessionsData = sessionsResponse.ok
-      ? await sessionsResponse.json() as { sessions?: SessionInfo[] }
-      : {};
     const itemsData = itemsResponse?.ok
       ? await itemsResponse.json() as { items?: WorkItemRecord[] }
       : {};
@@ -196,19 +207,9 @@ export function WorkspaceSidebar({
     const archivedSessionsInWs = (archivedSessionsData.sessions ?? []).filter((session) =>
       session.cwd === activeWorkspace.path || session.cwd.startsWith(wsPrefix));
     setArchivedCount(archivedSessionsInWs.length + (archivedItemsData.items ?? []).length);
-    setSessions((sessionsData.sessions ?? []).filter((session) => {
-      const owner = workspaces
-        .filter((workspace) => {
-          const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
-          return workspace.available
-            && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
-        })
-        .sort((left, right) => right.path.length - left.path.length)[0];
-      return owner?.id === activeWorkspace.id;
-    }));
     setWorkItems(itemsData.items ?? []);
     setRepositories(repositoriesData.repositories ?? []);
-  }, [activeWorkspace, hasCapability, workspaces]);
+  }, [activeWorkspace, hasCapability]);
 
   const archiveWorkItem = useCallback(async (item: WorkItemRecord) => {
     if (!activeWorkspace) return;

@@ -1021,6 +1021,7 @@ export function AppShell() {
       selectedWorkItemKey={selectedWorkItemKey}
       runningSessionIds={sessionActivity.runningIds}
       completedSessionIds={sessionActivity.completedIds}
+      allSessions={sessionActivity.sessions}
       refreshKey={refreshKey}
       explorerRefreshKey={explorerRefreshKey}
       onSelectWorkspace={handleOpenWorkspace}
