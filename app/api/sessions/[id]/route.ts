@@ -126,6 +126,24 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
+    // ETag/revision conditional GET (REQ-0001 决策 3): 切回 session 时客户端带上
+    // If-None-Match，文件未变化直接返回 304，省去重新读取/解析大 JSON 的开销。
+    // revision 基于 size+mtimeMs：pi 追加写 .jsonl 会改变两者，能可靠反映变化。
+    let fileStat: { size: number; mtimeMs: number } | null = null;
+    try {
+      const st = statSync(filePath);
+      fileStat = { size: st.size, mtimeMs: st.mtimeMs };
+    } catch {
+      // file may have been removed between resolve and stat; fall through to
+      // the normal error path below.
+    }
+    if (fileStat) {
+      const revision = `"${fileStat.size}-${fileStat.mtimeMs}"`;
+      if (req.headers.get("if-none-match") === revision) {
+        return new NextResponse(null, { status: 304, headers: { ETag: revision } });
+      }
+    }
+
     const sm = SessionManager.open(filePath);
     const entries = sm.getEntries() as never;
     const leafId = sm.getLeafId();
@@ -160,14 +178,19 @@ export async function GET(
       parentSessionId,
     } : null;
 
-    return NextResponse.json({
-      sessionId: id,
-      filePath,
-      info,
-      leafId,
-      tree,
-      context,
-    });
+    const revision = fileStat ? `"${fileStat.size}-${fileStat.mtimeMs}"` : undefined;
+    return NextResponse.json(
+      {
+        sessionId: id,
+        filePath,
+        info,
+        leafId,
+        tree,
+        context,
+        revision,
+      },
+      revision ? { headers: { ETag: revision } } : undefined,
+    );
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
