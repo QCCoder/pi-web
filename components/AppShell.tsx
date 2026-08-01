@@ -68,6 +68,10 @@ const LANGUAGE_MENU_WIDTH = 176;
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  // 捕获初始 URL 参数，供 loadWorkspaces 仅在挂载时读取一次。避免 loadWorkspaces
+  // 依赖 searchParams 导致每次 router.push（切 Tab）都重新 fetch /api/workspaces。
+  // 后续 URL 变化由独立的同步 effect 处理。
+  const initialSearchParamsRef = useRef(searchParams);
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, t: translate, supportedLocales } = useI18n();
@@ -304,8 +308,8 @@ export function AppShell() {
       }
 
       setActiveWorkspace((current) => {
-        const requestedId = searchParams.get("workspace");
-        const explicitlyHome = searchParams.get("tab") === "home";
+        const requestedId = initialSearchParamsRef.current.get("workspace");
+        const explicitlyHome = initialSearchParamsRef.current.get("tab") === "home";
         const targetId = explicitlyHome ? null : (requestedId ?? current?.id ?? persisted?.activeWorkspaceId ?? null);
         const next = targetId
           ? nextWorkspaces.find((workspace) => workspace.id === targetId && workspace.available)
@@ -335,7 +339,7 @@ export function AppShell() {
     } finally {
       setWorkspacesLoaded(true);
     }
-  }, [applyWorkspaceSnapshot, searchParams]);
+  }, [applyWorkspaceSnapshot]);
 
   useEffect(() => {
     void loadWorkspaces();
