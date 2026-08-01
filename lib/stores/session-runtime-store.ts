@@ -63,6 +63,32 @@ export interface SessionRuntimeState {
   lastActiveAt: number;
 }
 
+/** 未设置 slice 的稳定空值（useStoreSlice selector 的兜底，保证引用稳定）。 */
+export const EMPTY_RUNTIME: SessionRuntimeState = {
+  streamState: { isStreaming: false, streamingMessage: null },
+  agentRunning: false,
+  agentPhase: null,
+  retryInfo: null,
+  optimisticUserMessageKey: null,
+  bashRunning: false,
+  pendingBash: null,
+  contextUsage: null,
+  systemPrompt: null,
+  thinkingLevel: "auto",
+  currentModelOverride: null,
+  sessionStatsOverride: null,
+  extensionStatuses: [],
+  extensionWidgets: [],
+  queuedMessages: { steering: [], followUp: [] },
+  isCompacting: false,
+  compactError: null,
+  compactResult: null,
+  activeLeafId: null,
+  forkingEntryId: null,
+  scrollPosition: null,
+  lastActiveAt: 0,
+};
+
 export function createDefaultSessionRuntimeState(): SessionRuntimeState {
   return {
     streamState: { isStreaming: false, streamingMessage: null },
