@@ -15,6 +15,8 @@ import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { getCachedSession, setCachedSession, dropCachedSession } from "@/lib/stores/session-messages-cache";
 import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
+import { useStoreSlice } from "@/lib/stores/create-map-store";
+import { sessionRuntimeStore, setSessionRuntime, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
 
 export interface SessionData {
   sessionId: string;
@@ -338,8 +340,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
-  const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
+  // contextUsage / systemPrompt 走 SessionRuntimeStore（阶段 B3a，per-session 分片）。
+  // 读用 runtimeKey（响应式：session.id 优先，新会话用 newSessionCwd 作临时 key）；
+  // 写用 patchRuntime（见下，按 sessionIdRef.current 落盘）。
+  const runtimeKey = session?.id ?? newSessionCwd ?? "__new__";
+  const contextUsage = useStoreSlice(sessionRuntimeStore, runtimeKey, (s) => s?.contextUsage ?? null);
+  const systemPrompt = useStoreSlice(sessionRuntimeStore, runtimeKey, (s) => s?.systemPrompt ?? null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
@@ -377,6 +383,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+
+  // 写 SessionRuntimeStore：用 sessionIdRef.current（ensureNewSession 同步置位真 id）。
+  // 新会话在 ensure_session 返回前 sessionIdRef.current 为 null → no-op；promote 后状态
+  // 直接落到真 id，无需迁移临时 slice。稳定（空依赖），不引入回调重建级联。
+  const patchRuntime = useCallback(
+    (patch: Partial<SessionRuntimeState>) => {
+      const key = sessionIdRef.current;
+      if (key) setSessionRuntime(key, patch);
+    },
+    [],
+  );
 
   // models 走全局 modelsStore（按 cwd 分片，REQ-0001 决策 11 / 阶段 B2）：同一 cwd 的
   // session 共享一份 + 一次请求，切 session 不再重复 loadModels。
@@ -513,8 +530,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         const liveState = agentState.state;
         if (liveState) {
-          if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
-          if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
+          if (liveState.contextUsage !== undefined) patchRuntime({ contextUsage: liveState.contextUsage ?? null });
+          if (liveState.systemPrompt !== undefined) patchRuntime({ systemPrompt: liveState.systemPrompt ?? null });
           if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
           if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
@@ -536,7 +553,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (loadSessionAbortRef.current === ac) loadSessionAbortRef.current = null;
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applySessionData]);
+  }, [applySessionData, patchRuntime]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -884,8 +901,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy || !agentRunningRef.current) return;
       if (state) {
-        if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
-        if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
+        if (state.contextUsage !== undefined) patchRuntime({ contextUsage: state.contextUsage ?? null });
+        if (state.systemPrompt !== undefined) patchRuntime({ systemPrompt: state.systemPrompt ?? null });
         if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
         if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
       }
@@ -893,7 +910,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream]);
+  }, [finishPromptWithoutStream, patchRuntime]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -945,8 +962,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
             .then((r) => r.json())
             .then((d: { state?: AgentStateResponse }) => {
-              if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
-              if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
+              if (d.state?.contextUsage !== undefined) patchRuntime({ contextUsage: d.state.contextUsage ?? null });
+              if (d.state?.systemPrompt !== undefined) patchRuntime({ systemPrompt: d.state.systemPrompt ?? null });
               if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
               if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
               // Aborted turns can leave messages queued in pi (delivered with the
@@ -1070,7 +1087,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd]);
+  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd, patchRuntime]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1558,8 +1575,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         if (agentState?.state) {
           if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-          if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
-          if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
+          if (agentState.state.contextUsage !== undefined) patchRuntime({ contextUsage: agentState.state.contextUsage ?? null });
+          if (agentState.state.systemPrompt !== undefined) patchRuntime({ systemPrompt: agentState.state.systemPrompt ?? null });
           if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
           if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
           if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
