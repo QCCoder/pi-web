@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { ChatWindow } from "./ChatWindow";
@@ -14,11 +14,16 @@ import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { WorkspaceOverview } from "./WorkspaceOverview";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
+import { HomeLanding } from "./HomeLanding";
+import { WorkspaceTabBar } from "./WorkspaceTabBar";
+import { DirectoryPicker } from "./DirectoryPicker";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useSessionActivity } from "@/hooks/useSessionActivity";
 import { copyText } from "@/lib/clipboard";
+import { clearDraft, getDraft } from "@/lib/draft-store";
 import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
@@ -36,6 +41,27 @@ type AutoNameStatus =
   | { kind: "success" }
   | { kind: "error"; message: string };
 
+type WorkspaceView = "overview" | "settings" | "work-items" | "chat";
+
+interface WorkspaceTabSnapshot {
+  workspaceView: WorkspaceView;
+  selectedSession: SessionInfo | null;
+  newSessionCwd: string | null;
+  selectedWorkItemKey: string | null;
+  fileTabs: Tab[];
+  activeFileTabId: string | null;
+  rightPanelOpen: boolean;
+}
+
+interface PersistedWorkspaceTabs {
+  version: 1;
+  tabIds: string[];
+  activeWorkspaceId: string | null;
+  mruIds: string[];
+  snapshots: Record<string, WorkspaceTabSnapshot>;
+}
+
+const WORKSPACE_TABS_STORAGE_KEY = "pi-web:workspace-tabs:v1";
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
 
@@ -50,6 +76,7 @@ export function AppShell() {
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const sessionActivity = useSessionActivity(selectedSession?.id ?? null, refreshKey);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
@@ -58,10 +85,13 @@ export function AppShell() {
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
   const [workspaceManagerOpen, setWorkspaceManagerOpen] = useState(false);
+  const [importPickerOpen, setImportPickerOpen] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspacesLoaded, setWorkspacesLoaded] = useState(false);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceSummary | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<"overview" | "settings" | "work-items" | "chat">("overview");
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("overview");
   const [selectedWorkItemKey, setSelectedWorkItemKey] = useState<string | null>(null);
   const [createWorkItemRequest, setCreateWorkItemRequest] = useState<{
     type: "requirement" | "bug";
@@ -200,8 +230,51 @@ export function AppShell() {
 
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  const [workspaceTabIds, setWorkspaceTabIds] = useState<string[]>([]);
+  const [workspaceMruIds, setWorkspaceMruIds] = useState<string[]>([]);
+  const workspaceSnapshotsRef = useRef<Record<string, WorkspaceTabSnapshot>>({});
+  const workspaceTabsHydratedRef = useRef(false);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
+
+  const applyWorkspaceSnapshot = useCallback((workspace: WorkspaceSummary, snapshot?: WorkspaceTabSnapshot) => {
+    const hasOverview = workspace.capabilities.includes("overview");
+    setWorkspaceView(snapshot?.workspaceView ?? (hasOverview ? "overview" : "chat"));
+    setSelectedSession(snapshot?.selectedSession ?? null);
+    setNewSessionCwd(snapshot ? snapshot.newSessionCwd : (hasOverview ? null : workspace.path));
+    setSelectedWorkItemKey(snapshot?.selectedWorkItemKey ?? null);
+    setFileTabs(snapshot?.fileTabs ?? []);
+    setActiveFileTabId(snapshot?.activeFileTabId ?? null);
+    setRightPanelOpen(snapshot?.rightPanelOpen ?? false);
+    setActiveCwd(workspace.path);
+    setSessionKey((key) => key + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
+    setSystemPrompt(null);
+    setActiveTopPanel(null);
+  }, []);
+
+  const captureActiveWorkspaceSnapshot = useCallback(() => {
+    if (!activeWorkspace) return;
+    workspaceSnapshotsRef.current[activeWorkspace.id] = {
+      workspaceView,
+      selectedSession,
+      newSessionCwd,
+      selectedWorkItemKey,
+      fileTabs,
+      activeFileTabId,
+      rightPanelOpen,
+    };
+  }, [
+    activeFileTabId,
+    activeWorkspace,
+    fileTabs,
+    newSessionCwd,
+    rightPanelOpen,
+    selectedSession,
+    selectedWorkItemKey,
+    workspaceView,
+  ]);
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -210,13 +283,51 @@ export function AppShell() {
       const data = await response.json() as { workspaces?: WorkspaceSummary[] };
       const nextWorkspaces = data.workspaces ?? [];
       setWorkspaces(nextWorkspaces);
+
+      let persisted: PersistedWorkspaceTabs | null = null;
+      if (!workspaceTabsHydratedRef.current) {
+        workspaceTabsHydratedRef.current = true;
+        try {
+          const raw = window.localStorage.getItem(WORKSPACE_TABS_STORAGE_KEY);
+          const parsed = raw ? JSON.parse(raw) as PersistedWorkspaceTabs : null;
+          if (parsed?.version === 1 && Array.isArray(parsed.tabIds)) persisted = parsed;
+        } catch {
+          // Ignore malformed or unavailable browser storage.
+        }
+        if (persisted) {
+          const availableIds = new Set(nextWorkspaces.filter((workspace) => workspace.available).map((workspace) => workspace.id));
+          const restoredTabIds = persisted.tabIds.filter((id) => availableIds.has(id));
+          workspaceSnapshotsRef.current = persisted.snapshots ?? {};
+          setWorkspaceTabIds(restoredTabIds);
+          setWorkspaceMruIds(persisted.mruIds.filter((id) => restoredTabIds.includes(id)));
+        }
+      }
+
       setActiveWorkspace((current) => {
         const requestedId = searchParams.get("workspace");
-        const next = current
-          ? nextWorkspaces.find((workspace) => workspace.id === current.id)
-          : nextWorkspaces.find((workspace) => workspace.id === requestedId);
-        if (!next?.available) return null;
-        setActiveCwd(next.path);
+        const explicitlyHome = searchParams.get("tab") === "home";
+        const targetId = explicitlyHome ? null : (requestedId ?? current?.id ?? persisted?.activeWorkspaceId ?? null);
+        const next = targetId
+          ? nextWorkspaces.find((workspace) => workspace.id === targetId && workspace.available)
+          : undefined;
+        if (!next) {
+          if (explicitlyHome) {
+            setWorkspaceView("overview");
+            setSelectedSession(null);
+            setNewSessionCwd(null);
+            setActiveCwd(null);
+            setSelectedWorkItemKey(null);
+            setFileTabs([]);
+            setActiveFileTabId(null);
+            setRightPanelOpen(false);
+            return null;
+          }
+          return current;
+        }
+        setWorkspaceTabIds((ids) => ids.includes(next.id) ? ids : [...ids, next.id]);
+        setWorkspaceMruIds((ids) => [next.id, ...ids.filter((id) => id !== next.id)]);
+        if (current?.id !== next.id) applyWorkspaceSnapshot(next, workspaceSnapshotsRef.current[next.id]);
+        else setActiveCwd(next.path);
         return next;
       });
     } catch (error) {
@@ -224,7 +335,7 @@ export function AppShell() {
     } finally {
       setWorkspacesLoaded(true);
     }
-  }, [searchParams]);
+  }, [applyWorkspaceSnapshot, searchParams]);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -235,6 +346,47 @@ export function AppShell() {
       .then((data) => setGlobalSettingsCwd(data?.home ?? null))
       .catch(() => {});
   }, [loadWorkspaces]);
+
+  // The URL is the active navigation target. This effect makes browser
+  // back/forward restore the addressed workspace view without closing tabs.
+  useEffect(() => {
+    if (!workspacesLoaded) return;
+    if (searchParams.get("tab") === "home") return;
+    const workspaceId = searchParams.get("workspace");
+    if (!workspaceId) return;
+    const workspace = workspaces.find((item) => item.id === workspaceId && item.available);
+    if (!workspace) return;
+
+    if (activeWorkspace?.id !== workspace.id) {
+      captureActiveWorkspaceSnapshot();
+      applyWorkspaceSnapshot(workspace, workspaceSnapshotsRef.current[workspace.id]);
+      setActiveWorkspace(workspace);
+      setWorkspaceTabIds((ids) => ids.includes(workspace.id) ? ids : [...ids, workspace.id]);
+      setWorkspaceMruIds((ids) => [workspace.id, ...ids.filter((id) => id !== workspace.id)]);
+    }
+
+    const view = searchParams.get("view") as WorkspaceView | null;
+    if (view && ["overview", "settings", "work-items", "chat"].includes(view)) setWorkspaceView(view);
+    const itemKey = searchParams.get("item");
+    if (view === "work-items") setSelectedWorkItemKey(itemKey);
+    const sessionId = searchParams.get("session");
+    if (view === "chat" && sessionId) {
+      const session = sessionActivity.sessions.find((item) => item.id === sessionId);
+      if (session) {
+        setSelectedSession(session);
+        setNewSessionCwd(null);
+        setActiveCwd(workspace.path);
+      }
+    }
+  }, [
+    activeWorkspace?.id,
+    applyWorkspaceSnapshot,
+    captureActiveWorkspaceSnapshot,
+    searchParams,
+    sessionActivity.sessions,
+    workspaces,
+    workspacesLoaded,
+  ]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     setNewSessionCwd(null);
@@ -251,7 +403,7 @@ export function AppShell() {
       const workspaceQuery = activeWorkspace
         ? `workspace=${encodeURIComponent(activeWorkspace.id)}&`
         : "";
-      router.replace(`?${workspaceQuery}session=${encodeURIComponent(session.id)}`, { scroll: false });
+      router.push(`?${workspaceQuery}view=chat&session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
   }, [activeWorkspace, router, isMobile]);
 
@@ -321,27 +473,32 @@ export function AppShell() {
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
     setWorkspaceManagerOpen(false);
+    setModelsConfigOpen(false);
+    setSkillsConfigOpen(false);
+    setPluginsConfigOpen(false);
+    setArchiveOpen(false);
+    setProjectTrustDialogOpen(false);
     setWorkspaces((current) => current.some((item) => item.id === workspace.id)
       ? current.map((item) => item.id === workspace.id ? workspace : item)
       : [...current, workspace]);
+    if (activeWorkspace?.id !== workspace.id) {
+      captureActiveWorkspaceSnapshot();
+      applyWorkspaceSnapshot(workspace, workspaceSnapshotsRef.current[workspace.id]);
+    }
     setActiveWorkspace(workspace);
-    const hasOverview = workspace.capabilities.includes("overview");
-    setWorkspaceView(hasOverview ? "overview" : "chat");
-    setSelectedWorkItemKey(null);
-    setSelectedSession(null);
-    setNewSessionCwd(hasOverview ? null : workspace.path);
-    setActiveCwd(workspace.path);
-    setSessionKey((key) => key + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
-    setFileTabs([]);
-    setActiveFileTabId(null);
-    setRightPanelOpen(false);
+    setWorkspaceTabIds((ids) => ids.includes(workspace.id) ? ids : [...ids, workspace.id]);
+    setWorkspaceMruIds((ids) => [workspace.id, ...ids.filter((id) => id !== workspace.id)]);
     if (isMobile) setSidebarOpen(false);
-    router.replace(`?workspace=${encodeURIComponent(workspace.id)}`, { scroll: false });
-  }, [isMobile, router]);
+    const snapshot = workspaceSnapshotsRef.current[workspace.id];
+    const view = snapshot?.workspaceView ?? (workspace.capabilities.includes("overview") ? "overview" : "chat");
+    const sessionQuery = view === "chat" && snapshot?.selectedSession
+      ? `&session=${encodeURIComponent(snapshot.selectedSession.id)}`
+      : "";
+    const itemQuery = view === "work-items" && snapshot?.selectedWorkItemKey
+      ? `&item=${encodeURIComponent(snapshot.selectedWorkItemKey)}`
+      : "";
+    router.push(`?workspace=${encodeURIComponent(workspace.id)}&view=${view}${sessionQuery}${itemQuery}`, { scroll: false });
+  }, [activeWorkspace?.id, applyWorkspaceSnapshot, captureActiveWorkspaceSnapshot, isMobile, router]);
 
   const handleWorkspaceNewSession = useCallback(() => {
     if (!activeWorkspace) return;
@@ -353,10 +510,12 @@ export function AppShell() {
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace(`?workspace=${encodeURIComponent(activeWorkspace.id)}`, { scroll: false });
+    router.push(`?workspace=${encodeURIComponent(activeWorkspace.id)}&view=chat`, { scroll: false });
   }, [activeWorkspace, isMobile, router]);
 
   const handleReturnHome = useCallback(() => {
+    captureActiveWorkspaceSnapshot();
+    setWorkspaceManagerOpen(false);
     setActiveWorkspace(null);
     setWorkspaceView("overview");
     setSelectedSession(null);
@@ -366,22 +525,181 @@ export function AppShell() {
     setFileTabs([]);
     setActiveFileTabId(null);
     setRightPanelOpen(false);
-    router.replace("/", { scroll: false });
-  }, [router]);
+    setModelsConfigOpen(false);
+    setSkillsConfigOpen(false);
+    setPluginsConfigOpen(false);
+    setArchiveOpen(false);
+    setProjectTrustDialogOpen(false);
+    router.push("?tab=home", { scroll: false });
+  }, [captureActiveWorkspaceSnapshot, router]);
+
+  const navigateWorkspaceView = useCallback((view: WorkspaceView, itemKey?: string | null) => {
+    if (!activeWorkspace) return;
+    setWorkspaceView(view);
+    if (view === "work-items") setSelectedWorkItemKey(itemKey ?? null);
+    const itemQuery = view === "work-items" && itemKey ? `&item=${encodeURIComponent(itemKey)}` : "";
+    router.push(`?workspace=${encodeURIComponent(activeWorkspace.id)}&view=${view}${itemQuery}`, { scroll: false });
+  }, [activeWorkspace, router]);
+
+  const handleCloseWorkspaceTab = useCallback((workspaceId: string) => {
+    const wasActive = activeWorkspace?.id === workspaceId;
+    if (wasActive) captureActiveWorkspaceSnapshot();
+    const snapshot = workspaceSnapshotsRef.current[workspaceId];
+    const draftKey = snapshot?.selectedSession?.id
+      ?? (snapshot?.newSessionCwd ? `new:${snapshot.newSessionCwd}` : null);
+    const draft = draftKey ? getDraft(draftKey) : null;
+    if (draft && (draft.value || draft.images.length > 0)) {
+      const shouldClose = window.confirm("这个工作区有未发送的聊天草稿。要关闭并丢弃草稿吗？");
+      if (!shouldClose) return;
+      clearDraft(draftKey!);
+    }
+    delete workspaceSnapshotsRef.current[workspaceId];
+    const remainingIds = workspaceTabIds.filter((id) => id !== workspaceId);
+    setWorkspaceTabIds(remainingIds);
+    const nextMru = workspaceMruIds.filter((id) => id !== workspaceId && remainingIds.includes(id));
+    setWorkspaceMruIds(nextMru);
+    if (!wasActive) return;
+
+    const nextWorkspace = nextMru
+      .map((id) => workspaces.find((workspace) => workspace.id === id && workspace.available))
+      .find((workspace): workspace is WorkspaceSummary => Boolean(workspace));
+    if (nextWorkspace) {
+      applyWorkspaceSnapshot(nextWorkspace, workspaceSnapshotsRef.current[nextWorkspace.id]);
+      setActiveWorkspace(nextWorkspace);
+      router.push(`?workspace=${encodeURIComponent(nextWorkspace.id)}&view=${workspaceSnapshotsRef.current[nextWorkspace.id]?.workspaceView ?? "overview"}`, { scroll: false });
+      return;
+    }
+
+    setActiveWorkspace(null);
+    setWorkspaceView("overview");
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setActiveCwd(null);
+    setSelectedWorkItemKey(null);
+    setFileTabs([]);
+    setActiveFileTabId(null);
+    setRightPanelOpen(false);
+    router.push("?tab=home", { scroll: false });
+  }, [activeWorkspace?.id, applyWorkspaceSnapshot, captureActiveWorkspaceSnapshot, router, workspaceMruIds, workspaceTabIds, workspaces]);
+
+  useEffect(() => {
+    if (!workspaceTabsHydratedRef.current) return;
+    captureActiveWorkspaceSnapshot();
+    const persisted: PersistedWorkspaceTabs = {
+      version: 1,
+      tabIds: workspaceTabIds,
+      activeWorkspaceId: activeWorkspace?.id ?? null,
+      mruIds: workspaceMruIds,
+      snapshots: workspaceSnapshotsRef.current,
+    };
+    try {
+      window.localStorage.setItem(WORKSPACE_TABS_STORAGE_KEY, JSON.stringify(persisted));
+    } catch {
+      // Ignore storage quota and privacy-mode failures.
+    }
+  }, [activeWorkspace?.id, captureActiveWorkspaceSnapshot, workspaceMruIds, workspaceTabIds]);
+
+  const handleCreateWorkspace = useCallback(() => {
+    captureActiveWorkspaceSnapshot();
+    setWorkspaceManagerOpen(true);
+    setActiveWorkspace(null);
+    setActiveCwd(null);
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setFileTabs([]);
+    setActiveFileTabId(null);
+    setRightPanelOpen(false);
+    router.push("?tab=home&view=create-workspace", { scroll: false });
+  }, [captureActiveWorkspaceSnapshot, router]);
+
+  // Shared directory-import flow used by both the sidebar and the home page.
+  // Registers the picked directory as a workspace (with a copy-confirm prompt
+  // when it is a duplicate of an existing workspace) and opens it.
+  const handleImportDirectory = useCallback(async (path: string) => {
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      let asCopy = false;
+      let workspace: WorkspaceSummary | undefined;
+      while (!workspace) {
+        const response = await fetch("/api/workspaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, ...(asCopy ? { asCopy: true } : {}) }),
+        });
+        const data = await response.json() as { workspace?: WorkspaceSummary; error?: string };
+        if (response.ok && data.workspace) {
+          workspace = data.workspace;
+          break;
+        }
+        const message = data.error ?? `HTTP ${response.status}`;
+        if (
+          !asCopy
+          && response.status === 409
+          && message.includes("already registered")
+          && window.confirm("这个目录是现有 Workspace 的副本。要生成新的 Workspace ID 并作为副本导入吗？")
+        ) {
+          asCopy = true;
+          continue;
+        }
+        throw new Error(message);
+      }
+      setImportPickerOpen(false);
+      setWorkspaces((current) =>
+        current.some((item) => item.id === workspace!.id) ? current : [...current, workspace!],
+      );
+      handleOpenWorkspace(workspace);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImportBusy(false);
+    }
+  }, [handleOpenWorkspace]);
 
   const handleWorkspaceDeleted = useCallback((workspace: WorkspaceSummary) => {
     setWorkspaces((current) => current.filter((item) => item.id !== workspace.id));
-    if (activeWorkspace?.id === workspace.id) {
-      handleReturnHome();
+    handleCloseWorkspaceTab(workspace.id);
+  }, [handleCloseWorkspaceTab]);
+
+  // Open a session straight from the home page: resolve its owning workspace
+  // (already known from the loaded list) and switch into chat in one step.
+  const handleOpenSessionFromHome = useCallback((session: SessionInfo) => {
+    const owner = workspaces
+      .filter((workspace) => {
+        const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
+        return workspace.available
+          && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
+      })
+      .sort((left, right) => right.path.length - left.path.length)[0];
+    if (!owner) return;
+    setWorkspaceManagerOpen(false);
+    if (activeWorkspace?.id !== owner.id) {
+      captureActiveWorkspaceSnapshot();
+      applyWorkspaceSnapshot(owner, workspaceSnapshotsRef.current[owner.id]);
     }
-  }, [activeWorkspace, handleReturnHome]);
+    setActiveWorkspace(owner);
+    setWorkspaceTabIds((ids) => ids.includes(owner.id) ? ids : [...ids, owner.id]);
+    setWorkspaceMruIds((ids) => [owner.id, ...ids.filter((id) => id !== owner.id)]);
+    setWorkspaceView("chat");
+    setSelectedSession(session);
+    setNewSessionCwd(null);
+    setActiveCwd(owner.path);
+    setSessionKey((key) => key + 1);
+    setSystemPrompt(null);
+    setInitialSessionRestored(true);
+    if (isMobile) setSidebarOpen(false);
+    router.push(
+      `?workspace=${encodeURIComponent(owner.id)}&view=chat&session=${encodeURIComponent(session.id)}`,
+      { scroll: false },
+    );
+  }, [activeWorkspace?.id, applyWorkspaceSnapshot, captureActiveWorkspaceSnapshot, workspaces, isMobile, router]);
 
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
-    setWorkspaceView("work-items");
+    navigateWorkspaceView("work-items");
     setSelectedWorkItemKey(null);
     setCreateWorkItemRequest({ type, id: Date.now() });
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [isMobile, navigateWorkspaceView]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -416,7 +734,7 @@ export function AppShell() {
     const workspaceQuery = activeWorkspace
       ? `workspace=${encodeURIComponent(activeWorkspace.id)}&`
       : "";
-    router.replace(`?${workspaceQuery}session=${encodeURIComponent(session.id)}`, { scroll: false });
+    router.replace(`?${workspaceQuery}view=chat&session=${encodeURIComponent(session.id)}`, { scroll: false });
     const pending = pendingWorkItemConversationRef.current;
     pendingWorkItemConversationRef.current = null;
     if (pending) {
@@ -537,8 +855,9 @@ export function AppShell() {
       id: newSessionId,
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [router, hydrateSelectedSession]);
+    const workspaceQuery = activeWorkspace ? `workspace=${encodeURIComponent(activeWorkspace.id)}&` : "";
+    router.replace(`?${workspaceQuery}view=chat&session=${encodeURIComponent(newSessionId)}`, { scroll: false });
+  }, [activeWorkspace, router, hydrateSelectedSession]);
 
   const handleOpenFile = useCallback((
     filePath: string,
@@ -674,30 +993,42 @@ export function AppShell() {
     return () => observer.disconnect();
   }, [windowTitle]);
 
+  const workspaceActivity = useMemo(() => {
+    const result: Record<string, "running" | "completed" | undefined> = {};
+    for (const session of sessionActivity.sessions) {
+      const owner = workspaces
+        .filter((workspace) => {
+          const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
+          return workspace.available && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
+        })
+        .sort((left, right) => right.path.length - left.path.length)[0];
+      if (!owner) continue;
+      if (sessionActivity.runningIds.has(session.id)) result[owner.id] = "running";
+      else if (sessionActivity.completedIds.has(session.id) && result[owner.id] !== "running") result[owner.id] = "completed";
+    }
+    return result;
+  }, [sessionActivity.completedIds, sessionActivity.runningIds, sessionActivity.sessions, workspaces]);
+
   const sidebarContent = (
     <WorkspaceSidebar
       activeWorkspace={activeWorkspace}
       workspaces={workspaces}
       selectedSessionId={selectedSession?.id ?? null}
       selectedWorkItemKey={selectedWorkItemKey}
+      runningSessionIds={sessionActivity.runningIds}
+      completedSessionIds={sessionActivity.completedIds}
       refreshKey={refreshKey}
       explorerRefreshKey={explorerRefreshKey}
       onSelectWorkspace={handleOpenWorkspace}
-      onCreateWorkspace={() => {
-        setWorkspaceManagerOpen(true);
-        setActiveWorkspace(null);
-        setActiveCwd(null);
-        setSelectedSession(null);
-        setNewSessionCwd(null);
-      }}
-      onImportWorkspace={handleOpenWorkspace}
+      onCreateWorkspace={handleCreateWorkspace}
+      onImportDirectory={() => setImportPickerOpen(true)}
       onReturnHome={handleReturnHome}
       onOpenWorkspaceSettings={() => {
         setOpenRepositoryFormRequest(undefined);
-        setWorkspaceView("settings");
+        navigateWorkspaceView("settings");
       }}
       onAddRepository={() => {
-        setWorkspaceView("settings");
+        navigateWorkspaceView("settings");
         setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
         if (isMobile) setSidebarOpen(false);
       }}
@@ -705,7 +1036,7 @@ export function AppShell() {
       onSelectSession={handleSelectSession}
       onSelectWorkItem={(item) => {
         setSelectedWorkItemKey(item.key);
-        setWorkspaceView("work-items");
+        navigateWorkspaceView("work-items", item.key);
         if (isMobile) setSidebarOpen(false);
       }}
       onCreateWorkItem={handleCreateWorkItem}
@@ -881,6 +1212,26 @@ export function AppShell() {
                 <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
               </svg>
             )}
+           </button>
+           <button
+             onClick={handleReturnHome}
+             title={translate("common.home")}
+             aria-label={translate("common.home")}
+             style={{
+               display: "flex", alignItems: "center", justifyContent: "center",
+               width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+               background: "none", border: "none", borderRight: "1px solid var(--border)",
+               color: "var(--text-muted)",
+               cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
+             }}
+             onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+             onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+           >
+             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+               <path d="M3 9.5L12 3l9 6.5" />
+               <path d="M5 10v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V10" />
+               <path d="M9 21v-6h6v6" />
+             </svg>
            </button>
            <button
              ref={languageBtnRef}
@@ -1475,6 +1826,20 @@ export function AppShell() {
 
         </div>
 
+        <WorkspaceTabBar
+          workspaces={workspaces}
+          tabIds={workspaceTabIds}
+          activeWorkspaceId={activeWorkspace?.id ?? null}
+          activityByWorkspaceId={workspaceActivity}
+          homeActivity={Object.values(workspaceActivity).includes("running")
+            ? "running"
+            : Object.values(workspaceActivity).includes("completed") ? "completed" : undefined}
+          onSelectHome={handleReturnHome}
+          onSelectWorkspace={handleOpenWorkspace}
+          onCloseWorkspace={handleCloseWorkspaceTab}
+          onReorder={setWorkspaceTabIds}
+        />
+
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {activeWorkspace && workspaceView === "overview" ? (
@@ -1483,9 +1848,9 @@ export function AppShell() {
               onNewSession={handleWorkspaceNewSession}
               onOpenSettings={() => {
                 setOpenRepositoryFormRequest(undefined);
-                setWorkspaceView("settings");
+                navigateWorkspaceView("settings");
               }}
-              onOpenWorkItems={() => setWorkspaceView("work-items")}
+              onOpenWorkItems={() => navigateWorkspaceView("work-items")}
               onCreateWorkItem={handleCreateWorkItem}
               onSelectSession={handleSelectSession}
               onSessionDeleted={(id) => {
@@ -1503,7 +1868,7 @@ export function AppShell() {
               initialWorkItemKey={selectedWorkItemKey}
               createWorkItemRequest={createWorkItemRequest}
               openRepositoryFormRequest={openRepositoryFormRequest}
-              onClose={() => setWorkspaceView("overview")}
+              onClose={() => navigateWorkspaceView("overview")}
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
               onWorkspaceDeleted={handleWorkspaceDeleted}
@@ -1538,6 +1903,15 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+            />
+          ) : !activeWorkspace ? (
+            <HomeLanding
+              workspaces={workspaces}
+              refreshKey={refreshKey}
+              onSelectWorkspace={handleOpenWorkspace}
+              onCreateWorkspace={handleCreateWorkspace}
+              onImportDirectory={() => setImportPickerOpen(true)}
+              onSelectSession={handleOpenSessionFromHome}
             />
           ) : showPlaceholder ? (
             activeCwd ? (
@@ -1609,8 +1983,8 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    {/* File panel toggle — always visible at top-right */}
-    <button
+    {/* File panel toggle — workspace-scoped; the home tab has no file context. */}
+    {activeWorkspace && <button
       onClick={() => setRightPanelOpen((v) => !v)}
        title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
        aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
@@ -1628,8 +2002,16 @@ export function AppShell() {
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
-    </button>
+    </button>}
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
+    {importPickerOpen && (
+      <DirectoryPicker
+        onCancel={() => setImportPickerOpen(false)}
+        onSelect={(path) => void handleImportDirectory(path)}
+        busy={importBusy}
+        error={importError}
+      />
+    )}
     {archiveOpen && activeWorkspace && (
       <ArchiveModal
         workspaceId={activeWorkspace.id}

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileExplorer } from "./FileExplorer";
-import { DirectoryPicker } from "./DirectoryPicker";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
@@ -13,11 +12,13 @@ interface Props {
   workspaces: WorkspaceSummary[];
   selectedSessionId: string | null;
   selectedWorkItemKey: string | null;
+  runningSessionIds: Set<string>;
+  completedSessionIds: Set<string>;
   refreshKey: number;
   explorerRefreshKey: number;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCreateWorkspace: () => void;
-  onImportWorkspace: (workspace: WorkspaceSummary) => void;
+  onImportDirectory: () => void;
   onReturnHome: () => void;
   onOpenWorkspaceSettings: () => void;
   onAddRepository: () => void;
@@ -117,11 +118,13 @@ export function WorkspaceSidebar({
   workspaces,
   selectedSessionId,
   selectedWorkItemKey,
+  runningSessionIds,
+  completedSessionIds,
   refreshKey,
   explorerRefreshKey,
   onSelectWorkspace,
   onCreateWorkspace,
-  onImportWorkspace,
+  onImportDirectory,
   onReturnHome,
   onOpenWorkspaceSettings,
   onAddRepository,
@@ -147,9 +150,6 @@ export function WorkspaceSidebar({
   const [bugsOpen, setBugsOpen] = useState(true);
   const [repositoriesOpen, setRepositoriesOpen] = useState(true);
   const [explorerOpen, setExplorerOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [importBusy, setImportBusy] = useState(false);
-  const [importError, setImportError] = useState<string | null>(null);
   const hasCapability = useCallback(
     (capability: WorkspaceSummary["capabilities"][number]) =>
       activeWorkspace?.capabilities.includes(capability) ?? false,
@@ -219,44 +219,6 @@ export function WorkspaceSidebar({
     });
     await loadWorkspaceData();
   }, [activeWorkspace, loadWorkspaceData]);
-
-  const importDirectory = useCallback(async (path: string) => {
-    setImportBusy(true);
-    setImportError(null);
-    try {
-      let asCopy = false;
-      let workspace: WorkspaceSummary | undefined;
-      while (!workspace) {
-        const response = await fetch("/api/workspaces", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path, ...(asCopy ? { asCopy: true } : {}) }),
-        });
-        const data = await response.json() as { workspace?: WorkspaceSummary; error?: string };
-        if (response.ok && data.workspace) {
-          workspace = data.workspace;
-          break;
-        }
-        const message = data.error ?? `HTTP ${response.status}`;
-        if (
-          !asCopy
-          && response.status === 409
-          && message.includes("already registered")
-          && window.confirm("这个目录是现有 Workspace 的副本。要生成新的 Workspace ID 并作为副本导入吗？")
-        ) {
-          asCopy = true;
-          continue;
-        }
-        throw new Error(message);
-      }
-      setImportOpen(false);
-      onImportWorkspace(workspace);
-    } catch (error) {
-      setImportError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setImportBusy(false);
-    }
-  }, [onImportWorkspace]);
 
   useEffect(() => {
     void loadWorkspaceData();
@@ -347,10 +309,10 @@ export function WorkspaceSidebar({
             </div>
           )}
           <button
-            onClick={() => setImportOpen(true)}
+            onClick={onImportDirectory}
             style={{ ...rowStyle(), padding: "9px 10px", marginTop: 10 }}
           >
-            导入目录…
+            ＋ 导入目录…
           </button>
         </div>
         <SettingsBar
@@ -360,14 +322,6 @@ export function WorkspaceSidebar({
           onOpenSkills={onOpenSkills}
           onOpenPlugins={onOpenPlugins}
         />
-        {importOpen && (
-          <DirectoryPicker
-            onCancel={() => setImportOpen(false)}
-            onSelect={(path) => void importDirectory(path)}
-            busy={importBusy}
-            error={importError}
-          />
-        )}
       </div>
     );
   }
@@ -445,7 +399,7 @@ export function WorkspaceSidebar({
               </button>
             ))}
             <button style={rowStyle()} onClick={onCreateWorkspace}>＋ 新建 Workspace</button>
-            <button style={rowStyle()} onClick={() => setImportOpen(true)}>导入目录…</button>
+            <button style={rowStyle()} onClick={onImportDirectory}>＋ 导入目录…</button>
             <button style={rowStyle()} onClick={onReturnHome}>返回首页</button>
           </div>
         )}
@@ -482,6 +436,7 @@ export function WorkspaceSidebar({
                     key={session.id}
                     session={session}
                     isSelected={session.id === selectedSessionId}
+                    activity={runningSessionIds.has(session.id) ? "running" : completedSessionIds.has(session.id) ? "completed" : undefined}
                     onSelect={() => onSelectSession(session)}
                     onChanged={() => void loadWorkspaceData()}
                     onRemoved={onSessionRemoved}
@@ -611,14 +566,6 @@ export function WorkspaceSidebar({
         onOpenSkills={onOpenSkills}
         onOpenPlugins={onOpenPlugins}
       />
-      {importOpen && (
-        <DirectoryPicker
-          onCancel={() => setImportOpen(false)}
-          onSelect={(path) => void importDirectory(path)}
-          busy={importBusy}
-          error={importError}
-        />
-      )}
     </div>
   );
 }
@@ -812,12 +759,14 @@ function WorkItemRow({
 function SessionRow({
   session,
   isSelected,
+  activity,
   onSelect,
   onChanged,
   onRemoved,
 }: {
   session: SessionInfo;
   isSelected: boolean;
+  activity?: "running" | "completed";
   onSelect: () => void;
   onChanged: () => void;
   onRemoved?: (id: string) => void;
@@ -848,6 +797,22 @@ function SessionRow({
       }}
     >
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{label}</span>
+      {activity && !hovered && (
+        <span
+          title={activity === "running" ? "运行中" : "完成，尚未查看"}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            flexShrink: 0,
+            color: activity === "running" ? "var(--accent)" : "#22c55e",
+            fontSize: "var(--pi-sidebar-fs-meta)",
+          }}
+        >
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
+          {activity === "running" ? "运行中" : "完成"}
+        </span>
+      )}
       {hovered && !busy && (
         <div style={{ display: "flex", gap: 4, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
           <button title="归档" onClick={() => void archive()} style={hoverActionBtn}>归档</button>

@@ -1053,6 +1053,29 @@ export function getRunningRpcSessionIds(): string[] {
   return [...ids];
 }
 
+export interface LiveRpcSessionInfo {
+  id: string;
+  cwd: string;
+  sessionFile: string;
+}
+
+/**
+ * Minimal info for every alive RPC session, including brand-new sessions whose
+ * .jsonl file has not been flushed to disk yet (pi delays the first flush until
+ * an assistant message exists). Used to merge in-memory sessions into the
+ * session list so they appear immediately instead of waiting for the disk scan
+ * cache to expire.
+ */
+export function getLiveRpcSessionInfos(): LiveRpcSessionInfo[] {
+  return Array.from(getRegistry().values())
+    .filter((session) => session.isAlive())
+    .map((session) => ({
+      id: session.sessionId,
+      cwd: session.cwd,
+      sessionFile: session.sessionFile,
+    }));
+}
+
 // ----------------------------------------------------------------------------
 // Running-status broadcaster
 //
