@@ -244,7 +244,14 @@ export function AppShell() {
   const applyWorkspaceSnapshot = useCallback((workspace: WorkspaceSummary, snapshot?: WorkspaceTabSnapshot) => {
     const hasOverview = workspace.capabilities.includes("overview");
     setWorkspaceView(snapshot?.workspaceView ?? (hasOverview ? "overview" : "chat"));
-    setSelectedSession(snapshot?.selectedSession ?? null);
+    // 校验快照里的 session 确实属于这个 workspace（cwd 落在其路径下），
+    // 否则丢弃——避免历史脏快照把 A workspace 的 session 带进 B workspace。
+    const snapshotSession = snapshot?.selectedSession;
+    const wsRoot = workspace.path.replace(/\/+$/, "");
+    const sessionBelongs = snapshotSession && (
+      snapshotSession.cwd === workspace.path || snapshotSession.cwd.startsWith(`${wsRoot}/`)
+    );
+    setSelectedSession(sessionBelongs ? snapshotSession : null);
     setNewSessionCwd(snapshot ? snapshot.newSessionCwd : (hasOverview ? null : workspace.path));
     setSelectedWorkItemKey(snapshot?.selectedWorkItemKey ?? null);
     setFileTabs(snapshot?.fileTabs ?? []);
@@ -495,8 +502,13 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
     const snapshot = workspaceSnapshotsRef.current[workspace.id];
     const view = snapshot?.workspaceView ?? (workspace.capabilities.includes("overview") ? "overview" : "chat");
-    const sessionQuery = view === "chat" && snapshot?.selectedSession
-      ? `&session=${encodeURIComponent(snapshot.selectedSession.id)}`
+    const candSession = snapshot?.selectedSession;
+    const candWsRoot = workspace.path.replace(/\/+$/, "");
+    const candBelongs = candSession && (
+      candSession.cwd === workspace.path || candSession.cwd.startsWith(`${candWsRoot}/`)
+    );
+    const sessionQuery = view === "chat" && candBelongs
+      ? `&session=${encodeURIComponent(candSession!.id)}`
       : "";
     const itemQuery = view === "work-items" && snapshot?.selectedWorkItemKey
       ? `&item=${encodeURIComponent(snapshot.selectedWorkItemKey)}`
