@@ -14,6 +14,7 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { getCachedSession, setCachedSession, dropCachedSession } from "@/lib/stores/session-messages-cache";
+import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
 
 export interface SessionData {
   sessionId: string;
@@ -311,17 +312,6 @@ export interface AttachedImage {
   previewUrl: string;
 }
 
-type SelectedModel = { provider: string; modelId: string };
-type ModelEntry = { id: string; name: string; provider: string };
-type ModelsResponse = {
-  models: Record<string, string>;
-  modelList?: ModelEntry[];
-  defaultModel?: SelectedModel | null;
-  thinkingLevels?: Record<string, string[]>;
-  thinkingLevelMaps?: Record<string, Record<string, string | null>>;
-  modelError?: string;
-};
-
 type SlashCommandsResponse = {
   commands?: SlashCommandInfo[];
 };
@@ -344,13 +334,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
-  const [modelNames, setModelNames] = useState<Record<string, string>>({});
-  const [modelList, setModelList] = useState<ModelEntry[]>([]);
-  const [modelError, setModelError] = useState<string | null>(null);
-  const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
-  const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
-  const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
@@ -393,6 +377,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+
+  // models 走全局 modelsStore（按 cwd 分片，REQ-0001 决策 11 / 阶段 B2）：同一 cwd 的
+  // session 共享一份 + 一次请求，切 session 不再重复 loadModels。
+  const modelCwd = newSessionCwd ?? session?.cwd ?? "";
+  const modelsState = useModels(modelCwd, modelsRefreshKey ?? 0);
+  const modelNames = modelsState.models;
+  const modelList = modelsState.modelList;
+  const modelError = modelsState.modelError;
+  const modelThinkingLevels = modelsState.thinkingLevels;
+  const modelThinkingLevelMaps = modelsState.thinkingLevelMaps;
+  const newSessionDefaultModel = useMemo(
+    () => deriveNewSessionDefaultModel(modelsState),
+    [modelsState],
+  );
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -1301,26 +1299,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, loadSession]);
 
-  const loadModels = useCallback(async (signal?: AbortSignal) => {
-    const modelCwd = newSessionCwd ?? session?.cwd ?? "";
-    const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
-    const res = await fetch(modelsUrl, signal ? { signal } : undefined);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const d = await res.json() as ModelsResponse;
-    setModelNames(d.models);
-    setModelError(d.modelError ?? null);
-    setModelThinkingLevels(d.thinkingLevels ?? {});
-    setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
-    const nextModelList = d.modelList ?? [];
-    setModelList(nextModelList);
-    if (isNew) {
-      const match = d.defaultModel
-        ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
-        : undefined;
-      const displayModel = match ?? nextModelList[0];
-      setNewSessionDefaultModel(displayModel ? { provider: displayModel.provider, modelId: displayModel.id } : null);
-    }
-  }, [isNew, newSessionCwd, session?.cwd]);
+  // models 由全局 modelsStore 维护（useModels 自动拉取）；/reload 等显式刷新走这里。
+  const reloadModels = useCallback(() => fetchModels(modelCwd, { force: true }), [modelCwd]);
 
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
@@ -1363,7 +1343,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             loadSession(sid, false, true),
             loadTools(sid),
             loadSlashCommands(),
-            loadModels(),
+            reloadModels(),
           ]);
           return complete({ handled: true, message: "Reloaded session resources" });
         }
@@ -1403,7 +1383,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, ensureNewSession, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, ensureNewSession, isCompacting, reloadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -1650,15 +1630,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }
   }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
-
-  // Load model list
-  useEffect(() => {
-    const controller = new AbortController();
-    loadModels(controller.signal).catch((e) => {
-      if (e instanceof DOMException && e.name === "AbortError") return;
-    });
-    return () => controller.abort();
-  }, [loadModels, modelsRefreshKey]);
 
   // Compact error auto-dismiss
   useEffect(() => {
