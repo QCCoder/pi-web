@@ -419,7 +419,14 @@ export function AppShell() {
   }, [activeWorkspace, router, isMobile]);
 
   useEffect(() => {
-    if (!workspacesLoaded || !initialSessionId || initialSessionRestored || selectedSession) return;
+    if (!workspacesLoaded || !initialSessionId || initialSessionRestored) return;
+    // 用户已选了别的 session（包括正在新建会话）：不再用 URL 的 initialSessionId
+    // 覆盖，只标记恢复完成——否则 selectedSession 短暂变 null（新建）时会把 URL
+    // 里的旧 session 恢复回来，导致“新建会话要点 2 次”。
+    if (selectedSession) {
+      setInitialSessionRestored(true);
+      return;
+    }
     let cancelled = false;
     void (async () => {
       try {
