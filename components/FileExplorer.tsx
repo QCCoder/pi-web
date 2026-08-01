@@ -11,6 +11,7 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
+import { getDirectoryCache, setDirectoryCache, invalidateDirectory } from "@/lib/stores/file-resource-cache";
 import { useI18n } from "@/hooks/useI18n";
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -74,7 +75,24 @@ interface PendingConflict {
   nonReplaceable: string[];
 }
 
+function mapFileEntries(entries: FileEntry[], dirPath: string): FileNode[] {
+  return entries.map((e) => ({
+    name: e.name,
+    fullPath: joinFilePath(dirPath, e.name),
+    isDir: e.isDir,
+    size: e.size,
+    children: e.isDir ? [] : undefined,
+    loaded: !e.isDir,
+  }));
+}
+
 async function fetchEntries(dirPath: string): Promise<FileNode[]> {
+  // REQ-0001 决策 6/10：命中且未失效的目录缓存直接复用，免重新 fetch。
+  // 缓存存原始 FileEntry[]，每次 map 成新 FileNode[]，避免展开时 mutate children 污染缓存。
+  const cached = getDirectoryCache(dirPath);
+  if (cached && !cached.invalidated) {
+    return mapFileEntries(cached.entries as FileEntry[], dirPath);
+  }
   const encoded = encodeFilePathForApi(dirPath);
   const res = await fetch(`/api/files/${encoded}?type=list`);
   if (!res.ok) {
@@ -88,14 +106,9 @@ async function fetchEntries(dirPath: string): Promise<FileNode[]> {
     throw new Error(message);
   }
   const data = await res.json() as { entries?: FileEntry[] };
-  return (data.entries ?? []).map((e) => ({
-    name: e.name,
-    fullPath: joinFilePath(dirPath, e.name),
-    isDir: e.isDir,
-    size: e.size,
-    children: e.isDir ? [] : undefined,
-    loaded: !e.isDir,
-  }));
+  const entries = data.entries ?? [];
+  setDirectoryCache(dirPath, entries);
+  return mapFileEntries(entries, dirPath);
 }
 
 async function fetchGitStatus(cwd: string): Promise<GitStatusResponse> {
@@ -539,6 +552,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
   const prevCwdRef = useRef<string | null>(null);
+  const prevRefreshTokenRef = useRef<string>("");
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
@@ -673,6 +687,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   useEffect(() => {
     const cwdChanged = prevCwdRef.current !== cwd;
     prevCwdRef.current = cwd;
+    // refreshKey/treeRefreshKey 变化时失效当前目录缓存（强制下次重新拉取）；
+    // cwd 变化（切 workspace）时不失效，以便切回时命中缓存。
+    const refreshChanged = prevRefreshTokenRef.current !== refreshToken;
+    prevRefreshTokenRef.current = refreshToken;
+    if (!cwdChanged && refreshChanged) {
+      invalidateDirectory(cwd);
+    }
 
     // Reset expanded state only when cwd changes, not on refreshKey bumps
     if (cwdChanged) {
@@ -691,7 +712,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [cwd, refreshKey, treeRefreshKey]);
+  }, [cwd, refreshToken]);
 
   useEffect(() => {
     let cancelled = false;
