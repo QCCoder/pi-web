@@ -158,6 +158,8 @@ export interface UseAgentSessionOptions {
 export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
+/** 缓存命中且距上次加载不足此值时，纯用缓存不发请求（疯狂切换去重）。 */
+const SESSION_REFETCH_THRESHOLD_MS = 1200;
 const USER_SCROLL_INTENT_MS = 1200;
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
@@ -372,6 +374,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const loadSessionAbortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
@@ -449,6 +452,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     let messagesLoaded = false;
+    // 取消上一次未完成的加载，防止快速切换 Tab 时请求堆积（浏览器并发连接有限）。
+    loadSessionAbortRef.current?.abort();
+    const ac = new AbortController();
+    loadSessionAbortRef.current = ac;
     try {
       // SWR (REQ-0001 决策 2/3): 缓存命中则立即填充 UI 消除空窗；再发条件请求，
       // 304 复用缓存、200 覆盖更新。
@@ -459,41 +466,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (showLoading) {
         setLoading(true);
       }
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      const headers: Record<string, string> = {};
-      if (cached?.revision) headers["If-None-Match"] = cached.revision;
-      const res = await fetch(
-        `/api/sessions/${encodeURIComponent(sid)}?${params}`,
-        Object.keys(headers).length > 0 ? { headers } : undefined,
-      );
-      if (res.status === 304) {
-        // 文件未变，复用缓存（messagesLoaded 已由缓存命中时置位）。
-        if (showLoading) setLoading(false);
-        if (!includeState) return null;
-      } else {
-        if (res.status === 404) {
-          dropCachedSession(sid);
-          if (showLoading) {
-            setData(null);
-            setActiveLeafId(null);
-            setMessages([]);
-            setError(null);
+      // 短期内刚加载过：跳过 session 详情请求（大响应），但仍刷新 state 以检测
+      // running 并连 SSE。疯狂切换时只跳大请求，避免堆积又不丢流式连接。
+      const fresh = Boolean(cached) && Date.now() - (cached?.loadedAt ?? 0) < SESSION_REFETCH_THRESHOLD_MS;
+      if (!fresh) {
+        const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+        const headers: Record<string, string> = {};
+        if (cached?.revision) headers["If-None-Match"] = cached.revision;
+        const fetchOpts: RequestInit = { signal: ac.signal };
+        if (Object.keys(headers).length > 0) fetchOpts.headers = headers;
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sid)}?${params}`,
+          fetchOpts,
+        );
+        if (res.status === 304) {
+          // 文件未变，复用缓存（messagesLoaded 已由缓存命中时置位）。
+          if (showLoading) setLoading(false);
+        } else {
+          if (res.status === 404) {
+            dropCachedSession(sid);
+            if (showLoading) {
+              setData(null);
+              setActiveLeafId(null);
+              setMessages([]);
+              setError(null);
+            }
+            return null;
           }
-          return null;
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const revision = res.headers.get("etag") ?? undefined;
+          const d = await res.json() as SessionData;
+          if (sessionIdRef.current !== sid) return null;
+          applySessionData(d);
+          setCachedSession(sid, d, revision);
+          messagesLoaded = true;
+          if (showLoading) setLoading(false);
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const revision = res.headers.get("etag") ?? undefined;
-        const d = await res.json() as SessionData;
-        if (sessionIdRef.current !== sid) return null;
-        applySessionData(d);
-        setCachedSession(sid, d, revision);
-        messagesLoaded = true;
-        if (showLoading) setLoading(false);
-        if (!includeState) return null;
+      } else if (showLoading) {
+        setLoading(false);
       }
+      if (!includeState) return null;
 
       try {
-        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
+        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal: ac.signal });
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
         if (sessionIdRef.current !== sid) return null;
@@ -511,13 +526,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         return agentState;
       } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return null;
         console.error("Failed to load agent state:", e);
         return null;
       }
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return null;
       setError(String(e));
       return null;
     } finally {
+      if (loadSessionAbortRef.current === ac) loadSessionAbortRef.current = null;
       if (showLoading && !messagesLoaded) setLoading(false);
     }
   }, [applySessionData]);
