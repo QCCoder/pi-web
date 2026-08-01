@@ -311,7 +311,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
-  const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
+  const visibleMessages = useMemo(() => messages.filter((m) => m.role === "user" || m.role === "assistant"), [messages]);
   const inputHistory = useMemo(() => {
     const seen = new Set<string>();
     const history: string[] = [];
@@ -336,6 +336,14 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const currentThinkingLevelMap = displayModelValue
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
+
+  // Historical message rendering is O(messages). During streaming, ChatWindow
+  // re-renders per token but `messages` is stable — without this cache it
+  // rebuilds the whole list every token, freezing long sessions. The key
+  // object changes identity only when an input that affects the render
+  // changes, so the IIFE reuses the cached nodes while streaming.
+  const historyRenderKey = useMemo(() => ({}), [messages, entryIds, visibleCount, sessionBusy, isNew, streamState.isStreaming, forkingEntryId, modelNames, messageCwd, onOpenFile, handleFork, handleNavigate, handleEditContent, session?.id, t]);
+  const historyRenderCacheRef = useRef<{ key: object; nodes: ReactNode } | null>(null);
 
   const chatInputElement = (
     <ChatInput
@@ -508,6 +516,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
             {(() => {
+              const historyCache = historyRenderCacheRef.current;
+              if (historyCache && historyCache.key === historyRenderKey) {
+                return historyCache.nodes;
+              }
               const toolResultsMap = new Map<string, ToolResultMessage>();
               for (const msg of messages) {
                 if (msg.role === "toolResult") {
@@ -675,7 +687,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 idx = endIdx;
               }
               const { startIndex, hasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
-              return (
+              const nodes = (
                 <>
                   {hasMore && (
                      <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
@@ -685,6 +697,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                   {rendered.slice(startIndex)}
                 </>
               );
+              historyRenderCacheRef.current = { key: historyRenderKey, nodes };
+              return nodes;
             })()}
             {streamState.isStreaming && streamState.streamingMessage && (
               <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
@@ -712,10 +726,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 } as BashExecutionMessage}
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />
-            )}
-
-            {agentRunning && (
-              <div style={{ height: scrollContainerRef.current ? scrollContainerRef.current.clientHeight : "80vh" }} />
             )}
 
             <div ref={messagesEndRef} />
