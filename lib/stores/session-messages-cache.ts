@@ -55,3 +55,14 @@ export function setCachedSession(
 export function dropCachedSession(sessionId: string): void {
   sessionMessagesCache.delete(sessionId);
 }
+
+/** 不可变更新某 session 的 SessionData（message_end 追加 / loadContext 分支切换等用）。
+ *  无缓存条目时 no-op（后台 session 未访问过则等下次 loadSession 再建）。 */
+export function updateCachedSessionData(
+  sessionId: string,
+  updater: (data: SessionData) => SessionData,
+): void {
+  const entry = sessionMessagesCache.get(sessionId);
+  if (!entry) return;
+  sessionMessagesCache.set(sessionId, { ...entry, data: updater(entry.data) });
+}

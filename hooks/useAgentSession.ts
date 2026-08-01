@@ -13,7 +13,7 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
-import { getCachedSession, setCachedSession, dropCachedSession } from "@/lib/stores/session-messages-cache";
+import { getCachedSession, setCachedSession, dropCachedSession, sessionMessagesCache, updateCachedSessionData } from "@/lib/stores/session-messages-cache";
 import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
 import { useStoreSlice } from "@/lib/stores/create-map-store";
 import { sessionRuntimeStore, setSessionRuntime, updateSessionRuntime, getSessionRuntime, createDefaultSessionRuntimeState, EMPTY_RUNTIME, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
@@ -323,6 +323,20 @@ function readRuntimeFor(keyRef: { current: string }): SessionRuntimeState {
   return getSessionRuntime(keyRef.current);
 }
 
+const EMPTY_MESSAGES: AgentMessage[] = [];
+const EMPTY_ENTRY_IDS: string[] = [];
+
+/** 新会话乐观消息的最小 SessionData 占位（promote 后被 loadSession 的文件数据覆盖）。 */
+function makeMinimalSessionData(messages: AgentMessage[]): SessionData {
+  return {
+    sessionId: "",
+    filePath: "",
+    tree: [],
+    leafId: null,
+    context: { messages, entryIds: [], thinkingLevel: "", model: null },
+  };
+}
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
@@ -331,11 +345,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const isNew = session === null && newSessionCwd !== null;
 
-  const [data, setData] = useState<SessionData | null>(null);
+  // runtimeKey 早定义（cache + runtime 订阅共用）。
+  const runtimeKey = session?.id ?? newSessionCwd ?? "__new__";
+  const runtimeKeyRef = useRef(runtimeKey);
+  runtimeKeyRef.current = runtimeKey;
+
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [entryIds, setEntryIds] = useState<string[]>([]);
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
@@ -345,12 +361,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
 
-  // SessionRuntimeStore 订阅（REQ-0001 阶段 B3，per-session 分片）。整 slice 一次读 +
-  // destructure；写走 patchRuntime（见下）。新会话用 newSessionCwd 作临时 key，promote
-  // 后挂载 effect 从服务端重派生运行态（无需迁移 slice）。
-  const runtimeKey = session?.id ?? newSessionCwd ?? "__new__";
-  const runtimeKeyRef = useRef(runtimeKey);
-  runtimeKeyRef.current = runtimeKey;
+  // data / messages / entryIds 订阅 SessionMessagesCache（阶段 B4a）：后台 session 的
+  // message_end 写 cache 也能反映到前台；切回已缓存 session 无空窗。
+  const cachedEntry = useStoreSlice(sessionMessagesCache, runtimeKey, (e) => e ?? null);
+  const data = cachedEntry?.data ?? null;
+  const messages = data?.context.messages ?? EMPTY_MESSAGES;
+  const entryIds = data?.context.entryIds ?? EMPTY_ENTRY_IDS;
+
+  // SessionRuntimeStore 订阅（B3，per-session 分片）。整 slice 一次读 + destructure；写走
+  // patchRuntime（见下）。新会话用 newSessionCwd 临时 key，promote 后从服务端重派生。
   const runtime = useStoreSlice(sessionRuntimeStore, runtimeKey, (s) => s ?? EMPTY_RUNTIME);
   const {
     agentRunning, bashRunning, agentPhase, retryInfo, streamState,
@@ -394,6 +413,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     (action: StreamAction) => patchRuntime((rt) => ({ ...rt, streamState: streamReducer(rt.streamState, action) })),
     [patchRuntime],
   );
+  // messages 走 SessionMessagesCache（阶段 B4a）：setMessages(prev=>...) 复用为不可变更新
+  // cache 条目的 data.context.messages。无条目时 no-op（新会话乐观消息由 handleSend 显式建条目）。
+  const setMessages = useCallback(
+    (updater: AgentMessage[] | ((prev: AgentMessage[]) => AgentMessage[])) => {
+      updateCachedSessionData(runtimeKeyRef.current, (sd) => ({
+        ...sd,
+        context: { ...sd.context, messages: typeof updater === "function" ? updater(sd.context.messages) : updater },
+      }));
+    },
+    [],
+  );
+  // 对外 setData 包装（接口兼容）：写 whole SessionData 到 cache。
+  const setData = useCallback((d: SessionData | null) => {
+    const key = runtimeKeyRef.current;
+    if (d) setCachedSession(key, d, getCachedSession(key)?.revision);
+    else dropCachedSession(key);
+  }, []);
 
   // models 走全局 modelsStore（按 cwd 分片，REQ-0001 决策 11 / 阶段 B2）：同一 cwd 的
   // session 共享一份 + 一次请求，切 session 不再重复 loadModels。
@@ -454,7 +490,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
 
   const applySessionData = useCallback((d: SessionData) => {
-    setData(d);
+    // data/messages/entryIds 由 SessionMessagesCache 订阅驱动（setCachedSession / 缓存命中）；
+    // 这里只同步 runtime 派生字段。
     patchRuntime({
       activeLeafId: d.leafId,
       currentModelOverride: null,
@@ -462,8 +499,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ? { thinkingLevel: d.context.thinkingLevel as ThinkingLevelOption }
         : {}),
     });
-    setMessages(d.context.messages);
-    setEntryIds(d.context.entryIds ?? []);
     setError(null);
   }, [patchRuntime]);
 
@@ -503,9 +538,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (res.status === 404) {
             dropCachedSession(sid);
             if (showLoading) {
-              setData(null);
               patchRuntime({ activeLeafId: null });
-              setMessages([]);
               setError(null);
             }
             return null;
@@ -567,8 +600,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[] } };
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
+      updateCachedSessionData(sid, (sd) => ({
+        ...sd,
+        context: { ...sd.context, messages: d.context.messages, entryIds: d.context.entryIds ?? [] },
+      }));
     } catch (e) {
       console.error("Failed to load context:", e);
     }
@@ -1092,7 +1127,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd, patchRuntime, dispatch]);
+  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd, patchRuntime, dispatch, setMessages]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1120,7 +1155,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         : message,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+    // 新会话尚无缓存条目（runtimeKey=newSessionCwd）：建最小占位承载乐观消息，
+    // promote 后 loadSession(真id) 用文件数据覆盖。已有条目则追加。
+    {
+      const key = runtimeKeyRef.current;
+      if (!sessionMessagesCache.has(key)) {
+        setCachedSession(key, makeMinimalSessionData([userMsg]), undefined);
+      } else {
+        updateCachedSessionData(key, (sd) => ({
+          ...sd,
+          context: { ...sd.context, messages: [...sd.context.messages, userMsg] },
+        }));
+      }
+    }
     patchRuntime({ optimisticUserMessageKey: userMessageKey(userMsg) });
     promptRunIdRef.current = promptRunId;
     patchRuntime({ agentRunning: true, agentPhase: isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" } });
@@ -1186,7 +1233,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchRuntime({ optimisticUserMessageKey: null, agentRunning: false, agentPhase: null });
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime, dispatch]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime, dispatch, setMessages]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
@@ -1562,11 +1609,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // session 为空（新建会话 / 切到无活跃会话的 workspace）：清空历史消息，
       // 否则单实例 ChatWindow 会残留上一个 session 的内容。
       sessionIdRef.current = null;
-      setData(null);
-      setMessages([]);
-      setEntryIds([]);
       setError(null);
-      // 新会话视图：重置该 cwd 的 runtime slice（防上次新建尝试残留 run-state）。
+      // data/messages/entryIds 由 cache 订阅驱动；清掉该 cwd 可能残留的临时条目 + runtime slice。
+      dropCachedSession(runtimeKeyRef.current);
       setSessionRuntime(runtimeKeyRef.current, createDefaultSessionRuntimeState());
     }
     return () => {
