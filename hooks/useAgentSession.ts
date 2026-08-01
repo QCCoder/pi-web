@@ -13,6 +13,7 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { getCachedSession, setCachedSession, dropCachedSession } from "@/lib/stores/session-messages-cache";
 
 export interface SessionData {
   sessionId: string;
@@ -432,37 +433,62 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
 
+  const applySessionData = useCallback((d: SessionData) => {
+    setData(d);
+    setActiveLeafId(d.leafId);
+    setMessages(d.context.messages);
+    setEntryIds(d.context.entryIds ?? []);
+    setCurrentModelOverride(null);
+    setError(null);
+    if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
+      setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
+    }
+  }, []);
+
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     let messagesLoaded = false;
     try {
-      if (showLoading) setLoading(true);
+      // SWR (REQ-0001 决策 2/3): 缓存命中则立即填充 UI 消除空窗；再发条件请求，
+      // 304 复用缓存、200 覆盖更新。
+      const cached = getCachedSession(sid);
+      if (cached) {
+        applySessionData(cached.data);
+        messagesLoaded = true;
+      } else if (showLoading) {
+        setLoading(true);
+      }
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
-      if (res.status === 404) {
-        if (showLoading) {
-          setData(null);
-          setActiveLeafId(null);
-          setMessages([]);
-          setError(null);
+      const headers: Record<string, string> = {};
+      if (cached?.revision) headers["If-None-Match"] = cached.revision;
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sid)}?${params}`,
+        Object.keys(headers).length > 0 ? { headers } : undefined,
+      );
+      if (res.status === 304) {
+        // 文件未变，复用缓存（messagesLoaded 已由缓存命中时置位）。
+        if (showLoading) setLoading(false);
+        if (!includeState) return null;
+      } else {
+        if (res.status === 404) {
+          dropCachedSession(sid);
+          if (showLoading) {
+            setData(null);
+            setActiveLeafId(null);
+            setMessages([]);
+            setError(null);
+          }
+          return null;
         }
-        return null;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const revision = res.headers.get("etag") ?? undefined;
+        const d = await res.json() as SessionData;
+        if (sessionIdRef.current !== sid) return null;
+        applySessionData(d);
+        setCachedSession(sid, d, revision);
+        messagesLoaded = true;
+        if (showLoading) setLoading(false);
+        if (!includeState) return null;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as SessionData;
-      if (sessionIdRef.current !== sid) return null;
-      setData(d);
-      setActiveLeafId(d.leafId);
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
-      setCurrentModelOverride(null);
-      setError(null);
-      if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
-        setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
-      }
-
-      messagesLoaded = true;
-      if (showLoading) setLoading(false);
-      if (!includeState) return null;
 
       try {
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
