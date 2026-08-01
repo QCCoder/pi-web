@@ -16,7 +16,7 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import { getCachedSession, setCachedSession, dropCachedSession } from "@/lib/stores/session-messages-cache";
 import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
 import { useStoreSlice } from "@/lib/stores/create-map-store";
-import { sessionRuntimeStore, setSessionRuntime, updateSessionRuntime, createDefaultSessionRuntimeState, EMPTY_RUNTIME, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
+import { sessionRuntimeStore, setSessionRuntime, updateSessionRuntime, getSessionRuntime, createDefaultSessionRuntimeState, EMPTY_RUNTIME, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
 
 export interface SessionData {
   sessionId: string;
@@ -318,6 +318,11 @@ type SlashCommandsResponse = {
   commands?: SlashCommandInfo[];
 };
 
+/** 同步读取当前 session 的 runtime slice（回调里的 guard 用，替代原镜像 ref）。 */
+function readRuntimeFor(keyRef: { current: string }): SessionRuntimeState {
+  return getSessionRuntime(keyRef.current);
+}
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
@@ -332,11 +337,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
-  // agentRunning/bashRunning/retryInfo/agentPhase 仍为本 useState（B3b-2 迁 store + 删镜像 ref）。
-  const [agentRunning, setAgentRunning] = useState(false);
-  const [bashRunning, setBashRunning] = useState(false);
-  const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
-  const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
@@ -354,6 +354,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   runtimeKeyRef.current = runtimeKey;
   const runtime = useStoreSlice(sessionRuntimeStore, runtimeKey, (s) => s ?? EMPTY_RUNTIME);
   const {
+    agentRunning, bashRunning, agentPhase, retryInfo,
     contextUsage, systemPrompt, thinkingLevel, sessionStatsOverride,
     isCompacting, compactError, compactResult, currentModelOverride,
     forkingEntryId, activeLeafId, extensionStatuses, extensionWidgets,
@@ -363,8 +364,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventSourceRef = useRef<EventSource | null>(null);
   const loadSessionAbortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
-  const agentRunningRef = useRef(false);
-  const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
@@ -379,7 +378,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
-  const optimisticUserMessageKeyRef = useRef<string | null>(null);
 
   // 写 SessionRuntimeStore：key 用 runtimeKeyRef（响应式 runtimeKey 的镜像，覆盖新会话
   // pre-id 写入——agentRunning/optimisticKey 等在 ensureNewSession 之前就要可见）。
@@ -689,10 +687,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // auto-reconnect. Settle the Promise and manually reconnect for
           // already-running sessions.
           settle("closed");
-          if (eventSourceRef.current === es && agentRunningRef.current) {
+          if (eventSourceRef.current === es && readRuntimeFor(runtimeKeyRef).agentRunning) {
             eventSourceRef.current = null;
             setTimeout(() => {
-              if (agentRunningRef.current) void connectEvents(sid);
+              if (readRuntimeFor(runtimeKeyRef).agentRunning) void connectEvents(sid);
             }, 1000);
           }
         }
@@ -821,22 +819,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sid) await loadSession(sid);
     } finally {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
-      optimisticUserMessageKeyRef.current = null;
-      if (!agentRunningRef.current) return;
-      agentRunningRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
-      setRetryInfo(null);
+      patchRuntime({ optimisticUserMessageKey: null });
+      if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
+      patchRuntime({ agentRunning: false, agentPhase: null, retryInfo: null });
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
-  }, [loadSession, onAgentEnd]);
+  }, [loadSession, onAgentEnd, patchRuntime]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
 
-    while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
+    while (readRuntimeFor(runtimeKeyRef).agentRunning && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
@@ -860,7 +855,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     bashRecoveryIdRef.current = recoveryId;
 
     while (
-      bashRunningRef.current
+      readRuntimeFor(runtimeKeyRef).bashRunning
       && bashRecoveryIdRef.current === recoveryId
       && sessionIdRef.current === sid
     ) {
@@ -873,9 +868,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         await loadSession(sid);
         if (bashRecoveryIdRef.current !== recoveryId || sessionIdRef.current !== sid) return;
-        bashRunningRef.current = false;
-        setBashRunning(false);
-        patchRuntime({ pendingBash: null });
+        patchRuntime({ bashRunning: false, pendingBash: null });
         return;
       } catch {
         // Keep polling while the page is mounted; network recovery is transparent.
@@ -889,7 +882,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // If the server reports idle while we still think it's running, finish
   // through the same path as prompt_done.
   const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!agentRunningRef.current) return;
+    if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
     const runId = promptRunIdRef.current;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
@@ -910,7 +903,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchRuntime(reconcilePatch);
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
-      if (busy || !agentRunningRef.current) return;
+      if (busy || !readRuntimeFor(runtimeKeyRef).agentRunning) return;
       if (state) {
         const patch: Partial<SessionRuntimeState> = {};
         if (state.contextUsage !== undefined) patch.contextUsage = state.contextUsage ?? null;
@@ -949,26 +942,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [agentRunning, reconcileAgentState]);
 
-  useEffect(() => {
-    agentRunningRef.current = agentRunning;
-  }, [agentRunning]);
-
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case "agent_start":
-        agentRunningRef.current = true;
-        setAgentRunning(true);
-        setAgentPhase({ kind: "waiting_model" });
+        patchRuntime({ agentRunning: true, agentPhase: { kind: "waiting_model" } });
         dispatch({ type: "start" });
         break;
       case "agent_end":
         // A late agent_end can arrive over SSE after reconcileAgentState
         // already finished this run — don't re-trigger completion.
-        if (!agentRunningRef.current) break;
-        agentRunningRef.current = false;
-        setAgentRunning(false);
-        setAgentPhase(null);
-        setRetryInfo(null);
+        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
+        patchRuntime({ agentRunning: false, agentPhase: null, retryInfo: null });
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
           loadSession(sessionIdRef.current);
@@ -990,7 +974,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         onAgentEnd?.();
         break;
       case "prompt_done":
-        if (!agentRunningRef.current) break;
+        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
         void finishPromptWithoutStream(sessionIdRef.current);
         break;
       case "prompt_error":
@@ -1007,7 +991,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Ignore streaming events arriving after this run already finished
         // (e.g. SSE data buffered while the tab was frozen, flushed after
         // reconcile) — they would resurrect a ghost streaming bubble.
-        if (!agentRunningRef.current) break;
+        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
         const msg = event.message as Partial<AgentMessage> | undefined;
         if (msg?.role === "user") {
           break;
@@ -1015,14 +999,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (msg) {
           dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
         }
-        setAgentPhase(null);
+        patchRuntime({ agentPhase: null });
         break;
       }
       case "message_end": {
         // Same late-event guard: after reconcile finished this run,
         // loadSession already loaded this message from the session file —
         // appending it again would duplicate it.
-        if (!agentRunningRef.current) break;
+        if (!readRuntimeFor(runtimeKeyRef).agentRunning) break;
         const completed = event.message as AgentMessage | undefined;
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
@@ -1031,8 +1015,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // optimistic bubble; later same-text queue deliveries must render.
           const delivered = normalizeToolCalls(completed);
           const deliveredKey = userMessageKey(delivered);
-          const optimisticKey = optimisticUserMessageKeyRef.current;
-          optimisticUserMessageKeyRef.current = null;
+          const optimisticKey = readRuntimeFor(runtimeKeyRef).optimisticUserMessageKey;
+          patchRuntime({ optimisticUserMessageKey: null });
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
@@ -1046,26 +1030,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         }
         dispatch({ type: "reset" });
-        setAgentPhase({ kind: "waiting_model" });
+        patchRuntime({ agentPhase: { kind: "waiting_model" } });
         break;
       }
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
-        setAgentPhase((prev) => {
-          const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
+        patchRuntime((rt) => {
+          const tools = rt.agentPhase?.kind === "running_tools" ? [...rt.agentPhase.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name });
-          return { kind: "running_tools", tools };
+          return { ...rt, agentPhase: { kind: "running_tools", tools } };
         });
         break;
       }
       case "tool_execution_end": {
         const id = event.toolCallId as string;
-        setAgentPhase((prev) => {
-          if (prev?.kind !== "running_tools") return prev;
-          const tools = prev.tools.filter((t) => t.id !== id);
-          if (tools.length === 0) return { kind: "waiting_model" };
-          return { kind: "running_tools", tools };
+        patchRuntime((rt) => {
+          if (rt.agentPhase?.kind !== "running_tools") return rt;
+          const tools = rt.agentPhase.tools.filter((t) => t.id !== id);
+          return { ...rt, agentPhase: tools.length === 0 ? { kind: "waiting_model" } : { kind: "running_tools", tools } };
         });
         break;
       }
@@ -1078,10 +1061,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       case "auto_retry_start":
-        setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
+        patchRuntime({ retryInfo: { attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined } });
         break;
       case "auto_retry_end":
-        setRetryInfo(null);
+        patchRuntime({ retryInfo: null });
         break;
       case "auto_compaction_start":
       case "compaction_start":
@@ -1111,7 +1094,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return;
-    if (agentRunningRef.current || bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
@@ -1134,11 +1117,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
-    optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
+    patchRuntime({ optimisticUserMessageKey: userMessageKey(userMsg) });
     promptRunIdRef.current = promptRunId;
-    agentRunningRef.current = true;
-    setAgentRunning(true);
-    setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
+    patchRuntime({ agentRunning: true, agentPhase: isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" } });
     dispatch({ type: "start" });
     pendingScrollToUserRef.current = true;
     completionScrollAllowedRef.current = true;
@@ -1183,7 +1164,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to send message:", e);
       if (e instanceof EventStreamConnectionError) {
-        const optimisticKey = optimisticUserMessageKeyRef.current;
+        const optimisticKey = readRuntimeFor(runtimeKeyRef).optimisticUserMessageKey;
         if (optimisticKey) {
           setMessages((prev) => {
             const last = prev[prev.length - 1];
@@ -1198,20 +1179,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // executeBash; insertIfEmpty avoids clobbering anything typed since.
         if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
       }
-      optimisticUserMessageKeyRef.current = null;
-      agentRunningRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
+      patchRuntime({ optimisticUserMessageKey: null, agentRunning: false, agentPhase: null });
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
-    if (agentRunningRef.current || bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
-    bashRunningRef.current = true;
-    patchRuntime({ pendingBash: { command, excludeFromContext } });
-    setBashRunning(true);
+    patchRuntime({ bashRunning: true, pendingBash: { command, excludeFromContext } });
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
       if (!sid) throw new Error("Unable to create a session for the shell command");
@@ -1227,9 +1203,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       opts.chatInputRef?.current?.insertIfEmpty(inputText);
     } finally {
-      bashRunningRef.current = false;
-      patchRuntime({ pendingBash: null });
-      setBashRunning(false);
+      patchRuntime({ bashRunning: false, pendingBash: null });
     }
   }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session, patchRuntime]);
   executeBashRef.current = executeBash;
@@ -1237,7 +1211,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    if (bashRunningRef.current) {
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) {
       try {
         await sendAgentCommand(sid, { type: "abort_bash" });
       } catch (e) {
@@ -1253,7 +1227,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   const handleFork = useCallback(async (entryId: string) => {
-    if (bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
     patchRuntime({ forkingEntryId: entryId });
@@ -1274,7 +1248,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [onSessionForked, patchRuntime]);
 
   const handleNavigate = useCallback(async (entryId: string) => {
-    if (bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
     sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
@@ -1283,7 +1257,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadContext, patchRuntime]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
-    if (bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) return;
     patchRuntime({ activeLeafId: leafId });
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -1535,7 +1509,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   const handleScrollPositionChange = useCallback(() => {
-    if (!agentRunningRef.current) return;
+    if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
     if (Date.now() < ignoreProgrammaticScrollUntilRef.current) return;
     if (Date.now() > userScrollIntentUntilRef.current) return;
     completionScrollAllowedRef.current = false;
@@ -1546,13 +1520,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     // Reset transient run-state from the previous session so it does not bleed
     // into the new one before loadSession applies fresh data.
-    agentRunningRef.current = false;
-    setAgentRunning(false);
-    bashRunningRef.current = false;
-    setBashRunning(false);
-    patchRuntime({ pendingBash: null, forkingEntryId: null });
+    patchRuntime({ agentRunning: false, bashRunning: false, pendingBash: null, forkingEntryId: null, retryInfo: null });
     dispatch({ type: "reset" });
-    setRetryInfo(null);
     initialScrollDoneRef.current = false;
 
     if (session) {
@@ -1561,9 +1530,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (agentState?.running) {
           loadTools(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            agentRunningRef.current = true;
-            setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+            patchRuntime({ agentRunning: true, agentPhase: agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" } });
             dispatch({ type: "start" });
             void connectEvents(session.id);
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
@@ -1571,8 +1538,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
+            patchRuntime({ bashRunning: true });
             void waitForBashSettlement(session.id);
           }
         }
@@ -1655,7 +1621,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Follow the latest content while streaming and on completion.
         // completionScrollAllowedRef is cleared when the user scrolls up to
         // read, pausing auto-follow until the next prompt is sent.
-        scrollToBottom(agentRunningRef.current ? "instant" : "smooth");
+        scrollToBottom(agentRunning ? "instant" : "smooth");
       }
     }
   }, [messages.length, agentRunning, scrollToBottom]);
@@ -1694,9 +1660,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     patchRuntime({ sessionStatsOverride: null });
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow, patchRuntime]);
 
-  // 对外 setter 包装（接口兼容；写入 store）。setAgentRunning/dispatch 仍为本 useState/useReducer（B3b-2/B3c）。
+  // 对外 setter 包装（接口兼容；写入 store）。dispatch 仍为本 useReducer（B3c）。
   const setActiveLeafId = useCallback((id: string | null) => patchRuntime({ activeLeafId: id }), [patchRuntime]);
   const setForkingEntryId = useCallback((id: string | null) => patchRuntime({ forkingEntryId: id }), [patchRuntime]);
+  const setAgentRunning = useCallback((v: boolean) => patchRuntime({ agentRunning: v }), [patchRuntime]);
 
   return {
     // State
