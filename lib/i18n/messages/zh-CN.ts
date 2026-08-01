@@ -229,6 +229,8 @@ export const zhCNLocale: LocalePlugin = {
     "chat.extensions": "扩展",
     "chat.prompts": "提示词",
     "chat.skills": "技能",
+    "chat.skillDetails": "技能详情：{name}",
+    "chat.skillSnapshot": "本条消息实际发送的指令",
     "chat.commandCompact": "压缩上下文，可选附加说明",
     "chat.commandReload": "重新加载扩展、技能、提示词和工具",
     "chat.commandName": "设置会话显示名称",

@@ -229,6 +229,8 @@ export const enLocale: LocalePlugin = {
     "chat.extensions": "Extensions",
     "chat.prompts": "Prompts",
     "chat.skills": "Skills",
+    "chat.skillDetails": "Skill details: {name}",
+    "chat.skillSnapshot": "Instructions sent with this message",
     "chat.commandCompact": "Compress context, optionally with instructions",
     "chat.commandReload": "Reload extensions, skills, prompts, and tools",
     "chat.commandName": "Set the session display name",

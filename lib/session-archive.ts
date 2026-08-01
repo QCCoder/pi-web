@@ -15,6 +15,7 @@ import {
   resolveSessionPath,
 } from "./session-reader";
 import { getRpcSession } from "./rpc-manager";
+import { skillMessageTitle } from "./skill-message";
 
 /** Root directory holding all per-cwd session folders (~/.pi/agent/sessions). */
 function getSessionsDir(): string {
@@ -104,7 +105,7 @@ async function buildArchivedSessionInfo(filePath: string): Promise<ArchivedSessi
     path: filePath,
     cwd: header.cwd ?? "",
     name,
-    firstMessage: firstMessage || "(no messages)",
+    firstMessage: firstMessage ? skillMessageTitle(firstMessage) : "(no messages)",
     modified,
     archivedAt,
   };

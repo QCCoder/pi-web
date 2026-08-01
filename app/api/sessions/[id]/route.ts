@@ -13,6 +13,7 @@ import {
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { deleteArchivedSession, isSessionArchived } from "@/lib/session-archive";
+import { skillMessageTitle } from "@/lib/skill-message";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -152,7 +153,8 @@ export async function GET(
         ? (() => {
             const msg = context.messages.find((m) => m.role === "user")!;
             const c = (msg as { content: unknown }).content;
-            return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
+            const text = typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "");
+            return text ? skillMessageTitle(text) : "(no messages)";
           })()
         : "(no messages)",
       parentSessionId,
