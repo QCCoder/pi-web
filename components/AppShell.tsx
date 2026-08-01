@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
@@ -27,7 +26,6 @@ import { copyText } from "@/lib/clipboard";
 import { clearDraft, getDraft } from "@/lib/draft-store";
 import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
-import { getInitialNavigation } from "@/lib/initial-navigation";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -44,42 +42,51 @@ type AutoNameStatus =
 
 type WorkspaceView = "overview" | "settings" | "work-items" | "chat";
 
-interface WorkspaceTabSnapshot {
-  workspaceView: WorkspaceView;
-  selectedSession: SessionInfo | null;
+/**
+ * One open workspace tab. All per-tab view state (selected session, file tabs,
+ * panel state …) lives here, so switching tabs is just changing `activeTabId` —
+ * there is no snapshot capture/restore. The URL is a write-only projection of
+ * the active tab; popstate (back/forward) and the initial mount are the only
+ * places the URL drives state.
+ */
+interface WorkspaceTabState {
+  id: string;
+  workspace: WorkspaceSummary;
+  view: WorkspaceView;
+  session: SessionInfo | null;
   newSessionCwd: string | null;
-  selectedWorkItemKey: string | null;
+  workItemKey: string | null;
   fileTabs: Tab[];
   activeFileTabId: string | null;
   rightPanelOpen: boolean;
 }
-
-interface PersistedWorkspaceTabs {
-  version: 1;
-  tabIds: string[];
-  activeWorkspaceId: string | null;
-  mruIds: string[];
-  snapshots: Record<string, WorkspaceTabSnapshot>;
-}
-
-const WORKSPACE_TABS_STORAGE_KEY = "pi-web:workspace-tabs:v1";
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
 
 export function AppShell() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  // 捕获初始 URL 参数，供 loadWorkspaces 仅在挂载时读取一次。避免 loadWorkspaces
-  // 依赖 searchParams 导致每次 router.push（切 Tab）都重新 fetch /api/workspaces。
-  // 后续 URL 变化由独立的同步 effect 处理。
-  const initialSearchParamsRef = useRef(searchParams);
-  const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, t: translate, supportedLocales } = useI18n();
   const isMobile = useIsMobile();
-  const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
-  // When user clicks +, we only store the cwd — no fake session id
-  const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
+  // ---- Workspace tabs ---------------------------------------------------------
+  // Each open workspace is one entry in `tabs`; the active one is `activeTabId`.
+  // Per-tab view state is read directly off the active tab (no snapshot dance),
+  // and the URL is a write-only projection of it.
+  const [tabs, setTabs] = useState<WorkspaceTabState[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [mruIds, setMruIds] = useState<string[]>([]);
+  // False until the initial URL→tab restore has run, to avoid flashing the
+  // "select a session" placeholder while the addressed tab is still loading.
+  const [navReady, setNavReady] = useState(false);
+  const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+  const activeWorkspace = activeTab?.workspace ?? null;
+  const selectedSession = activeTab?.session ?? null;
+  const newSessionCwd = activeTab?.newSessionCwd ?? null;
+  const workspaceView = activeTab?.view ?? "overview";
+  const selectedWorkItemKey = activeTab?.workItemKey ?? null;
+  const fileTabs = activeTab?.fileTabs ?? [];
+  const activeFileTabId = activeTab?.activeFileTabId ?? null;
+  const rightPanelOpen = activeTab?.rightPanelOpen ?? false;
+  const activeCwd = activeTab?.workspace.path ?? null;
   const [refreshKey, setRefreshKey] = useState(0);
   const sessionActivity = useSessionActivity(selectedSession?.id ?? null, refreshKey);
   // 全局 SSE：为每个 running session 维护一条事件流，后台 session 事件不丢（决策 8 / B4b）。
@@ -97,9 +104,6 @@ export function AppShell() {
   const [importError, setImportError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspacesLoaded, setWorkspacesLoaded] = useState(false);
-  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceSummary | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("overview");
-  const [selectedWorkItemKey, setSelectedWorkItemKey] = useState<string | null>(null);
   const [createWorkItemRequest, setCreateWorkItemRequest] = useState<{
     type: "requirement" | "bug";
     id: number;
@@ -226,130 +230,207 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel, isMobile]);
 
-  // Right panel — file tabs only
-  const [fileTabs, setFileTabs] = useState<Tab[]>([]);
-  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
-
   const handleFileLineMention = useCallback((relativePath: string, startLine: number, endLine: number) => {
     chatInputRef.current?.insertText(buildFileLineMentionText(relativePath, startLine, endLine));
   }, []);
 
-  const initialSessionId = initialNavigation.sessionId;
-  const [activeCwd, setActiveCwd] = useState<string | null>(null);
-  const [workspaceTabIds, setWorkspaceTabIds] = useState<string[]>([]);
-  const [workspaceMruIds, setWorkspaceMruIds] = useState<string[]>([]);
-  const workspaceSnapshotsRef = useRef<Record<string, WorkspaceTabSnapshot>>({});
-  const workspaceTabsHydratedRef = useRef(false);
-  // True once the initial ?session= URL param has been resolved (or confirmed absent)
-  const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
+  // ---- Tab mutation helpers ---------------------------------------------------
+  // All stable: they mutate tabs via setTabs/updaters, so they never need to
+  // appear in a navigation effect's dependency array (the race root cause).
+  const updateTab = useCallback((
+    id: string,
+    patch: Partial<WorkspaceTabState> | ((tab: WorkspaceTabState) => Partial<WorkspaceTabState>),
+  ) => {
+    setTabs((prev) => prev.map((t) => {
+      if (t.id !== id) return t;
+      const p = typeof patch === "function" ? patch(t) : patch;
+      return { ...t, ...p };
+    }));
+  }, []);
 
-  const applyWorkspaceSnapshot = useCallback((workspace: WorkspaceSummary, snapshot?: WorkspaceTabSnapshot) => {
-    const hasOverview = workspace.capabilities.includes("overview");
-    setWorkspaceView(snapshot?.workspaceView ?? (hasOverview ? "overview" : "chat"));
-    // 校验快照里的 session 确实属于这个 workspace（cwd 落在其路径下），
-    // 否则丢弃——避免历史脏快照把 A workspace 的 session 带进 B workspace。
-    const snapshotSession = snapshot?.selectedSession;
-    const wsRoot = workspace.path.replace(/\/+$/, "");
-    const sessionBelongs = snapshotSession && (
-      snapshotSession.cwd === workspace.path || snapshotSession.cwd.startsWith(`${wsRoot}/`)
-    );
-    setSelectedSession(sessionBelongs ? snapshotSession : null);
-    setNewSessionCwd(snapshot ? snapshot.newSessionCwd : (hasOverview ? null : workspace.path));
-    setSelectedWorkItemKey(snapshot?.selectedWorkItemKey ?? null);
-    setFileTabs(snapshot?.fileTabs ?? []);
-    setActiveFileTabId(snapshot?.activeFileTabId ?? null);
-    setRightPanelOpen(snapshot?.rightPanelOpen ?? false);
-    setActiveCwd(workspace.path);
-    setSessionKey((key) => key + 1);
+  const updateActiveTab = useCallback((
+    patch: Partial<WorkspaceTabState> | ((tab: WorkspaceTabState) => Partial<WorkspaceTabState>),
+  ) => {
+    if (activeTabId) updateTab(activeTabId, patch);
+  }, [activeTabId, updateTab]);
+
+  // Register a workspace as a tab if it isn't open yet (with its default view),
+  // keep the master workspace list in sync, and touch MRU. Returns the tab id.
+  const ensureTab = useCallback((workspace: WorkspaceSummary): string => {
+    setWorkspaces((current) => current.some((w) => w.id === workspace.id)
+      ? current.map((w) => (w.id === workspace.id ? workspace : w))
+      : [...current, workspace]);
+    setTabs((prev) => {
+      if (prev.some((t) => t.id === workspace.id)) return prev;
+      const hasOverview = workspace.capabilities.includes("overview");
+      const tab: WorkspaceTabState = {
+        id: workspace.id,
+        workspace,
+        view: hasOverview ? "overview" : "chat",
+        session: null,
+        newSessionCwd: hasOverview ? null : workspace.path,
+        workItemKey: null,
+        fileTabs: [],
+        activeFileTabId: null,
+        rightPanelOpen: false,
+      };
+      return [...prev, tab];
+    });
+    return workspace.id;
+  }, []);
+
+  // Make a tab active (or go home with null). Closes modals and clears the
+  // per-session UI that ChatWindow will re-populate for the new session.
+  const activateTab = useCallback((id: string | null) => {
+    setWorkspaceManagerOpen(false);
+    setModelsConfigOpen(false);
+    setSkillsConfigOpen(false);
+    setPluginsConfigOpen(false);
+    setArchiveOpen(false);
+    setProjectTrustDialogOpen(false);
+    setActiveTopPanel(null);
+    if (id) setMruIds((ids) => [id, ...ids.filter((x) => x !== id)]);
+    setActiveTabId(id);
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
-    setActiveTopPanel(null);
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
+
+  // The URL is a write-only projection of the active tab. We push via the
+  // History API (no Next.js navigation → no Suspense churn); popstate is the
+  // only reader.
+  const navigateUrl = useCallback((query: string | null, replace = false) => {
+    const target = query ? `?${query}` : window.location.pathname;
+    const current = window.location.pathname + window.location.search;
+    if (target === current) return;
+    if (replace) window.history.replaceState(null, "", target);
+    else window.history.pushState(null, "", target);
   }, []);
 
-  const captureActiveWorkspaceSnapshot = useCallback(() => {
-    if (!activeWorkspace) return;
-    workspaceSnapshotsRef.current[activeWorkspace.id] = {
-      workspaceView,
-      selectedSession,
-      newSessionCwd,
-      selectedWorkItemKey,
-      fileTabs,
-      activeFileTabId,
-      rightPanelOpen,
-    };
-  }, [
-    activeFileTabId,
-    activeWorkspace,
-    fileTabs,
-    newSessionCwd,
-    rightPanelOpen,
-    selectedSession,
-    selectedWorkItemKey,
-    workspaceView,
-  ]);
+  const buildTabQuery = useCallback((tab: WorkspaceTabState): string => {
+    const parts = [`workspace=${encodeURIComponent(tab.id)}`, `view=${tab.view}`];
+    if (tab.view === "chat" && tab.session) parts.push(`session=${encodeURIComponent(tab.session.id)}`);
+    if (tab.view === "work-items" && tab.workItemKey) parts.push(`item=${encodeURIComponent(tab.workItemKey)}`);
+    return parts.join("&");
+  }, []);
 
   const loadWorkspaces = useCallback(async () => {
     try {
       const response = await fetch("/api/workspaces");
       if (!response.ok) return;
       const data = await response.json() as { workspaces?: WorkspaceSummary[] };
-      const nextWorkspaces = data.workspaces ?? [];
-      setWorkspaces(nextWorkspaces);
-
-      let persisted: PersistedWorkspaceTabs | null = null;
-      if (!workspaceTabsHydratedRef.current) {
-        workspaceTabsHydratedRef.current = true;
-        try {
-          const raw = window.localStorage.getItem(WORKSPACE_TABS_STORAGE_KEY);
-          const parsed = raw ? JSON.parse(raw) as PersistedWorkspaceTabs : null;
-          if (parsed?.version === 1 && Array.isArray(parsed.tabIds)) persisted = parsed;
-        } catch {
-          // Ignore malformed or unavailable browser storage.
-        }
-        if (persisted) {
-          const availableIds = new Set(nextWorkspaces.filter((workspace) => workspace.available).map((workspace) => workspace.id));
-          const restoredTabIds = persisted.tabIds.filter((id) => availableIds.has(id));
-          workspaceSnapshotsRef.current = persisted.snapshots ?? {};
-          setWorkspaceTabIds(restoredTabIds);
-          setWorkspaceMruIds(persisted.mruIds.filter((id) => restoredTabIds.includes(id)));
-        }
-      }
-
-      setActiveWorkspace((current) => {
-        const requestedId = initialSearchParamsRef.current.get("workspace");
-        const explicitlyHome = initialSearchParamsRef.current.get("tab") === "home";
-        const targetId = explicitlyHome ? null : (requestedId ?? current?.id ?? persisted?.activeWorkspaceId ?? null);
-        const next = targetId
-          ? nextWorkspaces.find((workspace) => workspace.id === targetId && workspace.available)
-          : undefined;
-        if (!next) {
-          if (explicitlyHome) {
-            setWorkspaceView("overview");
-            setSelectedSession(null);
-            setNewSessionCwd(null);
-            setActiveCwd(null);
-            setSelectedWorkItemKey(null);
-            setFileTabs([]);
-            setActiveFileTabId(null);
-            setRightPanelOpen(false);
-            return null;
-          }
-          return current;
-        }
-        setWorkspaceTabIds((ids) => ids.includes(next.id) ? ids : [...ids, next.id]);
-        setWorkspaceMruIds((ids) => [next.id, ...ids.filter((id) => id !== next.id)]);
-        if (current?.id !== next.id) applyWorkspaceSnapshot(next, workspaceSnapshotsRef.current[next.id]);
-        else setActiveCwd(next.path);
-        return next;
-      });
+      setWorkspaces(data.workspaces ?? []);
     } catch (error) {
       console.error("Failed to load workspaces:", error);
     } finally {
       setWorkspacesLoaded(true);
     }
-  }, [applyWorkspaceSnapshot]);
+  }, []);
+
+  // Translate the current URL into tab state. Used by the initial mount (once
+  // workspaces are loaded) and by popstate (back/forward). This is the *only*
+  // place the URL drives state, so user clicks can never race a URL→state effect.
+  const applyUrlToTabs = useCallback(async (params: URLSearchParams) => {
+    if (params.get("tab") === "home" || !params.get("workspace")) {
+      setActiveTabId(null);
+      return;
+    }
+    let workspaceId = params.get("workspace")!;
+    let workspace = workspaces.find((w) => w.id === workspaceId && w.available) ?? null;
+    const rawView = params.get("view");
+    const sessionId = params.get("session");
+    const itemKey = params.get("item");
+
+    let session: SessionInfo | null = null;
+    if (sessionId) {
+      session = sessionActivity.sessions.find((s) => s.id === sessionId) ?? null;
+      if (!session) {
+        try {
+          const r = await fetch("/api/sessions");
+          const d = r.ok ? await r.json() as { sessions?: SessionInfo[] } : null;
+          session = d?.sessions?.find((s) => s.id === sessionId) ?? null;
+        } catch {
+          // A missing session just falls through to a fresh chat view.
+        }
+      }
+      if (session) {
+        // Make sure the session's owning workspace is known & available; import
+        // it on the fly when opening via a shared link to an unknown cwd.
+        const owner = workspaces
+          .filter((w) => w.available && (session!.cwd === w.path || session!.cwd.startsWith(`${w.path.replace(/\/+$/, "")}/`)))
+          .sort((a, b) => b.path.length - a.path.length)[0];
+        if (owner) {
+          workspace = owner;
+          workspaceId = owner.id;
+        } else if (!workspace) {
+          try {
+            const ir = await fetch("/api/workspaces", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: session.cwd }),
+            });
+            const imported = ir.ok ? await ir.json() as { workspace?: WorkspaceSummary } : null;
+            if (imported?.workspace) {
+              const ws = imported.workspace;
+              setWorkspaces((cur) => cur.some((w) => w.id === ws.id) ? cur.map((w) => (w.id === ws.id ? ws : w)) : [...cur, ws]);
+              workspace = ws;
+              workspaceId = ws.id;
+            }
+          } catch {
+            // Leave workspace null → fall back to home.
+          }
+        }
+      }
+    }
+    if (!workspace) {
+      setActiveTabId(null);
+      return;
+    }
+
+    const view: WorkspaceView = rawView && (["overview", "settings", "work-items", "chat"] as const).includes(rawView as WorkspaceView)
+      ? rawView as WorkspaceView
+      : (workspace.capabilities.includes("overview") ? "overview" : "chat");
+    ensureTab(workspace);
+    updateTab(workspaceId, {
+      view,
+      session,
+      newSessionCwd: view === "chat" && !session ? workspace.path : null,
+      workItemKey: view === "work-items" ? itemKey : null,
+    });
+    activateTab(workspaceId);
+  }, [workspaces, sessionActivity.sessions, ensureTab, updateTab, activateTab]);
+
+  // Initial restore: once workspaces are loaded, open whatever the URL points at.
+  const initialNavDoneRef = useRef(false);
+  useEffect(() => {
+    if (!workspacesLoaded || initialNavDoneRef.current) return;
+    initialNavDoneRef.current = true;
+    void applyUrlToTabs(new URLSearchParams(window.location.search)).finally(() => setNavReady(true));
+  }, [workspacesLoaded, applyUrlToTabs]);
+
+  // Back/forward: the only other place the URL drives state.
+  useEffect(() => {
+    const onPop = () => { void applyUrlToTabs(new URLSearchParams(window.location.search)); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [applyUrlToTabs]);
+
+  // Keep each open tab's workspace in sync with the master list — capabilities,
+  // repositories and availability can change while a tab is open (add repo,
+  // config becomes ready, …).
+  useEffect(() => {
+    if (workspaces.length === 0) return;
+    setTabs((prev) => {
+      let changed = false;
+      const next = prev.map((t) => {
+        const fresh = workspaces.find((w) => w.id === t.id);
+        if (fresh && fresh !== t.workspace) { changed = true; return { ...t, workspace: fresh }; }
+        return t;
+      });
+      return changed ? next : prev;
+    });
+  }, [workspaces]);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -361,282 +442,84 @@ export function AppShell() {
       .catch(() => {});
   }, [loadWorkspaces]);
 
-  // The URL is the active navigation target. This effect makes browser
-  // back/forward restore the addressed workspace view without closing tabs.
-  useEffect(() => {
-    if (!workspacesLoaded) return;
-    if (searchParams.get("tab") === "home") return;
-    const workspaceId = searchParams.get("workspace");
-    if (!workspaceId) return;
-    const workspace = workspaces.find((item) => item.id === workspaceId && item.available);
-    if (!workspace) return;
-
-    if (activeWorkspace?.id !== workspace.id) {
-      captureActiveWorkspaceSnapshot();
-      applyWorkspaceSnapshot(workspace, workspaceSnapshotsRef.current[workspace.id]);
-      setActiveWorkspace(workspace);
-      setWorkspaceTabIds((ids) => ids.includes(workspace.id) ? ids : [...ids, workspace.id]);
-      setWorkspaceMruIds((ids) => [workspace.id, ...ids.filter((id) => id !== workspace.id)]);
-    }
-
-    const view = searchParams.get("view") as WorkspaceView | null;
-    if (view && ["overview", "settings", "work-items", "chat"].includes(view)) setWorkspaceView(view);
-    const itemKey = searchParams.get("item");
-    if (view === "work-items") setSelectedWorkItemKey(itemKey);
-    const sessionId = searchParams.get("session");
-    if (view === "chat" && sessionId) {
-      const session = sessionActivity.sessions.find((item) => item.id === sessionId);
-      if (session) {
-        setSelectedSession(session);
-        setNewSessionCwd(null);
-        setActiveCwd(workspace.path);
-      }
-    }
-  }, [
-    activeWorkspace?.id,
-    applyWorkspaceSnapshot,
-    captureActiveWorkspaceSnapshot,
-    searchParams,
-    sessionActivity.sessions,
-    workspaces,
-    workspacesLoaded,
-  ]);
-
-  const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
-    setNewSessionCwd(null);
-    setSelectedSession(session);
-    if (activeWorkspace) setWorkspaceView("chat");
+  const handleSelectSession = useCallback((session: SessionInfo) => {
+    if (!activeTabId) return;
+    updateTab(activeTabId, { session, newSessionCwd: null, view: "chat" });
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
-    setInitialSessionRestored(true);
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
-    if (isMobile && !isRestore) setSidebarOpen(false);
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
-    if (!isRestore) {
-      const workspaceQuery = activeWorkspace
-        ? `workspace=${encodeURIComponent(activeWorkspace.id)}&`
-        : "";
-      router.push(`?${workspaceQuery}view=chat&session=${encodeURIComponent(session.id)}`, { scroll: false });
-    }
-  }, [activeWorkspace, router, isMobile]);
-
-  useEffect(() => {
-    if (!workspacesLoaded || !initialSessionId || initialSessionRestored) return;
-    // 用户已选了别的 session（包括正在新建会话）：不再用 URL 的 initialSessionId
-    // 覆盖，只标记恢复完成——否则 selectedSession 短暂变 null（新建）时会把 URL
-    // 里的旧 session 恢复回来，导致“新建会话要点 2 次”。
-    if (selectedSession) {
-      setInitialSessionRestored(true);
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const response = await fetch("/api/sessions");
-        const data = response.ok
-          ? await response.json() as { sessions?: SessionInfo[] }
-          : null;
-        const session = data?.sessions?.find((item) => item.id === initialSessionId);
-        if (cancelled) return;
-        if (!session) {
-          setInitialSessionRestored(true);
-          return;
-        }
-        if (activeWorkspace) {
-          handleSelectSession(session, true);
-          return;
-        }
-        const importResponse = await fetch("/api/workspaces", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: session.cwd }),
-        });
-        const imported = await importResponse.json() as {
-          workspace?: WorkspaceSummary;
-          error?: string;
-        };
-        if (!importResponse.ok || !imported.workspace) {
-          throw new Error(imported.error ?? `HTTP ${importResponse.status}`);
-        }
-        if (cancelled) return;
-        const workspace = imported.workspace;
-        setWorkspaces((current) => current.some((item) => item.id === workspace.id)
-          ? current.map((item) => item.id === workspace.id ? workspace : item)
-          : [...current, workspace]);
-        setActiveWorkspace(workspace);
-        setActiveCwd(workspace.path);
-        setWorkspaceView("chat");
-        setNewSessionCwd(null);
-        setSelectedSession(session);
-        setSessionKey((key) => key + 1);
-        setInitialSessionRestored(true);
-        router.replace(
-          `?workspace=${encodeURIComponent(workspace.id)}&session=${encodeURIComponent(session.id)}`,
-          { scroll: false },
-        );
-      } catch {
-        if (!cancelled) setInitialSessionRestored(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeWorkspace,
-    handleSelectSession,
-    initialSessionId,
-    initialSessionRestored,
-    router,
-    selectedSession,
-    workspacesLoaded,
-  ]);
+    if (isMobile) setSidebarOpen(false);
+    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`);
+  }, [activeTabId, updateTab, navigateUrl, isMobile]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
-    setWorkspaceManagerOpen(false);
-    setModelsConfigOpen(false);
-    setSkillsConfigOpen(false);
-    setPluginsConfigOpen(false);
-    setArchiveOpen(false);
-    setProjectTrustDialogOpen(false);
-    setWorkspaces((current) => current.some((item) => item.id === workspace.id)
-      ? current.map((item) => item.id === workspace.id ? workspace : item)
-      : [...current, workspace]);
-    if (activeWorkspace?.id !== workspace.id) {
-      captureActiveWorkspaceSnapshot();
-      applyWorkspaceSnapshot(workspace, workspaceSnapshotsRef.current[workspace.id]);
-    }
-    setActiveWorkspace(workspace);
-    setWorkspaceTabIds((ids) => ids.includes(workspace.id) ? ids : [...ids, workspace.id]);
-    setWorkspaceMruIds((ids) => [workspace.id, ...ids.filter((id) => id !== workspace.id)]);
-    if (isMobile) setSidebarOpen(false);
-    const snapshot = workspaceSnapshotsRef.current[workspace.id];
-    const view = snapshot?.workspaceView ?? (workspace.capabilities.includes("overview") ? "overview" : "chat");
-    const candSession = snapshot?.selectedSession;
-    const candWsRoot = workspace.path.replace(/\/+$/, "");
-    const candBelongs = candSession && (
-      candSession.cwd === workspace.path || candSession.cwd.startsWith(`${candWsRoot}/`)
-    );
-    const sessionQuery = view === "chat" && candBelongs
-      ? `&session=${encodeURIComponent(candSession!.id)}`
-      : "";
-    const itemQuery = view === "work-items" && snapshot?.selectedWorkItemKey
-      ? `&item=${encodeURIComponent(snapshot.selectedWorkItemKey)}`
-      : "";
-    router.push(`?workspace=${encodeURIComponent(workspace.id)}&view=${view}${sessionQuery}${itemQuery}`, { scroll: false });
-  }, [activeWorkspace?.id, applyWorkspaceSnapshot, captureActiveWorkspaceSnapshot, isMobile, router]);
+    const id = ensureTab(workspace);
+    activateTab(id);
+    // Project the (possibly already-open) tab to the URL. `tabs` may not yet
+    // reflect a brand-new tab, so fall back to the workspace's default view.
+    const existing = tabs.find((t) => t.id === id);
+    navigateUrl(existing ? buildTabQuery(existing) : `workspace=${encodeURIComponent(id)}&view=${workspace.capabilities.includes("overview") ? "overview" : "chat"}`);
+  }, [ensureTab, activateTab, tabs, buildTabQuery, navigateUrl]);
 
   const handleWorkspaceNewSession = useCallback(() => {
-    if (!activeWorkspace) return;
-    setWorkspaceView("chat");
-    setSelectedSession(null);
-    setNewSessionCwd(activeWorkspace.path);
-    setSessionKey((key) => key + 1);
+    if (!activeTabId) return;
+    updateTab(activeTabId, { view: "chat", session: null, newSessionCwd: activeWorkspace?.path ?? null });
+    setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
     if (isMobile) setSidebarOpen(false);
-    router.push(`?workspace=${encodeURIComponent(activeWorkspace.id)}&view=chat`, { scroll: false });
-  }, [activeWorkspace, isMobile, router]);
+    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat`);
+  }, [activeTabId, activeWorkspace, updateTab, navigateUrl, isMobile]);
 
   const handleReturnHome = useCallback(() => {
-    captureActiveWorkspaceSnapshot();
-    setWorkspaceManagerOpen(false);
-    setActiveWorkspace(null);
-    setWorkspaceView("overview");
-    setSelectedSession(null);
-    setNewSessionCwd(null);
-    setActiveCwd(null);
-    setSelectedWorkItemKey(null);
-    setFileTabs([]);
-    setActiveFileTabId(null);
-    setRightPanelOpen(false);
-    setModelsConfigOpen(false);
-    setSkillsConfigOpen(false);
-    setPluginsConfigOpen(false);
-    setArchiveOpen(false);
-    setProjectTrustDialogOpen(false);
-    router.push("?tab=home", { scroll: false });
-  }, [captureActiveWorkspaceSnapshot, router]);
+    activateTab(null);
+    navigateUrl("tab=home");
+  }, [activateTab, navigateUrl]);
 
   const navigateWorkspaceView = useCallback((view: WorkspaceView, itemKey?: string | null) => {
-    if (!activeWorkspace) return;
-    setWorkspaceView(view);
-    if (view === "work-items") setSelectedWorkItemKey(itemKey ?? null);
-    const itemQuery = view === "work-items" && itemKey ? `&item=${encodeURIComponent(itemKey)}` : "";
-    router.push(`?workspace=${encodeURIComponent(activeWorkspace.id)}&view=${view}${itemQuery}`, { scroll: false });
-  }, [activeWorkspace, router]);
+    if (!activeTabId) return;
+    updateTab(activeTabId, {
+      view,
+      ...(view === "work-items" ? { workItemKey: itemKey ?? null } : {}),
+    });
+    let query = `workspace=${encodeURIComponent(activeTabId)}&view=${view}`;
+    if (view === "work-items" && itemKey) query += `&item=${encodeURIComponent(itemKey)}`;
+    navigateUrl(query);
+  }, [activeTabId, updateTab, navigateUrl]);
 
   const handleCloseWorkspaceTab = useCallback((workspaceId: string) => {
-    const wasActive = activeWorkspace?.id === workspaceId;
-    if (wasActive) captureActiveWorkspaceSnapshot();
-    const snapshot = workspaceSnapshotsRef.current[workspaceId];
-    const draftKey = snapshot?.selectedSession?.id
-      ?? (snapshot?.newSessionCwd ? `new:${snapshot.newSessionCwd}` : null);
+    const tab = tabs.find((t) => t.id === workspaceId) ?? null;
+    const draftKey = tab?.session?.id ?? (tab?.newSessionCwd ? `new:${tab.newSessionCwd}` : null);
     const draft = draftKey ? getDraft(draftKey) : null;
     if (draft && (draft.value || draft.images.length > 0)) {
       const shouldClose = window.confirm("这个工作区有未发送的聊天草稿。要关闭并丢弃草稿吗？");
       if (!shouldClose) return;
       clearDraft(draftKey!);
     }
-    delete workspaceSnapshotsRef.current[workspaceId];
-    const remainingIds = workspaceTabIds.filter((id) => id !== workspaceId);
-    setWorkspaceTabIds(remainingIds);
-    const nextMru = workspaceMruIds.filter((id) => id !== workspaceId && remainingIds.includes(id));
-    setWorkspaceMruIds(nextMru);
-    if (!wasActive) return;
+    const remaining = tabs.filter((t) => t.id !== workspaceId);
+    setTabs(remaining);
+    setMruIds((ids) => ids.filter((id) => id !== workspaceId));
+    if (activeTabId !== workspaceId) return;
 
-    const nextWorkspace = nextMru
-      .map((id) => workspaces.find((workspace) => workspace.id === id && workspace.available))
-      .find((workspace): workspace is WorkspaceSummary => Boolean(workspace));
-    if (nextWorkspace) {
-      applyWorkspaceSnapshot(nextWorkspace, workspaceSnapshotsRef.current[nextWorkspace.id]);
-      setActiveWorkspace(nextWorkspace);
-      router.push(`?workspace=${encodeURIComponent(nextWorkspace.id)}&view=${workspaceSnapshotsRef.current[nextWorkspace.id]?.workspaceView ?? "overview"}`, { scroll: false });
-      return;
+    const nextId = mruIds.find((id) => id !== workspaceId && remaining.some((t) => t.id === id));
+    if (nextId) {
+      activateTab(nextId);
+      const nextTab = remaining.find((t) => t.id === nextId);
+      navigateUrl(nextTab ? buildTabQuery(nextTab) : `workspace=${encodeURIComponent(nextId)}`);
+    } else {
+      activateTab(null);
+      navigateUrl("tab=home");
     }
-
-    setActiveWorkspace(null);
-    setWorkspaceView("overview");
-    setSelectedSession(null);
-    setNewSessionCwd(null);
-    setActiveCwd(null);
-    setSelectedWorkItemKey(null);
-    setFileTabs([]);
-    setActiveFileTabId(null);
-    setRightPanelOpen(false);
-    router.push("?tab=home", { scroll: false });
-  }, [activeWorkspace?.id, applyWorkspaceSnapshot, captureActiveWorkspaceSnapshot, router, workspaceMruIds, workspaceTabIds, workspaces]);
-
-  useEffect(() => {
-    if (!workspaceTabsHydratedRef.current) return;
-    captureActiveWorkspaceSnapshot();
-    const persisted: PersistedWorkspaceTabs = {
-      version: 1,
-      tabIds: workspaceTabIds,
-      activeWorkspaceId: activeWorkspace?.id ?? null,
-      mruIds: workspaceMruIds,
-      snapshots: workspaceSnapshotsRef.current,
-    };
-    try {
-      window.localStorage.setItem(WORKSPACE_TABS_STORAGE_KEY, JSON.stringify(persisted));
-    } catch {
-      // Ignore storage quota and privacy-mode failures.
-    }
-  }, [activeWorkspace?.id, captureActiveWorkspaceSnapshot, workspaceMruIds, workspaceTabIds]);
+  }, [tabs, activeTabId, mruIds, activateTab, buildTabQuery, navigateUrl]);
 
   const handleCreateWorkspace = useCallback(() => {
-    captureActiveWorkspaceSnapshot();
+    // Opening the manager from home; don't run it through activateTab (which
+    // would close the very modal we're opening).
     setWorkspaceManagerOpen(true);
-    setActiveWorkspace(null);
-    setActiveCwd(null);
-    setSelectedSession(null);
-    setNewSessionCwd(null);
-    setFileTabs([]);
-    setActiveFileTabId(null);
-    setRightPanelOpen(false);
-    router.push("?tab=home&view=create-workspace", { scroll: false });
-  }, [captureActiveWorkspaceSnapshot, router]);
+    setActiveTabId(null);
+    navigateUrl("tab=home&view=create-workspace");
+  }, [navigateUrl]);
 
   // Shared directory-import flow used by both the sidebar and the home page.
   // Registers the picked directory as a workspace (with a copy-confirm prompt
@@ -699,30 +582,16 @@ export function AppShell() {
       .sort((left, right) => right.path.length - left.path.length)[0];
     if (!owner) return;
     setWorkspaceManagerOpen(false);
-    if (activeWorkspace?.id !== owner.id) {
-      captureActiveWorkspaceSnapshot();
-      applyWorkspaceSnapshot(owner, workspaceSnapshotsRef.current[owner.id]);
-    }
-    setActiveWorkspace(owner);
-    setWorkspaceTabIds((ids) => ids.includes(owner.id) ? ids : [...ids, owner.id]);
-    setWorkspaceMruIds((ids) => [owner.id, ...ids.filter((id) => id !== owner.id)]);
-    setWorkspaceView("chat");
-    setSelectedSession(session);
-    setNewSessionCwd(null);
-    setActiveCwd(owner.path);
-    setSessionKey((key) => key + 1);
+    ensureTab(owner);
+    updateTab(owner.id, { view: "chat", session, newSessionCwd: null });
+    activateTab(owner.id);
+    setSessionKey((k) => k + 1);
     setSystemPrompt(null);
-    setInitialSessionRestored(true);
-    if (isMobile) setSidebarOpen(false);
-    router.push(
-      `?workspace=${encodeURIComponent(owner.id)}&view=chat&session=${encodeURIComponent(session.id)}`,
-      { scroll: false },
-    );
-  }, [activeWorkspace?.id, applyWorkspaceSnapshot, captureActiveWorkspaceSnapshot, workspaces, isMobile, router]);
+    navigateUrl(`workspace=${encodeURIComponent(owner.id)}&view=chat&session=${encodeURIComponent(session.id)}`);
+  }, [workspaces, ensureTab, updateTab, activateTab, navigateUrl]);
 
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
     navigateWorkspaceView("work-items");
-    setSelectedWorkItemKey(null);
     setCreateWorkItemRequest({ type, id: Date.now() });
     if (isMobile) setSidebarOpen(false);
   }, [isMobile, navigateWorkspaceView]);
@@ -746,21 +615,18 @@ export function AppShell() {
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
         if (!full) return;
-        setSelectedSession((prev) => (prev && prev.id === sessionId && !prev.projectRoot ? full : prev));
+        updateActiveTab((tab) => (tab.session?.id === sessionId && !tab.session.projectRoot ? { session: full } : {}));
       })
       .catch(() => {});
-  }, []);
+  }, [updateActiveTab]);
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
-    setNewSessionCwd(null);
-    setSelectedSession(session);
+    if (!activeTabId) return;
+    updateTab(activeTabId, { session, newSessionCwd: null });
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
-    const workspaceQuery = activeWorkspace
-      ? `workspace=${encodeURIComponent(activeWorkspace.id)}&`
-      : "";
-    router.replace(`?${workspaceQuery}view=chat&session=${encodeURIComponent(session.id)}`, { scroll: false });
+    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`, true);
     const pending = pendingWorkItemConversationRef.current;
     pendingWorkItemConversationRef.current = null;
     if (pending) {
@@ -783,7 +649,7 @@ export function AppShell() {
         })
         .catch(() => {});
     }
-  }, [activeWorkspace, router, hydrateSelectedSession]);
+  }, [activeTabId, updateTab, navigateUrl, hydrateSelectedSession]);
 
   const handleOpenWorkItemConversation = useCallback(async (
     workspace: WorkspaceSummary,
@@ -797,8 +663,12 @@ export function AppShell() {
           const data = await response.json() as { sessions: SessionInfo[] };
           const existing = data.sessions.find((session) => session.id === primaryConversationId);
           if (existing) {
-            setWorkspaceManagerOpen(false);
-            handleSelectSession(existing);
+            ensureTab(workspace);
+            updateTab(workspace.id, { view: "chat", session: existing, newSessionCwd: null });
+            activateTab(workspace.id);
+            setSessionKey((k) => k + 1);
+            setSystemPrompt(null);
+            navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(existing.id)}`);
             return;
           }
         }
@@ -811,13 +681,11 @@ export function AppShell() {
       workspaceId: workspace.id,
       key: item.key,
     };
-    setActiveWorkspace(workspace);
-    setWorkspaceView("chat");
-    setSelectedSession(null);
-    setNewSessionCwd(workspace.path);
-    setActiveCwd(workspace.path);
+    ensureTab(workspace);
+    updateTab(workspace.id, { view: "chat", session: null, newSessionCwd: workspace.path });
+    activateTab(workspace.id);
     setSessionKey((key) => key + 1);
-    router.replace(`?workspace=${encodeURIComponent(workspace.id)}`, { scroll: false });
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}`, true);
     const prompt = `请继续处理工作项 ${item.key}（${item.title}）。先调用 workspace_get_work_item 读取现状，再按 Workspace 的 AGENTS.md 和已选 Pi skills 协作；只把关键里程碑写回工作项。`;
     let attempts = 0;
     const timer = window.setInterval(() => {
@@ -829,7 +697,7 @@ export function AppShell() {
         window.clearInterval(timer);
       }
     }, 50);
-  }, [handleSelectSession, router]);
+  }, [ensureTab, updateTab, activateTab, navigateUrl]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -855,7 +723,7 @@ export function AppShell() {
       const title = body.title.trim();
       setRefreshKey((key) => key + 1);
       if (activeSessionIdRef.current !== sessionId) return;
-      setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
+      updateActiveTab((tab) => (tab.session?.id === sessionId ? { session: { ...tab.session!, name: title } } : {}));
       setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: title } : current);
       setAutoNameStatus({ kind: "success" });
       autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 1800);
@@ -865,7 +733,7 @@ export function AppShell() {
       setAutoNameStatus({ kind: "error", message });
       autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 5000);
     }
-  }, [autoNameStatus.kind, selectedSession?.id]);
+  }, [autoNameStatus.kind, selectedSession?.id, updateActiveTab]);
 
   useEffect(() => {
     if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
@@ -873,70 +741,73 @@ export function AppShell() {
   }, [selectedSession?.id]);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
+    if (!activeTabId) return;
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
-    setNewSessionCwd(null);
-    setSelectedSession((prev) => ({
-      ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
-      id: newSessionId,
+    updateTab(activeTabId, (tab) => ({
+      session: { ...(tab.session ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }), id: newSessionId },
+      newSessionCwd: null,
     }));
     hydrateSelectedSession(newSessionId);
-    const workspaceQuery = activeWorkspace ? `workspace=${encodeURIComponent(activeWorkspace.id)}&` : "";
-    router.replace(`?${workspaceQuery}view=chat&session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [activeWorkspace, router, hydrateSelectedSession]);
+    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(newSessionId)}`, true);
+  }, [activeTabId, updateTab, navigateUrl, hydrateSelectedSession]);
 
   const handleOpenFile = useCallback((
     filePath: string,
     fileName: string,
     options?: { sourceSessionId?: string | null; modeHint?: "diff" },
   ) => {
+    if (!activeTabId) return;
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
-    const tabId = `file:${filePath}`;
-    setFileTabs((prev) => {
-      const existing = prev.find((t) => t.id === tabId);
+    const fileTabId = `file:${filePath}`;
+    updateTab(activeTabId, (tab) => {
+      const prev = tab.fileTabs;
+      const existing = prev.find((t) => t.id === fileTabId);
+      let fileTabs: Tab[];
       if (!existing) {
-        return [...prev, {
-          id: tabId,
+        fileTabs = [...prev, {
+          id: fileTabId,
           label: fileName,
           filePath,
           sourceSessionId,
           initialDisplayMode: modeHint,
         }];
+      } else {
+        const sourceUnchanged = !sourceSessionId || existing.sourceSessionId === sourceSessionId;
+        const modeUnchanged = !modeHint || existing.initialDisplayMode === modeHint;
+        if (sourceUnchanged && modeUnchanged) {
+          fileTabs = prev;
+        } else {
+          fileTabs = prev.map((t) => {
+            if (t.id !== fileTabId) return t;
+            const next: Tab = { ...t };
+            if (sourceSessionId) next.sourceSessionId = sourceSessionId;
+            if (modeHint) next.initialDisplayMode = modeHint;
+            return next;
+          });
+        }
       }
-      const sourceUnchanged = !sourceSessionId || existing.sourceSessionId === sourceSessionId;
-      const modeUnchanged = !modeHint || existing.initialDisplayMode === modeHint;
-      if (sourceUnchanged && modeUnchanged) return prev;
-      return prev.map((t) => {
-        if (t.id !== tabId) return t;
-        const next: Tab = { ...t };
-        if (sourceSessionId) next.sourceSessionId = sourceSessionId;
-        if (modeHint) next.initialDisplayMode = modeHint;
-        return next;
-      });
+      return { fileTabs, activeFileTabId: fileTabId, rightPanelOpen: true };
     });
-    setActiveFileTabId(tabId);
-    setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [activeTabId, updateTab, isMobile]);
 
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
   }, [handleOpenFile, selectedSession?.id]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
-    setFileTabs((prev) => {
-      const next = prev.filter((t) => t.id !== tabId);
-      if (next.length === 0) setRightPanelOpen(false);
-      return next;
+    if (!activeTabId) return;
+    updateTab(activeTabId, (tab) => {
+      const next = tab.fileTabs.filter((t) => t.id !== tabId);
+      const activeFileTabId = tab.activeFileTabId !== tabId
+        ? tab.activeFileTabId
+        : (next.length > 0 ? next[next.length - 1].id : null);
+      return { fileTabs: next, activeFileTabId, rightPanelOpen: next.length > 0 ? tab.rightPanelOpen : false };
     });
-    setActiveFileTabId((cur) => {
-      if (cur !== tabId) return cur;
-      const remaining = fileTabs.filter((t) => t.id !== tabId);
-      return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
-    });
-  }, [fileTabs]);
+  }, [activeTabId, updateTab]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -957,7 +828,7 @@ export function AppShell() {
     ?? activeCwd
     ?? globalSettingsCwd;
   // While restoring initial session from URL, don't show the placeholder
-  const showPlaceholder = initialSessionRestored && !showChat;
+  const showPlaceholder = navReady && activeWorkspace !== null && !showChat;
 
   useEffect(() => {
     setProjectTrust(null);
@@ -1062,7 +933,6 @@ export function AppShell() {
       onNewSession={handleWorkspaceNewSession}
       onSelectSession={handleSelectSession}
       onSelectWorkItem={(item) => {
-        setSelectedWorkItemKey(item.key);
         navigateWorkspaceView("work-items", item.key);
         if (isMobile) setSidebarOpen(false);
       }}
@@ -1073,7 +943,7 @@ export function AppShell() {
       onOpenPlugins={() => setPluginsConfigOpen(true)}
       onOpenArchive={() => setArchiveOpen(true)}
       onSessionRemoved={(id) => {
-        if (selectedSession?.id === id) setSelectedSession(null);
+        updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
         setRefreshKey((k) => k + 1);
       }}
     />
@@ -1855,7 +1725,7 @@ export function AppShell() {
 
         <WorkspaceTabBar
           workspaces={workspaces}
-          tabIds={workspaceTabIds}
+          tabIds={tabs.map((t) => t.id)}
           activeWorkspaceId={activeWorkspace?.id ?? null}
           activityByWorkspaceId={workspaceActivity}
           homeActivity={Object.values(workspaceActivity).includes("running")
@@ -1864,7 +1734,7 @@ export function AppShell() {
           onSelectHome={handleReturnHome}
           onSelectWorkspace={handleOpenWorkspace}
           onCloseWorkspace={handleCloseWorkspaceTab}
-          onReorder={setWorkspaceTabIds}
+          onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is WorkspaceTabState => Boolean(t)))}
         />
 
         {/* Chat content */}
@@ -1882,7 +1752,7 @@ export function AppShell() {
               onSelectSession={handleSelectSession}
               onSessionDeleted={(id) => {
                 setRefreshKey((key) => key + 1);
-                setSelectedSession((prev) => (prev?.id === id ? null : prev));
+                updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
               }}
             />
           ) : activeWorkspace
@@ -1979,7 +1849,7 @@ export function AppShell() {
             <TabBar
               tabs={fileTabs}
               activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
+              onSelectTab={(id: string) => updateActiveTab({ activeFileTabId: id })}
               onCloseTab={handleCloseFileTab}
             />
           </div>
@@ -2012,7 +1882,7 @@ export function AppShell() {
     </div>
     {/* File panel toggle — workspace-scoped; the home tab has no file context. */}
     {activeWorkspace && <button
-      onClick={() => setRightPanelOpen((v) => !v)}
+      onClick={() => updateActiveTab((tab) => ({ rightPanelOpen: !tab.rightPanelOpen }))}
        title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
        aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
       style={{
