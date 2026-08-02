@@ -41,6 +41,14 @@ export function ChangesPanel({ groups, cwd, onOpenFile }: Props) {
     });
   };
 
+  if (groups.length === 0) {
+    return (
+      <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 11 }}>
+        {t("sidebar.noChanges")}
+      </div>
+    );
+  }
+
   if (groups.length === 1) {
     const group = groups[0];
     return (

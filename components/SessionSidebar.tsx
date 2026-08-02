@@ -1520,7 +1520,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </div>
 
       {/* Changes section — multi-repo change listing, peer of Explorer */}
-      {explorerCwd && changesCount > 0 && (
+      {explorerCwd && gitStatus?.isGitRepository && (
         <div
           style={{
             borderTop: "1px solid var(--border)",

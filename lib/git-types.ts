@@ -32,7 +32,7 @@ export interface RepoGroup {
 }
 
 export interface GitStatusResponse {
-  /** True when at least one repository under cwd has changes. */
+  /** True when cwd is inside a Git repository or contains nested repositories. */
   isGitRepository: boolean;
   /** Per-repository groups; only repositories with changes appear. Primary
    *  repository (the one enclosing cwd) first, then nested repos by relative path. */

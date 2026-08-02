@@ -154,7 +154,7 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
 
   const additions = groups.reduce((sum, group) => sum + group.additions, 0);
   const deletions = groups.reduce((sum, group) => sum + group.deletions, 0);
-  return { isGitRepository: groups.length > 0, groups, additions, deletions };
+  return { isGitRepository: queryRepos.length > 0, groups, additions, deletions };
 }
 
 function hasNullByte(content: Buffer): boolean {

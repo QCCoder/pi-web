@@ -110,6 +110,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.refreshExplorer": "Refresh explorer",
     "sidebar.changedFiles": "{count} changed files",
     "sidebar.changes": "Changes",
+    "sidebar.noChanges": "No changes",
     "sidebar.loading": "Loading...",
     "sidebar.noSessions": "No sessions found",
     "sidebar.agentRunning": "Agent running…",

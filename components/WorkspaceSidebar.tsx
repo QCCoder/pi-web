@@ -599,7 +599,7 @@ export function WorkspaceSidebar({
               </>
             )}
 
-            {hasCapability("explorer") && changesCount > 0 && (
+            {hasCapability("explorer") && gitStatus?.isGitRepository && (
               <>
                 <SectionHeader
                   label="Changes"
