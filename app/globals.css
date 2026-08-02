@@ -33,6 +33,16 @@
   --assistant-bg: #ffffff;
   --tool-bg: #f9fafb;
   --bg-subtle: rgba(0,0,0,0.03);
+
+  /* Sidebar density (typography + row rhythm). Desktop defaults here;
+     mobile overrides in the @media (max-width: 640px) block below. */
+  --pi-sidebar-fs: 13px;
+  --pi-sidebar-fs-meta: 11px;
+  --pi-sidebar-fs-title: 16px;
+  --pi-sidebar-row-py: 9px;
+  --pi-sidebar-section-py: 9px;
+  --pi-sidebar-btn-fs: 12px;
+  --pi-sidebar-btn-h: 36px;
 }
 
 html.dark {
@@ -893,6 +903,15 @@ span.linenumber {
 
 /* Mobile sidebar: slide in/out as overlay */
 @media (max-width: 640px) {
+  :root {
+    --pi-sidebar-fs: 14px;
+    --pi-sidebar-fs-meta: 12px;
+    --pi-sidebar-fs-title: 17px;
+    --pi-sidebar-row-py: 12px;
+    --pi-sidebar-section-py: 11px;
+    --pi-sidebar-btn-fs: 13px;
+    --pi-sidebar-btn-h: 40px;
+  }
   .chat-stats-center {
     display: none !important;
   }

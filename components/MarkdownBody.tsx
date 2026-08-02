@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, type MouseEvent } from "react";
+import { useMemo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
@@ -13,9 +13,10 @@ interface MarkdownBodyProps {
   isStreaming?: boolean;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  renderInlineCode?: (value: string) => ReactNode | undefined;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
+export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, renderInlineCode }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
 
   return (
@@ -32,8 +33,12 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
               if (lang === "mermaid") {
                 return <MermaidBlock code={raw.replace(/\n$/, "")} isStreaming={isStreaming} />;
               }
-              return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
+              // While streaming, render plain text — Prism re-tokenizes the whole
+              // block on every token (O(n²) over the stream → main-thread freeze).
+              return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} plain={isStreaming} />;
             }
+            const customInlineCode = renderInlineCode?.(raw);
+            if (customInlineCode !== undefined) return <>{customInlineCode}</>;
             return (
               <code
                 className="markdown-inline-code"

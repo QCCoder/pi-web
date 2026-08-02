@@ -12,6 +12,8 @@ import {
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { deleteArchivedSession, isSessionArchived } from "@/lib/session-archive";
+import { skillMessageTitle } from "@/lib/skill-message";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -124,6 +126,24 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
+    // ETag/revision conditional GET (REQ-0001 决策 3): 切回 session 时客户端带上
+    // If-None-Match，文件未变化直接返回 304，省去重新读取/解析大 JSON 的开销。
+    // revision 基于 size+mtimeMs：pi 追加写 .jsonl 会改变两者，能可靠反映变化。
+    let fileStat: { size: number; mtimeMs: number } | null = null;
+    try {
+      const st = statSync(filePath);
+      fileStat = { size: st.size, mtimeMs: st.mtimeMs };
+    } catch {
+      // file may have been removed between resolve and stat; fall through to
+      // the normal error path below.
+    }
+    if (fileStat) {
+      const revision = `"${fileStat.size}-${fileStat.mtimeMs}"`;
+      if (req.headers.get("if-none-match") === revision) {
+        return new NextResponse(null, { status: 304, headers: { ETag: revision } });
+      }
+    }
+
     const sm = SessionManager.open(filePath);
     const entries = sm.getEntries() as never;
     const leafId = sm.getLeafId();
@@ -151,20 +171,26 @@ export async function GET(
         ? (() => {
             const msg = context.messages.find((m) => m.role === "user")!;
             const c = (msg as { content: unknown }).content;
-            return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
+            const text = typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "");
+            return text ? skillMessageTitle(text) : "(no messages)";
           })()
         : "(no messages)",
       parentSessionId,
     } : null;
 
-    return NextResponse.json({
-      sessionId: id,
-      filePath,
-      info,
-      leafId,
-      tree,
-      context,
-    });
+    const revision = fileStat ? `"${fileStat.size}-${fileStat.mtimeMs}"` : undefined;
+    return NextResponse.json(
+      {
+        sessionId: id,
+        filePath,
+        info,
+        leafId,
+        tree,
+        context,
+        revision,
+      },
+      revision ? { headers: { ETag: revision } } : undefined,
+    );
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
@@ -201,6 +227,12 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
+    // Archived sessions are deleted directly (no fork re-parenting — the
+    // parentSession links are preserved so a restore reconnects the tree).
+    if (await isSessionArchived(id)) {
+      return NextResponse.json(await deleteArchivedSession(id));
+    }
+
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });

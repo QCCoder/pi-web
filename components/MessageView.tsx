@@ -2,11 +2,13 @@
 
 import { memo, useState, useRef, useEffect, useMemo } from "react";
 import { MarkdownBody } from "./MarkdownBody";
+import { SkillMessageContent } from "./SkillMessageContent";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
+import { parseSkillMessage, skillCommandText } from "@/lib/skill-message";
 import type {
   AgentMessage,
   UserMessage,
@@ -164,13 +166,15 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
     typeof message.content === "string"
       ? []
       : message.content.filter((b): b is ImageContent => b.type === "image");
+  const skill = useMemo(() => parseSkillMessage(content), [content]);
+  const displayedContent = skill ? skillCommandText(skill) : content;
 
   const time = formatTime(message.timestamp);
   const canFork = !!entryId && !!onFork;
   const canNavigate = !!prevAssistantEntryId && !!onNavigate;
 
   const copyContent = () => {
-    copyText(content).then(() => {
+    copyText(displayedContent).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
@@ -198,7 +202,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           }}
         >
           {imageBlocks.length > 0 && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: content ? 8 : 0 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: displayedContent ? 8 : 0 }}>
               {imageBlocks.map((img, i) => {
                 // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
                 // pi-ai on-disk format uses flat {data, mimeType} — handle both
@@ -222,7 +226,9 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               })}
             </div>
           )}
-          {content && <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</MarkdownBody>}
+          {skill
+            ? <SkillMessageContent skill={skill} cwd={cwd} onOpenFile={onOpenFile} />
+            : displayedContent && <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{displayedContent}</MarkdownBody>}
         </div>
 
       </div>
@@ -278,7 +284,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
             }}>
               {canNavigate && (
                 <button
-                  onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(content); }}
+                  onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(displayedContent); }}
                    title={t("i18n.editFromHereTitle")}
                   style={{
                     display: "flex", alignItems: "center", gap: 4,

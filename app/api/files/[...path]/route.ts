@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 import {
   getAllowedFileRoots,
   isExistingFilePathAllowed,
@@ -43,6 +44,7 @@ const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 // Multipart boundaries and headers are not file bytes, but must be bounded too.
 const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + 1024 * 1024;
+const MAX_TEXT_WRITE_BYTES = TEXT_PREVIEW_MAX_BYTES;
 
 const EXT_TO_LANGUAGE: Record<string, string> = {
   ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
@@ -120,6 +122,130 @@ async function getUploadDirectory(segments: string[]): Promise<
 function parseUploadFileNames(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return null;
   return value;
+}
+
+function protectedWriteReason(filePath: string): string | null {
+  const normalized = normalizeSlashes(filePath);
+  if (normalized.includes("/.git/") || normalized.endsWith("/.git")) {
+    return "Git internal files cannot be edited here";
+  }
+  if (normalized.includes("/.pi/trash/")) {
+    return "Files in the Workspace trash cannot be edited";
+  }
+  if (normalized.endsWith("/.pi/workspace.yaml")) {
+    return "workspace.yaml is managed through the Workspace settings";
+  }
+  if (/\/(?:requirements\/REQ-\d+(?:-[^/]+)?|bugs\/BUG-\d+(?:-[^/]+)?)\/(?:item\.yaml|events\.jsonl)$/.test(normalized)) {
+    return "Work Item metadata and events are managed through the Work Item API";
+  }
+  return null;
+}
+
+function workItemReadme(filePath: string): boolean {
+  return /\/(?:requirements\/REQ-\d+(?:-[^/]+)?|bugs\/BUG-\d+(?:-[^/]+)?)\/README\.md$/.test(
+    normalizeSlashes(filePath),
+  );
+}
+
+function originalDescription(content: string): string | null {
+  const match = content.match(/^## Original Description\s*\n([\s\S]*?)(?=^## |\s*$)/m);
+  return match ? match[1].trim() : null;
+}
+
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> },
+) {
+  if (!isApiRequestAllowed(request)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
+
+  try {
+    const { path: segments } = await params;
+    const filePath = filePathFromSegments(segments);
+    const allowedRoots = await getAllowedFileRoots();
+    if (
+      !isFilePathAllowed(filePath, allowedRoots)
+      || !isExistingFilePathAllowed(filePath, allowedRoots)
+    ) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    const reason = protectedWriteReason(filePath);
+    if (reason) return NextResponse.json({ error: reason }, { status: 403 });
+
+    const fileStat = fs.lstatSync(filePath);
+    if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+      return NextResponse.json({ error: "Only regular text files can be edited" }, { status: 400 });
+    }
+    if (getImageMime(filePath) || getAudioMime(filePath) || getDocumentMime(filePath)) {
+      return NextResponse.json({ error: "Binary files cannot be edited" }, { status: 400 });
+    }
+    if (fileStat.size > MAX_TEXT_WRITE_BYTES) {
+      return NextResponse.json({ error: "File too large to edit (>256KB)" }, { status: 413 });
+    }
+
+    const body = await request.json().catch(() => null) as {
+      content?: unknown;
+      expectedModified?: unknown;
+    } | null;
+    if (!body || typeof body.content !== "string") {
+      return NextResponse.json({ error: "content must be a string" }, { status: 400 });
+    }
+    if (
+      body.expectedModified !== undefined
+      && (typeof body.expectedModified !== "number"
+        || body.expectedModified !== fileStat.mtimeMs)
+    ) {
+      return NextResponse.json(
+        { error: "File changed since it was loaded", modified: fileStat.mtimeMs },
+        { status: 409 },
+      );
+    }
+    if (Buffer.byteLength(body.content, "utf8") > MAX_TEXT_WRITE_BYTES) {
+      return NextResponse.json({ error: "Content too large to edit (>256KB)" }, { status: 413 });
+    }
+
+    const previous = fs.readFileSync(filePath, "utf8");
+    if (
+      workItemReadme(filePath)
+      && (
+        !originalDescription(body.content)
+        || originalDescription(previous) !== originalDescription(body.content)
+      )
+    ) {
+      return NextResponse.json(
+        { error: "The Work Item Original Description cannot be overwritten" },
+        { status: 400 },
+      );
+    }
+
+    const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporaryPath, body.content, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: fileStat.mode,
+      });
+      fs.renameSync(temporaryPath, filePath);
+    } catch (error) {
+      try { fs.unlinkSync(temporaryPath); } catch { /* ignore cleanup failure */ }
+      throw error;
+    }
+    const updatedStat = fs.statSync(filePath);
+    return NextResponse.json({
+      content: body.content,
+      language: getLanguage(filePath),
+      size: updatedStat.size,
+      modified: updatedStat.mtimeMs,
+      editable: true,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(
@@ -470,7 +596,13 @@ export async function GET(
       }
       const content = fs.readFileSync(filePath, "utf-8");
       const language = getLanguage(filePath);
-      return NextResponse.json({ content, language, size: stat.size });
+      return NextResponse.json({
+        content,
+        language,
+        size: stat.size,
+        modified: stat.mtimeMs,
+        editable: !protectedWriteReason(filePath),
+      });
     }
 
     if (type === "download") {

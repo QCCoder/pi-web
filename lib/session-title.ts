@@ -5,6 +5,7 @@ import {
   type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { sanitizeSkillUserContent } from "./skill-message";
 
 const TITLE_TIMEOUT_MS = 90_000;
 const MAX_TITLE_LENGTH = 80;
@@ -202,7 +203,12 @@ export function sanitizeTitleMessages(messages: AgentMessage[]): AgentMessage[] 
     }
 
     expectedToolResultIds = undefined;
-    sanitized.push(message);
+    if (message.role === "user") {
+      const content = sanitizeSkillUserContent(message.content);
+      sanitized.push(content === message.content ? message : { ...message, content });
+    } else {
+      sanitized.push(message);
+    }
   }
 
   return sanitized;

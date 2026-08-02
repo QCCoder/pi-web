@@ -11,33 +11,18 @@ import {
 } from "@/lib/file-access";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
 import { discoverReposAndScattered } from "@/lib/git-discover";
+import { mergeFileLists, type FileListing } from "@/lib/file-index";
 
 const execFileAsync = promisify(execFile);
 
-// Same skip lists as /api/files — only used for the non-git readdir fallback.
-// Git-tracked repos rely on .gitignore instead (matches the TUI's fd behavior).
-const IGNORED_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store",
-]);
-
-const IGNORED_SUFFIXES = [".pyc"];
-
 /** Cap on the plain (no-query) response used as the client-side index */
 const MAX_FILES = 5000;
-/** Hard caps on the full in-memory listing that ?q= searches against */
+/** Hard cap on the full in-memory listing that ?q= searches against */
 const GIT_HARD_CAP = 200_000;
 const MAX_QUERY_LENGTH = 500;
 const CACHE_TTL_MS = 10_000;
 const CACHE_MAX_ENTRIES = 20;
 
-interface FileListing {
-  /** Full listing up to the hard cap (not the client cap) */
-  files: string[];
-  /** True when even the hard cap was exceeded */
-  hardTruncated: boolean;
-}
 interface CacheEntry {
   listing: FileListing;
   /** Derived lazily on the first ?q= search against this listing */
@@ -104,12 +89,7 @@ async function listAllFiles(cwd: string): Promise<FileListing> {
     roots.map((root) => listGitFiles(root, cwd)),
   );
   const nonRepoFiles = primaryRoot ? [] : scatteredFiles;
-  const all = Array.from(new Set([nonRepoFiles, ...gitLists].flat())).filter((file) => {
-    const segments = file.split("/");
-    return !segments.some((segment) => (
-      IGNORED_NAMES.has(segment) || IGNORED_SUFFIXES.some((suffix) => segment.endsWith(suffix))
-    ));
-  });
+  const all = mergeFileLists([nonRepoFiles, ...gitLists]);
   if (all.length > GIT_HARD_CAP) {
     return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
   }
@@ -122,7 +102,10 @@ async function listAllFiles(cwd: string): Promise<FileListing> {
 // With q: { matches: { path, isDir }[] } — ranked against the FULL listing so
 // repos larger than MAX_FILES still find deep files (cap applied after
 // matching, like the TUI passing the query to fd).
-// Guarded by the same allow-list as /api/files.
+// The listing spans the cwd repo AND every nested git repo it contains
+// (submodules, independent nested repos, worktrees) plus scattered files
+// outside any repo — each repo's own .gitignore is honored. Guarded by the
+// same allow-list as /api/files.
 export async function GET(req: NextRequest) {
   try {
     const cwd = req.nextUrl.searchParams.get("cwd")?.trim() ?? "";

@@ -14,14 +14,20 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
-  if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
+  const globalContext = searchParams.get("scope") === "global";
+  if (!cwd && !globalContext) {
+    return NextResponse.json({ error: "cwd required" }, { status: 400 });
+  }
 
   try {
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    const effectiveCwd = globalContext ? getAgentDir() : cwd!;
+    if (!globalContext) {
+      const allowedRoots = await getAllowedFileRoots();
+      if (!isExistingFilePathAllowed(effectiveCwd, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
     }
-    return NextResponse.json(await loadSkillsWithInstallInfo(cwd));
+    return NextResponse.json(await loadSkillsWithInstallInfo(effectiveCwd));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }

@@ -4,6 +4,7 @@ import type { SkillInstallScope } from "@/lib/api-types";
 import { buildSkillUpdateArgs } from "@/lib/skill-updates";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -13,21 +14,26 @@ export async function POST(req: Request) {
       cwd?: unknown;
       package?: unknown;
       scope?: unknown;
+      contextScope?: unknown;
     };
     const cwd = typeof body.cwd === "string" ? body.cwd : "";
     const pkg = typeof body.package === "string" ? body.package : "";
     const scope = body.scope === "global" || body.scope === "project"
       ? body.scope as SkillInstallScope
       : undefined;
-    if (!cwd || !pkg || !scope) {
+    const globalContext = body.contextScope === "global";
+    if ((!cwd && !globalContext) || !pkg || !scope) {
       return NextResponse.json({ error: "cwd, package, and scope are required" }, { status: 400 });
     }
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    const effectiveCwd = globalContext ? getAgentDir() : cwd;
+    if (!globalContext) {
+      const allowedRoots = await getAllowedFileRoots();
+      if (!isExistingFilePathAllowed(effectiveCwd, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
     }
 
-    const { skills } = await loadSkillsWithInstallInfo(cwd);
+    const { skills } = await loadSkillsWithInstallInfo(effectiveCwd);
     const skill = skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );
@@ -40,11 +46,11 @@ export async function POST(req: Request) {
 
     const { stdout, stderr } = await runNpx(buildSkillUpdateArgs(skill.install), {
       timeout: 60_000,
-      cwd: scope === "project" ? cwd : undefined,
+      cwd: scope === "project" ? effectiveCwd : undefined,
       env: { ...process.env, FORCE_COLOR: "0" },
     });
 
-    const refreshed = await loadSkillsWithInstallInfo(cwd);
+    const refreshed = await loadSkillsWithInstallInfo(effectiveCwd);
     const updatedSkill = refreshed.skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );

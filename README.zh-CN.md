@@ -46,6 +46,11 @@ API 请求仅接受 loopback 名称、IP 字面量、当前监听主机名，以
 
 Pi Web 的服务端模型请求和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
 
+远程 Linux 私网部署请使用仓库内的 Docker Compose 配置，步骤见
+[Pi Workspace 私网部署](./docs/deployment.zh-CN.md)。服务没有应用层登录，不能直接暴露到公网。
+上游 MIT 许可和未来客户端打包边界见
+[上游许可与客户端边界](./docs/upstream-license-and-clients.zh-CN.md)。
+
 macOS 或 Linux：
 
 ```bash

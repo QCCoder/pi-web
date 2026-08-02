@@ -17,3 +17,14 @@ test("does not register row-level session deletion shortcuts", () => {
   assert.doesNotMatch(sessionItemSource, /onKeyDown=\{handleKeyDown\}/);
   assert.doesNotMatch(sessionItemSource, /tabIndex=\{0\}/);
 });
+
+test("opts the dynamic new-session button out of Firefox disabled-state restoration", () => {
+  const headerSource = source.slice(
+    source.indexOf("{/* Header */}"),
+    source.indexOf("{/* CWD picker */}"),
+  );
+  assert.match(
+    headerSource,
+    /onClick=\{handleNewSession\}\s+\{\.\.\.\{ autoComplete: "off" \}\}\s+disabled=\{!selectedCwd\}/,
+  );
+});

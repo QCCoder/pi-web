@@ -9,10 +9,14 @@ import type {
   SessionInfo,
   SessionTreeNode,
 } from "@/lib/types";
-import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { getCachedSession, setCachedSession, dropCachedSession, sessionMessagesCache, updateCachedSessionData } from "@/lib/stores/session-messages-cache";
+import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
+import { useStoreSlice } from "@/lib/stores/create-map-store";
+import { sessionRuntimeStore, setSessionRuntime, updateSessionRuntime, getSessionRuntime, createDefaultSessionRuntimeState, EMPTY_RUNTIME, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
+import { globalAgentEvents } from "@/lib/sse/global-agent-events";
 
 export interface SessionData {
   sessionId: string;
@@ -50,11 +54,6 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
     default:
       return state;
   }
-}
-
-interface AgentEvent {
-  type: string;
-  [key: string]: unknown;
 }
 
 interface CompactCommandResult {
@@ -145,6 +144,8 @@ export interface UseAgentSessionOptions {
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
+  /** 变化时强制重新加载当前 session（替代原 key={sessionKey} 的整树重建）。 */
+  reloadSignal?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
@@ -155,24 +156,20 @@ export interface UseAgentSessionOptions {
 export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
+/** 缓存命中且距上次加载不足此值时，纯用缓存不发请求（疯狂切换去重）。 */
+const SESSION_REFETCH_THRESHOLD_MS = 1200;
 const USER_SCROLL_INTENT_MS = 1200;
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
-const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
-
-type EventStreamConnectionResult = {
-  status: EventStreamConnectionStatus;
-  source: EventSource;
-};
 
 class EventStreamConnectionError extends Error {
   constructor(public readonly status: Exclude<EventStreamConnectionStatus, "connected">) {
@@ -306,74 +303,74 @@ export interface AttachedImage {
   previewUrl: string;
 }
 
-type SelectedModel = { provider: string; modelId: string };
-type ModelEntry = { id: string; name: string; provider: string };
-type ModelsResponse = {
-  models: Record<string, string>;
-  modelList?: ModelEntry[];
-  defaultModel?: SelectedModel | null;
-  thinkingLevels?: Record<string, string[]>;
-  thinkingLevelMaps?: Record<string, Record<string, string | null>>;
-  modelError?: string;
-};
-
 type SlashCommandsResponse = {
   commands?: SlashCommandInfo[];
 };
 
+/** 同步读取当前 session 的 runtime slice（回调里的 guard 用，替代原镜像 ref）。 */
+function readRuntimeFor(keyRef: { current: string }): SessionRuntimeState {
+  return getSessionRuntime(keyRef.current);
+}
+
+const EMPTY_MESSAGES: AgentMessage[] = [];
+const EMPTY_ENTRY_IDS: string[] = [];
+
+/** 新会话乐观消息的最小 SessionData 占位（promote 后被 loadSession 的文件数据覆盖）。 */
+function makeMinimalSessionData(messages: AgentMessage[]): SessionData {
+  return {
+    sessionId: "",
+    filePath: "",
+    tree: [],
+    leafId: null,
+    context: { messages, entryIds: [], thinkingLevel: "", model: null },
+  };
+}
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, reloadSignal, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
 
-  const [data, setData] = useState<SessionData | null>(null);
+  // runtimeKey 早定义（cache + runtime 订阅共用）。
+  const runtimeKey = session?.id ?? newSessionCwd ?? "__new__";
+  const runtimeKeyRef = useRef(runtimeKey);
+  runtimeKeyRef.current = runtimeKey;
+
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
-  const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [entryIds, setEntryIds] = useState<string[]>([]);
-  const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
-  const [agentRunning, setAgentRunning] = useState(false);
-  const [bashRunning, setBashRunning] = useState(false);
-  const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
-  const [modelNames, setModelNames] = useState<Record<string, string>>({});
-  const [modelList, setModelList] = useState<ModelEntry[]>([]);
-  const [modelError, setModelError] = useState<string | null>(null);
-  const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
-  const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
-  const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
-  const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
-  const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
-  const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
-  const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
-  const [isCompacting, setIsCompacting] = useState(false);
-  const [compactError, setCompactError] = useState<string | null>(null);
-  const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
-  const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
-  const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
-  const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
-  const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
-  const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  // data / messages / entryIds 订阅 SessionMessagesCache（阶段 B4a）：后台 session 的
+  // message_end 写 cache 也能反映到前台；切回已缓存 session 无空窗。
+  const cachedEntry = useStoreSlice(sessionMessagesCache, runtimeKey, (e) => e ?? null);
+  const data = cachedEntry?.data ?? null;
+  const messages = data?.context.messages ?? EMPTY_MESSAGES;
+  const entryIds = data?.context.entryIds ?? EMPTY_ENTRY_IDS;
+
+  // SessionRuntimeStore 订阅（B3，per-session 分片）。整 slice 一次读 + destructure；写走
+  // patchRuntime（见下）。新会话用 newSessionCwd 临时 key，promote 后从服务端重派生。
+  const runtime = useStoreSlice(sessionRuntimeStore, runtimeKey, (s) => s ?? EMPTY_RUNTIME);
+  const {
+    agentRunning, bashRunning, agentPhase, retryInfo, streamState,
+    contextUsage, systemPrompt, thinkingLevel, sessionStatsOverride,
+    isCompacting, compactError, compactResult, currentModelOverride,
+    forkingEntryId, activeLeafId, extensionStatuses, extensionWidgets,
+    queuedMessages, pendingBash,
+  } = runtime;
+
+  const loadSessionAbortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
-  const agentRunningRef = useRef(false);
-  const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
-  const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
@@ -386,7 +383,54 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
-  const optimisticUserMessageKeyRef = useRef<string | null>(null);
+
+  // 写 SessionRuntimeStore：key 用 runtimeKeyRef（响应式 runtimeKey 的镜像，覆盖新会话
+  // pre-id 写入——agentRunning/optimisticKey 等在 ensureNewSession 之前就要可见）。
+  // 支持函数更新（functional setter）。稳定（空依赖）。
+  const patchRuntime = useCallback(
+    (patch: Partial<SessionRuntimeState> | ((prev: SessionRuntimeState) => SessionRuntimeState)) => {
+      const key = runtimeKeyRef.current;
+      if (typeof patch === "function") updateSessionRuntime(key, patch);
+      else setSessionRuntime(key, patch);
+    },
+    [],
+  );
+  // streamState 走 store（阶段 B3c）：dispatch 复用 streamReducer 纯函数，把结果写回 store slice。
+  const dispatch = useCallback(
+    (action: StreamAction) => patchRuntime((rt) => ({ ...rt, streamState: streamReducer(rt.streamState, action) })),
+    [patchRuntime],
+  );
+  // messages 走 SessionMessagesCache（阶段 B4a）：setMessages(prev=>...) 复用为不可变更新
+  // cache 条目的 data.context.messages。无条目时 no-op（新会话乐观消息由 handleSend 显式建条目）。
+  const setMessages = useCallback(
+    (updater: AgentMessage[] | ((prev: AgentMessage[]) => AgentMessage[])) => {
+      updateCachedSessionData(runtimeKeyRef.current, (sd) => ({
+        ...sd,
+        context: { ...sd.context, messages: typeof updater === "function" ? updater(sd.context.messages) : updater },
+      }));
+    },
+    [],
+  );
+  // 对外 setData 包装（接口兼容）：写 whole SessionData 到 cache。
+  const setData = useCallback((d: SessionData | null) => {
+    const key = runtimeKeyRef.current;
+    if (d) setCachedSession(key, d, getCachedSession(key)?.revision);
+    else dropCachedSession(key);
+  }, []);
+
+  // models 走全局 modelsStore（按 cwd 分片，REQ-0001 决策 11 / 阶段 B2）：同一 cwd 的
+  // session 共享一份 + 一次请求，切 session 不再重复 loadModels。
+  const modelCwd = newSessionCwd ?? session?.cwd ?? "";
+  const modelsState = useModels(modelCwd, modelsRefreshKey ?? 0);
+  const modelNames = modelsState.models;
+  const modelList = modelsState.modelList;
+  const modelError = modelsState.modelError;
+  const modelThinkingLevels = modelsState.thinkingLevels;
+  const modelThinkingLevelMaps = modelsState.thinkingLevelMaps;
+  const newSessionDefaultModel = useMemo(
+    () => deriveNewSessionDefaultModel(modelsState),
+    [modelsState],
+  );
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -432,67 +476,108 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
 
+  const applySessionData = useCallback((d: SessionData) => {
+    // data/messages/entryIds 由 SessionMessagesCache 订阅驱动（setCachedSession / 缓存命中）；
+    // 这里只同步 runtime 派生字段。
+    patchRuntime({
+      activeLeafId: d.leafId,
+      currentModelOverride: null,
+      ...(d.context.thinkingLevel && d.context.thinkingLevel !== "off"
+        ? { thinkingLevel: d.context.thinkingLevel as ThinkingLevelOption }
+        : {}),
+    });
+    setError(null);
+  }, [patchRuntime]);
+
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     let messagesLoaded = false;
+    // 取消上一次未完成的加载，防止快速切换 Tab 时请求堆积（浏览器并发连接有限）。
+    loadSessionAbortRef.current?.abort();
+    const ac = new AbortController();
+    loadSessionAbortRef.current = ac;
     try {
-      if (showLoading) setLoading(true);
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
-      if (res.status === 404) {
-        if (showLoading) {
-          setData(null);
-          setActiveLeafId(null);
-          setMessages([]);
-          setError(null);
+      // SWR (REQ-0001 决策 2/3): 缓存命中则立即填充 UI 消除空窗；再发条件请求，
+      // 304 复用缓存、200 覆盖更新。
+      const cached = getCachedSession(sid);
+      if (cached) {
+        applySessionData(cached.data);
+        messagesLoaded = true;
+      } else if (showLoading) {
+        setLoading(true);
+      }
+      // 短期内刚加载过：跳过 session 详情请求（大响应），但仍刷新 state 以检测
+      // running 并连 SSE。疯狂切换时只跳大请求，避免堆积又不丢流式连接。
+      const fresh = Boolean(cached) && Date.now() - (cached?.loadedAt ?? 0) < SESSION_REFETCH_THRESHOLD_MS;
+      if (!fresh) {
+        const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+        const headers: Record<string, string> = {};
+        if (cached?.revision) headers["If-None-Match"] = cached.revision;
+        const fetchOpts: RequestInit = { signal: ac.signal };
+        if (Object.keys(headers).length > 0) fetchOpts.headers = headers;
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sid)}?${params}`,
+          fetchOpts,
+        );
+        if (res.status === 304) {
+          // 文件未变，复用缓存（messagesLoaded 已由缓存命中时置位）。
+          if (showLoading) setLoading(false);
+        } else {
+          if (res.status === 404) {
+            dropCachedSession(sid);
+            if (showLoading) {
+              patchRuntime({ activeLeafId: null });
+              setError(null);
+            }
+            return null;
+          }
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const revision = res.headers.get("etag") ?? undefined;
+          const d = await res.json() as SessionData;
+          if (sessionIdRef.current !== sid) return null;
+          applySessionData(d);
+          setCachedSession(sid, d, revision);
+          messagesLoaded = true;
+          if (showLoading) setLoading(false);
         }
-        return null;
+      } else if (showLoading) {
+        setLoading(false);
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as SessionData;
-      if (sessionIdRef.current !== sid) return null;
-      setData(d);
-      setActiveLeafId(d.leafId);
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
-      setCurrentModelOverride(null);
-      setError(null);
-      if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
-        setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
-      }
-
-      messagesLoaded = true;
-      if (showLoading) setLoading(false);
       if (!includeState) return null;
 
       try {
-        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
+        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal: ac.signal });
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
         if (sessionIdRef.current !== sid) return null;
 
         const liveState = agentState.state;
         if (liveState) {
-          if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
-          if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
-          if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
-          if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
-          if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
-          if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
+          const patch: Partial<SessionRuntimeState> = {};
+          if (liveState.contextUsage !== undefined) patch.contextUsage = liveState.contextUsage ?? null;
+          if (liveState.systemPrompt !== undefined) patch.systemPrompt = liveState.systemPrompt ?? null;
+          if (liveState.thinkingLevel !== undefined) patch.thinkingLevel = (liveState.thinkingLevel as ThinkingLevelOption) ?? "auto";
+          if (liveState.extensionStatuses !== undefined) patch.extensionStatuses = liveState.extensionStatuses ?? [];
+          if (liveState.extensionWidgets !== undefined) patch.extensionWidgets = liveState.extensionWidgets ?? [];
+          if (liveState.queuedMessages !== undefined) patch.queuedMessages = normalizeQueuedMessages(liveState.queuedMessages);
+          if (Object.keys(patch).length > 0) patchRuntime(patch);
         } else if (!agentState.running) {
-          setQueuedMessages({ steering: [], followUp: [] });
+          patchRuntime({ queuedMessages: { steering: [], followUp: [] } });
         }
         return agentState;
       } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return null;
         console.error("Failed to load agent state:", e);
         return null;
       }
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return null;
       setError(String(e));
       return null;
     } finally {
+      if (loadSessionAbortRef.current === ac) loadSessionAbortRef.current = null;
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, []);
+  }, [applySessionData, patchRuntime]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -502,8 +587,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[] } };
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
+      updateCachedSessionData(sid, (sd) => ({
+        ...sd,
+        context: { ...sd.context, messages: d.context.messages, entryIds: d.context.entryIds ?? [] },
+      }));
     } catch (e) {
       console.error("Failed to load context:", e);
     }
@@ -593,61 +680,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [ensureNewSession]);
 
-  const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
-    eventSourceRef.current = es;
-
-    return new Promise((resolve) => {
-      let settled = false;
-      const settle = (status: EventStreamConnectionStatus) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        resolve({ status, source: es });
-      };
-      const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
-
-      es.onmessage = (e) => {
-        try {
-          const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") settle("connected");
-          handleAgentEventRef.current?.(event);
-        } catch {
-          // ignore
-        }
-      };
-      es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) {
-          // Fatal error (404/500/content-type mismatch): browser won't
-          // auto-reconnect. Settle the Promise and manually reconnect for
-          // already-running sessions.
-          settle("closed");
-          if (eventSourceRef.current === es && agentRunningRef.current) {
-            eventSourceRef.current = null;
-            setTimeout(() => {
-              if (agentRunningRef.current) void connectEvents(sid);
-            }, 1000);
-          }
-        }
-        // Recoverable errors (CONNECTING): let EventSource auto-reconnect.
-        // The timeout above resolves only to let callers decide whether this
-        // connection must be ready before they continue.
-      };
-    });
-  }, []);
-
-  const ensureEventsConnected = useCallback(async (sid: string) => {
-    const result = await connectEvents(sid);
-    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
-    if (eventSourceRef.current === result.source) eventSourceRef.current = null;
-    result.source.close();
-    throw new EventStreamConnectionError(result.status);
-  }, [connectEvents]);
-
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
     response: { value: string } | { confirmed: boolean } | { cancelled: true },
@@ -693,56 +725,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, []);
 
-  const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
-    switch (request.method) {
-      case "select":
-      case "confirm":
-      case "input":
-      case "editor":
-        setExtensionDialog(request);
-        break;
-      case "notify": {
-        addNotice({
-          id: request.id,
-          message: request.message,
-          type: request.notifyType ?? "info",
-        });
-        break;
-      }
-      case "setStatus":
-        setExtensionStatuses((prev) => {
-          const rest = prev.filter((item) => item.key !== request.statusKey);
-          return request.statusText !== undefined
-            ? [...rest, { key: request.statusKey, text: request.statusText }]
-            : rest;
-        });
-        break;
-      case "setWidget":
-        setExtensionWidgets((prev) => {
-          const rest = prev.filter((item) => item.key !== request.widgetKey);
-          return request.widgetLines
-            ? [...rest, {
-                key: request.widgetKey,
-                lines: request.widgetLines,
-                placement: request.widgetPlacement ?? "aboveEditor",
-              }]
-            : rest;
-        });
-        break;
-      case "setTitle":
-        if (request.title) document.title = request.title;
-        break;
-      case "set_editor_text":
-        opts.chatInputRef?.current?.insertText(request.text);
-        break;
-      case "custom":
-        setExtensionCustomUi((current) => {
-          if (request.closed) return current?.id === request.id ? null : current;
-          return request;
-        });
-        break;
-    }
-  }, [addNotice, opts.chatInputRef]);
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId?: number) => {
     // Bail out before loadSession too: a stale finish for a previous run
@@ -752,22 +734,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sid) await loadSession(sid);
     } finally {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
-      optimisticUserMessageKeyRef.current = null;
-      if (!agentRunningRef.current) return;
-      agentRunningRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
-      setRetryInfo(null);
+      patchRuntime({ optimisticUserMessageKey: null });
+      if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
+      patchRuntime({ agentRunning: false, agentPhase: null, retryInfo: null });
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
-  }, [loadSession, onAgentEnd]);
+  }, [loadSession, onAgentEnd, patchRuntime, dispatch]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
 
-    while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
+    while (readRuntimeFor(runtimeKeyRef).agentRunning && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
@@ -791,7 +770,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     bashRecoveryIdRef.current = recoveryId;
 
     while (
-      bashRunningRef.current
+      readRuntimeFor(runtimeKeyRef).bashRunning
       && bashRecoveryIdRef.current === recoveryId
       && sessionIdRef.current === sid
     ) {
@@ -804,15 +783,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         await loadSession(sid);
         if (bashRecoveryIdRef.current !== recoveryId || sessionIdRef.current !== sid) return;
-        bashRunningRef.current = false;
-        setBashRunning(false);
-        setPendingBash(null);
+        patchRuntime({ bashRunning: false, pendingBash: null });
         return;
       } catch {
         // Keep polling while the page is mounted; network recovery is transparent.
       }
     }
-  }, [loadSession]);
+  }, [loadSession, patchRuntime]);
 
   // Reconcile client streaming state with the server. When SSE events are
   // missed (network drop, mobile tab backgrounded, half-open connection),
@@ -820,7 +797,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // If the server reports idle while we still think it's running, finish
   // through the same path as prompt_done.
   const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!agentRunningRef.current) return;
+    if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
     const runId = promptRunIdRef.current;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
@@ -834,22 +811,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the "Stop compaction" UI stuck. No state
       // (wrapper destroyed) means nothing is compacting.
-      setIsCompacting(state?.isCompacting ?? false);
-      setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+      const reconcilePatch: Partial<SessionRuntimeState> = {
+        isCompacting: state?.isCompacting ?? false,
+        queuedMessages: normalizeQueuedMessages(state?.queuedMessages),
+      };
+      patchRuntime(reconcilePatch);
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
-      if (busy || !agentRunningRef.current) return;
+      if (busy || !readRuntimeFor(runtimeKeyRef).agentRunning) return;
       if (state) {
-        if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
-        if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
-        if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
-        if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
+        const patch: Partial<SessionRuntimeState> = {};
+        if (state.contextUsage !== undefined) patch.contextUsage = state.contextUsage ?? null;
+        if (state.systemPrompt !== undefined) patch.systemPrompt = state.systemPrompt ?? null;
+        if (state.extensionStatuses !== undefined) patch.extensionStatuses = state.extensionStatuses ?? [];
+        if (state.extensionWidgets !== undefined) patch.extensionWidgets = state.extensionWidgets ?? [];
+        if (Object.keys(patch).length > 0) patchRuntime(patch);
       }
       await finishPromptWithoutStream(sid, runId);
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream]);
+  }, [finishPromptWithoutStream, patchRuntime]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -875,164 +857,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [agentRunning, reconcileAgentState]);
 
-  useEffect(() => {
-    agentRunningRef.current = agentRunning;
-  }, [agentRunning]);
-
-  const handleAgentEvent = useCallback((event: AgentEvent) => {
-    switch (event.type) {
-      case "agent_start":
-        agentRunningRef.current = true;
-        setAgentRunning(true);
-        setAgentPhase({ kind: "waiting_model" });
-        dispatch({ type: "start" });
-        break;
-      case "agent_end":
-        // A late agent_end can arrive over SSE after reconcileAgentState
-        // already finished this run — don't re-trigger completion.
-        if (!agentRunningRef.current) break;
-        agentRunningRef.current = false;
-        setAgentRunning(false);
-        setAgentPhase(null);
-        setRetryInfo(null);
-        dispatch({ type: "end" });
-        if (sessionIdRef.current) {
-          loadSession(sessionIdRef.current);
-          fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
-            .then((r) => r.json())
-            .then((d: { state?: AgentStateResponse }) => {
-              if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
-              if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
-              if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
-              if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
-              // Aborted turns can leave messages queued in pi (delivered with the
-              // next turn); dead wrapper (no state) means the queue is gone.
-              setQueuedMessages(normalizeQueuedMessages(d.state?.queuedMessages));
-            })
-            .catch(() => {});
-        }
-        onAgentEnd?.();
-        break;
-      case "prompt_done":
-        if (!agentRunningRef.current) break;
-        void finishPromptWithoutStream(sessionIdRef.current);
-        break;
-      case "prompt_error":
-        addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
-        break;
-      case "extension_error":
-        addNotice({
-          type: "error",
-          message: (event.error as string | undefined) ?? "Extension command failed",
-        });
-        break;
-      case "message_start":
-      case "message_update": {
-        // Ignore streaming events arriving after this run already finished
-        // (e.g. SSE data buffered while the tab was frozen, flushed after
-        // reconcile) — they would resurrect a ghost streaming bubble.
-        if (!agentRunningRef.current) break;
-        const msg = event.message as Partial<AgentMessage> | undefined;
-        if (msg?.role === "user") {
-          break;
-        }
-        if (msg) {
-          dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
-        }
-        setAgentPhase(null);
-        break;
-      }
-      case "message_end": {
-        // Same late-event guard: after reconcile finished this run,
-        // loadSession already loaded this message from the session file —
-        // appending it again would duplicate it.
-        if (!agentRunningRef.current) break;
-        const completed = event.message as AgentMessage | undefined;
-        if (completed && completed.role === "user") {
-          // Delivered steering/follow-up messages surface here as user
-          // messages. The run's initial prompt also emits one, but handleSend
-          // already appended it optimistically. Consume only the still-adjacent
-          // optimistic bubble; later same-text queue deliveries must render.
-          const delivered = normalizeToolCalls(completed);
-          const deliveredKey = userMessageKey(delivered);
-          const optimisticKey = optimisticUserMessageKeyRef.current;
-          optimisticUserMessageKeyRef.current = null;
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
-              return optimisticKey === deliveredKey
-                ? prev
-                : [...prev.slice(0, -1), delivered];
-            }
-            return [...prev, delivered];
-          });
-        } else if (completed) {
-          setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
-        }
-        dispatch({ type: "reset" });
-        setAgentPhase({ kind: "waiting_model" });
-        break;
-      }
-      case "tool_execution_start": {
-        const id = event.toolCallId as string;
-        const name = event.toolName as string;
-        setAgentPhase((prev) => {
-          const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
-          if (!tools.some((t) => t.id === id)) tools.push({ id, name });
-          return { kind: "running_tools", tools };
-        });
-        break;
-      }
-      case "tool_execution_end": {
-        const id = event.toolCallId as string;
-        setAgentPhase((prev) => {
-          if (prev?.kind !== "running_tools") return prev;
-          const tools = prev.tools.filter((t) => t.id !== id);
-          if (tools.length === 0) return { kind: "waiting_model" };
-          return { kind: "running_tools", tools };
-        });
-        break;
-      }
-      case "queue_update":
-        setQueuedMessages({
-          steering: [...((event.steering as string[] | undefined) ?? [])],
-          followUp: [...((event.followUp as string[] | undefined) ?? [])],
-        });
-        break;
-      case "auto_retry_start":
-        setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
-        break;
-      case "auto_retry_end":
-        setRetryInfo(null);
-        break;
-      case "auto_compaction_start":
-      case "compaction_start":
-        setIsCompacting(true);
-        setCompactError(null);
-        setCompactResult(null);
-        break;
-      case "auto_compaction_end":
-      case "compaction_end":
-        setIsCompacting(false);
-        if (event.errorMessage) {
-          setCompactError(event.errorMessage as string);
-          setCompactResult(null);
-        } else if (!event.aborted) {
-          setCompactResult(readCompactResult(event.result, (event.reason as string | undefined) ?? "auto"));
-          if (sessionIdRef.current) loadSession(sessionIdRef.current);
-        }
-        break;
-      case "extension_ui_request":
-        handleExtensionUiRequest(event as ExtensionUiRequest);
-        break;
-    }
-  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd]);
-  handleAgentEventRef.current = handleAgentEvent;
+  // 确保全局 SSE 已连上（发 prompt 前调用，防漏 agent_start）。连接失败抛
+  // EventStreamConnectionError，由 handleSend 的 catch 走乐观消息回滚 + 文本恢复。
+  const ensureSseConnected = useCallback(async (sid: string) => {
+    const status = await globalAgentEvents.ensureConnected(sid);
+    if (status !== "connected") throw new EventStreamConnectionError(status);
+  }, []);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return;
-    if (agentRunningRef.current || bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
@@ -1054,12 +889,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         : message,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
-    optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
+    // 新会话尚无缓存条目（runtimeKey=newSessionCwd）：建最小占位承载乐观消息，
+    // promote 后 loadSession(真id) 用文件数据覆盖。已有条目则追加。
+    {
+      const key = runtimeKeyRef.current;
+      if (!sessionMessagesCache.has(key)) {
+        setCachedSession(key, makeMinimalSessionData([userMsg]), undefined);
+      } else {
+        updateCachedSessionData(key, (sd) => ({
+          ...sd,
+          context: { ...sd.context, messages: [...sd.context.messages, userMsg] },
+        }));
+      }
+    }
+    patchRuntime({ optimisticUserMessageKey: userMessageKey(userMsg) });
     promptRunIdRef.current = promptRunId;
-    agentRunningRef.current = true;
-    setAgentRunning(true);
-    setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
+    patchRuntime({ agentRunning: true, agentPhase: isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" } });
     dispatch({ type: "start" });
     pendingScrollToUserRef.current = true;
     completionScrollAllowedRef.current = true;
@@ -1081,7 +926,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
             }
           }
-          await ensureEventsConnected(sid);
+          await ensureSseConnected(sid);
           await sendAgentCommand(sid, {
             type: "prompt",
             message,
@@ -1091,7 +936,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       } else if (session) {
         sentSessionId = session.id;
-        await ensureEventsConnected(session.id);
+        await ensureSseConnected(session.id);
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
@@ -1104,7 +949,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to send message:", e);
       if (e instanceof EventStreamConnectionError) {
-        const optimisticKey = optimisticUserMessageKeyRef.current;
+        const optimisticKey = readRuntimeFor(runtimeKeyRef).optimisticUserMessageKey;
         if (optimisticKey) {
           setMessages((prev) => {
             const last = prev[prev.length - 1];
@@ -1119,20 +964,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // executeBash; insertIfEmpty avoids clobbering anything typed since.
         if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
       }
-      optimisticUserMessageKeyRef.current = null;
-      agentRunningRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
+      patchRuntime({ optimisticUserMessageKey: null, agentRunning: false, agentPhase: null });
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureSseConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime, dispatch, setMessages]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
-    if (agentRunningRef.current || bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
-    bashRunningRef.current = true;
-    setPendingBash({ command, excludeFromContext });
-    setBashRunning(true);
+    patchRuntime({ bashRunning: true, pendingBash: { command, excludeFromContext } });
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
       if (!sid) throw new Error("Unable to create a session for the shell command");
@@ -1148,17 +988,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       opts.chatInputRef?.current?.insertIfEmpty(inputText);
     } finally {
-      bashRunningRef.current = false;
-      setPendingBash(null);
-      setBashRunning(false);
+      patchRuntime({ bashRunning: false, pendingBash: null });
     }
-  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session]);
+  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session, patchRuntime]);
   executeBashRef.current = executeBash;
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    if (bashRunningRef.current) {
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) {
       try {
         await sendAgentCommand(sid, { type: "abort_bash" });
       } catch (e) {
@@ -1174,10 +1012,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   const handleFork = useCallback(async (entryId: string) => {
-    if (bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    setForkingEntryId(entryId);
+    patchRuntime({ forkingEntryId: entryId });
     try {
       const result = await sendAgentCommand<{ cancelled?: boolean; newSessionId?: string }>(sid, {
         type: "fork",
@@ -1190,29 +1028,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Fork failed:", e);
     } finally {
-      setForkingEntryId(null);
+      patchRuntime({ forkingEntryId: null });
     }
-  }, [onSessionForked]);
+  }, [onSessionForked, patchRuntime]);
 
   const handleNavigate = useCallback(async (entryId: string) => {
-    if (bashRunningRef.current) return;
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
     sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
-    setActiveLeafId(entryId);
+    patchRuntime({ activeLeafId: entryId });
     await loadContext(sid, entryId);
-  }, [loadContext]);
+  }, [loadContext, patchRuntime]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
-    if (bashRunningRef.current) return;
-    setActiveLeafId(leafId);
+    if (readRuntimeFor(runtimeKeyRef).bashRunning) return;
+    patchRuntime({ activeLeafId: leafId });
     const sid = sessionIdRef.current;
     if (!sid) return;
     await loadContext(sid, leafId);
     if (leafId) {
       sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
     }
-  }, [loadContext]);
+  }, [loadContext, patchRuntime]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     if (isNew) {
@@ -1231,50 +1069,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      setCurrentModelOverride({ provider, modelId });
+      patchRuntime({ currentModelOverride: { provider, modelId } });
     } catch (e) {
       console.error("Failed to set model:", e);
     }
-  }, [isNew, setNewSessionModel]);
+  }, [isNew, setNewSessionModel, patchRuntime]);
 
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid || isCompacting) return;
-    setIsCompacting(true);
-    setCompactError(null);
-    setCompactResult(null);
+    patchRuntime({ isCompacting: true, compactError: null, compactResult: null });
     try {
       const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
-      setCompactResult(readCompactResult(result, "manual"));
+      patchRuntime({ compactResult: readCompactResult(result, "manual") });
       await loadSession(sid, true);
     } catch (e) {
-      setCompactError(e instanceof Error ? e.message : String(e));
-      setCompactResult(null);
+      patchRuntime({ compactError: e instanceof Error ? e.message : String(e), compactResult: null });
     } finally {
-      setIsCompacting(false);
+      patchRuntime({ isCompacting: false });
     }
-  }, [isCompacting, loadSession]);
+  }, [isCompacting, loadSession, patchRuntime]);
 
-  const loadModels = useCallback(async (signal?: AbortSignal) => {
-    const modelCwd = newSessionCwd ?? session?.cwd ?? "";
-    const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
-    const res = await fetch(modelsUrl, signal ? { signal } : undefined);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const d = await res.json() as ModelsResponse;
-    setModelNames(d.models);
-    setModelError(d.modelError ?? null);
-    setModelThinkingLevels(d.thinkingLevels ?? {});
-    setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
-    const nextModelList = d.modelList ?? [];
-    setModelList(nextModelList);
-    if (isNew) {
-      const match = d.defaultModel
-        ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
-        : undefined;
-      const displayModel = match ?? nextModelList[0];
-      setNewSessionDefaultModel(displayModel ? { provider: displayModel.provider, modelId: displayModel.id } : null);
-    }
-  }, [isNew, newSessionCwd, session?.cwd]);
+  // models 由全局 modelsStore 维护（useModels 自动拉取）；/reload 等显式刷新走这里。
+  const reloadModels = useCallback(() => fetchModels(modelCwd, { force: true }), [modelCwd]);
 
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
@@ -1298,14 +1115,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       switch (commandName) {
         case "compact": {
           if (!sid || isCompacting) return complete({ handled: true, error: "No active session to compact" });
-          setIsCompacting(true);
-          setCompactError(null);
-          setCompactResult(null);
+          patchRuntime({ isCompacting: true, compactError: null, compactResult: null });
           const result = await sendAgentCommand<CompactCommandResult>(sid, {
             type: "compact",
             ...(args ? { customInstructions: args } : {}),
           });
-          setCompactResult(readCompactResult(result, "manual"));
+          patchRuntime({ compactResult: readCompactResult(result, "manual") });
           if (await loadSession(sid, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
         }
@@ -1317,7 +1132,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             loadSession(sid, false, true),
             loadTools(sid),
             loadSlashCommands(),
-            loadModels(),
+            reloadModels(),
           ]);
           return complete({ handled: true, message: "Reloaded session resources" });
         }
@@ -1334,7 +1149,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!sid) return complete({ handled: true, error: "No active session" });
           const stats = await sendAgentCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
           if (stats) {
-            setSessionStatsOverride(stats);
+            patchRuntime({ sessionStatsOverride: stats });
           }
           onSessionStatsPanelOpen?.();
           return complete({ handled: true, action: "openSessionStats" });
@@ -1355,9 +1170,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     } finally {
-      if (commandName === "compact") setIsCompacting(false);
+      if (commandName === "compact") patchRuntime({ isCompacting: false });
     }
-  }, [addNotice, ensureNewSession, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, ensureNewSession, isCompacting, reloadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen, patchRuntime]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -1430,7 +1245,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, { type: "clear_queue" });
       // clearQueue also emits an empty queue_update, but that only reaches us
       // while SSE is connected — clear locally so idle recalls update the UI.
-      setQueuedMessages({ steering: [], followUp: [] });
+      patchRuntime({ queuedMessages: { steering: [], followUp: [] } });
       const texts = [...(result?.steering ?? []), ...(result?.followUp ?? [])];
       if (texts.length > 0) {
         opts.chatInputRef?.current?.prependText(texts.join("\n\n"));
@@ -1439,10 +1254,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to recall queued messages:", e);
       addNotice({ type: "error", message: "Failed to recall queued messages" });
     }
-  }, [opts.chatInputRef, addNotice]);
+  }, [opts.chatInputRef, addNotice, patchRuntime]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
-    setThinkingLevel(level);
+    patchRuntime({ thinkingLevel: level });
     if (level === "auto") return; // "auto" leaves pi's current setting untouched
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
@@ -1451,7 +1266,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to set thinking level:", e);
     }
-  }, []);
+  }, [patchRuntime]);
 
   const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
     const toolNames = getToolNamesForPreset(preset);
@@ -1470,15 +1285,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
-  const scrollUserMsgToTop = useCallback(() => {
-    const container = scrollContainerRef.current;
-    const el = lastUserMsgRef.current;
-    if (!container || !el) return;
-    const elAbsTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
-    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-    container.scrollTo({ top: elAbsTop - 16, behavior: "smooth" });
-  }, []);
-
   const markUserScrollIntent = useCallback((event: Event) => {
     if (event instanceof KeyboardEvent) {
       if (!SCROLL_KEYS.has(event.key)) return;
@@ -1488,53 +1294,65 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   const handleScrollPositionChange = useCallback(() => {
-    if (!agentRunningRef.current) return;
+    if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
     if (Date.now() < ignoreProgrammaticScrollUntilRef.current) return;
     if (Date.now() > userScrollIntentUntilRef.current) return;
     completionScrollAllowedRef.current = false;
   }, []);
 
-  // Load session on mount
+  // Load session whenever the active session id or reloadSignal changes. ChatWindow is
+  // now session-stable (no key remount), so this effect drives loading on switch.
   useEffect(() => {
+    // Reset transient run-state from the previous session so it does not bleed
+    // into the new one before loadSession applies fresh data.
+    patchRuntime({ agentRunning: false, bashRunning: false, pendingBash: null, forkingEntryId: null, retryInfo: null });
+    dispatch({ type: "reset" });
+    initialScrollDoneRef.current = false;
+
     if (session) {
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
         if (agentState?.running) {
           loadTools(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            agentRunningRef.current = true;
-            setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+            patchRuntime({ agentRunning: true, agentPhase: agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" } });
             dispatch({ type: "start" });
-            void connectEvents(session.id);
+            void globalAgentEvents.ensureConnected(session.id);
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
               void waitForPromptSettlement(session.id);
             }
           }
           if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
+            patchRuntime({ bashRunning: true });
             void waitForBashSettlement(session.id);
           }
         }
         if (agentState?.state) {
-          if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-          if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
-          if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-          if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
-          if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
-          if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
-          if (agentState.state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(agentState.state.queuedMessages));
+          const patch: Partial<SessionRuntimeState> = {};
+          if (agentState.state.isCompacting !== undefined) patch.isCompacting = agentState.state.isCompacting;
+          if (agentState.state.contextUsage !== undefined) patch.contextUsage = agentState.state.contextUsage ?? null;
+          if (agentState.state.systemPrompt !== undefined) patch.systemPrompt = agentState.state.systemPrompt ?? null;
+          if (agentState.state.thinkingLevel !== undefined) patch.thinkingLevel = (agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto";
+          if (agentState.state.extensionStatuses !== undefined) patch.extensionStatuses = agentState.state.extensionStatuses ?? [];
+          if (agentState.state.extensionWidgets !== undefined) patch.extensionWidgets = agentState.state.extensionWidgets ?? [];
+          if (agentState.state.queuedMessages !== undefined) patch.queuedMessages = normalizeQueuedMessages(agentState.state.queuedMessages);
+          if (Object.keys(patch).length > 0) patchRuntime(patch);
         }
       });
+    } else {
+      // session 为空（新建会话 / 切到无活跃会话的 workspace）：清空历史消息，
+      // 否则单实例 ChatWindow 会残留上一个 session 的内容。
+      sessionIdRef.current = null;
+      setError(null);
+      // data/messages/entryIds 由 cache 订阅驱动；清掉该 cwd 可能残留的临时条目 + runtime slice。
+      dropCachedSession(runtimeKeyRef.current);
+      setSessionRuntime(runtimeKeyRef.current, createDefaultSessionRuntimeState());
     }
     return () => {
       bashRecoveryIdRef.current += 1;
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [session?.id, reloadSignal]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -1570,39 +1388,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     if (messages.length > 0) {
       if (pendingScrollToUserRef.current) {
+        // Just sent a prompt: jump to the bottom so the user message and the
+        // incoming response stay in view as the stream progresses. We no longer
+        // pin the user message to the top (which required a full-viewport blank
+        // spacer below it); instead we follow the stream like most chat UIs.
         pendingScrollToUserRef.current = false;
         initialScrollDoneRef.current = true;
-        scrollUserMsgToTop();
+        scrollToBottom("instant");
       } else if (!initialScrollDoneRef.current) {
         initialScrollDoneRef.current = true;
         scrollToBottom("instant");
-      } else if (!agentRunningRef.current && completionScrollAllowedRef.current) {
-        scrollToBottom("smooth");
+      } else if (completionScrollAllowedRef.current) {
+        // Follow the latest content while streaming and on completion.
+        // completionScrollAllowedRef is cleared when the user scrolls up to
+        // read, pausing auto-follow until the next prompt is sent.
+        scrollToBottom(agentRunning ? "instant" : "smooth");
       }
     }
-  }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
-
-  // Load model list
-  useEffect(() => {
-    const controller = new AbortController();
-    loadModels(controller.signal).catch((e) => {
-      if (e instanceof DOMException && e.name === "AbortError") return;
-    });
-    return () => controller.abort();
-  }, [loadModels, modelsRefreshKey]);
+  }, [messages.length, agentRunning, scrollToBottom]);
 
   // Compact error auto-dismiss
   useEffect(() => {
     if (!compactError) return;
-    const t = setTimeout(() => setCompactError(null), 3000);
+    const t = setTimeout(() => patchRuntime({ compactError: null }), 3000);
     return () => clearTimeout(t);
-  }, [compactError]);
+  }, [compactError, patchRuntime]);
 
   useEffect(() => {
     if (!compactResult) return;
-    const t = setTimeout(() => setCompactResult(null), 6000);
+    const t = setTimeout(() => patchRuntime({ compactResult: null }), 6000);
     return () => clearTimeout(t);
-  }, [compactResult]);
+  }, [compactResult, patchRuntime]);
 
   useEffect(() => {
     if (noticeState.visible.length === 0) return;
@@ -1622,8 +1438,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [noticeState.visible]);
 
   useEffect(() => {
-    setSessionStatsOverride(null);
-  }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
+    patchRuntime({ sessionStatsOverride: null });
+  }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow, patchRuntime]);
+
+  // 对外 setter 包装（接口兼容；写入 store）。dispatch 仍为本 useReducer（B3c）。
+  const setActiveLeafId = useCallback((id: string | null) => patchRuntime({ activeLeafId: id }), [patchRuntime]);
+  const setForkingEntryId = useCallback((id: string | null) => patchRuntime({ forkingEntryId: id }), [patchRuntime]);
+  const setAgentRunning = useCallback((v: boolean) => patchRuntime({ agentRunning: v }), [patchRuntime]);
+
+  // 注册当前 active session 的 UI effect handlers 给全局 SSE 管理器（B4b）：后台 session
+  // 事件写 store/cache；UI effects（notice / 对话框 / 完成音 / editor 注入 / slash 完成）
+  // 只送达 active session。
+  useEffect(() => {
+    globalAgentEvents.setActive(runtimeKey, {
+      onAgentEnd,
+      addNotice,
+      setExtensionDialog,
+      resolveExtensionCustomUi: (request) => setExtensionCustomUi((current) =>
+        request.closed ? (current?.id === request.id ? null : current) : request),
+      editorInsertText: (text) => opts.chatInputRef?.current?.insertText(text),
+      finishPromptWithoutStream: (sid) => void finishPromptWithoutStream(sid),
+    });
+    return () => { globalAgentEvents.setActive(null, null); };
+  }, [runtimeKey, onAgentEnd, addNotice, setExtensionDialog, setExtensionCustomUi, finishPromptWithoutStream, opts.chatInputRef]);
 
   return {
     // State
@@ -1637,7 +1474,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase,
     isNew,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
@@ -1647,7 +1484,5 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
-    // Subscriptions
-    handleAgentEventRef,
   };
 }

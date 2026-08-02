@@ -3,6 +3,7 @@ import type { SkillInstallScope } from "@/lib/api-types";
 import { checkSkillUpdates } from "@/lib/skill-updates";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -12,12 +13,19 @@ export async function POST(req: Request) {
       cwd?: unknown;
       package?: unknown;
       scope?: unknown;
+      contextScope?: unknown;
     };
     const cwd = typeof body.cwd === "string" ? body.cwd : "";
-    if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    const globalContext = body.contextScope === "global";
+    if (!cwd && !globalContext) {
+      return NextResponse.json({ error: "cwd required" }, { status: 400 });
+    }
+    const effectiveCwd = globalContext ? getAgentDir() : cwd;
+    if (!globalContext) {
+      const allowedRoots = await getAllowedFileRoots();
+      if (!isExistingFilePathAllowed(effectiveCwd, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
     }
 
     const pkg = typeof body.package === "string" ? body.package : undefined;
@@ -28,7 +36,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "package and scope must be provided together" }, { status: 400 });
     }
 
-    const { skills } = await loadSkillsWithInstallInfo(cwd);
+    const { skills } = await loadSkillsWithInstallInfo(effectiveCwd);
     const installs = skills
       .map((skill) => skill.install)
       .filter((install): install is NonNullable<typeof install> => Boolean(install))

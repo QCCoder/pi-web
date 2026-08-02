@@ -11,6 +11,8 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+import { createWorkspaceWorkItemExtension } from "./work-items/extension";
+import { findWorkspaceForPath } from "./workspaces/service";
 
 // ============================================================================
 // Types
@@ -1051,6 +1053,29 @@ export function getRunningRpcSessionIds(): string[] {
   return [...ids];
 }
 
+export interface LiveRpcSessionInfo {
+  id: string;
+  cwd: string;
+  sessionFile: string;
+}
+
+/**
+ * Minimal info for every alive RPC session, including brand-new sessions whose
+ * .jsonl file has not been flushed to disk yet (pi delays the first flush until
+ * an assistant message exists). Used to merge in-memory sessions into the
+ * session list so they appear immediately instead of waiting for the disk scan
+ * cache to expire.
+ */
+export function getLiveRpcSessionInfos(): LiveRpcSessionInfo[] {
+  return Array.from(getRegistry().values())
+    .filter((session) => session.isAlive())
+    .map((session) => ({
+      id: session.sessionId,
+      cwd: session.cwd,
+      sessionFile: session.sessionFile,
+    }));
+}
+
 // ----------------------------------------------------------------------------
 // Running-status broadcaster
 //
@@ -1137,9 +1162,28 @@ export async function startRpcSession(
     // Gate untrusted project extensions so opening a repository does not run
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
+    const workspace = await findWorkspaceForPath(cwd);
+    const selectedWorkspaceSkills = new Set(workspace?.manifest.skills ?? []);
     const services = await createAgentSessionServices({
       cwd,
       agentDir,
+      ...(workspace
+        ? {
+            resourceLoaderOptions: {
+              extensionFactories: [
+                createWorkspaceWorkItemExtension(workspace.manifest.id, workspace.path),
+              ],
+              ...(selectedWorkspaceSkills.size > 0
+                ? {
+                    skillsOverride: (base) => ({
+                      ...base,
+                      skills: base.skills.filter((skill) => selectedWorkspaceSkills.has(skill.name)),
+                    }),
+                  }
+                : {}),
+            },
+          }
+        : {}),
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
     const { session: inner } = await createAgentSessionFromServices({

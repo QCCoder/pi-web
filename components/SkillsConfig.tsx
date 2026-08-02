@@ -340,11 +340,13 @@ function SkillDetail({
 
 function AddSkillPanel({
   cwd,
+  globalOnly,
   installedPackages,
   projectResourcesLoaded,
   onInstalled,
 }: {
   cwd: string;
+  globalOnly: boolean;
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   projectResourcesLoaded: boolean;
   onInstalled: () => void;
@@ -494,7 +496,7 @@ function AddSkillPanel({
               flexShrink: 0,
             }}
           >
-            {(["global", "project"] as const).map((s) => (
+            {(globalOnly ? ["global"] as const : ["global", "project"] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => {
@@ -683,9 +685,11 @@ function AddSkillPanel({
 
 export function SkillsConfig({
   cwd,
+  globalOnly = false,
   onClose,
 }: {
   cwd: string;
+  globalOnly?: boolean;
   onClose: () => void;
 }) {
   const isMobile = useIsMobile();
@@ -708,7 +712,8 @@ export function SkillsConfig({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
+      const scopeQuery = globalOnly ? "&scope=global" : "";
+      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}${scopeQuery}`);
       const d = (await res.json()) as Partial<SkillsResponse> & { error?: string };
       if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
       const list = d.skills ?? [];
@@ -722,13 +727,13 @@ export function SkillsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd, selected]);
+  }, [cwd, globalOnly, selected]);
 
   useEffect(() => {
     setUpdateStatuses({});
     setUpdateError(null);
     void loadSkills();
-  }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cwd, globalOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const checkForUpdates = useCallback(async (skill?: Skill) => {
     const targets = skill
@@ -750,6 +755,7 @@ export function SkillsConfig({
           cwd,
           package: skill?.install?.package,
           scope: skill?.install?.scope,
+          contextScope: globalOnly ? "global" : "project",
         }),
       });
       const data = (await res.json()) as {
@@ -774,7 +780,7 @@ export function SkillsConfig({
       });
       if (!skill) setCheckingAll(false);
     }
-  }, [cwd, skills]);
+  }, [cwd, globalOnly, skills]);
 
   const updateInstalledSkill = useCallback(async (skill: Skill) => {
     if (!skill.install) return;
@@ -789,6 +795,7 @@ export function SkillsConfig({
           cwd,
           package: skill.install.package,
           scope: skill.install.scope,
+          contextScope: globalOnly ? "global" : "project",
         }),
       });
       const data = (await res.json()) as {
@@ -816,7 +823,7 @@ export function SkillsConfig({
     } finally {
       setUpdatingSkill(null);
     }
-  }, [cwd, loadSkills]);
+  }, [cwd, globalOnly, loadSkills]);
 
   const toggle = useCallback(async (skill: Skill) => {
     const next = !skill.disableModelInvocation;
@@ -914,7 +921,7 @@ export function SkillsConfig({
                 whiteSpace: "nowrap",
               }}
             >
-              {shortenPath(cwd)}
+              {globalOnly ? "全局" : shortenPath(cwd)}
             </code>
           </div>
           <button
@@ -1190,6 +1197,7 @@ export function SkillsConfig({
             {addMode ? (
               <AddSkillPanel
                 cwd={cwd}
+                globalOnly={globalOnly}
                 projectResourcesLoaded={projectResourcesLoaded}
                 installedPackages={{
                   global: new Set(

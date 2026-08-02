@@ -9,6 +9,29 @@ export interface ChatDraft {
 }
 
 const drafts = new Map<string, ChatDraft>();
+const hydratedKeys = new Set<string>();
+const STORAGE_PREFIX = "pi-web:chat-draft:";
+
+function storageKey(key: string): string {
+  return `${STORAGE_PREFIX}${encodeURIComponent(key)}`;
+}
+
+function hydrateDraft(key: string): void {
+  if (hydratedKeys.has(key) || typeof window === "undefined") return;
+  hydratedKeys.add(key);
+  try {
+    const raw = window.localStorage.getItem(storageKey(key));
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Partial<ChatDraft>;
+    if (typeof parsed.value !== "string" || !Array.isArray(parsed.images)) return;
+    const images = parsed.images.filter((image): image is ChatDraftImage => Boolean(
+      image && typeof image.data === "string" && typeof image.mimeType === "string",
+    ));
+    drafts.set(key, { value: parsed.value, images });
+  } catch {
+    // Ignore malformed drafts and unavailable browser storage.
+  }
+}
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
   return {
@@ -22,18 +45,34 @@ function isEmptyDraft(draft: ChatDraft): boolean {
 }
 
 export function getDraft(key: string): ChatDraft | null {
+  hydrateDraft(key);
   const draft = drafts.get(key);
   return draft ? cloneDraft(draft) : null;
 }
 
 export function setDraft(key: string, draft: ChatDraft): void {
+  hydratedKeys.add(key);
   if (isEmptyDraft(draft)) {
-    drafts.delete(key);
+    clearDraft(key);
     return;
   }
-  drafts.set(key, cloneDraft(draft));
+  const copy = cloneDraft(draft);
+  drafts.set(key, copy);
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(storageKey(key), JSON.stringify(copy));
+  } catch {
+    // Keep the in-memory draft when storage is unavailable or over quota.
+  }
 }
 
 export function clearDraft(key: string): void {
+  hydratedKeys.add(key);
   drafts.delete(key);
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(storageKey(key));
+  } catch {
+    // Ignore unavailable browser storage.
+  }
 }

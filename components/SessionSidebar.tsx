@@ -92,6 +92,7 @@ interface Props {
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
+  mobilePane?: "conversations" | "explorer";
 }
 
 interface WorktreeEntry {
@@ -385,7 +386,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, mobilePane }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -414,6 +415,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [uploadTargetRel, setUploadTargetRel] = useState("");
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const explorerCwd = selectedCwd ?? selectedCwdProp ?? null;
   const { status: gitStatus, gitStatusByPath, changedDirectoryPaths } = useGitStatus(explorerCwd, explorerKey);
@@ -851,6 +853,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleNewSession}
+              {...{ autoComplete: "off" }}
               disabled={!selectedCwd}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
@@ -1476,7 +1479,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </div>
 
       {/* Session list */}
-      <div style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
+      <div style={{
+        display: mobilePane === "explorer" ? "none" : "block",
+        flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto",
+        overflowY: "auto",
+        padding: "0",
+        minHeight: 80,
+      }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             {t("sidebar.loading")}
@@ -1570,7 +1579,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         <div
           style={{
             borderTop: "1px solid var(--border)",
-            display: "flex",
+            display: mobilePane === "conversations" ? "none" : "flex",
             flexDirection: "column",
             flex: explorerOpen ? "1 1 0" : "0 0 auto",
             minHeight: 0,
@@ -1610,7 +1619,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               <ToolbarIconButton
                 onClick={() => fileExplorerRef.current?.openUploadPicker()}
                 disabled={explorerUploadBusy}
-                title={t("sidebar.uploadFilesTitle")}
+                title={
+                  uploadTargetRel
+                    ? t("sidebar.uploadFilesToTitle", { path: uploadTargetRel })
+                    : t("sidebar.uploadFilesTitle")
+                }
                 color="var(--text-dim)"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1658,6 +1671,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onUploadBusyChange={setExplorerUploadBusy}
                 gitStatusByPath={gitStatusByPath}
                 changedDirectoryPaths={changedDirectoryPaths}
+                onUploadTargetChange={setUploadTargetRel}
               />
             </div>
           )}
