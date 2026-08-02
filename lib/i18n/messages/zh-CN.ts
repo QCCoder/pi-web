@@ -107,6 +107,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.uploadFiles": "上传文件",
     "sidebar.refreshExplorer": "刷新文件浏览器",
     "sidebar.changedFiles": "{count} 个变更文件",
+    "sidebar.changes": "改动",
     "sidebar.loading": "加载中...",
     "sidebar.noSessions": "未找到会话",
     "sidebar.agentRunning": "Agent 运行中…",

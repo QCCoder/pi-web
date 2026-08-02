@@ -10,6 +10,7 @@ import {
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
+import { discoverReposAndScattered } from "@/lib/git-discover";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,8 +28,6 @@ const IGNORED_SUFFIXES = [".pyc"];
 const MAX_FILES = 5000;
 /** Hard caps on the full in-memory listing that ?q= searches against */
 const GIT_HARD_CAP = 200_000;
-const WALK_HARD_CAP = 50_000;
-const MAX_WALK_DEPTH = 8;
 const MAX_QUERY_LENGTH = 500;
 const CACHE_TTL_MS = 10_000;
 const CACHE_MAX_ENTRIES = 20;
@@ -39,7 +38,6 @@ interface FileListing {
   /** True when even the hard cap was exceeded */
   hardTruncated: boolean;
 }
-
 interface CacheEntry {
   listing: FileListing;
   /** Derived lazily on the first ?q= search against this listing */
@@ -59,52 +57,63 @@ function getIndexCache(): Map<string, CacheEntry> {
   return globalThis.__piFileIndexCache;
 }
 
-async function listWithGit(cwd: string): Promise<FileListing | null> {
+async function findRepositoryRoot(cwd: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
+      ["-C", cwd, "rev-parse", "--show-toplevel"],
+      { timeout: 10_000, env: { ...process.env, LC_ALL: "C" } },
     );
-    const all = stdout.split("\0").filter(Boolean);
-    if (all.length > GIT_HARD_CAP) {
-      return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
-    }
-    return { files: all, hardTruncated: false };
+    return stdout.trim() || null;
   } catch {
-    // Not a git repo (or git unavailable) — caller falls back to readdir walk.
     return null;
   }
 }
 
-function listWithWalk(cwd: string): FileListing {
-  const files: string[] = [];
-  // BFS so shallow files win when the cap truncates the listing.
-  const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
-  while (queue.length > 0) {
-    const { abs, rel, depth } = queue.shift()!;
-    let dirents: fs.Dirent[];
-    try {
-      dirents = fs.readdirSync(abs, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const d of dirents) {
-      if (IGNORED_NAMES.has(d.name) || IGNORED_SUFFIXES.some((s) => d.name.endsWith(s))) continue;
-      const childRel = rel ? `${rel}/${d.name}` : d.name;
-      if (d.isDirectory()) {
-        if (depth + 1 <= MAX_WALK_DEPTH) {
-          queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
-        }
-      } else if (d.isFile()) {
-        if (files.length >= WALK_HARD_CAP) {
-          return { files, hardTruncated: true };
-        }
-        files.push(childRel);
-      }
-    }
+/** List one repo's files relative to cwd. Best-effort: any git error (missing
+ *  submodule checkout, corrupt .git, timeout) returns an empty list. */
+async function listGitFiles(repoRoot: string, cwd: string): Promise<string[]> {
+  try {
+    const cwdWithinRepo = path.relative(repoRoot, cwd);
+    const pathspec = cwdWithinRepo && !cwdWithinRepo.startsWith(`..${path.sep}`)
+      ? ["--", cwdWithinRepo]
+      : [];
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", repoRoot, "ls-files", "--cached", "--others", "--exclude-standard", "-z", ...pathspec],
+      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
+    );
+    return stdout
+      .split("\0")
+      .filter(Boolean)
+      .map((file) => path.relative(cwd, path.join(repoRoot, file)).split(path.sep).join("/"))
+      .filter((file) => file !== ".." && !file.startsWith("../"));
+  } catch {
+    return [];
   }
-  return { files, hardTruncated: false };
+}
+
+/** Unified listing: discover all nested repos + scattered files, git-list each
+ *  repo in parallel, merge with the ignore post-filter, then apply the hard
+ *  cap. Replaces the old single-repo listWithGit / readdir listWithWalk. */
+async function listAllFiles(cwd: string): Promise<FileListing> {
+  const { repoRoots, scatteredFiles } = discoverReposAndScattered(cwd);
+  const primaryRoot = await findRepositoryRoot(cwd);
+  const roots = Array.from(new Set(primaryRoot ? [primaryRoot, ...repoRoots] : repoRoots));
+  const gitLists = await Promise.all(
+    roots.map((root) => listGitFiles(root, cwd)),
+  );
+  const nonRepoFiles = primaryRoot ? [] : scatteredFiles;
+  const all = Array.from(new Set([nonRepoFiles, ...gitLists].flat())).filter((file) => {
+    const segments = file.split("/");
+    return !segments.some((segment) => (
+      IGNORED_NAMES.has(segment) || IGNORED_SUFFIXES.some((suffix) => segment.endsWith(suffix))
+    ));
+  });
+  if (all.length > GIT_HARD_CAP) {
+    return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
+  }
+  return { files: all, hardTruncated: false };
 }
 
 // GET /api/file-index?cwd=/abs/path[&q=query]
@@ -144,7 +153,7 @@ export async function GET(req: NextRequest) {
     const now = Date.now();
     let cached = cache.get(cwd);
     if (!cached || cached.expiresAt <= now) {
-      const listing = (await listWithGit(cwd)) ?? listWithWalk(cwd);
+      const listing = await listAllFiles(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
       }

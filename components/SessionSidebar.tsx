@@ -3,8 +3,11 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
+import { useGitStatus } from "@/hooks/useGitStatus";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
+import { ChangesPanel } from "./ChangesPanel";
+import { GIT_STATUS_COLORS } from "./git-ui";
 
 declare global {
   interface Window {
@@ -411,8 +414,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
-  const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
+  const explorerCwd = selectedCwd ?? selectedCwdProp ?? null;
+  const { status: gitStatus, gitStatusByPath, changedDirectoryPaths } = useGitStatus(explorerCwd, explorerKey);
+  const changesCount = gitStatus ? gitStatus.groups.reduce((total, group) => total + group.files.length, 0) : 0;
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
@@ -1505,6 +1510,61 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         ))}
       </div>
 
+      {/* Changes section — multi-repo change listing, peer of Explorer */}
+      {explorerCwd && changesCount > 0 && (
+        <div
+          style={{
+            borderTop: "1px solid var(--border)",
+            display: "flex",
+            flexDirection: "column",
+            flex: changesCollapsed ? "0 0 auto" : "1 1 0",
+            minHeight: 0,
+            overflow: "hidden",
+          }}
+        >
+          <button
+            onClick={() => setChangesCollapsed((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              width: "100%",
+              padding: "6px 10px",
+              background: "none",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: "0.05em",
+              textTransform: "uppercase",
+              textAlign: "left",
+            }}
+          >
+            <svg
+              width="9" height="9" viewBox="0 0 10 10" fill="none"
+              stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+              style={{ transform: changesCollapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", flexShrink: 0 }}
+            >
+              <polyline points="3 2 7 5 3 8" />
+            </svg>
+            {t("sidebar.changes")}
+            <span style={{ color: "var(--text-dim)" }}>{changesCount}</span>
+            <span style={{ color: GIT_STATUS_COLORS.added, fontFamily: "var(--font-mono)" }}>+{gitStatus?.additions ?? 0}</span>
+            <span style={{ color: GIT_STATUS_COLORS.deleted, fontFamily: "var(--font-mono)" }}>-{gitStatus?.deletions ?? 0}</span>
+          </button>
+          {!changesCollapsed && (
+            <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+              <ChangesPanel
+                groups={gitStatus?.groups ?? []}
+                cwd={explorerCwd}
+                onOpenFile={onOpenFile ?? (() => {})}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {/* File Explorer section */}
       {(selectedCwdProp || selectedCwd) && (
         <div
@@ -1546,21 +1606,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </svg>
               {t("files.explorer")}
             </button>
-            {explorerOpen && changesCount > 0 && (
-              <ToolbarIconButton
-                onClick={() => setChangesCollapsed((v) => !v)}
-                title={t("sidebar.changedFiles", { count: changesCount })}
-                ariaPressed={!changesCollapsed}
-                color={changesCollapsed ? "var(--text-dim)" : "var(--accent)"}
-                background={changesCollapsed ? "none" : "var(--bg-selected)"}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M3 12h6" />
-                  <path d="M15 12h6" />
-                </svg>
-              </ToolbarIconButton>
-            )}
             {explorerOpen && (
               <ToolbarIconButton
                 onClick={() => fileExplorerRef.current?.openUploadPicker()}
@@ -1611,8 +1656,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onAtMention={onAtMention}
                 onAtMentions={onAtMentions}
                 onUploadBusyChange={setExplorerUploadBusy}
-                changesCollapsed={changesCollapsed}
-                onChangesCountChange={setChangesCount}
+                gitStatusByPath={gitStatusByPath}
+                changedDirectoryPaths={changedDirectoryPaths}
               />
             </div>
           )}

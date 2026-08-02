@@ -3,15 +3,18 @@ import fs from "fs";
 import path from "path";
 import { promisify } from "util";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
+import { discoverRepoRoots } from "./git-discover";
 import type {
   GitFileDiffResponse,
-  GitFileStatus,
   GitStatusResponse,
 } from "./git-types";
 import {
+  buildRepoGroups,
   classifyGitStatus,
+  isWithinPath,
   parseGitPorcelainV1,
   type GitPorcelainEntry,
+  type RawRepoStatus,
 } from "./git-status";
 
 const execFileAsync = promisify(execFile);
@@ -33,11 +36,6 @@ async function findRepositoryRoot(cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-function isWithinPath(parent: string, target: string): boolean {
-  const relative = path.relative(path.resolve(parent), path.resolve(target));
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
 function toGitPath(filePath: string): string {
@@ -100,44 +98,63 @@ function countUntrackedTextLines(filePath: string): number {
 }
 
 export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
-  const repositoryRoot = await findRepositoryRoot(cwd);
-  if (!repositoryRoot) {
-    return {
-      isGitRepository: false,
-      repositoryRoot: null,
-      files: [],
-      additions: 0,
-      deletions: 0,
-    };
+  const primaryRoot = await findRepositoryRoot(cwd);
+  const nestedRoots = discoverRepoRoots(cwd);
+  const allRoots = new Set<string>();
+  if (primaryRoot) allRoots.add(primaryRoot);
+  for (const root of nestedRoots) allRoots.add(root);
+
+  // Repositories to query: the primary (enclosing) repo scoped to cwd, plus
+  // every nested repo scoped to its own root. The primary may also appear in
+  // nestedRoots (when cwd is itself a repo) — skip it so it's queried once.
+  const queryRepos: Array<{ root: string; isPrimary: boolean; scopeCwd: string }> = [];
+  if (primaryRoot) queryRepos.push({ root: primaryRoot, isPrimary: true, scopeCwd: cwd });
+  for (const root of nestedRoots) {
+    if (root === primaryRoot) continue;
+    queryRepos.push({ root, isPrimary: false, scopeCwd: root });
   }
 
-  const [entries, trackedLineStats] = await Promise.all([
-    readStatusEntries(repositoryRoot),
-    readTrackedLineStats(repositoryRoot, cwd),
-  ]);
-  const files = entries.flatMap((entry): GitFileStatus[] => {
-    const filePath = path.resolve(repositoryRoot, entry.path);
-    if (!isWithinPath(cwd, filePath)) return [];
-    const classified = classifyGitStatus(entry);
-    return [{
-      filePath,
-      ...classified,
-      indexStatus: entry.indexStatus,
-      worktreeStatus: entry.worktreeStatus,
-    }];
-  });
-  const untrackedAdditions = files.reduce(
-    (total, file) => total + (file.status === "untracked" ? countUntrackedTextLines(file.filePath) : 0),
-    0,
-  );
+  if (queryRepos.length === 0) {
+    return { isGitRepository: false, groups: [], additions: 0, deletions: 0 };
+  }
 
-  return {
-    isGitRepository: true,
-    repositoryRoot,
-    files,
-    additions: trackedLineStats.additions + untrackedAdditions,
-    deletions: trackedLineStats.deletions,
-  };
+  // Best-effort per repo: a corrupt .git or an unchecked-out submodule must
+  // not abort the whole listing, so failures are swallowed per repo.
+  const gathered: RawRepoStatus[] = [];
+  await Promise.all(queryRepos.map(async (repo) => {
+    try {
+      const [entries, trackedLineStats] = await Promise.all([
+        readStatusEntries(repo.root),
+        readTrackedLineStats(repo.root, repo.scopeCwd),
+      ]);
+      gathered.push({
+        root: repo.root,
+        isPrimary: repo.isPrimary,
+        scopeCwd: repo.scopeCwd,
+        entries,
+        trackedAdditions: trackedLineStats.additions,
+        trackedDeletions: trackedLineStats.deletions,
+      });
+    } catch {
+      // skip this repository
+    }
+  }));
+
+  const groups = buildRepoGroups(cwd, primaryRoot, gathered, allRoots);
+
+  // Untracked additions read files from disk, so they are added here (after the
+  // pure grouping produced the filtered file list) rather than in buildRepoGroups.
+  for (const group of groups) {
+    let untrackedAdditions = 0;
+    for (const file of group.files) {
+      if (file.status === "untracked") untrackedAdditions += countUntrackedTextLines(file.filePath);
+    }
+    group.additions += untrackedAdditions;
+  }
+
+  const additions = groups.reduce((sum, group) => sum + group.additions, 0);
+  const deletions = groups.reduce((sum, group) => sum + group.deletions, 0);
+  return { isGitRepository: groups.length > 0, groups, additions, deletions };
 }
 
 function hasNullByte(content: Buffer): boolean {
@@ -186,7 +203,10 @@ async function createTrackedFilePatch(
 }
 
 export async function getGitFileDiff(cwd: string, filePath: string): Promise<GitFileDiffResponse> {
-  const repositoryRoot = await findRepositoryRoot(cwd);
+  // Resolve the repository from the FILE's location, not cwd, so a file inside
+  // a nested repository is diffed against its own repo rather than the
+  // enclosing one. cwd is still used by the route for allow-list checks.
+  const repositoryRoot = await findRepositoryRoot(path.dirname(filePath));
   if (!repositoryRoot || !isWithinPath(repositoryRoot, filePath)) return { supported: false };
 
   const resolvedFilePath = path.resolve(filePath);
