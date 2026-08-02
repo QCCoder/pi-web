@@ -21,7 +21,7 @@ export async function GET() {
     return NextResponse.json({
       root,
       workspaces,
-      templates: listWorkspaceTemplates(),
+      templates: await listWorkspaceTemplates(),
     });
   } catch (error) {
     return NextResponse.json(

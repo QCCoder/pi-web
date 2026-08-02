@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   access,
+  cp,
   lstat,
   mkdir,
   readFile,
@@ -21,17 +22,21 @@ import {
   defaultGitForTemplate,
   defaultSkillsForTemplate,
   getWorkspaceTemplate,
-  isWorkspaceTemplateId,
+  isBuiltinWorkspaceTemplateId,
   renderSoftwareDevelopmentAgents,
   renderWorkspaceRepositories,
   SOFTWARE_DEVELOPMENT_DIRECTORIES,
   SOFTWARE_DEVELOPMENT_GITIGNORE,
+  SOFTWARE_DEVELOPMENT_SKILLS,
 } from "./templates.ts";
 import {
   WORKSPACE_SCHEMA_VERSION,
+  type BuiltinWorkspaceTemplateId,
   type CreateWorkspaceInput,
   type AddWorkspaceRepositoryInput,
   type UpdateWorkspaceInput,
+  type WorkspaceCapability,
+  type WorkspaceCustomTemplate,
   type WorkspaceManifest,
   type WorkspaceIndex,
   type WorkspaceIndexEntry,
@@ -123,11 +128,172 @@ export function getWorkspaceIndexPath(root?: string): string {
     : resolve(configured || join(homedir(), ".pi", "workspace.yaml"));
 }
 
-export function listWorkspaceTemplates(): WorkspaceTemplateInfo[] {
-  return BUILT_IN_WORKSPACE_TEMPLATES.map((template) => ({
-    ...template,
+const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
+  "sessions",
+  "explorer",
+  "work-items",
+  "repositories",
+  "overview",
+  "workflows",
+];
+
+function parseCapabilities(value: unknown): WorkspaceCapability[] {
+  if (!Array.isArray(value)) {
+    throw new WorkspaceValidationError("capabilities must be an array");
+  }
+  const result: WorkspaceCapability[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (
+      typeof item !== "string"
+      || !ALL_WORKSPACE_CAPABILITIES.includes(item as WorkspaceCapability)
+    ) {
+      throw new WorkspaceValidationError(`Unknown capability: ${String(item)}`);
+    }
+    if (seen.has(item)) continue;
+    seen.add(item);
+    result.push(item as WorkspaceCapability);
+  }
+  return result;
+}
+
+/** Capabilities currently in effect for a workspace: cached snapshot, else the
+ *  built-in template lookup, else the bare minimum. */
+export function effectiveCapabilities(manifest: WorkspaceManifest): WorkspaceCapability[] {
+  if (manifest.capabilities) return manifest.capabilities;
+  const builtIn = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
+    candidate.id === manifest.template.id && candidate.version === manifest.template.version
+  );
+  return builtIn ? [...builtIn.capabilities] : (["sessions", "explorer"] as WorkspaceCapability[]);
+}
+
+export async function listWorkspaceTemplates(root?: string): Promise<WorkspaceTemplateInfo[]> {
+  const builtIns: WorkspaceTemplateInfo[] = BUILT_IN_WORKSPACE_TEMPLATES.map((template) => ({
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    version: template.version,
     capabilities: [...template.capabilities],
+    source: "built-in",
+    skills: [...template.skills],
+    editable: false,
   }));
+  const customs = await discoverCustomTemplates(root);
+  const customInfos: WorkspaceTemplateInfo[] = customs.map((template) => ({
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    version: template.version,
+    capabilities: [...template.capabilities],
+    source: "custom",
+    skills: [...template.skills],
+    editable: true,
+  }));
+  return [...builtIns, ...customInfos];
+}
+
+function customTemplatesDir(root?: string): string {
+  return join(root ?? getWorkspaceRoot(), ".pi", "workspace-templates");
+}
+
+export function parseCustomTemplate(value: unknown, templatePath: string): WorkspaceCustomTemplate {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new WorkspaceValidationError("Custom template must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.schema_version !== 1) {
+    throw new WorkspaceValidationError("Custom template schema_version must be 1");
+  }
+  const id = validateWorkspaceSlug(requireNonEmptyString(record.id, "id"));
+  const dirName = basename(templatePath);
+  if (id !== dirName) {
+    throw new WorkspaceValidationError(
+      `Custom template id "${id}" must equal its directory name "${dirName}"`,
+    );
+  }
+  const skillsRaw = record.skills ?? [];
+  if (
+    !Array.isArray(skillsRaw)
+    || skillsRaw.some((skill) => typeof skill !== "string" || !skill.trim())
+  ) {
+    throw new WorkspaceValidationError("skills must be an array of non-empty strings");
+  }
+  const agentValue = record.agent ?? {};
+  if (!agentValue || typeof agentValue !== "object" || Array.isArray(agentValue)) {
+    throw new WorkspaceValidationError("agent must be an object");
+  }
+  const agentRecord = agentValue as Record<string, unknown>;
+  return {
+    schemaVersion: 1,
+    id,
+    name: requireNonEmptyString(record.name, "name"),
+    description: optionalString(record.description, "description") ?? "",
+    version: parsePositiveInteger(record.version, "version"),
+    capabilities: parseCapabilities(record.capabilities),
+    skills: [...new Set((skillsRaw as string[]).map((skill) => skill.trim()))],
+    agent: {
+      ...(optionalString(agentRecord.default_model, "agent.default_model")
+        ? { defaultModel: optionalString(agentRecord.default_model, "agent.default_model") }
+        : {}),
+      ...(optionalString(agentRecord.thinking_level, "agent.thinking_level")
+        ? { thinkingLevel: optionalString(agentRecord.thinking_level, "agent.thinking_level") }
+        : {}),
+    },
+    path: templatePath,
+  };
+}
+
+export async function discoverCustomTemplates(root?: string): Promise<WorkspaceCustomTemplate[]> {
+  const templatesDir = customTemplatesDir(root);
+  let entries;
+  try {
+    entries = await readdir(templatesDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const templates: WorkspaceCustomTemplate[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(templatesDir, entry.name);
+    try {
+      const content = await readFile(join(dir, "template.yaml"), "utf8");
+      templates.push(parseCustomTemplate(parse(content), dir));
+    } catch {
+      // Skip malformed or incomplete custom template directories.
+    }
+  }
+  return templates;
+}
+
+export async function getCustomTemplate(
+  id: string,
+  root?: string,
+): Promise<WorkspaceCustomTemplate | undefined> {
+  const customs = await discoverCustomTemplates(root);
+  return customs.find((template) => template.id === id);
+}
+
+/** Copy a custom template's `seed/` contents into a freshly created workspace. */
+async function applyCustomTemplateSeed(workspacePath: string, templatePath: string): Promise<void> {
+  const seedDir = join(templatePath, "seed");
+  try {
+    if (!(await stat(seedDir)).isDirectory()) return;
+  } catch {
+    return; // no seed directory
+  }
+  for (const entry of await readdir(seedDir)) {
+    // Never let a seed overwrite the workspace manifest we are about to write.
+    if (entry === ".pi") {
+      const seedPi = join(seedDir, ".pi");
+      await mkdir(join(workspacePath, ".pi"), { recursive: true });
+      for (const piEntry of await readdir(seedPi)) {
+        if (piEntry === "workspace.yaml") continue;
+        await cp(join(seedPi, piEntry), join(workspacePath, ".pi", piEntry), { recursive: true });
+      }
+      continue;
+    }
+    await cp(join(seedDir, entry), join(workspacePath, entry), { recursive: true });
+  }
 }
 
 export function validateWorkspaceSlug(slug: string): string {
@@ -222,6 +388,8 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     throw new WorkspaceValidationError("agent must be an object");
   }
   const agentRecord = agent as Record<string, unknown>;
+  const capabilities =
+    record.capabilities === undefined ? undefined : parseCapabilities(record.capabilities);
   const gitValue = record.git;
   let git: WorkspaceManifest["git"];
   if (gitValue !== undefined) {
@@ -270,6 +438,7 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
         ? { thinkingLevel: optionalString(agentRecord.thinking_level, "agent.thinking_level") }
         : {}),
     },
+    ...(capabilities ? { capabilities } : {}),
     ...(git ? { git } : {}),
     workItems: {
       nextRequirementNumber: parsePositiveInteger(
@@ -306,6 +475,7 @@ export function serializeWorkspaceManifest(manifest: WorkspaceManifest): string 
       ...(manifest.agent.defaultModel ? { default_model: manifest.agent.defaultModel } : {}),
       ...(manifest.agent.thinkingLevel ? { thinking_level: manifest.agent.thinkingLevel } : {}),
     },
+    ...(manifest.capabilities ? { capabilities: manifest.capabilities } : {}),
     ...(manifest.git
       ? {
           git: {
@@ -373,9 +543,6 @@ export async function readWorkspaceManifest(workspacePath: string): Promise<Work
 }
 
 export function workspaceSummary(workspacePath: string, manifest: WorkspaceManifest): WorkspaceSummary {
-  const template = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
-    candidate.id === manifest.template.id && candidate.version === manifest.template.version
-  );
   return {
     id: manifest.id,
     slug: manifest.slug,
@@ -383,7 +550,7 @@ export function workspaceSummary(workspacePath: string, manifest: WorkspaceManif
     path: workspacePath,
     templateId: manifest.template.id,
     templateVersion: manifest.template.version,
-    capabilities: template ? [...template.capabilities] : ["sessions", "explorer"],
+    capabilities: [...effectiveCapabilities(manifest)],
     available: true,
     configStatus: "ready",
     skills: [...manifest.skills],
@@ -424,7 +591,12 @@ export async function commitWorkspaceChanges(
   manifestValue?: WorkspaceManifest,
 ): Promise<void> {
   const manifest = manifestValue ?? await readWorkspaceManifest(workspacePath);
-  if (manifest.template.id !== "software-development") return;
+  // Auto-commit only when the workspace is an actual git repository.
+  try {
+    await gitOutput(workspacePath, ["rev-parse", "--is-inside-work-tree"]);
+  } catch {
+    return;
+  }
   await ensureGitIdentity(workspacePath);
   const status = await gitOutput(workspacePath, ["status", "--porcelain"]);
   if (!status) return;
@@ -439,17 +611,20 @@ async function updateManagedRepositoryInstructions(
   workspacePath: string,
   manifest: WorkspaceManifest,
 ): Promise<void> {
-  if (manifest.template.id !== "software-development") return;
+  if (!effectiveCapabilities(manifest).includes("repositories")) return;
   const agentsPath = join(workspacePath, "AGENTS.md");
-  const current = await readFile(agentsPath, "utf8");
+  let current: string;
+  try {
+    current = await readFile(agentsPath, "utf8");
+  } catch {
+    return; // no AGENTS.md to maintain
+  }
   const managed = renderWorkspaceRepositories(manifest);
   const next = current.replace(
     /<!-- workspace-managed:repositories:start -->[\s\S]*?<!-- workspace-managed:repositories:end -->/,
     managed,
   );
-  if (next === current) {
-    throw new WorkspaceValidationError("AGENTS.md repository managed block is missing");
-  }
+  if (next === current) return; // no managed block present; nothing to update
   await writeFileAtomic(agentsPath, next);
 }
 
@@ -916,9 +1091,32 @@ export async function createWorkspace(
   const workspaceRoot = root ?? getWorkspaceRoot();
   const name = requireNonEmptyString(input.name, "name");
   const slug = validateWorkspaceSlug(input.slug);
-  if (!isWorkspaceTemplateId(input.templateId)) {
-    throw new WorkspaceValidationError(`Unknown workspace template: ${String(input.templateId)}`);
+  const isBuiltin = isBuiltinWorkspaceTemplateId(input.templateId);
+
+  // Resolve the template: a built-in constant or a discovered custom definition.
+  let templateVersion: number;
+  let templateSkills: string[];
+  let templateCapabilities: WorkspaceCapability[];
+  let templateAgent: WorkspaceManifest["agent"];
+  let customTemplatePath: string | undefined;
+  if (isBuiltin) {
+    const builtin = getWorkspaceTemplate(input.templateId as BuiltinWorkspaceTemplateId);
+    templateVersion = builtin.version;
+    templateSkills = defaultSkillsForTemplate(input.templateId);
+    templateCapabilities = [...builtin.capabilities];
+    templateAgent = {};
+  } else {
+    const custom = await getCustomTemplate(input.templateId, root);
+    if (!custom) {
+      throw new WorkspaceValidationError(`Unknown workspace template: ${String(input.templateId)}`);
+    }
+    templateVersion = custom.version;
+    templateSkills = [...custom.skills];
+    templateCapabilities = [...custom.capabilities];
+    templateAgent = { ...custom.agent };
+    customTemplatePath = custom.path;
   }
+
   await ensureWorkspaceRoot(workspaceRoot);
   const workspacePath = join(workspaceRoot, `workspace-${slug}`);
   try {
@@ -930,16 +1128,16 @@ export async function createWorkspace(
 
   const temporaryPath = join(workspaceRoot, `.creating-workspace-${slug}-${createUlid()}`);
   const now = new Date().toISOString();
-  const template = getWorkspaceTemplate(input.templateId);
   const manifest: WorkspaceManifest = {
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     id: createUlid(),
     slug,
     name,
-    template: { id: input.templateId, version: template.version },
-    skills: defaultSkillsForTemplate(input.templateId),
+    template: { id: input.templateId, version: templateVersion },
+    skills: templateSkills,
     repositories: [],
-    agent: {},
+    agent: templateAgent,
+    capabilities: templateCapabilities,
     ...(defaultGitForTemplate(input.templateId)
       ? { git: defaultGitForTemplate(input.templateId) }
       : {}),
@@ -953,11 +1151,14 @@ export async function createWorkspace(
 
   await mkdir(join(temporaryPath, ".pi"), { recursive: true });
   try {
+    if (customTemplatePath) {
+      await applyCustomTemplateSeed(temporaryPath, customTemplatePath);
+    }
     await writeFileAtomic(
       join(temporaryPath, ".pi", "workspace.yaml"),
       serializeWorkspaceManifest(manifest),
     );
-    if (input.templateId === "software-development") {
+    if (isBuiltin && input.templateId === "software-development") {
       await initializeSoftwareDevelopmentWorkspace(temporaryPath, manifest);
     }
     await rename(temporaryPath, workspacePath);

@@ -1,12 +1,21 @@
 export const WORKSPACE_SCHEMA_VERSION = 1 as const;
 
-export type WorkspaceTemplateId = "empty" | "software-development";
+export const BUILTIN_WORKSPACE_TEMPLATE_IDS = ["empty", "software-development"] as const;
+export type BuiltinWorkspaceTemplateId = (typeof BUILTIN_WORKSPACE_TEMPLATE_IDS)[number];
+
+/**
+ * A workspace template id. Either a built-in id ("empty" | "software-development")
+ * or a custom template id — any slug defined under `.pi/workspace-templates/<id>/`.
+ */
+export type WorkspaceTemplateId = string;
 export type WorkspaceCapability =
   | "sessions"
   | "explorer"
   | "work-items"
   | "repositories"
-  | "overview";
+  | "overview"
+  | "workflows";
+export type WorkspaceTemplateSource = "built-in" | "custom";
 export type WorkspaceRepositoryKind = "code" | "knowledge";
 export type WorkspaceRepositoryStatus = "active" | "removed";
 
@@ -62,6 +71,9 @@ export interface WorkspaceManifest {
   skills: string[];
   repositories: WorkspaceRepository[];
   agent: WorkspaceAgentSettings;
+  /** Cached capabilities snapshot, synced from the template definition on edit.
+   *  Absent for legacy manifests (derived from the built-in template lookup). */
+  capabilities?: WorkspaceCapability[];
   git?: WorkspaceGitSettings;
   workItems: {
     nextRequirementNumber: number;
@@ -94,6 +106,24 @@ export interface WorkspaceTemplateInfo {
   description: string;
   version: number;
   capabilities: WorkspaceCapability[];
+  source: WorkspaceTemplateSource;
+  skills: string[];
+  /** Whether this template can be edited through the UI (custom only). */
+  editable: boolean;
+}
+
+/** A custom (user-defined) workspace template, parsed from `.pi/workspace-templates/<id>/template.yaml`. */
+export interface WorkspaceCustomTemplate {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  description: string;
+  version: number;
+  capabilities: WorkspaceCapability[];
+  skills: string[];
+  agent: WorkspaceAgentSettings;
+  /** Absolute path to the template directory (holds `template.yaml` + `seed/`). */
+  path: string;
 }
 
 export interface WorkspaceIndexEntry {

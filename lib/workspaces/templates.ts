@@ -1,9 +1,17 @@
 import type {
+  BuiltinWorkspaceTemplateId,
   WorkspaceGitSettings,
   WorkspaceManifest,
   WorkspaceTemplateId,
   WorkspaceTemplateInfo,
 } from "./types.ts";
+
+export const SOFTWARE_DEVELOPMENT_SKILLS = [
+  "grilling",
+  "domain-modeling",
+  "codebase-design",
+  "tdd",
+] as const;
 
 export const BUILT_IN_WORKSPACE_TEMPLATES: readonly WorkspaceTemplateInfo[] = [
   {
@@ -12,6 +20,9 @@ export const BUILT_IN_WORKSPACE_TEMPLATES: readonly WorkspaceTemplateInfo[] = [
     description: "Only create the Workspace manifest and leave the directory structure open.",
     version: 1,
     capabilities: ["sessions", "explorer"],
+    source: "built-in",
+    skills: [],
+    editable: false,
   },
   {
     id: "software-development",
@@ -19,15 +30,11 @@ export const BUILT_IN_WORKSPACE_TEMPLATES: readonly WorkspaceTemplateInfo[] = [
     description: "Requirements, bugs, designs, plans, typed repositories, and collaboration rules.",
     version: 1,
     capabilities: ["sessions", "work-items", "repositories", "explorer", "overview"],
+    source: "built-in",
+    skills: [...SOFTWARE_DEVELOPMENT_SKILLS],
+    editable: false,
   },
 ];
-
-export const SOFTWARE_DEVELOPMENT_SKILLS = [
-  "grilling",
-  "domain-modeling",
-  "codebase-design",
-  "tdd",
-] as const;
 
 export const DEFAULT_GIT_SETTINGS: WorkspaceGitSettings = {
   branchRules: {
@@ -46,11 +53,11 @@ export const SOFTWARE_DEVELOPMENT_DIRECTORIES = [
   "repositories/knowledge",
 ] as const;
 
-export function isWorkspaceTemplateId(value: unknown): value is WorkspaceTemplateId {
+export function isBuiltinWorkspaceTemplateId(value: unknown): value is BuiltinWorkspaceTemplateId {
   return value === "empty" || value === "software-development";
 }
 
-export function getWorkspaceTemplate(id: WorkspaceTemplateId): WorkspaceTemplateInfo {
+export function getWorkspaceTemplate(id: BuiltinWorkspaceTemplateId): WorkspaceTemplateInfo {
   return BUILT_IN_WORKSPACE_TEMPLATES.find((template) => template.id === id)!;
 }
 
