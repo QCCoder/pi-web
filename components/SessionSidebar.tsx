@@ -1524,7 +1524,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         <div
           style={{
             borderTop: "1px solid var(--border)",
-            display: "flex",
+            display: mobilePane === "conversations" ? "none" : "flex",
             flexDirection: "column",
             flex: changesCollapsed ? "0 0 auto" : "1 1 0",
             minHeight: 0,
