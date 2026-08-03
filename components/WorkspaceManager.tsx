@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { FeishuConfig } from "./FeishuConfig";
 import { LoopConfig } from "./LoopConfig";
+import { FeishuChannelPanel } from "./FeishuChannelPanel";
 import type {
   WorkspaceRepositoryState,
   WorkspaceRepositoryKind,
@@ -1190,6 +1191,10 @@ export function WorkspaceManager({
                     <LoopConfig
                       workspace={selectedWorkspace}
                       onWorkspaceChanged={() => void loadWorkspaces()}
+                    />
+                    <FeishuChannelPanel
+                      workspace={selectedWorkspace}
+                      onRefresh={loadWorkspaces}
                     />
                     {selectedWorkspace.capabilities.includes("repositories") && (
                     <section className="repository-section">

@@ -19,4 +19,19 @@ export async function register(): Promise<void> {
       );
     }
   }
+
+  // Start feishu-channel long-connections for workspaces that have the
+  // capability + credentials. Fire-and-forget so server boot is not blocked by
+  // disk I/O or the WS dial; channels connect in the background. Dynamic import
+  // keeps this (and its global WebSocket usage) out of the edge/browser bundle.
+  if (process.env.PI_FEISHU_CHANNEL_DISABLED !== "1") {
+    void import("@/lib/feishu-channel/manager")
+      .then((mod) => mod.ensureAllFeishuChannelsStarted())
+      .catch((err) => {
+        console.error(
+          "[feishu-channel] failed to start at boot:",
+          err instanceof Error ? err.message : err,
+        );
+      });
+  }
 }

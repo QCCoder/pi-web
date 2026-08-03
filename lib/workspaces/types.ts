@@ -16,7 +16,8 @@ export type WorkspaceCapability =
   | "overview"
   | "workflows"
   | "feishu-transport"
-  | "loop";
+  | "loop"
+  | "feishu-channel";
 export type WorkspaceTemplateSource = "built-in" | "custom";
 export type WorkspaceRepositoryKind = "code" | "knowledge";
 export type WorkspaceRepositoryStatus = "active" | "removed";
