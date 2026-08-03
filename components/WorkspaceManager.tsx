@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MarkdownBody } from "./MarkdownBody";
+import { FeishuConfig } from "./FeishuConfig";
+import { LoopConfig } from "./LoopConfig";
 import type {
   WorkspaceRepositoryState,
   WorkspaceRepositoryKind,
@@ -1181,6 +1183,14 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
+                    <FeishuConfig
+                      workspace={selectedWorkspace}
+                      onWorkspaceChanged={() => void loadWorkspaces()}
+                    />
+                    <LoopConfig
+                      workspace={selectedWorkspace}
+                      onWorkspaceChanged={() => void loadWorkspaces()}
+                    />
                     {selectedWorkspace.capabilities.includes("repositories") && (
                     <section className="repository-section">
                       <div className="repository-section-header">
