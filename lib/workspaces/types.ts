@@ -16,6 +16,7 @@ export type WorkspaceCapability =
   | "overview"
   | "workflows"
   | "feishu-transport"
+
   | "loop"
   | "feishu-channel";
 export type WorkspaceTemplateSource = "built-in" | "custom";
@@ -127,6 +128,10 @@ export interface WorkspaceCustomTemplate {
   agent: WorkspaceAgentSettings;
   /** Absolute path to the template directory (holds `template.yaml` + `seed/`). */
   path: string;
+  /** True for templates shipped with the app (discovered from the bundled
+   *  templates directory rather than the user workspaces root). Bundled
+   *  templates are read-only and should not be edited through the UI. */
+  bundled?: boolean;
 }
 
 export interface WorkspaceIndexEntry {

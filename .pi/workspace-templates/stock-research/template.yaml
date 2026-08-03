@@ -1,0 +1,21 @@
+schema_version: 1
+id: stock-research
+name: Stock Research
+description: 股票研究助理工作区——行情取数、个股分析、交易计划、持仓复盘、研报与盘后简报，并支持飞书推送与定时 Loop。
+version: 1
+capabilities:
+  - sessions
+  - explorer
+  - feishu-transport
+  - loop
+  - feishu-channel
+skills:
+  - investment-copilot
+  - stock-data
+  - stock-analysis
+  - stock-trade-plan
+  - portfolio-review
+  - stock-report-render
+  - pdf-financial-extract
+agent:
+  thinking_level: medium

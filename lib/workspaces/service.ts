@@ -191,13 +191,45 @@ export async function listWorkspaceTemplates(root?: string): Promise<WorkspaceTe
     capabilities: [...template.capabilities],
     source: "custom",
     skills: [...template.skills],
-    editable: true,
+    editable: !template.bundled,
   }));
   return [...builtIns, ...customInfos];
 }
 
 function customTemplatesDir(root?: string): string {
   return join(root ?? getWorkspaceRoot(), ".pi", "workspace-templates");
+}
+
+/** Directory holding app-shipped ("bundled") custom templates, discovered in
+ *  addition to the user's workspaces-root templates. Defaults to the running
+ *  app's `<cwd>/.pi/workspace-templates/`; override with PI_BUNDLED_TEMPLATES_DIR. */
+function bundledTemplatesDir(): string {
+  const configured = process.env.PI_BUNDLED_TEMPLATES_DIR?.trim();
+  return resolve(configured || join(process.cwd(), ".pi", "workspace-templates"));
+}
+
+async function scanTemplatesDir(
+  templatesDir: string,
+  bundled: boolean,
+): Promise<WorkspaceCustomTemplate[]> {
+  let entries;
+  try {
+    entries = await readdir(templatesDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const templates: WorkspaceCustomTemplate[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(templatesDir, entry.name);
+    try {
+      const content = await readFile(join(dir, "template.yaml"), "utf8");
+      templates.push({ ...parseCustomTemplate(parse(content), dir), bundled });
+    } catch {
+      // Skip malformed or incomplete custom template directories.
+    }
+  }
+  return templates;
 }
 
 export function parseCustomTemplate(value: unknown, templatePath: string): WorkspaceCustomTemplate {
@@ -248,25 +280,15 @@ export function parseCustomTemplate(value: unknown, templatePath: string): Works
 }
 
 export async function discoverCustomTemplates(root?: string): Promise<WorkspaceCustomTemplate[]> {
-  const templatesDir = customTemplatesDir(root);
-  let entries;
-  try {
-    entries = await readdir(templatesDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const templates: WorkspaceCustomTemplate[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const dir = join(templatesDir, entry.name);
-    try {
-      const content = await readFile(join(dir, "template.yaml"), "utf8");
-      templates.push(parseCustomTemplate(parse(content), dir));
-    } catch {
-      // Skip malformed or incomplete custom template directories.
-    }
-  }
-  return templates;
+  // Bundled (app-shipped) templates are scanned first; a user-defined template
+  // with the same id under the workspaces root overrides the bundled one so
+  // users can customize shipped defaults without editing the bundle.
+  const bundled = await scanTemplatesDir(bundledTemplatesDir(), true);
+  const user = await scanTemplatesDir(customTemplatesDir(root), false);
+  const byId = new Map<string, WorkspaceCustomTemplate>();
+  for (const template of bundled) byId.set(template.id, template);
+  for (const template of user) byId.set(template.id, template);
+  return [...byId.values()];
 }
 
 export async function getCustomTemplate(
