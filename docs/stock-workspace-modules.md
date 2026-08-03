@@ -21,13 +21,13 @@
 ## 2. 分层架构
 
 ```
-┌─ 模板层 Template        stock-research（数据化定义，后续阶段）
+┌─ 模板层 Template        stock-research（已定义：.pi/workspace-templates/stock-research，bundled 发现）
 ├─ 模块层 Modules         每个模块 = capability + extension/服务 + 配置面板
 │   ├─ feishu-transport   工具：发消息/卡片/文件（出站，无状态）   [后端已做]
 │   ├─ feishu-channel     服务：入站长连接监听 + chat↔session 绑定  [后续阶段]
 │   ├─ loop               服务：pi-web 内调度器 + job 持久化 + 补跑 + run 历史  [待做]
 │   ├─ work-management    能力开关（Work Items）                    [已解耦]
-│   └─ git-changes        能力开关（差异跟踪）                      [待解耦]
+│   └─ git-changes        能力开关（差异跟踪）                      [已解耦：随 explorer + git 仓库]
 ├─ 领域 Skill             stock-* 7 个（已就绪，全局 ~/.pi/agent/skills/，自包含）
 └─ 运行时 Runtime         pi-web（唯一 session owner，常驻）+ 飞书长连接
 ```
@@ -57,12 +57,17 @@ automations/
 已完成（已提交）：
 - `d495861 feat(modules): capability-gated workspace extension registry` —— `lib/workspaces/extensions.ts` + rpc-manager 改造。
 - `d98c80c feat(feishu): feishu-transport module + capability toggling` —— `lib/feishu/{types,client,config,extension}.ts`、`feishu-transport` capability、`UpdateWorkspaceInput.capabilities`、`GET/PUT/DELETE /api/workspaces/[id]/feishu`。
+- 模板系统 + 解耦（`feature/stock-templates`）：
+  - **stock-research 自定义模板**：`.pi/workspace-templates/stock-research/{template.yaml,seed/AGENTS.md}`，capabilities=`sessions,explorer,feishu-transport,loop,feishu-channel`，7 个 stock-* skills，`agent.thinking_level=medium`。走现成 custom-template 机制，**未改引擎**。
+  - **bundled 模板发现**：`discoverCustomTemplates` 同时扫 `process.cwd()/.pi/workspace-templates`（可 `PI_BUNDLED_TEMPLATES_DIR` 覆盖）与用户 workspaces root；用户同名模板覆盖 bundled；bundled 模板不可编辑。
+  - **修复 `feishu-transport` 校验遗漏**：它在 union 里但没进 `ALL_WORKSPACE_CAPABILITIES`，`parseCapabilities` 会拒收——补进白名单。
+  - **前置声明 `loop`/`feishu-channel` capability**（union + 白名单）：模板今天就能声明，模块在后续分支接入前是惰性开关。
+  - **Part A 无需改 UI**：Work Items 面板（`work-items` capability）与 Changes 面板（`explorer` capability + git 仓库存在）已从 effective capabilities 渲染；`AppShell` 只用 `WorkspaceSidebar`。任意声明对应 capability 的模板（含 empty/custom）都能拿到这两个面板。
 
 待做（按顺序）：
 1. **feishu-transport 配置 UI**：在工作区设置里加面板——填 appId/appSecret/receiveId + 开关 `feishu-transport` capability + 测试发送按钮。调 `/api/workspaces/[id]/feishu` 和 `PATCH /api/workspaces/[id]`。
 2. **Loop 模块**：`lib/loop/`（types、job store 读写 yaml、scheduler、runner、run 历史）+ capability `loop`/`automations` + API 路由（`/api/workspaces/[id]/loop/jobs`、`/runs`）+ 配置 UI（job 编辑器：写描述 + schedule + watchlist + push + produce）。
 3. **feishu-channel 入站**（后续阶段）：长连接客户端 + chat↔session 绑定 + 入站路由（复用 rpc-manager）+ `/new`。
-4. **模板系统 + 解耦 work-management/git-changes**（后续阶段）。
 
 ## 6. 编码约定（必读，来自 pi-web AGENTS.md）
 
