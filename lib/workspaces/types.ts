@@ -15,7 +15,12 @@ export type WorkspaceCapability =
   | "repositories"
   | "overview"
   | "workflows"
-  | "feishu-transport";
+  | "feishu-transport"
+  // Forward-declared module toggles. The capabilities are registered so
+  // templates can declare them today; the matching extensions/services are
+  // wired in later branches and stay inert (no factory attached) until then.
+  | "loop"
+  | "feishu-channel";
 export type WorkspaceTemplateSource = "built-in" | "custom";
 export type WorkspaceRepositoryKind = "code" | "knowledge";
 export type WorkspaceRepositoryStatus = "active" | "removed";
