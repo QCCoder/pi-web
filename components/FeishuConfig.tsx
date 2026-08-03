@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { WorkspaceCapability, WorkspaceSummary } from "@/lib/workspaces/types";
 import type { FeishuConfigPublic, FeishuReceiveIdType } from "@/lib/feishu/types";
+import { CapabilityToggle } from "./CapabilityToggle";
 
 const FEISHU_CAPABILITY: WorkspaceCapability = "feishu-transport";
 
@@ -17,54 +18,6 @@ async function responseJson<T>(response: Response): Promise<T> {
   const data = (await response.json().catch(() => ({}))) as T & { error?: string };
   if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
   return data;
-}
-
-function CapabilityToggle({
-  enabled,
-  loading,
-  onToggle,
-}: {
-  enabled: boolean;
-  loading: boolean;
-  onToggle: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      disabled={loading}
-      onClick={() => onToggle(!enabled)}
-      title={enabled ? "已启用飞书推送工具" : "启用飞书推送工具"}
-      style={{
-        flexShrink: 0,
-        width: 40,
-        height: 22,
-        borderRadius: 11,
-        border: "none",
-        padding: 0,
-        cursor: loading ? "wait" : "pointer",
-        background: enabled ? "var(--accent)" : "var(--border)",
-        position: "relative",
-        transition: "background 0.18s",
-        outline: "none",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          top: 3,
-          left: enabled ? 21 : 3,
-          width: 16,
-          height: 16,
-          borderRadius: "50%",
-          background: "var(--bg)",
-          boxShadow: "0 1px 4px rgba(0,0,0,0.22)",
-          transition: "left 0.18s cubic-bezier(.4,0,.2,1)",
-        }}
-      />
-    </button>
-  );
 }
 
 /**
