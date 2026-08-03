@@ -135,6 +135,7 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "repositories",
   "overview",
   "workflows",
+  "feishu-transport",
 ];
 
 export function parseCapabilities(value: unknown): WorkspaceCapability[] {
