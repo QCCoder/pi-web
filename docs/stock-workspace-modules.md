@@ -57,12 +57,26 @@ automations/
 已完成（已提交）：
 - `d495861 feat(modules): capability-gated workspace extension registry` —— `lib/workspaces/extensions.ts` + rpc-manager 改造。
 - `d98c80c feat(feishu): feishu-transport module + capability toggling` —— `lib/feishu/{types,client,config,extension}.ts`、`feishu-transport` capability、`UpdateWorkspaceInput.capabilities`、`GET/PUT/DELETE /api/workspaces/[id]/feishu`。
+- `3f617f1 fix(workspaces): register feishu-transport in capability registry` —— `ALL_WORKSPACE_CAPABILITIES` 之前漏登 `feishu-transport`，`parseCapabilities` 拒收、PATCH 切换会报 400；补登记后切换才真正生效。
+- `9d80539 feat(feishu): feishu-transport settings panel`（**PIECE A**）—— `components/FeishuConfig.tsx`（开关 capability + 填 appId/appSecret/receiveIdType/receiveId + 测试发送）+ `POST /api/workspaces/[id]/feishu/test`，嵌入 WorkspaceManager 设置视图。
+- `45bc847 / e7cf442 / b1be0f1 feat(loop): …`（**PIECE B**）—— `lib/loop/{types,schedule,store,runner,scheduler}.ts` + API 路由（`/api/workspaces/[id]/loop/jobs`、`/jobs/[name]`、`/jobs/[name]/run`、`/runs`）+ `components/LoopConfig.tsx`，详见下方「Loop 实现说明」。
+- `8f64e25 test(rpc): update stale extension-preload assertion` —— 修掉 d495861 重构后遗留的红测。
+
+### 5.1 Loop 实现说明（PIECE B 落地决策）
+
+- **提示词内嵌在 job**：`LoopJob.prompt` 字段就是「做什么」的模版/提示词（任务描述明确该字段 = prompt/template）。v1 不单设 `automations/templates/` 目录，后续需要复用模版时再加。
+- **推送由 runner 服务端执行**：开 automation session 跑提示词 → 抓 `get_last_assistant_text` 作为产物 → 由 runner 用 `FeishuClient` 推送（card/text）。确定性、可记录 push 结果、可控制目标与格式；提示词里要求 agent **不要**自己调 feishu 工具（避免双推）。
+- **调度器在 pi-web 进程内**：`getLoopScheduler()` 是 globalThis 单例（抗 hot-reload），60s tick；经 `instrumentation.ts` 在 server 启动时拉起（跳过 `next build`，且 try/catch 不阻塞启动）。每个 job 复用 `startRpcSession` 开**独立 automation session**（唯一 session owner，绝不另起进程）。
+- **同日补跑**：`isJobDue(now, schedule, lastRunAt)` 依上次 run 标记 + Asia/Shanghai 当日 HH:MM 判断；服务重启后同日错过的槽位会补跑一次，跨过上海午夜错过的槽位不补（下一槽按时跑）。
+- **schedule 零依赖纯函数**：CST 固定 UTC+8、无夏令时，固定偏移换算；配 `lib/loop/schedule.test.mjs`（node:test，9 例）。
+- **loop 是后台服务**，**不**登记进 `WORKSPACE_EXTENSION_FACTORIES`；`loop` capability 已加入 `WorkspaceCapability` + registry。
+- **job/run 不自动 git commit**（避免每次调度的提交噪音）；runs 走 append-only JSONL（`automations/runs/<name>.jsonl`）。
+- **手动触发** `POST .../jobs/[name]/run` 返回 202，run 脱离请求生命周期，结果落 runs 历史；UI 触发后短轮询拉历史。
+- **automation session 可见**：它们是真实 session（独立 .jsonl），会出现在会话列表里便于复查；与聊天 session「隔离」指推送单向、用户回复进聊天 session。
 
 待做（按顺序）：
-1. **feishu-transport 配置 UI**：在工作区设置里加面板——填 appId/appSecret/receiveId + 开关 `feishu-transport` capability + 测试发送按钮。调 `/api/workspaces/[id]/feishu` 和 `PATCH /api/workspaces/[id]`。
-2. **Loop 模块**：`lib/loop/`（types、job store 读写 yaml、scheduler、runner、run 历史）+ capability `loop`/`automations` + API 路由（`/api/workspaces/[id]/loop/jobs`、`/runs`）+ 配置 UI（job 编辑器：写描述 + schedule + watchlist + push + produce）。
-3. **feishu-channel 入站**（后续阶段）：长连接客户端 + chat↔session 绑定 + 入站路由（复用 rpc-manager）+ `/new`。
-4. **模板系统 + 解耦 work-management/git-changes**（后续阶段）。
+1. **feishu-channel 入站**（后续阶段）：长连接客户端 + chat↔session 绑定 + 入站路由（复用 rpc-manager）+ `/new`。
+2. **模板系统 + 解耦 work-management/git-changes**（后续阶段）。
 
 ## 6. 编码约定（必读，来自 pi-web AGENTS.md）
 
