@@ -208,8 +208,9 @@ export async function deleteJob(workspacePath: string, name: string): Promise<vo
 }
 
 export async function appendRun(workspacePath: string, name: string, run: LoopRun): Promise<void> {
+  const normalized = validateJobName(name);
   await mkdir(runsDir(workspacePath), { recursive: true });
-  await appendFile(runFile(workspacePath, name), `${JSON.stringify(run)}\n`, "utf8");
+  await appendFile(runFile(workspacePath, normalized), `${JSON.stringify(run)}\n`, "utf8");
 }
 
 export async function listRuns(
@@ -217,9 +218,10 @@ export async function listRuns(
   name: string,
   limit = MAX_RUNS_RETURNED,
 ): Promise<LoopRun[]> {
+  const normalized = validateJobName(name);
   let content: string;
   try {
-    content = await readFile(runFile(workspacePath, name), "utf8");
+    content = await readFile(runFile(workspacePath, normalized), "utf8");
   } catch {
     return [];
   }
