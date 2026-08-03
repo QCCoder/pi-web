@@ -14,7 +14,8 @@ export type WorkspaceCapability =
   | "work-items"
   | "repositories"
   | "overview"
-  | "workflows";
+  | "workflows"
+  | "feishu-transport";
 export type WorkspaceTemplateSource = "built-in" | "custom";
 export type WorkspaceRepositoryKind = "code" | "knowledge";
 export type WorkspaceRepositoryStatus = "active" | "removed";
@@ -156,4 +157,6 @@ export interface UpdateWorkspaceInput {
   expectedUpdatedAt?: string;
   name?: string;
   skills?: string[];
+  /** Replace the workspace's capability set. Used to toggle modules on/off. */
+  capabilities?: WorkspaceCapability[];
 }

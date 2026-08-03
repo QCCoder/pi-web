@@ -137,7 +137,7 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "workflows",
 ];
 
-function parseCapabilities(value: unknown): WorkspaceCapability[] {
+export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   if (!Array.isArray(value)) {
     throw new WorkspaceValidationError("capabilities must be an array");
   }
@@ -1208,6 +1208,9 @@ export async function updateWorkspace(
         throw new WorkspaceValidationError("skills must be an array of non-empty strings");
       }
       latest.skills = [...new Set(input.skills.map((skill) => skill.trim()))];
+    }
+    if (input.capabilities !== undefined) {
+      latest.capabilities = parseCapabilities(input.capabilities);
     }
     latest.updatedAt = new Date().toISOString();
     await writeWorkspaceManifest(current.path, latest);
