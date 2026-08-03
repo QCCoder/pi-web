@@ -11,7 +11,7 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
-import { createWorkspaceWorkItemExtension } from "./work-items/extension";
+import { buildWorkspaceExtensions } from "./workspaces/extensions";
 import { findWorkspaceForPath } from "./workspaces/service";
 
 // ============================================================================
@@ -1170,9 +1170,7 @@ export async function startRpcSession(
       ...(workspace
         ? {
             resourceLoaderOptions: {
-              extensionFactories: [
-                createWorkspaceWorkItemExtension(workspace.manifest.id, workspace.path),
-              ],
+              extensionFactories: buildWorkspaceExtensions(workspace.manifest, workspace.path),
               ...(selectedWorkspaceSkills.size > 0
                 ? {
                     skillsOverride: (base) => ({
