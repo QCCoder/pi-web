@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MarkdownBody } from "./MarkdownBody";
+import { FeishuChannelPanel } from "./FeishuChannelPanel";
 import type {
   WorkspaceRepositoryState,
   WorkspaceRepositoryKind,
@@ -1181,6 +1182,10 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
+                    <FeishuChannelPanel
+                      workspace={selectedWorkspace}
+                      onRefresh={loadWorkspaces}
+                    />
                     {selectedWorkspace.capabilities.includes("repositories") && (
                     <section className="repository-section">
                       <div className="repository-section-header">

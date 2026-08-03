@@ -79,6 +79,16 @@ export async function PUT(
     }
 
     await writeFeishuConfig(manifest.id, config);
+    // The feishu-channel inbound service reuses these same credentials; restart
+    // it so the long-connection picks up the new appId/appSecret immediately.
+    // (No-op if the workspace lacks the feishu-channel capability.)
+    const { restartFeishuChannel } = await import("@/lib/feishu-channel/manager");
+    void restartFeishuChannel(manifest.id).catch((err) => {
+      console.error(
+        "[feishu-channel] restart after credential update failed:",
+        err instanceof Error ? err.message : err,
+      );
+    });
     return NextResponse.json({ config: toPublicConfig(config) });
   } catch (error) {
     return errorResponse(error);
@@ -98,6 +108,11 @@ export async function DELETE(
       appSecret: "",
       receiveIdType: "open_id",
       receiveId: "",
+    });
+    // Credentials removed: stop the inbound channel if it was running.
+    const { ensureFeishuChannelStarted } = await import("@/lib/feishu-channel/manager");
+    void ensureFeishuChannelStarted(manifest.id).catch(() => {
+      /* best-effort; credentials are gone either way */
     });
     return NextResponse.json({ ok: true });
   } catch (error) {
