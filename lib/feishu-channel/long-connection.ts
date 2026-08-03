@@ -33,6 +33,8 @@ const T_PONG = "pong";
 
 const EVENT_MESSAGE_RECEIVE = "im.message.receive_v1";
 const ACK_CODE_OK = 200;
+/** TTL for the dedup + fragment caches. Matches the SDK's data-cache window. */
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface EndpointInfo {
   url: string;
@@ -46,6 +48,7 @@ interface EndpointInfo {
 interface FragmentBucket {
   sum: number;
   pieces: (Uint8Array | undefined)[];
+  expireAt: number;
 }
 
 export interface LongConnectionLogger {
@@ -80,6 +83,10 @@ export class FeishuLongConnection {
   private connectedAt: string | null = null;
   private lastEventAt: string | null = null;
   private readonly fragments = new Map<string, FragmentBucket>();
+  /** Delivery message_ids already dispatched. Guards against redelivery when a
+   *  reconnect straddles an ACK (the ACK and the event can cross a dropped
+   *  socket, so Feishu re-sends unacked events after reconnect). */
+  private readonly seen = new Map<string, number>();
 
   constructor(
     private readonly appId: string,
@@ -279,20 +286,55 @@ export class FeishuLongConnection {
     this.sendAck(frame);
 
     const payload = frame.payload ?? new Uint8Array(0);
+    let complete: Uint8Array | null;
     if (sum > 1) {
       // Large events are split across frames sharing messageId; reassemble.
       if (!messageId) return;
-      let bucket = this.fragments.get(messageId);
-      if (!bucket) {
-        bucket = { sum, pieces: new Array<Uint8Array | undefined>(sum).fill(undefined) };
-        this.fragments.set(messageId, bucket);
-      }
-      bucket.pieces[seq] = payload;
-      if (!bucket.pieces.every((piece) => piece !== undefined)) return;
-      this.fragments.delete(messageId);
-      this.dispatchEvent(concatU8(bucket.pieces as Uint8Array[]));
+      complete = this.mergeFragment(messageId, sum, seq, payload);
+      if (!complete) return; // not all fragments yet
     } else {
-      this.dispatchEvent(payload);
+      complete = payload;
+    }
+
+    // Dedup by delivery messageId: across a reconnect, Feishu redelivers events
+    // whose ACK crossed the dropped socket. Without this the same DM would
+    // prompt the agent twice.
+    if (messageId) {
+      const now = Date.now();
+      this.evictExpired(now);
+      if (this.seen.has(messageId)) return;
+      this.seen.set(messageId, now + CACHE_TTL_MS);
+    }
+    this.dispatchEvent(complete);
+  }
+
+  /** Merge one fragment of a split event; return the full payload once the last
+   *  fragment arrives, else null. Stale partial buckets are evicted by TTL so a
+   *  dropped final fragment cannot leak memory. */
+  private mergeFragment(
+    messageId: string,
+    sum: number,
+    seq: number,
+    payload: Uint8Array,
+  ): Uint8Array | null {
+    const now = Date.now();
+    for (const [id, bucket] of this.fragments) {
+      if (now > bucket.expireAt) this.fragments.delete(id);
+    }
+    let bucket = this.fragments.get(messageId);
+    if (!bucket) {
+      bucket = { sum, pieces: new Array<Uint8Array | undefined>(sum).fill(undefined), expireAt: now + CACHE_TTL_MS };
+      this.fragments.set(messageId, bucket);
+    }
+    bucket.pieces[seq] = payload;
+    if (!bucket.pieces.every((piece) => piece !== undefined)) return null;
+    this.fragments.delete(messageId);
+    return concatU8(bucket.pieces as Uint8Array[]);
+  }
+
+  private evictExpired(now: number): void {
+    for (const [id, expireAt] of this.seen) {
+      if (now > expireAt) this.seen.delete(id);
     }
   }
 
