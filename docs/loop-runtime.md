@@ -50,7 +50,11 @@ Cron 使用标准五字段（minute hour day-of-month month day-of-week）；支
 1. 任意 Trigger Source 向统一入口提交稳定 `eventId`；重复 id 返回原 Round。
 2. Host 创建 Pi Orchestrator Conversation，让 AI 读取 `LOOP.md` 和 `STATE.md`，只推断执行结构。
 3. Round 进入 `waiting_for_confirmation`；Pi Web 展示 Maker、Checker、Gate 和 Improve。
-4. 创建者确认后，Host 在同一个 Pi 主会话继续执行；拒绝则 Round 结束为 cancelled。
+4. 创建者确认后，Host 在同一个 Pi 主会话继续执行；拒绝则 Round 结束为 cancelled。Maker/Checker 作为**隔离子 agent 会话**运行——编排器用 `subagent` 工具派生，每个子会话可独立查看（侧边栏里挂在编排器会话下，跑完持久化在磁盘）。
 5. 每次状态变化追加到 `RUNS.jsonl`。执行状态和业务 verdict 分开记录。
+
+### 子 agent 依赖
+
+Maker/Checker 走通需要该 Loop workspace 具有 `subagent` capability（编排器会话才会拿到 `subagent` 工具）。`execute()` 会先探测工具是否存在：有则让编排器用 `subagent` 派生 maker/checker；没有则回退到编排器自行执行（仍保持 producer/verifier 分离）。给 workspace 提供 `.pi/agents/maker.md` 与 `.pi/agents/checker.md`（或用内置 `general`）即可被按名派生。
 
 当前骨架已经留出消息/webhook Trigger 与 Round Gate 的统一接口；首个跑通的 Adapter 是 cron 和手动触发。Host 重启后可读取证据，但不会续接尚未确认或尚未完成的 Pi 会话，这属于下一阶段的恢复策略。

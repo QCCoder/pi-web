@@ -41,6 +41,15 @@ function capturePrompt(session: AgentSessionWrapper, prompt: string): Promise<st
   });
 }
 
+async function hasSubagentTool(session: AgentSessionWrapper): Promise<boolean> {
+  try {
+    const tools = await session.send({ type: "get_tools" }) as Array<{ name: string; active: boolean }>;
+    return Array.isArray(tools) && tools.some((t) => t.name === "subagent" && t.active);
+  } catch {
+    return false;
+  }
+}
+
 function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const candidate = fenced ?? text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
@@ -98,6 +107,7 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
       "Read the task contract below. Infer its maker/checker pipeline without doing the work yet.",
       "Return JSON only: {summary, steps:[{id,maker,verifier,gate?}], improve}.",
       "Every producing step needs a separate verifier. Include human gates only where the contract requires judgment.",
+      "Each maker and verifier will later run as its own isolated subagent session, so infer roles that are independently delegatable.",
       "",
       `# LOOP.md\n${instructions}`,
       `# STATE.md\n${state}`,
@@ -108,12 +118,16 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
   async execute(definition: LoopDefinition, run: LoopRun, comment?: string) {
     const session = this.sessions.get(run.id);
     if (!session) throw new Error("orchestrator session is unavailable; start a fresh round");
+    const delegateViaSubagent = await hasSubagentTool(session);
+    const delegationLine = delegateViaSubagent
+      ? "You have a `subagent` tool. Delegate each producing (maker) step and each verifying (checker) step to its OWN isolated child session via `subagent` (prefer the `maker`/`checker` agents if available, otherwise `general`), passing a fully self-contained task. Bring each child's result back here. Each child session is recorded and viewable. Never let a maker verify its own output — the verifier must be a separate subagent call."
+      : "Perform maker and checker roles yourself, but keep producer and verifier strictly separate; never let a maker verify its own output.";
     const output = await capturePrompt(session, [
       `The creator approved plan ${run.plan?.fingerprint ?? "(unknown)"}.`,
       comment ? `Creator comment: ${comment}` : "",
       "Execute the whole confirmed pipeline now.",
-      "Keep this session as orchestrator. For maker/checker roles, launch separate headless Pi workers (for example via `pi -p` with explicit tools and no persisted worker session), and bring their results back here.",
-      "Never let the Maker verify its own output.",
+      "Keep this session as the orchestrator only — do coordination, synthesize verification, and produce the final verdict here.",
+      delegationLine,
       "Record concrete evidence, update STATE.md only from verified results, append audit material under this loop directory,",
       "and end with LOOP_VERDICT: changed|unchanged|unknown when the task is a monitor.",
       "Before any declared human gate, stop and end with LOOP_GATE: <the exact decision needed>. Do not cross the gate.",

@@ -8,6 +8,7 @@ capabilities:
   - explorer
   - feishu-transport
   - loop
+  - subagent
   - feishu-channel
 skills:
   - investment-copilot
