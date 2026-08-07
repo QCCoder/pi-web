@@ -38,6 +38,7 @@ interface Props {
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string) => void;
+  onOpenSession?: (sessionId: string) => void;
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -171,7 +172,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { mes
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -585,6 +586,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
+                    onOpenSession={onOpenSession}
                     entryId={entryIds[idx]}
                     onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
@@ -701,7 +703,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               return nodes;
             })()}
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
             )}
 
             {agentRunning && !streamState.streamingMessage && (

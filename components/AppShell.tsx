@@ -1809,6 +1809,7 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+              onOpenSession={handleOpenLoopSession}
             />
           ) : !activeWorkspace ? (
             <HomeLanding

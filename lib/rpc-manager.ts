@@ -1118,11 +1118,22 @@ export function notifyRunningChange(): void {
  * For new sessions (sessionFile === ""), pi generates its own id.
  * Pass toolNames to pre-configure active tools (empty array = all tools disabled).
  */
+/** Extra options for creating a child/subagent session in-process. */
+export interface StartSessionOptions {
+  /** Link this session to a parent session file (sidebar nests it as a child). */
+  parentSession?: string;
+  /** Append this text to the session's system prompt (e.g. a subagent role prompt). */
+  appendSystemPrompt?: string;
+  /** Explicit provider/model to use instead of the saved/default model. */
+  model?: { provider: string; modelId: string };
+}
+
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
   cwd: string,
-  toolNames?: string[]
+  toolNames?: string[],
+  options?: StartSessionOptions,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -1141,7 +1152,11 @@ export async function startRpcSession(
 
     const sessionManager = sessionFile
       ? SessionManager.open(sessionFile, undefined)
-      : SessionManager.create(cwd, undefined);
+      : SessionManager.create(
+          cwd,
+          undefined,
+          options?.parentSession ? { parentSession: options.parentSession } : undefined,
+        );
 
     // Determine which tools to pass based on requested toolNames.
     // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
@@ -1164,30 +1179,37 @@ export async function startRpcSession(
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
     const workspace = await findWorkspaceForPath(cwd);
     const selectedWorkspaceSkills = new Set(workspace?.manifest.skills ?? []);
+    const resourceLoaderOptions: Record<string, unknown> = workspace
+      ? {
+          extensionFactories: buildWorkspaceExtensions(workspace.manifest, workspace.path),
+          ...(selectedWorkspaceSkills.size > 0
+            ? {
+                skillsOverride: (base: { skills: Array<{ name: string }> }) => ({
+                  ...base,
+                  skills: base.skills.filter((skill) => selectedWorkspaceSkills.has(skill.name)),
+                }),
+              }
+            : {}),
+        }
+      : {};
+    if (options?.appendSystemPrompt) {
+      resourceLoaderOptions.appendSystemPrompt = [options.appendSystemPrompt];
+    }
     const services = await createAgentSessionServices({
       cwd,
       agentDir,
-      ...(workspace
-        ? {
-            resourceLoaderOptions: {
-              extensionFactories: buildWorkspaceExtensions(workspace.manifest, workspace.path),
-              ...(selectedWorkspaceSkills.size > 0
-                ? {
-                    skillsOverride: (base) => ({
-                      ...base,
-                      skills: base.skills.filter((skill) => selectedWorkspaceSkills.has(skill.name)),
-                    }),
-                  }
-                : {}),
-            },
-          }
-        : {}),
+      ...(Object.keys(resourceLoaderOptions).length > 0 ? { resourceLoaderOptions } : {}),
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
+    let modelOption: ReturnType<typeof services.modelRuntime.getModel>;
+    if (options?.model) {
+      modelOption = services.modelRuntime.getModel(options.model.provider, options.model.modelId);
+    }
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
+      ...(modelOption ? { model: modelOption } : {}),
     });
 
     // If specific tool names were requested (non-empty), set the active tools to the

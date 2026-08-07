@@ -62,6 +62,7 @@ interface Props {
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  onOpenSession?: (sessionId: string) => void;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
@@ -100,12 +101,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSession, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -128,6 +129,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.modelNames === next.modelNames
     && prev.cwd === next.cwd
     && prev.onOpenFile === next.onOpenFile
+    && prev.onOpenSession === next.onOpenSession
     && prev.entryId === next.entryId
     && prev.onFork === next.onFork
     && prev.forking === next.forking
@@ -351,6 +353,7 @@ function AssistantMessageView({
   modelNames,
   cwd,
   onOpenFile,
+  onOpenSession,
   showTimestamp,
   prevTimestamp,
   sessionId,
@@ -362,6 +365,7 @@ function AssistantMessageView({
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  onOpenSession?: (sessionId: string) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -534,7 +538,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
         ))}
       </div>
 
@@ -587,7 +591,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
+function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSession, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSession?: (sessionId: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
@@ -598,7 +602,7 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSession={onOpenSession} />;
   }
   return null;
 }
@@ -690,11 +694,23 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
 }
 
 
-function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
+function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const inputStr = JSON.stringify(block.input, null, 2);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
+
+  // Subagent child sessions — show "open" links so the full subagent run is viewable.
+  const childSessionIds: string[] = (() => {
+    const details = (result as { details?: unknown } | undefined)?.details;
+    if (!details || typeof details !== "object") return [];
+    const d = details as { childSessionId?: string; results?: Array<{ childSessionId?: string }> };
+    const ids: string[] = [];
+    if (d.childSessionId) ids.push(d.childSessionId);
+    if (Array.isArray(d.results)) for (const r of d.results) if (r.childSessionId) ids.push(r.childSessionId);
+    return [...new Set(ids)];
+  })();
+  const showChildLinks = block.toolName === "subagent" && childSessionIds.length > 0 && Boolean(onOpenSession);
 
   // Result display
   const resultText = result
@@ -744,6 +760,35 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
           <polyline points="2 3.5 5 6.5 8 3.5" />
         </svg>
       </button>
+
+      {/* ── Subagent child-session links (always visible) ── */}
+      {showChildLinks && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "5px 10px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+          {childSessionIds.map((id, i) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => onOpenSession!(id)}
+              title={id}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "2px 8px",
+                fontSize: 11,
+                fontFamily: "var(--font-mono)",
+                color: "var(--accent)",
+                background: "none",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                cursor: "pointer",
+              }}
+            >
+              {childSessionIds.length > 1 ? `subagent ${i + 1}` : "open subagent"} →
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ── Expanded: input args ── */}
       {expanded && !isEditTool && (

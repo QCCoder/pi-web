@@ -1,9 +1,11 @@
 /**
  * Workspace extension that registers the `subagent` tool.
  *
- * The tool delegates a task to a specialized subagent running in its OWN
- * isolated pi process with a fresh context window. Internal steps stay
- * isolated; only the worker's final result returns to this conversation.
+ * The tool delegates a task to a specialized subagent running as its OWN
+ * first-class session (own context window, own model/tools), linked to this
+ * conversation as a child. Internal steps stay isolated in that child session;
+ * only streamed status + the final result return here. The child session is
+ * fully viewable — open it from the tool result to inspect the whole run live.
  *
  * Modes:
  *   - single:  { agent, task }
@@ -20,6 +22,7 @@ import {
   isFailedResult,
   runParallel,
   runWorker,
+  type ModelSpec,
   type WorkerDetails,
   type WorkerResult,
 } from "./worker.ts";
@@ -30,12 +33,12 @@ const PER_TASK_CAP = 50 * 1024;
 
 function truncateOutput(text: string): string {
   if (Buffer.byteLength(text, "utf8") <= PER_TASK_CAP) return text;
-  return `${text.slice(0, PER_TASK_CAP)}\n\n[output truncated: full text preserved in tool details]`;
+  return `${text.slice(0, PER_TASK_CAP)}\n\n[output truncated; open the child session to see the full run]`;
 }
 
 function workerOutput(result: WorkerResult): string {
   if (isFailedResult(result)) {
-    return result.errorMessage || result.stderr || result.output || "(no output)";
+    return result.errorMessage || result.output || "(no output)";
   }
   return result.output || "(no output)";
 }
@@ -56,9 +59,9 @@ export function createSubagentExtension(_workspaceId: string, workspacePath: str
         name: "subagent",
         label: "Subagent",
         description: [
-          "Delegate a task to a specialized subagent that runs in its OWN isolated pi process with a fresh context window.",
+          "Delegate a task to a specialized subagent that runs as its OWN session with a fresh context window, linked to this conversation as a child.",
           "Modes: single {agent, task} or parallel {tasks:[{agent,task,cwd?}]}.",
-          "Each subagent is a real independent agent; its internal steps are isolated, only its final result returns here.",
+          "Each subagent's full run is viewable: open its child session from the result. Internal steps stay isolated from this conversation.",
         ].join(" "),
         promptGuidelines: [
           "Use the subagent tool to isolate a self-contained sub-task so it does not pollute this conversation's context.",
@@ -85,6 +88,29 @@ export function createSubagentExtension(_workspaceId: string, workspacePath: str
           const agents = discoverAgents(workspacePath);
           const findAgent = (name: string): AgentConfig | undefined => agents.find((a) => a.name === name);
           const defaultCwd = params.cwd ?? ctx.cwd;
+          const parentSessionFile = ctx.sessionManager.getSessionFile() ?? "";
+          const parentModel: ModelSpec | undefined = ctx.model
+            ? { provider: ctx.model.provider, modelId: ctx.model.id }
+            : undefined;
+
+          const streamSingle = onUpdate
+            ? (partial: { text: string; details: WorkerDetails }) =>
+                onUpdate({
+                  content: [{ type: "text" as const, text: partial.text }],
+                  details: { mode: "single" as const, childSessionId: partial.details.childSessionId },
+                })
+            : undefined;
+
+          const streamParallel = onUpdate
+            ? (partial: { text: string; details: { mode: "parallel"; results: WorkerResult[] } }) =>
+                onUpdate({
+                  content: [{ type: "text" as const, text: partial.text }],
+                  details: {
+                    mode: "parallel" as const,
+                    results: partial.details.results.map((r) => ({ agent: r.agent, childSessionId: r.childSessionId })),
+                  },
+                })
+            : undefined;
 
           // ---- parallel mode ----
           if (params.tasks && params.tasks.length > 0) {
@@ -102,18 +128,10 @@ export function createSubagentExtension(_workspaceId: string, workspacePath: str
               };
             }
 
-            const streamParallel = onUpdate
-              ? (partial: { text: string; details: { mode: "parallel"; results: WorkerResult[] } }) =>
-                  onUpdate({
-                    content: [{ type: "text" as const, text: partial.text }],
-                    details: partial.details,
-                  })
-              : undefined;
-
             const results = await runParallel(
               params.tasks.map((t) => ({ agent: findAgent(t.agent) as AgentConfig, task: t.task, cwd: t.cwd ?? defaultCwd })),
               CONCURRENCY,
-              signal,
+              { parentSessionFile, parentModel, signal },
               streamParallel,
             );
 
@@ -123,13 +141,16 @@ export function createSubagentExtension(_workspaceId: string, workspacePath: str
                 const status = isFailedResult(r)
                   ? `failed${r.stopReason && r.stopReason !== "error" ? ` (${r.stopReason})` : ""}`
                   : "completed";
-                return `### [${r.agent}] ${status}\n\n${truncateOutput(workerOutput(r))}`;
+                return `### [${r.agent}] ${status} — session ${r.childSessionId}\n\n${truncateOutput(workerOutput(r))}`;
               })
               .join("\n\n---\n\n");
 
             return {
               content: [{ type: "text" as const, text: `Parallel: ${succeeded}/${results.length} succeeded\n\n${summary}` }],
-              details: { mode: "parallel" as const, results },
+              details: {
+                mode: "parallel" as const,
+                results: results.map((r) => ({ agent: r.agent, childSessionId: r.childSessionId })),
+              },
             };
           }
 
@@ -142,24 +163,25 @@ export function createSubagentExtension(_workspaceId: string, workspacePath: str
                 details: { mode: "single" as const, results: [] },
               };
             }
-            const streamSingle = onUpdate
-              ? (partial: { text: string; details: WorkerDetails }) =>
-                  onUpdate({
-                    content: [{ type: "text" as const, text: partial.text }],
-                    details: partial.details,
-                  })
-              : undefined;
-            const result = await runWorker({ agent, task: params.task, cwd: defaultCwd, signal, onUpdate: streamSingle });
+            const result = await runWorker({
+              agent,
+              task: params.task,
+              cwd: defaultCwd,
+              parentSessionFile,
+              parentModel,
+              signal,
+              onUpdate: streamSingle,
+            });
             if (isFailedResult(result)) {
               return {
                 content: [{ type: "text" as const, text: `Agent ${result.stopReason || "failed"}: ${workerOutput(result)}` }],
-                details: { mode: "single" as const, results: [result] },
+                details: { mode: "single" as const, childSessionId: result.childSessionId },
                 isError: true,
               };
             }
             return {
-              content: [{ type: "text" as const, text: result.output || "(no output)" }],
-              details: { mode: "single" as const, results: [result] },
+              content: [{ type: "text" as const, text: `${result.output || "(no output)"}\n\n_Subagent session: ${result.childSessionId}_` }],
+              details: { mode: "single" as const, childSessionId: result.childSessionId },
             };
           }
 
@@ -171,7 +193,7 @@ export function createSubagentExtension(_workspaceId: string, workspacePath: str
                 text: `Provide {agent, task} for a single subagent, or {tasks:[...]} for parallel.\n${availableAgentsText(agents)}`,
               },
             ],
-            details: { mode: "single" as const, results: [] },
+            details: { mode: "single" as const },
           };
         },
       });
