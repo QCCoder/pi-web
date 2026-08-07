@@ -1869,10 +1869,39 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             display: "flex",
             alignItems: "center",
             justifyContent: "flex-end",
+            gap: isMobile ? 4 : 2,
             position: "relative",
             marginLeft: isMobile ? 0 : "auto",
           }}>
-            {isMobile && (
+            {/* Stop is always visible (both mobile & desktop) while streaming,
+                so mobile users don't have to open "more controls" first. */}
+            {isStreaming && (
+              <button
+                onClick={onAbort}
+                 title={t("chat.stopAgent")}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "8px 14px",
+                  height: 32,
+                  background: "rgba(239,68,68,0.08)",
+                  border: "1px solid rgba(239,68,68,0.3)",
+                  borderRadius: 9,
+                  color: "#ef4444",
+                  cursor: "pointer",
+                  fontSize: 12, fontWeight: 600,
+                  whiteSpace: "nowrap", letterSpacing: "-0.01em",
+                  transition: "background 0.12s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.16)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
+                </svg>
+                 {t("chat.stop")}
+              </button>
+            )}
+            {isMobile && !isStreaming && (
               <button
                 type="button"
                  title={controlsMenuOpen ? undefined : t("chat.moreControls")}
@@ -2153,33 +2182,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   )}
                 </button>
               </div>
-            )}
-
-            {isStreaming && (
-              <button
-                onClick={onAbort}
-                 title={t("chat.stopAgent")}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  padding: "8px 14px",
-                  height: 32,
-                  background: "rgba(239,68,68,0.08)",
-                  border: "1px solid rgba(239,68,68,0.3)",
-                  borderRadius: 9,
-                  color: "#ef4444",
-                  cursor: "pointer",
-                  fontSize: 12, fontWeight: 600,
-                  whiteSpace: "nowrap", letterSpacing: "-0.01em",
-                  transition: "background 0.12s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.16)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
-                </svg>
-                 {t("chat.stop")}
-              </button>
             )}
 
             {onSoundToggle !== undefined && (

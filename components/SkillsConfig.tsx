@@ -10,6 +10,7 @@ import type {
   SkillsResponse,
   SkillUpdateResult,
 } from "@/lib/api-types";
+import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 function shortenPath(p: string): string {
   // Match common home dir patterns: /Users/xxx, /home/xxx
@@ -87,6 +88,7 @@ function Toggle({
 function SkillDetail({
   skill,
   cwd,
+  enabled,
   onToggle,
   toggling,
   saveError,
@@ -99,6 +101,10 @@ function SkillDetail({
 }: {
   skill: Skill;
   cwd: string;
+  /** Whether this skill is enabled for the current scope. In workspace mode
+   *  this reflects workspace.yaml skills-whitelist membership; in global mode
+   *  it reflects the absence of the disable-model-invocation frontmatter. */
+  enabled: boolean;
   onToggle: (skill: Skill) => void;
   toggling: boolean;
   saveError: string | null;
@@ -111,7 +117,6 @@ function SkillDetail({
 }) {
   const { t } = useI18n();
   const label = sourceLabel(skill);
-  const enabled = !skill.disableModelInvocation;
 
   function displayPath(p: string): string {
     if (label === "project" && p.startsWith(cwd)) {
@@ -686,13 +691,22 @@ function AddSkillPanel({
 export function SkillsConfig({
   cwd,
   globalOnly = false,
+  workspace = null,
+  onWorkspaceSkillsChange,
   onClose,
 }: {
   cwd: string;
   globalOnly?: boolean;
+  /** When set, the enable/disable toggle controls this workspace's
+   *  `workspace.yaml` skills whitelist (the real source of which skills the
+   *  workspace agent can invoke). When null, falls back to the global
+   *  `disable-model-invocation` frontmatter toggle. */
+  workspace?: WorkspaceSummary | null;
+  onWorkspaceSkillsChange?: (workspace: WorkspaceSummary) => void;
   onClose: () => void;
 }) {
   const isMobile = useIsMobile();
+  const workspaceMode = workspace !== null;
   const { t } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
@@ -707,6 +721,22 @@ export function SkillsConfig({
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectResourcesLoaded, setProjectResourcesLoaded] = useState(true);
+  // Workspace skills whitelist (workspace.yaml `skills`). Owned locally so the
+  // toggle can update optimistically; re-seeded from the workspace prop.
+  const [workspaceSkills, setWorkspaceSkills] = useState<Set<string>>(
+    () => new Set(workspace?.skills ?? []),
+  );
+  useEffect(() => {
+    setWorkspaceSkills(new Set(workspace?.skills ?? []));
+  }, [workspace]);
+
+  // The toggle's enabled state has two meanings depending on scope:
+  //  - workspace mode: skill name is in the workspace.yaml skills whitelist
+  //  - global mode: skill's SKILL.md does NOT set disable-model-invocation
+  // All discoverable skills (global dir, with a SKILL.md) are toggleable in
+  // workspace mode regardless of install/lock info.
+  const isEnabled = (skill: Skill) =>
+    workspaceMode ? workspaceSkills.has(skill.name) : !skill.disableModelInvocation;
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -826,9 +856,50 @@ export function SkillsConfig({
   }, [cwd, globalOnly, loadSkills]);
 
   const toggle = useCallback(async (skill: Skill) => {
-    const next = !skill.disableModelInvocation;
     setToggling((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
+
+    // Workspace mode: persist to the workspace.yaml skills whitelist. This is
+    // the ONLY change that controls which skills the workspace agent can
+    // actually invoke (see lib/rpc-manager.ts skillsOverride). We do not pass
+    // expectedUpdatedAt: the service serializes read-modify-write under a
+    // per-workspace lock, so quick consecutive toggles stay consistent.
+    if (workspaceMode && workspace) {
+      const current = new Set(workspaceSkills);
+      if (current.has(skill.name)) current.delete(skill.name);
+      else current.add(skill.name);
+      try {
+        const res = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ skills: [...current] }),
+        });
+        const d = (await res.json()) as { workspace?: WorkspaceSummary; error?: string };
+        if (!res.ok || d.error) {
+          setSaveError(d.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        const updated = d.workspace;
+        if (updated) {
+          setWorkspaceSkills(new Set(updated.skills));
+          onWorkspaceSkillsChange?.(updated);
+        } else {
+          setWorkspaceSkills(current);
+        }
+      } catch (e) {
+        setSaveError(String(e));
+      } finally {
+        setToggling((s) => {
+          const n = new Set(s);
+          n.delete(skill.filePath);
+          return n;
+        });
+      }
+      return;
+    }
+
+    // Global mode: flip the disable-model-invocation frontmatter on SKILL.md.
+    const next = !skill.disableModelInvocation;
     try {
       const res = await fetch("/api/skills", {
         method: "PATCH",
@@ -859,7 +930,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, []);
+  }, [workspaceMode, workspace, workspaceSkills, onWorkspaceSkillsChange]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
@@ -939,6 +1010,21 @@ export function SkillsConfig({
             ×
           </button>
         </div>
+
+        {workspaceMode && (
+          <div
+            style={{
+              padding: "6px 18px 7px",
+              borderBottom: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+              color: "var(--text-muted)",
+              fontSize: 11,
+              lineHeight: 1.5,
+            }}
+          >
+            开关 = 该工作区 <code style={{ fontFamily: "var(--font-mono)" }}>.pi/workspace.yaml</code> 的 skills 白名单（决定哪些 skill 注入本工作区 agent）；版本 / 来源仅表示已安装包信息。
+          </div>
+        )}
 
         {!projectResourcesLoaded && (
           <div
@@ -1057,7 +1143,7 @@ export function SkillsConfig({
                         {grpSkills.map((skill) => {
                           const isSelected =
                             !addMode && selected === skill.filePath;
-                          const disabled = skill.disableModelInvocation;
+                          const disabled = !isEnabled(skill);
                           return (
                             <div
                               key={skill.filePath}
@@ -1220,8 +1306,11 @@ export function SkillsConfig({
                 key={selectedSkill.filePath}
                 skill={selectedSkill}
                 cwd={cwd}
+                enabled={isEnabled(selectedSkill)}
                 onToggle={toggle}
-                toggling={toggling.has(selectedSkill.filePath)}
+                toggling={
+                  workspaceMode ? toggling.size > 0 : toggling.has(selectedSkill.filePath)
+                }
                 saveError={saveError}
                 updateStatus={
                   updateKey(selectedSkill)

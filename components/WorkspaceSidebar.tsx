@@ -24,6 +24,8 @@ interface Props {
   onCreateWorkspace: () => void;
   onImportDirectory: () => void;
   onOpenWorkspaceSettings: () => void;
+  onOpenLoops: () => void;
+  loopsActive: boolean;
   onAddRepository: () => void;
   onNewSession: () => void;
   onSelectSession: (session: SessionInfo) => void;
@@ -133,6 +135,8 @@ export function WorkspaceSidebar({
   onCreateWorkspace,
   onImportDirectory,
   onOpenWorkspaceSettings,
+  onOpenLoops,
+  loopsActive,
   onAddRepository,
   onNewSession,
   onSelectSession,
@@ -549,6 +553,23 @@ export function WorkspaceSidebar({
               </div>
             )}
           </>
+        )}
+
+        {hasCapability("loop") && (
+          <div style={{ borderTop: "1px solid var(--border)" }}>
+            <button
+              style={{
+                ...sectionButtonStyle,
+                background: loopsActive ? "var(--bg-selected)" : "transparent",
+                color: loopsActive ? "var(--text)" : "var(--text-muted)",
+              }}
+              onClick={onOpenLoops}
+              aria-current={loopsActive ? "page" : undefined}
+            >
+              <span aria-hidden="true">↻</span>
+              <span>Loops</span>
+            </button>
+          </div>
         )}
 
         {(

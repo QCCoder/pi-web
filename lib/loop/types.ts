@@ -1,71 +1,132 @@
-/** Loop module types. */
+/** Public domain model for the generic Loop Runtime. */
 
-export const LOOP_JOB_SCHEMA_VERSION = 1 as const;
+export const LOOP_DEFINITION_SCHEMA_VERSION = 1 as const;
 
-/** How the captured automation output is delivered to Feishu. */
-export type LoopProduceFormat = "card" | "text";
+export type LoopTriggerSource = "cron" | "manual" | "message" | "webhook";
+export type LoopRunStatus =
+  | "queued"
+  | "inferring"
+  | "waiting_for_confirmation"
+  | "running"
+  | "waiting_for_gate"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+export type MonitorVerdict = "changed" | "unchanged" | "unknown";
+export type AutonomyLevel = "L1" | "L2" | "L3";
 
-export type LoopRunStatus = "success" | "error";
-
-export type LoopRunTrigger = "schedule" | "manual";
-
-/**
- * A scheduled automation job. Serialized to
- * `<workspace>/automations/jobs/<name>.yaml`. The `prompt` field is the
- * natural-language "what to do" — it is the template/prompt sent to the
- * automation session.
- */
-export interface LoopJob {
-  name: string;
-  /** Short human label shown in lists and used as the push card title. */
-  description: string;
-  /** Natural-language "what to do" — the prompt/template for the automation session. */
-  prompt: string;
-  /** Daily schedule in `HH:MM` (Asia/Shanghai), e.g. "15:05". */
-  schedule: string;
-  /** Watchlist file reference under `automations/` (without `.md`); "" or "watchlist" => automations/watchlist.md. */
-  watchlist: string;
-  /** Feishu receive_id override; "" => the workspace default receive_id. */
-  pushTarget: string;
-  /** Delivery format for the captured output. */
-  produceFormat: LoopProduceFormat;
+export interface CronTriggerDefinition {
+  id: string;
+  type: "cron";
+  expression: string;
+  timezone: string;
   enabled: boolean;
-  createdAt: string;
-  updatedAt: string;
 }
 
-/** Input accepted by the create/update API (server fills timestamps). */
-export interface UpsertLoopJobInput {
+export interface ExternalTriggerDefinition {
+  id: string;
+  type: "manual" | "message" | "webhook";
+  enabled: boolean;
+}
+
+export type LoopTriggerDefinition = CronTriggerDefinition | ExternalTriggerDefinition;
+
+/** Parsed from `<workspace>/loops/<loopId>/loop.yaml`. */
+export interface LoopDefinition {
+  schemaVersion: typeof LOOP_DEFINITION_SCHEMA_VERSION;
+  id: string;
   name: string;
-  description?: string;
-  prompt: string;
-  schedule: string;
-  watchlist?: string;
-  pushTarget?: string;
-  produceFormat?: LoopProduceFormat;
-  enabled?: boolean;
+  description: string;
+  enabled: boolean;
+  autonomy: AutonomyLevel;
+  workspaceId: string;
+  workspacePath: string;
+  directory: string;
+  instructionsPath: string;
+  statePath: string;
+  triggers: LoopTriggerDefinition[];
 }
 
-export interface LoopPushResult {
-  ok: boolean;
-  messageId?: string;
-  error?: string;
+export interface TriggerCommand {
+  workspaceId: string;
+  loopId: string;
+  source: LoopTriggerSource;
+  /** Stable upstream id. Replays with the same id are de-duplicated. */
+  eventId: string;
+  payload?: Record<string, unknown>;
 }
 
-/** One execution record, appended to `automations/runs/<name>.jsonl`. */
+export interface TriggerReceipt {
+  accepted: boolean;
+  duplicate: boolean;
+  runId: string;
+}
+
+export interface InferredLoopPlan {
+  summary: string;
+  steps: Array<{
+    id: string;
+    maker: string;
+    verifier: string;
+    gate?: string;
+  }>;
+  improve: string;
+  fingerprint: string;
+}
+
 export interface LoopRun {
   id: string;
-  jobName: string;
-  startedAt: string;
-  finishedAt: string;
+  workspaceId: string;
+  loopId: string;
+  eventId: string;
+  triggeredBy: LoopTriggerSource;
   status: LoopRunStatus;
-  /** Automation session id (pi's real session id). */
-  sessionId: string;
-  /** Captured assistant output (truncated for storage). */
-  output: string;
-  /** Feishu push result, if a push was attempted. */
-  push?: LoopPushResult;
-  /** Error message when status === "error". */
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  sessionId?: string;
+  plan?: InferredLoopPlan;
+  gateRequest?: string;
+  verdict?: MonitorVerdict;
+  output?: string;
   error?: string;
-  triggeredBy: LoopRunTrigger;
+}
+
+export interface GateCommand {
+  workspaceId: string;
+  runId: string;
+  decision: "approve" | "reject";
+  comment?: string;
+}
+
+/** The deliberately small interface consumed by every adapter. */
+export interface LoopRuntime {
+  listLoops(workspaceId: string): Promise<LoopDefinition[]>;
+  trigger(command: TriggerCommand): Promise<TriggerReceipt>;
+  getRun(workspaceId: string, runId: string): Promise<LoopRun>;
+  answerGate(command: GateCommand): Promise<LoopRun>;
+}
+
+export interface WorkspaceLocation {
+  id: string;
+  name: string;
+  path: string;
+}
+
+export interface WorkspaceResolver {
+  get(workspaceId: string): Promise<WorkspaceLocation>;
+  list(): Promise<WorkspaceLocation[]>;
+}
+
+export interface RoundExecutionBackend {
+  infer(definition: LoopDefinition, run: LoopRun): Promise<{
+    sessionId: string;
+    plan: InferredLoopPlan;
+  }>;
+  execute(definition: LoopDefinition, run: LoopRun, comment?: string): Promise<{
+    output: string;
+    verdict?: MonitorVerdict;
+    gateRequest?: string;
+  }>;
+  reject(run: LoopRun, comment?: string): Promise<void>;
 }

@@ -1,0 +1,3 @@
+# Use OpenCode as the execution reference and Codex as a product reference
+
+Pi's verified constraints remain authoritative; within those constraints, the Loop system follows OpenCode's local-server patterns for Workspace-scoped instances, asynchronous execution, events, cancellation, and concurrency, while borrowing only Codex's user-facing Automation concepts such as recurrence, destination, continuity, and run review. Combining both internal models would create competing owners for schedules, sessions, approvals, and state, so Codex's unpublished scheduler and storage behavior and OpenCode's persistent child-session model are deliberately excluded.

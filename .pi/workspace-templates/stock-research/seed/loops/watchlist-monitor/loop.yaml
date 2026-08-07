@@ -1,0 +1,18 @@
+schema_version: 1
+id: watchlist-monitor
+name: 自选股变化监控
+description: 对比已验证基线，仅在出现值得报告的变化时生成简报。
+enabled: true
+autonomy: L1
+triggers:
+  - id: weekday-close
+    type: cron
+    expression: "10 15 * * 1-5"
+    timezone: Asia/Shanghai
+    enabled: true
+  - id: run-now
+    type: manual
+    enabled: true
+  - id: market-message
+    type: message
+    enabled: false

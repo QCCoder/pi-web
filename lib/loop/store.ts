@@ -1,249 +1,164 @@
-import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { parse, stringify } from "yaml";
-import { createUlid } from "../workspaces/id.ts";
-import {
-  LOOP_JOB_SCHEMA_VERSION,
-  type LoopJob,
-  type LoopProduceFormat,
-  type LoopRun,
-  type UpsertLoopJobInput,
+import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { parse } from "yaml";
+import type {
+  AutonomyLevel,
+  LoopDefinition,
+  LoopRun,
+  LoopTriggerDefinition,
+  WorkspaceLocation,
 } from "./types.ts";
 
 export class LoopValidationError extends Error {}
 export class LoopConflictError extends Error {}
 export class LoopNotFoundError extends Error {}
 
-const JOB_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const VALID_PRODUCE_FORMATS: readonly LoopProduceFormat[] = ["card", "text"];
-const MAX_RUNS_RETURNED = 50;
-const DEFAULT_WATCHLIST = "watchlist";
+const LOOP_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const AUTONOMY_LEVELS = new Set<AutonomyLevel>(["L1", "L2", "L3"]);
 
-export function automationsDir(workspacePath: string): string {
-  return join(workspacePath, "automations");
-}
-
-function jobsDir(workspacePath: string): string {
-  return join(automationsDir(workspacePath), "jobs");
-}
-
-function jobFile(workspacePath: string, name: string): string {
-  return join(jobsDir(workspacePath), `${name}.yaml`);
-}
-
-function runsDir(workspacePath: string): string {
-  return join(automationsDir(workspacePath), "runs");
-}
-
-function runFile(workspacePath: string, name: string): string {
-  return join(runsDir(workspacePath), `${name}.jsonl`);
-}
-
-function watchlistFile(workspacePath: string, watchlist: string): string {
-  const stem = watchlist.trim() || DEFAULT_WATCHLIST;
-  return join(automationsDir(workspacePath), `${stem}.md`);
-}
-
-export function validateJobName(name: string): string {
-  const normalized = name.trim().toLowerCase();
-  if (!JOB_NAME_RE.test(normalized)) {
-    throw new LoopValidationError(
-      "Job name must contain lowercase letters, numbers, and single hyphens only",
-    );
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new LoopValidationError(`${field} must be a non-empty string`);
   }
-  return normalized;
+  return value.trim();
 }
 
-function parseProduceFormat(value: unknown): LoopProduceFormat {
-  if (value === undefined) return "card";
-  if (typeof value !== "string" || !VALID_PRODUCE_FORMATS.includes(value as LoopProduceFormat)) {
-    throw new LoopValidationError(`produce_format must be one of: ${VALID_PRODUCE_FORMATS.join(", ")}`);
+export function validateLoopId(value: string): string {
+  const id = value.trim().toLowerCase();
+  if (!LOOP_ID_RE.test(id)) {
+    throw new LoopValidationError("loop id must use lowercase letters, numbers, and hyphens");
   }
-  return value as LoopProduceFormat;
+  return id;
 }
 
-/** Normalize + validate a job definition from the API or disk. */
-export function normalizeJob(input: UpsertLoopJobInput, existing?: LoopJob): LoopJob {
-  const name = validateJobName(input.name);
-  const prompt = input.prompt?.trim();
-  if (!prompt) throw new LoopValidationError("prompt is required");
-  const schedule = input.schedule?.trim() ?? "";
-  if (!/^\s*([01]\d|2[0-3]):([0-5]\d)\s*$/.test(schedule)) {
-    throw new LoopValidationError("schedule must be HH:MM (Asia/Shanghai), e.g. 15:05");
+function parseTriggers(value: unknown): LoopTriggerDefinition[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new LoopValidationError("triggers must contain at least one trigger");
   }
-  const now = new Date().toISOString();
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new LoopValidationError(`triggers[${index}] must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    const id = requiredString(record.id, `triggers[${index}].id`);
+    const type = requiredString(record.type, `triggers[${index}].type`);
+    const enabled = record.enabled !== false;
+    if (type === "cron") {
+      return {
+        id,
+        type,
+        expression: requiredString(record.expression, `triggers[${index}].expression`),
+        timezone: typeof record.timezone === "string" && record.timezone.trim()
+          ? record.timezone.trim()
+          : "Asia/Shanghai",
+        enabled,
+      };
+    }
+    if (type === "manual" || type === "message" || type === "webhook") {
+      return { id, type, enabled };
+    }
+    throw new LoopValidationError(`unsupported trigger type: ${type}`);
+  });
+}
+
+export async function readLoopDefinition(
+  workspace: WorkspaceLocation,
+  loopId: string,
+): Promise<LoopDefinition> {
+  const id = validateLoopId(loopId);
+  const directory = resolve(workspace.path, "loops", id);
+  let raw: unknown;
+  try {
+    raw = parse(await readFile(join(directory, "loop.yaml"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new LoopNotFoundError(`loop not found: ${workspace.id}/${id}`);
+    }
+    throw error;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new LoopValidationError("loop.yaml must contain an object");
+  }
+  const record = raw as Record<string, unknown>;
+  if (record.schema_version !== 1) throw new LoopValidationError("schema_version must be 1");
+  const fileId = validateLoopId(requiredString(record.id, "id"));
+  if (fileId !== id) throw new LoopValidationError(`loop id ${fileId} must match directory ${id}`);
+  const autonomy = (record.autonomy ?? "L1") as AutonomyLevel;
+  if (!AUTONOMY_LEVELS.has(autonomy)) throw new LoopValidationError("autonomy must be L1, L2, or L3");
+  const instructionsPath = join(directory, "LOOP.md");
+  try {
+    await readFile(instructionsPath, "utf8");
+  } catch {
+    throw new LoopValidationError(`${instructionsPath} is required`);
+  }
   return {
-    name,
-    description: input.description?.trim() ?? existing?.description ?? "",
-    prompt,
-    schedule,
-    watchlist: input.watchlist?.trim() ?? existing?.watchlist ?? DEFAULT_WATCHLIST,
-    pushTarget: input.pushTarget?.trim() ?? existing?.pushTarget ?? "",
-    produceFormat: parseProduceFormat(input.produceFormat),
-    enabled: input.enabled ?? existing?.enabled ?? true,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
+    schemaVersion: 1,
+    id,
+    name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : id,
+    description: typeof record.description === "string" ? record.description.trim() : "",
+    enabled: record.enabled !== false,
+    autonomy,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    directory,
+    instructionsPath,
+    statePath: join(directory, "STATE.md"),
+    triggers: parseTriggers(record.triggers),
   };
 }
 
-export function serializeJob(job: LoopJob): string {
-  return stringify({
-    schema_version: LOOP_JOB_SCHEMA_VERSION,
-    name: job.name,
-    description: job.description,
-    prompt: job.prompt,
-    schedule: job.schedule,
-    watchlist: job.watchlist,
-    push_target: job.pushTarget,
-    produce_format: job.produceFormat,
-    enabled: job.enabled,
-    created_at: job.createdAt,
-    updated_at: job.updatedAt,
-  }, { lineWidth: 0 });
-}
-
-export function parseJob(value: unknown, expectedName?: string): LoopJob {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new LoopValidationError("Job must be an object");
-  }
-  const record = value as Record<string, unknown>;
-  if (record.schema_version !== LOOP_JOB_SCHEMA_VERSION) {
-    throw new LoopValidationError(`Unsupported job schema: ${String(record.schema_version)}`);
-  }
-  const name = validateJobName(String(record.name ?? ""));
-  if (expectedName && name !== expectedName) {
-    throw new LoopValidationError(`Job name "${name}" must match its filename "${expectedName}"`);
-  }
-  return normalizeJob(
-    {
-      name,
-      description: typeof record.description === "string" ? record.description : "",
-      prompt: typeof record.prompt === "string" ? record.prompt : "",
-      schedule: typeof record.schedule === "string" ? record.schedule : "",
-      watchlist: typeof record.watchlist === "string" ? record.watchlist : "",
-      pushTarget: typeof record.push_target === "string" ? record.push_target : "",
-      produceFormat: record.produce_format as LoopProduceFormat | undefined,
-      enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
-    },
-    {
-      name,
-      description: "",
-      prompt: "",
-      schedule: "",
-      watchlist: DEFAULT_WATCHLIST,
-      pushTarget: "",
-      produceFormat: "card",
-      enabled: true,
-      createdAt: typeof record.created_at === "string" ? record.created_at : "",
-      updatedAt: typeof record.updated_at === "string" ? record.updated_at : "",
-    },
-  );
-}
-
-async function writeFileAtomic(filePath: string, content: string): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
-  const temporaryPath = `${filePath}.${process.pid}.${createUlid()}.tmp`;
+export async function listLoopDefinitions(workspace: WorkspaceLocation): Promise<LoopDefinition[]> {
+  let entries;
   try {
-    await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx" });
-    await rename(temporaryPath, filePath);
-  } catch (error) {
-    await rm(temporaryPath, { force: true });
-    throw error;
-  }
-}
-
-export async function listJobs(workspacePath: string): Promise<LoopJob[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(jobsDir(workspacePath));
+    entries = await readdir(join(workspace.path, "loops"), { withFileTypes: true });
   } catch {
     return [];
   }
-  const jobs: LoopJob[] = [];
+  const loops: LoopDefinition[] = [];
   for (const entry of entries) {
-    if (!entry.endsWith(".yaml") && !entry.endsWith(".yml")) continue;
-    const name = entry.replace(/\.ya?ml$/, "");
+    if (!entry.isDirectory()) continue;
     try {
-      const content = await readFile(jobFile(workspacePath, name), "utf8");
-      jobs.push(parseJob(parse(content), name));
-    } catch {
-      // Skip malformed job files so one bad file doesn't break listing.
+      loops.push(await readLoopDefinition(workspace, entry.name));
+    } catch (error) {
+      console.warn(`[loop] ignoring invalid definition ${workspace.id}/${entry.name}:`, error);
     }
   }
-  return jobs.sort((a, b) => a.name.localeCompare(b.name));
+  return loops.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-export async function readJob(workspacePath: string, name: string): Promise<LoopJob> {
-  const normalized = validateJobName(name);
-  let content: string;
-  try {
-    content = await readFile(jobFile(workspacePath, normalized), "utf8");
-  } catch {
-    throw new LoopNotFoundError(`Loop job not found: ${normalized}`);
-  }
-  return parseJob(parse(content), normalized);
+function runsFile(workspace: WorkspaceLocation, loopId: string): string {
+  return join(workspace.path, "loops", validateLoopId(loopId), "RUNS.jsonl");
 }
 
-export async function writeJob(workspacePath: string, input: UpsertLoopJobInput): Promise<LoopJob> {
-  const normalized = validateJobName(input.name);
-  let existing: LoopJob | undefined;
-  try {
-    existing = await readJob(workspacePath, normalized);
-  } catch (error) {
-    if (!(error instanceof LoopNotFoundError)) throw error;
-  }
-  const job = normalizeJob(input, existing);
-  await writeFileAtomic(jobFile(workspacePath, normalized), serializeJob(job));
-  return job;
+export async function appendRunSnapshot(workspace: WorkspaceLocation, run: LoopRun): Promise<void> {
+  await mkdir(join(workspace.path, "loops", run.loopId), { recursive: true });
+  await appendFile(runsFile(workspace, run.loopId), `${JSON.stringify(run)}\n`, "utf8");
 }
 
-export async function deleteJob(workspacePath: string, name: string): Promise<void> {
-  const normalized = validateJobName(name);
-  try {
-    await rm(jobFile(workspacePath, normalized));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  // Run history is retained for auditability even after a job is deleted.
-}
-
-export async function appendRun(workspacePath: string, name: string, run: LoopRun): Promise<void> {
-  const normalized = validateJobName(name);
-  await mkdir(runsDir(workspacePath), { recursive: true });
-  await appendFile(runFile(workspacePath, normalized), `${JSON.stringify(run)}\n`, "utf8");
-}
-
-export async function listRuns(
-  workspacePath: string,
-  name: string,
-  limit = MAX_RUNS_RETURNED,
+export async function listRunSnapshots(
+  workspace: WorkspaceLocation,
+  loopId?: string,
 ): Promise<LoopRun[]> {
-  const normalized = validateJobName(name);
-  let content: string;
-  try {
-    content = await readFile(runFile(workspacePath, normalized), "utf8");
-  } catch {
-    return [];
-  }
-  const runs: LoopRun[] = [];
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+  const loopIds = loopId
+    ? [validateLoopId(loopId)]
+    : (await listLoopDefinitions(workspace)).map((definition) => definition.id);
+  const latest = new Map<string, LoopRun>();
+  for (const id of loopIds) {
+    let content = "";
     try {
-      runs.push(JSON.parse(trimmed) as LoopRun);
+      content = await readFile(runsFile(workspace, id), "utf8");
     } catch {
-      // Skip malformed lines.
+      continue;
+    }
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const run = JSON.parse(line) as LoopRun;
+        latest.set(run.id, run);
+      } catch {
+        // An append-only evidence log remains usable after a partial final line.
+      }
     }
   }
-  // Newest first.
-  runs.reverse();
-  return runs.slice(0, Math.max(0, limit));
-}
-
-export async function readWatchlist(workspacePath: string, watchlist: string): Promise<string> {
-  try {
-    return await readFile(watchlistFile(workspacePath, watchlist), "utf8");
-  } catch {
-    return "";
-  }
+  return [...latest.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }

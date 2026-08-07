@@ -42,15 +42,18 @@
 ## 4. Loop 任务模型（待实现）
 
 ```
-automations/
-  jobs/<name>.yaml        schedule + 引用哪个模版 + watchlist + push + produce
-  templates/<name>.md     自然语言"做什么"（= 调研模版/提示词）+ 期望产出
-  watchlist.md            用户随时改的自选股
+loops/<loop-id>/
+  loop.yaml               触发源 + autonomy + enabled
+  LOOP.md                 怎么做 + 怎么验 + Gate + Improve 边界
+  STATE.md                下轮需要的已验证状态
+  RUNS.jsonl              append-only Round 状态与证据
+  agents/                 可选的任务专用 Worker 指令
+  audit/                  人工审计与改进建议
 ```
-- job 触发 = 开一个**独立 automation session**（走 rpc-manager，**复用唯一 session owner**，绝不另起进程开 session）→ 按 template 跑（取数 + 总结）→ 出产物 → 调 feishu-transport 推送。
-- automation session 与聊天 session 隔离：推送是单向的；用户回复进聊天 session。
-- 起步 job：每日盘后简报（行情+涨跌+成交+一句话点评 → 飞书卡片）。
-- run 历史：每次跑记录（时间、成功否、产物路径、错误），存本地（学 openclaw tasks/runs 思路）。
+- `pi-loop` 独立进程接受 cron、手动、消息和 webhook Trigger，创建一个可见的 Pi Orchestrator Conversation。
+- AI 先读取 Loop 契约并推断 Maker/Checker/Gate 结构，创建者确认一次后才在同一主会话执行。
+- Maker 与 Checker 是隔离的临时 Worker，不形成需要管理的持久子会话。
+- 每轮状态变化追加到 `RUNS.jsonl`；执行成功与业务 verdict（changed/unchanged/unknown）分开记录。
 
 ## 5. 实现进度
 
@@ -59,20 +62,18 @@ automations/
 - `d98c80c feat(feishu): feishu-transport module + capability toggling` —— `lib/feishu/{types,client,config,extension}.ts`、`feishu-transport` capability、`UpdateWorkspaceInput.capabilities`、`GET/PUT/DELETE /api/workspaces/[id]/feishu`。
 - `3f617f1 fix(workspaces): register feishu-transport in capability registry` —— `ALL_WORKSPACE_CAPABILITIES` 之前漏登 `feishu-transport`，`parseCapabilities` 拒收、PATCH 切换会报 400；补登记后切换才真正生效。
 - `9d80539 feat(feishu): feishu-transport settings panel`（**PIECE A**）—— `components/FeishuConfig.tsx`（开关 capability + 填 appId/appSecret/receiveIdType/receiveId + 测试发送）+ `POST /api/workspaces/[id]/feishu/test`，嵌入 WorkspaceManager 设置视图。
-- `45bc847 / e7cf442 / b1be0f1 feat(loop): …`（**PIECE B**）—— `lib/loop/{types,schedule,store,runner,scheduler}.ts` + API 路由（`/api/workspaces/[id]/loop/jobs`、`/jobs/[name]`、`/jobs/[name]/run`、`/runs`）+ `components/LoopConfig.tsx`，详见下方「Loop 实现说明」。
+- `45bc847 / e7cf442 / b1be0f1 feat(loop): …`（历史实验）—— 进程内 job/scheduler 原型，已由下面的通用 Loop Runtime 取代，不保留数据或 API 兼容。
 - `8f64e25 test(rpc): update stale extension-preload assertion` —— 修掉 d495861 重构后遗留的红测。
 
-### 5.1 Loop 实现说明（PIECE B 落地决策）
+### 5.1 通用 Loop Runtime 落地决策
 
-- **提示词内嵌在 job**：`LoopJob.prompt` 字段就是「做什么」的模版/提示词（任务描述明确该字段 = prompt/template）。v1 不单设 `automations/templates/` 目录，后续需要复用模版时再加。
-- **推送由 runner 服务端执行**：开 automation session 跑提示词 → 抓 `get_last_assistant_text` 作为产物 → 由 runner 用 `FeishuClient` 推送（card/text）。确定性、可记录 push 结果、可控制目标与格式；提示词里要求 agent **不要**自己调 feishu 工具（避免双推）。
-- **调度器在 pi-web 进程内**：`getLoopScheduler()` 是 globalThis 单例（抗 hot-reload），60s tick；经 `instrumentation.ts` 在 server 启动时拉起（跳过 `next build`，且 try/catch 不阻塞启动）。每个 job 复用 `startRpcSession` 开**独立 automation session**（唯一 session owner，绝不另起进程）。
-- **同日补跑**：`isJobDue(now, schedule, lastRunAt)` 依上次 run 标记 + Asia/Shanghai 当日 HH:MM 判断；服务重启后同日错过的槽位会补跑一次，跨过上海午夜错过的槽位不补（下一槽按时跑）。
-- **schedule 零依赖纯函数**：CST 固定 UTC+8、无夏令时，固定偏移换算；配 `lib/loop/schedule.test.mjs`（node:test，9 例）。
-- **loop 是后台服务**，**不**登记进 `WORKSPACE_EXTENSION_FACTORIES`；`loop` capability 已加入 `WorkspaceCapability` + registry。
-- **job/run 不自动 git commit**（避免每次调度的提交噪音）；runs 走 append-only JSONL（`automations/runs/<name>.jsonl`）。
-- **手动触发** `POST .../jobs/[name]/run` 返回 202，run 脱离请求生命周期，结果落 runs 历史；UI 触发后短轮询拉历史。
-- **automation session 可见**：它们是真实 session（独立 .jsonl），会出现在会话列表里便于复查；与聊天 session「隔离」指推送单向、用户回复进聊天 session。
+- **Workspace 文件是权威来源**：每个任务独占 `loops/<loop-id>/`，Host registry 可从目录重建。
+- **深接口**：所有 Adapter 只依赖 `listLoops`、`trigger`、`getRun`、`answerGate`；任务领域内容不进入 Runtime。
+- **独立 Host**：timer、去重和派发由 `pi-loop` 拥有，Pi Web 仅代理管理 API；Pi extension factory 不启动 timer。
+- **统一触发**：cron/manual/message/webhook 使用同一个 `TriggerCommand` 和稳定 `eventId`。
+- **Maker/Checker 分离**：每个产出步骤必须有独立 verifier；人 Gate 通过 `waiting_for_gate` 暂停同一 Pi 主会话。
+- **渐进自治**：L1/L2 不自动改写规则；Improve 把真实证据写入 `audit/`，由 Loop Audit 决定规则修改和 L1→L2→L3 晋级。
+- 完整契约与启动方式见 `docs/loop-runtime.md`。
 
 待做（按顺序）：
 1. **feishu-channel 入站**（后续阶段）：长连接客户端 + chat↔session 绑定 + 入站路由（复用 rpc-manager）+ `/new`。

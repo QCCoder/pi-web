@@ -71,3 +71,85 @@ _Avoid_: Skill catalog
 **Unassigned Conversation**:
 An existing Pi Conversation that has not yet been associated with a Workspace.
 _Avoid_: Orphaned Conversation
+
+### Feedback Loops
+
+**Feedback Loop**:
+A persistent definition of repeatable work whose completed Rounds can improve later Rounds.
+_Avoid_: Scheduled Job, recurring prompt
+
+**Round**:
+One bounded execution of a Feedback Loop, with its own input, progress, and outcome.
+_Avoid_: Loop, schedule tick
+
+**Trigger**:
+An idempotent request from a Trigger Source to start a Round of a specific Feedback Loop.
+_Avoid_: Round, schedule
+
+**Trigger Source**:
+The origin that decides when to request a Round, such as a schedule, message, webhook, or person.
+_Avoid_: Orchestrator, Feedback Loop
+
+**Orchestrator Conversation**:
+The single persistent Pi Conversation that coordinates a Round and presents its progress to the user.
+_Avoid_: Worker Conversation, parent session
+
+**Worker**:
+An isolated, temporary agent invocation that performs one delegated responsibility and returns its result to the Orchestrator Conversation.
+_Avoid_: Child Conversation, persistent subagent
+
+**Maker**:
+The Worker responsible for producing a Step's declared outcome.
+_Avoid_: Checker, Orchestrator
+
+**Checker**:
+The Worker responsible for independently evaluating a Maker's outcome against declared acceptance criteria.
+_Avoid_: Maker, self-reviewer
+
+**Loop Definition**:
+The Workspace-owned, authoritative description of a Feedback Loop's purpose, trigger policy, Round behavior, verification requirements, Gates, and improvement boundaries.
+_Avoid_: Registry record, scheduled prompt
+
+**Loop Service**:
+The shared local service that accepts Triggers, schedules and dispatches Rounds, and coordinates their execution across trusted Workspaces.
+_Avoid_: Pi extension, Workspace daemon, Loop Definition
+
+**Loop Host**:
+The independent local process that keeps the Loop Service available without requiring Pi Web or an interactive Pi session to remain open.
+_Avoid_: Pi extension, Pi Web server
+
+**Registry Index**:
+A disposable catalog derived from registered Workspace Loop Definitions for discovery and dispatch.
+_Avoid_: Loop database, source of truth
+
+**Round Execution Backend**:
+The adapter that runs an Orchestrator Conversation and its Workers for one Round within the target Workspace.
+_Avoid_: Loop Service, Scheduler, Trigger Source
+
+**Autonomy Level**:
+The approved authority of a Feedback Loop: L1 reports only, L2 prepares or performs assisted actions requiring review, and L3 may perform proven low-risk actions unattended.
+_Avoid_: Progress status, model capability
+
+**Loop Audit**:
+A review of Run evidence, failures, false positives, human escalations, and cost used to change a Loop or its Autonomy Level.
+_Avoid_: Automatic self-modification, Checker verification
+
+**Watchlist Monitor**:
+The first real Feedback Loop used to discover the shared Loop contract: it observes configured targets, evaluates changes, and may deliver a verified report to Feishu.
+_Avoid_: Example Loop, generic Loop template
+
+**Watchlist**:
+The Workspace-owned set of targets a Watchlist Monitor is responsible for observing.
+_Avoid_: Report recipients, schedule
+
+**Observation**:
+A sourced fact collected about a Watchlist target during one Round.
+_Avoid_: Report, unverified claim
+
+**Baseline**:
+The accepted prior state against which a Round evaluates new Observations.
+_Avoid_: Run history, current report
+
+**Monitor Verdict**:
+The domain conclusion that a completed monitoring Round found either no reportable change or a reportable change.
+_Avoid_: Round status, execution result

@@ -13,6 +13,7 @@ import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { WorkspaceOverview } from "./WorkspaceOverview";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
+import { LoopConfig } from "./LoopConfig";
 import { HomeLanding } from "./HomeLanding";
 import { WorkspaceTabBar } from "./WorkspaceTabBar";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -40,7 +41,7 @@ type AutoNameStatus =
   | { kind: "success" }
   | { kind: "error"; message: string };
 
-type WorkspaceView = "overview" | "settings" | "work-items" | "chat";
+type WorkspaceView = "overview" | "settings" | "work-items" | "loops" | "chat";
 
 /**
  * One open workspace tab. All per-tab view state (selected session, file tabs,
@@ -388,9 +389,12 @@ export function AppShell() {
       return;
     }
 
-    const view: WorkspaceView = rawView && (["overview", "settings", "work-items", "chat"] as const).includes(rawView as WorkspaceView)
+    let view: WorkspaceView = rawView && (["overview", "settings", "work-items", "loops", "chat"] as const).includes(rawView as WorkspaceView)
       ? rawView as WorkspaceView
       : (workspace.capabilities.includes("overview") ? "overview" : "chat");
+    if (view === "loops" && !workspace.capabilities.includes("loop")) {
+      view = workspace.capabilities.includes("overview") ? "overview" : "chat";
+    }
     ensureTab(workspace);
     updateTab(workspaceId, {
       view,
@@ -425,7 +429,13 @@ export function AppShell() {
       let changed = false;
       const next = prev.map((t) => {
         const fresh = workspaces.find((w) => w.id === t.id);
-        if (fresh && fresh !== t.workspace) { changed = true; return { ...t, workspace: fresh }; }
+        if (fresh && fresh !== t.workspace) {
+          changed = true;
+          const view = t.view === "loops" && !fresh.capabilities.includes("loop")
+            ? (fresh.capabilities.includes("overview") ? "overview" : "chat")
+            : t.view;
+          return { ...t, workspace: fresh, view };
+        }
         return t;
       });
       return changed ? next : prev;
@@ -451,6 +461,17 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
     navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`);
   }, [activeTabId, updateTab, navigateUrl, isMobile]);
+
+  // Loop 运行产生的 orchestrator 会话按 id 打开（会话列表里查到后走常规选中流程）。
+  const handleOpenLoopSession = useCallback((sessionId: string) => {
+    void fetch("/api/sessions")
+      .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
+      .then((d) => {
+        const session = d?.sessions.find((s) => s.id === sessionId);
+        if (session) handleSelectSession(session);
+      })
+      .catch(() => {});
+  }, [handleSelectSession]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
     const id = ensureTab(workspace);
@@ -924,6 +945,11 @@ export function AppShell() {
         setOpenRepositoryFormRequest(undefined);
         navigateWorkspaceView("settings");
       }}
+      onOpenLoops={() => {
+        navigateWorkspaceView("loops");
+        if (isMobile) setSidebarOpen(false);
+      }}
+      loopsActive={workspaceView === "loops"}
       onAddRepository={() => {
         navigateWorkspaceView("settings");
         setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
@@ -1732,6 +1758,11 @@ export function AppShell() {
               }}
             />
           ) : activeWorkspace
+            && workspaceView === "loops" ? (
+            <div style={{ height: "100%", overflowY: "auto", padding: 20 }}>
+              <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onOpenSession={handleOpenLoopSession} />
+            </div>
+          ) : activeWorkspace
             && (workspaceView === "settings" || workspaceView === "work-items") ? (
             <WorkspaceManager
               open
@@ -1746,6 +1777,8 @@ export function AppShell() {
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
               onWorkspaceDeleted={handleWorkspaceDeleted}
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+              onWorkspaceChanged={() => void loadWorkspaces()}
+              onOpenLoops={() => navigateWorkspaceView("loops")}
             />
           ) : !activeWorkspace && workspaceManagerOpen ? (
             <WorkspaceManager
@@ -1908,6 +1941,12 @@ export function AppShell() {
       <SkillsConfig
         cwd={settingsCwd}
         globalOnly={!activeWorkspace}
+        workspace={activeWorkspace}
+        onWorkspaceSkillsChange={(updated) => {
+          setWorkspaces((current) =>
+            current.map((w) => (w.id === updated.id ? updated : w)),
+          );
+        }}
         onClose={() => setSkillsConfigOpen(false)}
       />
     )}

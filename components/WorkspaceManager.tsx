@@ -54,6 +54,8 @@ interface Props {
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
   onWorkspaceDeleted?: (workspace: WorkspaceSummary) => void;
   onWorkItemsChanged?: () => void;
+  onWorkspaceChanged?: () => void;
+  onOpenLoops?: () => void;
 }
 
 const STATUS_OPTIONS: WorkItemStatus[] = ["open", "in_progress", "blocked", "done", "cancelled"];
@@ -159,6 +161,8 @@ export function WorkspaceManager({
   onOpenWorkItemConversation,
   onWorkspaceDeleted,
   onWorkItemsChanged,
+  onWorkspaceChanged,
+  onOpenLoops,
 }: Props) {
   const [section, setSection] = useState<ManagerSection>(initialSection);
   const [workspaceData, setWorkspaceData] = useState<WorkspaceListResponse | null>(null);
@@ -1190,7 +1194,12 @@ export function WorkspaceManager({
                     />
                     <LoopConfig
                       workspace={selectedWorkspace}
-                      onWorkspaceChanged={() => void loadWorkspaces()}
+                      mode="settings"
+                      onOpenLoops={onOpenLoops}
+                      onWorkspaceChanged={() => {
+                        void loadWorkspaces();
+                        onWorkspaceChanged?.();
+                      }}
                     />
                     <FeishuChannelPanel
                       workspace={selectedWorkspace}
