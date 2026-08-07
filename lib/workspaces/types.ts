@@ -18,6 +18,7 @@ export type WorkspaceCapability =
   | "feishu-transport"
 
   | "loop"
+  | "subagent"
   | "feishu-channel";
 export type WorkspaceTemplateSource = "built-in" | "custom";
 export type WorkspaceRepositoryKind = "code" | "knowledge";

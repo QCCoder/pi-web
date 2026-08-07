@@ -1,4 +1,5 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { createSubagentExtension } from "../subagent/extension.ts";
 import { createWorkspaceWorkItemExtension } from "../work-items/extension.ts";
 import { createFeishuTransportExtension } from "../feishu/extension.ts";
 import { effectiveCapabilities } from "./service.ts";
@@ -38,6 +39,10 @@ export const WORKSPACE_EXTENSION_FACTORIES: readonly WorkspaceExtensionFactory[]
   {
     capability: "feishu-transport",
     build: (manifest) => createFeishuTransportExtension(manifest),
+  },
+  {
+    capability: "subagent",
+    build: (manifest, workspacePath) => createSubagentExtension(manifest.id, workspacePath),
   },
 ];
 
