@@ -99,9 +99,16 @@ export class DefaultLoopRuntime implements LoopRuntime {
         // open it live instead of waiting for the whole inference to finish.
         await appendRunSnapshot(workspace, this.patch(inferring, { sessionId }));
       });
-      await appendRunSnapshot(workspace, this.patch(inferring, {
-        status: "waiting_for_confirmation", sessionId: inferred.sessionId, plan: inferred.plan,
-      }));
+      const planned = this.patch(inferring, { sessionId: inferred.sessionId, plan: inferred.plan });
+      if (definition.autonomy === "L3") {
+        // Unattended authority (ADR 0008): skip human confirmation and execute
+        // the inferred plan directly. Declared in-round gates still pause.
+        const running = this.patch(planned, { status: "running" });
+        await appendRunSnapshot(workspace, running);
+        await this.execute(workspace, definition, running);
+        return;
+      }
+      await appendRunSnapshot(workspace, this.patch(planned, { status: "waiting_for_confirmation" }));
     } catch (error) {
       await this.fail(workspace, run, error);
     } finally {

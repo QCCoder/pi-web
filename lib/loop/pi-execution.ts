@@ -51,9 +51,17 @@ async function hasSubagentTool(session: AgentSessionWrapper): Promise<boolean> {
 }
 
 function extractJson(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const candidate = fenced ?? text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
-  return JSON.parse(candidate);
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  const hasBraces = text.includes("{") && text.includes("}");
+  const candidate = fenced ?? (hasBraces ? text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1) : "");
+  if (!candidate) {
+    throw new Error(`Pi did not return JSON (empty or no JSON object). Preview: ${text.slice(0, 200)}`);
+  }
+  try {
+    return JSON.parse(candidate);
+  } catch (error) {
+    throw new Error(`Pi returned unparseable JSON: ${error instanceof Error ? error.message : String(error)}. Preview: ${candidate.slice(0, 200)}`);
+  }
 }
 
 function normalizePlan(output: string, definition: LoopDefinition): InferredLoopPlan {
@@ -103,12 +111,16 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     );
     this.sessions.set(run.id, session);
     onSessionReady?.(realSessionId);
+    const delegateViaSubagent = await hasSubagentTool(session);
+    const roleLine = delegateViaSubagent
+      ? "Each maker and verifier will later run as its own isolated subagent session, so infer roles that are independently delegatable."
+      : "Maker and verifier roles will run inline in this same session; keep them conceptually separable.";
     const output = await capturePrompt(session, [
       "You are the persistent orchestrator conversation for one generic Loop round.",
       "Read the task contract below. Infer its maker/checker pipeline without doing the work yet.",
       "Return JSON only: {summary, steps:[{id,maker,verifier,gate?}], improve}.",
       "Every producing step needs a separate verifier. Include human gates only where the contract requires judgment.",
-      "Each maker and verifier will later run as its own isolated subagent session, so infer roles that are independently delegatable.",
+      roleLine,
       "",
       `# LOOP.md\n${instructions}`,
       `# STATE.md\n${state}`,
