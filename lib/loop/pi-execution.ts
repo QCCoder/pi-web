@@ -92,7 +92,7 @@ function gateFrom(output: string): string | undefined {
 export class PiRoundExecutionBackend implements RoundExecutionBackend {
   private readonly sessions = new Map<string, AgentSessionWrapper>();
 
-  async infer(definition: LoopDefinition, run: LoopRun) {
+  async infer(definition: LoopDefinition, run: LoopRun, onSessionReady?: (sessionId: string) => void) {
     const instructions = await readFile(definition.instructionsPath, "utf8");
     const state = await readFile(definition.statePath, "utf8").catch(() => "# State\n\nNo prior state.");
     const { session, realSessionId } = await startRpcSession(
@@ -102,6 +102,7 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
       undefined,
     );
     this.sessions.set(run.id, session);
+    onSessionReady?.(realSessionId);
     const output = await capturePrompt(session, [
       "You are the persistent orchestrator conversation for one generic Loop round.",
       "Read the task contract below. Infer its maker/checker pipeline without doing the work yet.",

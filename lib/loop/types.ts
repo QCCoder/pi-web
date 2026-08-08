@@ -119,7 +119,12 @@ export interface WorkspaceResolver {
 }
 
 export interface RoundExecutionBackend {
-  infer(definition: LoopDefinition, run: LoopRun): Promise<{
+  infer(
+    definition: LoopDefinition,
+    run: LoopRun,
+    /** Called as soon as the orchestrator session exists, before inference finishes. */
+    onSessionReady?: (sessionId: string) => void,
+  ): Promise<{
     sessionId: string;
     plan: InferredLoopPlan;
   }>;

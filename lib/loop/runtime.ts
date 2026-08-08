@@ -94,7 +94,11 @@ export class DefaultLoopRuntime implements LoopRuntime {
     try {
       const inferring = this.patch(run, { status: "inferring" });
       await appendRunSnapshot(workspace, inferring);
-      const inferred = await this.execution.infer(definition, inferring);
+      const inferred = await this.execution.infer(definition, inferring, async (sessionId) => {
+        // Record the orchestrator session id as soon as it exists so the UI can
+        // open it live instead of waiting for the whole inference to finish.
+        await appendRunSnapshot(workspace, this.patch(inferring, { sessionId }));
+      });
       await appendRunSnapshot(workspace, this.patch(inferring, {
         status: "waiting_for_confirmation", sessionId: inferred.sessionId, plan: inferred.plan,
       }));

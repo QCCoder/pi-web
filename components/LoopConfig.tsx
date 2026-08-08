@@ -92,13 +92,18 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
   }, [base, enabled]);
   useEffect(() => { void load(); }, [load]);
 
-  const pollRun = useCallback((loopId: string, runId: string) => {
+  const pollRun = useCallback((loopId: string, runId: string, onSession?: (sessionId: string) => void) => {
+    let sessionHandled = false;
     const poll = async () => {
       if (!mounted.current) return;
       try {
         const { run } = await responseJson<{ run: LoopRun }>(await fetch(`${base}/runs/${encodeURIComponent(runId)}`));
         if (!mounted.current) return;
         setRuns((current) => ({ ...current, [loopId]: run }));
+        if (onSession && !sessionHandled && run.sessionId) {
+          sessionHandled = true;
+          onSession(run.sessionId);
+        }
         if (!TERMINAL.has(run.status) && run.status !== "waiting_for_confirmation" && run.status !== "waiting_for_gate") {
           setTimeout(() => void poll(), 1500);
         }
@@ -111,9 +116,9 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
     setError(null);
     try {
       const receipt = await responseJson<{ runId: string }>(await fetch(`${base}/loops/${encodeURIComponent(loop.id)}/trigger`, { method: "POST" }));
-      pollRun(loop.id, receipt.runId);
+      pollRun(loop.id, receipt.runId, onOpenSession);
     } catch (triggerError) { setError(triggerError instanceof Error ? triggerError.message : String(triggerError)); }
-  }, [base, pollRun]);
+  }, [base, pollRun, onOpenSession]);
 
   const decide = useCallback(async (loopId: string, runId: string, decision: "approve" | "reject") => {
     setError(null);
