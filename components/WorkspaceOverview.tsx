@@ -82,9 +82,12 @@ export function WorkspaceOverview({
     const prefix = `${wsPath}/`;
     return sessions
       .filter((session) =>
-        session.cwd === path
-        || session.cwd.startsWith(prefix)
-        || session.projectRoot === path,
+        !session.subagentChild
+        && (
+          session.cwd === path
+          || session.cwd.startsWith(prefix)
+          || session.projectRoot === path
+        ),
       )
       .sort((a, b) => b.modified.localeCompare(a.modified))
       .slice(0, 5);

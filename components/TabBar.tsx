@@ -3,14 +3,24 @@
 import { useState } from "react";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
+import type { SessionInfo } from "@/lib/types";
 
-export interface Tab {
-  id: string;
-  label: string;
-  filePath: string;
-  sourceSessionId?: string | null;
-  initialDisplayMode?: "source" | "preview" | "diff";
-}
+export type Tab =
+  | {
+      id: string;
+      kind: "file";
+      label: string;
+      filePath: string;
+      sourceSessionId?: string | null;
+      initialDisplayMode?: "source" | "preview" | "diff";
+    }
+  | {
+      id: string;
+      kind: "session";
+      label: string;
+      sessionId: string;
+      sessionInfo: SessionInfo;
+    };
 
 interface Props {
   tabs: Tab[];
@@ -70,7 +80,11 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
             }}
           >
             <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-              {getFileIcon(tab.label, 13)}
+              {tab.kind === "file" ? getFileIcon(tab.label, 13) : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+              )}
             </span>
             <span
               style={{
@@ -79,7 +93,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
                 flex: 1,
                 fontWeight: isActive ? 500 : 400,
               }}
-              title={tab.filePath}
+              title={tab.kind === "file" ? tab.filePath : tab.label}
             >
               {tab.label}
             </span>

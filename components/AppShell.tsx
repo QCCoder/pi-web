@@ -14,6 +14,7 @@ import { WorkspaceManager } from "./WorkspaceManager";
 import { WorkspaceOverview } from "./WorkspaceOverview";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { LoopConfig } from "./LoopConfig";
+import { LoopLaunchingPlaceholder, LoopStatusBar } from "./LoopLaunchOverlay";
 import { HomeLanding } from "./HomeLanding";
 import { WorkspaceTabBar } from "./WorkspaceTabBar";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -33,6 +34,7 @@ import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
+import type { LoopDefinition, LoopRun } from "@/lib/loop/types";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -57,6 +59,9 @@ interface WorkspaceTabState {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   workItemKey: string | null;
+  /** When set, this tab is showing a just-triggered Loop run's launching
+   *  placeholder / status bar. Cleared once the run reaches a terminal state. */
+  loopPending?: { runId?: string; loopName: string; workspaceId: string };
   fileTabs: Tab[];
   activeFileTabId: string | null;
   rightPanelOpen: boolean;
@@ -462,16 +467,104 @@ export function AppShell() {
     navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`);
   }, [activeTabId, updateTab, navigateUrl, isMobile]);
 
-  // Loop 运行产生的 orchestrator 会话按 id 打开（会话列表里查到后走常规选中流程）。
+  // Loop 运行产生的 orchestrator 会话按 id 打开。走专门的 locate 端点：
+  // 优先 probe Loop Host 拿权威元信息（session 在 Host 进程里，它最先知道），
+  // Host 不可达/旧版本时回退到强制刷新磁盘扫描。两种路径都不依赖 30s 列表缓存，
+  // 所以刚触发的一轮能立刻打开，而不是“过一会才出现”。
   const handleOpenLoopSession = useCallback((sessionId: string) => {
-    void fetch("/api/sessions")
-      .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
+    void fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`)
+      .then((r) => (r.ok ? (r.json() as Promise<{ session: SessionInfo }>) : null))
       .then((d) => {
-        const session = d?.sessions.find((s) => s.id === sessionId);
-        if (session) handleSelectSession(session);
+        if (d?.session) {
+          handleSelectSession(d.session);
+          // locate 已让磁盘缓存失效；触发侧边栏重拉，让这个新会话立即出现在会话列表里。
+          setRefreshKey((k) => k + 1);
+        }
       })
       .catch(() => {});
   }, [handleSelectSession]);
+
+  // ---- Loop 乐观启动 -----------------------------------------------------------
+  // 点击“运行一轮”时立即把当前 tab 切到 chat 并显示启动占位，不等 Loop Host 把
+  // 编排会话创建好（那要起 AgentSession + 加载 skills，好几秒）。这里轮询 run，
+  // sessionId 一出现就接上实时流；run 状态/plan/gate 也由这里维护，状态条挂在
+  // chat 顶部，L2 的人工确认不用切回 Loops 视图。
+  const [loopRun, setLoopRun] = useState<LoopRun | null>(null);
+  const activeLoopPending = activeTab?.loopPending ?? null;
+
+  const handleLoopTriggered = useCallback((loop: LoopDefinition) => {
+    if (!activeTabId) return;
+    const workspaceId = activeTabId;
+    // 点击瞬间同步切到 chat + 启动占位，不等 trigger POST 往返——这是“立即打开会话框”的关键。
+    setLoopRun({
+      id: "", workspaceId, loopId: loop.id, eventId: "", triggeredBy: "manual",
+      status: "queued", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    updateTab(workspaceId, {
+      view: "chat", session: null, newSessionCwd: null, workItemKey: null,
+      loopPending: { loopName: loop.name, workspaceId },
+    });
+    setSessionKey((k) => k + 1);
+    navigateUrl(`workspace=${encodeURIComponent(workspaceId)}&view=chat`);
+    // 后台触发；runId 一返回就写进 loopPending，轮询 effect 随即接管。
+    void (async () => {
+      try {
+        const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/loop/loops/${encodeURIComponent(loop.id)}/trigger`, { method: "POST" });
+        if (!res.ok) throw new Error(`触发失败 (HTTP ${res.status})`);
+        const receipt = await res.json() as { runId: string };
+        updateTab(workspaceId, (tab) => (tab.loopPending ? { loopPending: { ...tab.loopPending, runId: receipt.runId } } : {}));
+      } catch (error) {
+        setLoopRun((cur) => (cur ? { ...cur, status: "failed", error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() } : cur));
+        updateTab(workspaceId, { loopPending: undefined });
+      }
+    })();
+  }, [activeTabId, updateTab, navigateUrl]);
+
+  const handleLoopGate = useCallback(async (decision: "approve" | "reject") => {
+    const run = loopRun;
+    if (!run) return;
+    try {
+      const res = await fetch(`/api/workspaces/${encodeURIComponent(run.workspaceId)}/loop/runs/${encodeURIComponent(run.id)}/gate`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }),
+      });
+      const value = await res.json() as { run: LoopRun };
+      setLoopRun(value.run);
+    } catch { /* 下一次轮询会修正状态 */ }
+  }, [loopRun]);
+
+  useEffect(() => {
+    if (!activeLoopPending) { setLoopRun(null); return; }
+    const runId = activeLoopPending.runId;
+    const workspaceId = activeLoopPending.workspaceId;
+    if (!runId) return; // trigger POST 还没返回 runId，暂不轮询；runId 写入后本 effect 重跑
+    const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/loop`;
+    const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+    let stopped = false;
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetch(`${base}/runs/${encodeURIComponent(runId)}`);
+        if (!res.ok) { if (!stopped) setTimeout(poll, 2000); return; }
+        const { run } = await res.json() as { run: LoopRun };
+        if (stopped) return;
+        setLoopRun(run);
+        // 编排会话一存在就接上实时流。
+        if (run.sessionId && selectedSession?.id !== run.sessionId) {
+          handleOpenLoopSession(run.sessionId);
+        }
+        if (TERMINAL.has(run.status)) {
+          // 保留终态状态供查看；清掉 pending 让轮询停止。
+          updateTab(workspaceId, { loopPending: undefined });
+        } else {
+          setTimeout(poll, 1000);
+        }
+      } catch {
+        if (!stopped) setTimeout(poll, 2000);
+      }
+    };
+    const timer = setTimeout(poll, 300);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [activeLoopPending, selectedSession, handleOpenLoopSession, updateTab]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
     const id = ensureTab(workspace);
@@ -789,25 +882,28 @@ export function AppShell() {
       if (!existing) {
         fileTabs = [...prev, {
           id: fileTabId,
+          kind: "file",
           label: fileName,
           filePath,
           sourceSessionId,
           initialDisplayMode: modeHint,
         }];
-      } else {
+      } else if (existing.kind === "file") {
         const sourceUnchanged = !sourceSessionId || existing.sourceSessionId === sourceSessionId;
         const modeUnchanged = !modeHint || existing.initialDisplayMode === modeHint;
         if (sourceUnchanged && modeUnchanged) {
           fileTabs = prev;
         } else {
           fileTabs = prev.map((t) => {
-            if (t.id !== fileTabId) return t;
-            const next: Tab = { ...t };
+            if (t.id !== fileTabId || t.kind !== "file") return t;
+            const next = { ...t };
             if (sourceSessionId) next.sourceSessionId = sourceSessionId;
             if (modeHint) next.initialDisplayMode = modeHint;
             return next;
           });
         }
+      } else {
+        fileTabs = prev;
       }
       return { fileTabs, activeFileTabId: fileTabId, rightPanelOpen: true };
     });
@@ -818,6 +914,36 @@ export function AppShell() {
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
   }, [handleOpenFile, selectedSession?.id]);
+
+  // Open a (subagent) session in the right split pane as a closable tab, so the
+  // main conversation stays put. Mirrors handleOpenFile but for sessions.
+  const handleOpenSessionViewer = useCallback(async (sessionId: string) => {
+    if (!activeTabId) return;
+    let info: SessionInfo | undefined;
+    try {
+      const res = await fetch("/api/sessions");
+      if (res.ok) {
+        const data = await res.json() as { sessions: SessionInfo[] };
+        info = data.sessions.find((s) => s.id === sessionId);
+      }
+    } catch { /* ignore — cannot resolve */ }
+    if (!info) return;
+    const sessionInfo = info;
+    const tabId = `session:${sessionId}`;
+    const label = sessionInfo.name?.trim()
+      || (sessionInfo.firstMessage ? sessionInfo.firstMessage.slice(0, 48) : "subagent");
+    updateTab(activeTabId, (tab) => {
+      if (tab.fileTabs.some((t) => t.id === tabId)) {
+        return { activeFileTabId: tabId, rightPanelOpen: true };
+      }
+      return {
+        fileTabs: [...tab.fileTabs, { id: tabId, kind: "session", label, sessionId, sessionInfo }],
+        activeFileTabId: tabId,
+        rightPanelOpen: true,
+      };
+    });
+    if (isMobile) setSidebarOpen(false);
+  }, [activeTabId, updateTab, isMobile]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     if (!activeTabId) return;
@@ -841,7 +967,7 @@ export function AppShell() {
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd;
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null || Boolean(activeTab?.loopPending);
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   const settingsCwd = activeWorkspace?.path
     ?? selectedSession?.cwd
@@ -1760,7 +1886,7 @@ export function AppShell() {
           ) : activeWorkspace
             && workspaceView === "loops" ? (
             <div style={{ height: "100%", overflowY: "auto", padding: 20 }}>
-              <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onOpenSession={handleOpenLoopSession} />
+              <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onTriggered={handleLoopTriggered} onOpenSession={handleOpenLoopSession} />
             </div>
           ) : activeWorkspace
             && (workspaceView === "settings" || workspaceView === "work-items") ? (
@@ -1794,23 +1920,32 @@ export function AppShell() {
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
             />
           ) : showChat ? (
-            <ChatWindow
-              reloadSignal={sessionKey}
-              session={selectedSession}
-              newSessionCwd={effectiveNewSessionCwd}
-              onAgentEnd={handleAgentEnd}
-              onSessionCreated={handleSessionCreated}
-              onSessionForked={handleSessionForked}
-              modelsRefreshKey={modelsRefreshKey}
-              chatInputRef={chatInputRef}
-              onBranchDataChange={handleBranchDataChange}
-              onSystemPromptChange={handleSystemPromptChange}
-              onSessionStatsChange={handleSessionStatsChange}
-              onSessionStatsPanelOpen={openSessionStatsPanel}
-              onContextUsageChange={handleContextUsageChange}
-              onOpenFile={handleOpenLinkedFile}
-              onOpenSession={handleOpenLoopSession}
-            />
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              {loopRun && <LoopStatusBar run={loopRun} onDecide={handleLoopGate} onClose={() => setLoopRun(null)} />}
+              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+                {activeTab?.loopPending && !selectedSession ? (
+                  <LoopLaunchingPlaceholder name={activeTab.loopPending.loopName} status={loopRun?.status} error={loopRun?.error} />
+                ) : (
+                  <ChatWindow
+                    reloadSignal={sessionKey}
+                    session={selectedSession}
+                    newSessionCwd={effectiveNewSessionCwd}
+                    onAgentEnd={handleAgentEnd}
+                    onSessionCreated={handleSessionCreated}
+                    onSessionForked={handleSessionForked}
+                    modelsRefreshKey={modelsRefreshKey}
+                    chatInputRef={chatInputRef}
+                    onBranchDataChange={handleBranchDataChange}
+                    onSystemPromptChange={handleSystemPromptChange}
+                    onSessionStatsChange={handleSessionStatsChange}
+                    onSessionStatsPanelOpen={openSessionStatsPanel}
+                    onContextUsageChange={handleContextUsageChange}
+                    onOpenFile={handleOpenLinkedFile}
+                    onOpenSession={handleOpenSessionViewer}
+                  />
+                )}
+              </div>
+            </div>
           ) : !activeWorkspace ? (
             <HomeLanding
               workspaces={workspaces}
@@ -1868,7 +2003,7 @@ export function AppShell() {
 
         {/* File content */}
         <div style={{ flex: 1, overflow: "hidden" }}>
-          {activeFileTab?.filePath ? (
+          {activeFileTab?.kind === "file" ? (
             <FileViewer
               filePath={activeFileTab.filePath}
               cwd={activeCwd ?? undefined}
@@ -1881,6 +2016,15 @@ export function AppShell() {
                 getFileName(filePath),
                 { sourceSessionId: activeFileTab.sourceSessionId },
               )}
+            />
+          ) : activeFileTab?.kind === "session" ? (
+            <ChatWindow
+              key={activeFileTab.sessionId}
+              session={activeFileTab.sessionInfo}
+              newSessionCwd={null}
+              embedded
+              onOpenFile={handleOpenLinkedFile}
+              onOpenSession={handleOpenSessionViewer}
             />
           ) : (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>

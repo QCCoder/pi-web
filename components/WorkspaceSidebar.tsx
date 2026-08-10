@@ -161,7 +161,9 @@ export function WorkspaceSidebar({
             && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
         })
         .sort((left, right) => right.path.length - left.path.length)[0];
-      return owner?.id === activeWorkspace.id;
+      // Hide subagent worker sessions — they stay openable from the parent's
+      // subagent result card, but must not clutter the workspace session list.
+      return owner?.id === activeWorkspace.id && !session.subagentChild;
     });
   }, [allSessions, activeWorkspace, workspaces]);
   const [archivedCount, setArchivedCount] = useState(0);

@@ -52,7 +52,7 @@ loops/<loop-id>/
 ```
 - `pi-loop` 独立进程接受 cron、手动、消息和 webhook Trigger，创建一个可见的 Pi Orchestrator Conversation。
 - AI 先读取 Loop 契约并推断 Maker/Checker/Gate 结构，创建者确认一次后才在同一主会话执行。
-- Maker 与 Checker 是隔离的临时 Worker，不形成需要管理的持久子会话。
+- Maker 与 Checker 是真实可查看的子 agent 会话：编排器用 `subagent` 工具按名派生，挂在编排器会话下并持久化；角色定义放该 loop 的 `loops/<loop-id>/agents/*.md`（frontmatter 声明 name/tools）。
 - 每轮状态变化追加到 `RUNS.jsonl`；执行成功与业务 verdict（changed/unchanged/unknown）分开记录。
 
 ## 5. 实现进度

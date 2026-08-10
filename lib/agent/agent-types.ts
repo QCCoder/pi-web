@@ -86,6 +86,14 @@ export interface StreamingState {
   streamingMessage: Partial<AgentMessage> | null;
 }
 
+/** Partial result streamed via `tool_execution_update` while a tool runs.
+ *  Surfaced to the running tool-call block (e.g. live subagent progress). */
+export interface ToolExecutionPartial {
+  toolCallId: string;
+  content: Array<{ type: "text"; text: string }>;
+  details?: unknown;
+}
+
 export type StreamAction =
   | { type: "start" }
   | { type: "update"; message: Partial<AgentMessage> }

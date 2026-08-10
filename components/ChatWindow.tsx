@@ -39,6 +39,9 @@ interface Props {
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string) => void;
   onOpenSession?: (sessionId: string) => void;
+  /** When true, renders as a compact view-oriented viewer (no input bar or
+   *  minimap) — used when embedded in the right split pane. */
+  embedded?: boolean;
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -172,7 +175,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { mes
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -206,6 +209,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
     agentPhase,
+    toolExecutionUpdates,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
@@ -345,6 +349,22 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   // changes, so the IIFE reuses the cached nodes while streaming.
   const historyRenderKey = useMemo(() => ({}), [messages, entryIds, visibleCount, sessionBusy, isNew, streamState.isStreaming, forkingEntryId, modelNames, messageCwd, onOpenFile, handleFork, handleNavigate, handleEditContent, session?.id, t]);
   const historyRenderCacheRef = useRef<{ key: object; nodes: ReactNode } | null>(null);
+
+  // Partial tool results streamed via tool_execution_update, surfaced to the
+  // currently-streaming message so running tool calls (e.g. subagents) show
+  // live progress + child-session links before the final result lands.
+  const streamingToolResults = useMemo(() => {
+    const map = new Map<string, ToolResultMessage>();
+    for (const [id, partial] of Object.entries(toolExecutionUpdates ?? {})) {
+      map.set(id, {
+        role: "toolResult",
+        toolCallId: id,
+        content: partial.content as ToolResultMessage["content"],
+        details: partial.details,
+      });
+    }
+    return map;
+  }, [toolExecutionUpdates]);
 
   const chatInputElement = (
     <ChatInput
@@ -501,7 +521,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             position: "absolute",
             top: 12,
             left: 0,
-            right: isMobile ? 0 : CHAT_MINIMAP_WIDTH,
+            right: (isMobile || embedded) ? 0 : CHAT_MINIMAP_WIDTH,
             zIndex: 40,
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
             pointerEvents: "none",
@@ -525,6 +545,21 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               for (const msg of messages) {
                 if (msg.role === "toolResult") {
                   toolResultsMap.set((msg as ToolResultMessage).toolCallId, msg as ToolResultMessage);
+                }
+              }
+              // Merge live tool_execution_update partials for tool calls that
+              // don't have a finalized result yet (e.g. running subagents), so
+              // their inline progress / child-session links render during the run.
+              // Real toolResult messages above always win.
+              if (toolExecutionUpdates) {
+                for (const [id, partial] of Object.entries(toolExecutionUpdates)) {
+                  if (toolResultsMap.has(id)) continue;
+                  toolResultsMap.set(id, {
+                    role: "toolResult",
+                    toolCallId: id,
+                    content: partial.content as ToolResultMessage["content"],
+                    details: partial.details,
+                  });
                 }
               }
 
@@ -703,7 +738,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               return nodes;
             })()}
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming toolResults={streamingToolResults} modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
             )}
 
             {agentRunning && !streamState.streamingMessage && (
@@ -734,7 +769,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             </div>
           </div>
         </div>
-        {isMobile ? null : (
+        {(embedded || isMobile) ? null : (
           <ChatMinimap
             messages={messages}
             streamingMessage={streamState.streamingMessage}
@@ -744,6 +779,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         )}
       </div>
 
+      {!embedded && (
       <div className="relative">
         <div
           style={{
@@ -758,6 +794,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         {chatInputElement}
         <ExtensionStatusBar statuses={extensionStatuses} />
       </div>
+      )}
       </>
       )}
     </div>

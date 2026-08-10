@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { AgentEvent, AgentSessionWrapper } from "../rpc-manager.ts";
 import { startRpcSession } from "../rpc-manager.ts";
 import type {
@@ -99,17 +101,28 @@ function gateFrom(output: string): string | undefined {
 /** Pi owns reasoning; this adapter only preserves the same main session across phases. */
 export class PiRoundExecutionBackend implements RoundExecutionBackend {
   private readonly sessions = new Map<string, AgentSessionWrapper>();
+  /** Reverse index: pi session id -> orchestrator wrapper. Lets the Loop Host
+   *  serve a live session (probe + event stream) to Pi Web even though the
+   *  session object lives in *this* process, not Pi Web's. */
+  private readonly sessionBySid = new Map<string, AgentSessionWrapper>();
 
   async infer(definition: LoopDefinition, run: LoopRun, onSessionReady?: (sessionId: string) => void) {
     const instructions = await readFile(definition.instructionsPath, "utf8");
     const state = await readFile(definition.statePath, "utf8").catch(() => "# State\n\nNo prior state.");
+    // Inject this loop's own `agents/` directory so the orchestrator's
+    // `subagent` tool can discover scanner/analyst/checker by name. These are
+    // a trusted, loop-scoped source (no project-agent confirmation gate).
+    const agentsDir = join(definition.directory, "agents");
     const { session, realSessionId } = await startRpcSession(
       `__loop_host__${run.id}`,
       "",
       definition.workspacePath,
       undefined,
+      { extraAgentDirs: existsSync(agentsDir) ? [agentsDir] : undefined },
     );
     this.sessions.set(run.id, session);
+    this.sessionBySid.set(realSessionId, session);
+    session.onDestroy(() => this.sessionBySid.delete(realSessionId));
     onSessionReady?.(realSessionId);
     const delegateViaSubagent = await hasSubagentTool(session);
     const roleLine = delegateViaSubagent
@@ -133,7 +146,7 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     if (!session) throw new Error("orchestrator session is unavailable; start a fresh round");
     const delegateViaSubagent = await hasSubagentTool(session);
     const delegationLine = delegateViaSubagent
-      ? "You have a `subagent` tool. Delegate each producing (maker) step and each verifying (checker) step to its OWN isolated child session via `subagent` (prefer the `maker`/`checker` agents if available, otherwise `general`), passing a fully self-contained task. Bring each child's result back here. Each child session is recorded and viewable. Never let a maker verify its own output — the verifier must be a separate subagent call."
+      ? "You have a `subagent` tool, and this loop's worker agents (defined under this loop's `agents/` directory) are registered and callable by name. Execute each producing (maker) step and each verifying (checker) step from LOOP.md by delegating to its named agent via `subagent({ agent, task, cwd })`, passing a fully self-contained task (the child has NOT seen this conversation). Each child runs in its own isolated, recorded, viewable session. Never let a maker verify its own output — the checker must always be a separate `subagent` call. Do NOT shell out to `pi`/`bash` to spawn workers; always use the `subagent` tool."
       : "Perform maker and checker roles yourself, but keep producer and verifier strictly separate; never let a maker verify its own output.";
     const output = await capturePrompt(session, [
       `The creator approved plan ${run.plan?.fingerprint ?? "(unknown)"}.`,
@@ -163,5 +176,20 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
       session.destroy();
     }
     this.sessions.delete(run.id);
+  }
+
+  /** Look up the orchestrator wrapper backing a Loop run by pi session id. */
+  getBySessionId(sessionId: string): AgentSessionWrapper | undefined {
+    const session = this.sessionBySid.get(sessionId);
+    return session?.isAlive() ? session : undefined;
+  }
+
+  /** Snapshot metadata for a live Loop-owned session. Consumed by the host's
+   *  session probe/SSE routes so Pi Web can open and stream a Loop session
+   *  that physically lives in this process. */
+  getLiveSessionMeta(sessionId: string): { id: string; cwd: string; sessionFile: string; running: boolean } | undefined {
+    const session = this.sessionBySid.get(sessionId);
+    if (!session?.isAlive()) return undefined;
+    return { id: session.sessionId, cwd: session.cwd, sessionFile: session.sessionFile, running: session.isRunning() };
   }
 }

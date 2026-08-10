@@ -298,6 +298,9 @@ export interface SessionInfo {
   projectRoot?: string;
   /** Branch name when cwd is a linked git worktree (not the main checkout) */
   worktreeBranch?: string;
+  /** True for subagent worker sessions — hidden from the sidebar session list,
+   *  but still openable by id from the parent's subagent result card. */
+  subagentChild?: boolean;
 }
 
 export interface SessionContext {

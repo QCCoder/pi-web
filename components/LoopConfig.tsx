@@ -40,12 +40,16 @@ async function responseJson<T>(response: Response): Promise<T> {
   return value;
 }
 
-export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", onOpenLoops, onOpenSession }: {
+export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", onOpenLoops, onOpenSession, onTriggered }: {
   workspace: WorkspaceSummary;
   onWorkspaceChanged: () => void;
   mode?: "dashboard" | "settings";
   onOpenLoops?: () => void;
   onOpenSession?: (sessionId: string) => void;
+  /** Optimistic open: fired the moment a run is accepted, so the parent can
+   *  switch to the chat placeholder immediately instead of waiting for the
+   *  Loop Host to create the orchestrator session. */
+  onTriggered?: (loop: LoopDefinition) => void;
 }) {
   const enabled = workspace.capabilities.includes(LOOP_CAPABILITY);
   const base = `/api/workspaces/${encodeURIComponent(workspace.id)}/loop`;
@@ -112,13 +116,19 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
     setTimeout(() => void poll(), 500);
   }, [base]);
 
-  const trigger = useCallback(async (loop: LoopDefinition) => {
+  const trigger = useCallback((loop: LoopDefinition) => {
     setError(null);
-    try {
-      const receipt = await responseJson<{ runId: string }>(await fetch(`${base}/loops/${encodeURIComponent(loop.id)}/trigger`, { method: "POST" }));
-      pollRun(loop.id, receipt.runId, onOpenSession);
-    } catch (triggerError) { setError(triggerError instanceof Error ? triggerError.message : String(triggerError)); }
-  }, [base, pollRun, onOpenSession]);
+    // 乐观打开：点击瞬间同步交给父组件切到 chat 占位，不等 trigger POST。
+    // POST 和后续轮询都由 AppShell 接管。
+    if (onTriggered) { onTriggered(loop); return; }
+    // fallback：没有 onTriggered 时（非 dashboard 场景）自行触发并轮询。
+    void (async () => {
+      try {
+        const receipt = await responseJson<{ runId: string }>(await fetch(`${base}/loops/${encodeURIComponent(loop.id)}/trigger`, { method: "POST" }));
+        pollRun(loop.id, receipt.runId, onOpenSession);
+      } catch (triggerError) { setError(triggerError instanceof Error ? triggerError.message : String(triggerError)); }
+    })();
+  }, [base, pollRun, onOpenSession, onTriggered]);
 
   const decide = useCallback(async (loopId: string, runId: string, decision: "approve" | "reject") => {
     setError(null);

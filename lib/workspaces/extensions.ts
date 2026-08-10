@@ -1,5 +1,4 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { createSubagentExtension } from "../subagent/extension.ts";
 import { createWorkspaceWorkItemExtension } from "../work-items/extension.ts";
 import { createFeishuTransportExtension } from "../feishu/extension.ts";
 import { effectiveCapabilities } from "./service.ts";
@@ -30,6 +29,9 @@ export interface WorkspaceExtensionFactory {
  *   3. add an entry here
  *   4. add a config UI panel gated on the same capability
  */
+// NOTE: `subagent` is intentionally NOT registered here. It is a global
+// capability, attached to every session in lib/rpc-manager.ts (startRpcSession),
+// independent of workspace capability toggles. Do not re-add it as a module.
 export const WORKSPACE_EXTENSION_FACTORIES: readonly WorkspaceExtensionFactory[] = [
   {
     capability: "work-items",
@@ -39,10 +41,6 @@ export const WORKSPACE_EXTENSION_FACTORIES: readonly WorkspaceExtensionFactory[]
   {
     capability: "feishu-transport",
     build: (manifest) => createFeishuTransportExtension(manifest),
-  },
-  {
-    capability: "subagent",
-    build: (manifest, workspacePath) => createSubagentExtension(manifest.id, workspacePath),
   },
 ];
 

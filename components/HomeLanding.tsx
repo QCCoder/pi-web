@@ -69,7 +69,7 @@ export function HomeLanding({
 
   const recentSessions = useMemo(() => {
     return sessions
-      .filter((session) => workspaceForSession(session, workspaces))
+      .filter((session) => !session.subagentChild && workspaceForSession(session, workspaces))
       .sort((left, right) => right.modified.localeCompare(left.modified))
       .slice(0, 5);
   }, [sessions, workspaces]);

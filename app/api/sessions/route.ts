@@ -1,15 +1,21 @@
 import { NextResponse } from "next/server";
-import { listAllSessions } from "@/lib/session-reader";
+import { invalidateSessionListCache, listAllSessions } from "@/lib/session-reader";
 import { listArchivedSessions } from "@/lib/session-archive";
+import { loadSubagentChildIds } from "@/lib/subagent/registry";
 import { getLiveRpcSessionInfos, getRunningRpcSessionIds } from "@/lib/rpc-manager";
 import type { SessionInfo } from "@/lib/types";
 
 export async function GET(req: Request) {
   try {
-    const archived = new URL(req.url).searchParams.has("archived");
+    const url = new URL(req.url);
+    const archived = url.searchParams.has("archived");
     if (archived) {
       return NextResponse.json({ sessions: await listArchivedSessions() });
     }
+    // A freshly triggered Loop round writes its .jsonl from the Loop Host
+    // process; the disk scan below is cached 30s, so without an explicit
+    // invalidate the new session would be invisible until the cache expires.
+    if (url.searchParams.has("refresh")) invalidateSessionListCache();
     const sessions = await listAllSessions();
 
     // Merge in-memory RPC sessions that are not yet on disk. A brand-new
@@ -34,7 +40,14 @@ export async function GET(req: Request) {
     }
     const merged = liveSynthesized.length > 0 ? [...liveSynthesized, ...sessions] : sessions;
 
-    return NextResponse.json({ sessions: merged, runningSessionIds: getRunningRpcSessionIds() });
+    // Tag subagent worker sessions so the sidebar hides them. They stay in the
+    // response so the parent's "open child" action can still resolve by id.
+    const subagentChildIds = loadSubagentChildIds();
+    const sessionsWithFlags = subagentChildIds.size > 0
+      ? merged.map((session) => (subagentChildIds.has(session.id) ? { ...session, subagentChild: true } : session))
+      : merged;
+
+    return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: getRunningRpcSessionIds() });
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },

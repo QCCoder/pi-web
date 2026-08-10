@@ -55,6 +55,6 @@ Cron 使用标准五字段（minute hour day-of-month month day-of-week）；支
 
 ### 子 agent 依赖
 
-Maker/Checker 走通需要该 Loop workspace 具有 `subagent` capability（编排器会话才会拿到 `subagent` 工具）。`execute()` 会先探测工具是否存在：有则让编排器用 `subagent` 派生 maker/checker；没有则回退到编排器自行执行（仍保持 producer/verifier 分离）。给 workspace 提供 `.pi/agents/maker.md` 与 `.pi/agents/checker.md`（或用内置 `general`）即可被按名派生。
+`subagent` 是全局能力：每个会话（含 Loop 编排器会话）都自带 `subagent` 工具，无需 workspace 开关。Loop 的 worker 角色定义放在该 loop 自己的 `loops/<loopId>/agents/*.md`（YAML frontmatter：`name`/`description`/`tools`，正文是角色 prompt）；Loop Runtime 建编排器会话时把这个目录作为可信的「loop」源注入（`StartSessionOptions.extraAgentDirs`），优先级高于 user/project，且不触发 project-agent 确认。于是编排器能按名（如 `scanner`/`analyst`/`checker`，或 seed 的 `maker`/`checker`）派生子会话；子会话是真实可查看的 child AgentSession，挂在编排器会话下并持久化。`execute()` 仍会先探测工具是否存在作为兜底：探测不到则回退到编排器自行执行（保持 producer/verifier 分离）。
 
 当前骨架已经留出消息/webhook Trigger 与 Round Gate 的统一接口；首个跑通的 Adapter 是 cron 和手动触发。Host 重启后可读取证据，但不会续接尚未确认或尚未完成的 Pi 会话，这属于下一阶段的恢复策略。

@@ -4,6 +4,7 @@ import { PiRoundExecutionBackend } from "./pi-execution.ts";
 import { LoopHostScheduler } from "./scheduler.ts";
 import { PiWorkspaceResolver } from "./workspace-resolver.ts";
 import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./store.ts";
+import type { AgentSessionWrapper } from "../rpc-manager.ts";
 import type { GateCommand, TriggerCommand } from "./types.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -21,6 +22,32 @@ function json(response: ServerResponse, status: number, value: unknown): void {
   response.end(JSON.stringify(value));
 }
 
+/** Stream a Loop-owned orchestrator session's agent events to an HTTP
+ *  client (Pi Web proxies this to the browser so a Loop session that lives in
+ *  this process can be watched live). Mirrors the SSE shape Pi Web emits. */
+function serveSessionSse(request: IncomingMessage, response: ServerResponse, session: AgentSessionWrapper): void {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  const write = (data: unknown) => {
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  write({ type: "connected", sessionId: session.sessionId });
+  const unsubscribe = session.onEvent((event) => write(event));
+  const heartbeat = setInterval(() => {
+    try { response.write(": \n\n"); } catch { /* response already closed */ }
+  }, 30_000);
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+    try { response.end(); } catch { /* already ended */ }
+  };
+  request.on("close", cleanup);
+  request.on("error", cleanup);
+}
+
 function errorStatus(error: unknown): number {
   if (error instanceof LoopNotFoundError) return 404;
   if (error instanceof LoopValidationError) return 400;
@@ -30,7 +57,8 @@ function errorStatus(error: unknown): number {
 
 export function createLoopHost() {
   const workspaces = new PiWorkspaceResolver();
-  const runtime = new DefaultLoopRuntime(workspaces, new PiRoundExecutionBackend());
+  const execution = new PiRoundExecutionBackend();
+  const runtime = new DefaultLoopRuntime(workspaces, execution);
   const scheduler = new LoopHostScheduler(runtime, workspaces);
   const server = createServer(async (request, response) => {
     try {
@@ -44,6 +72,29 @@ export function createLoopHost() {
       }
       if (request.method === "POST" && url.pathname === "/v1/triggers") {
         return json(response, 202, await runtime.trigger(await body(request) as TriggerCommand));
+      }
+      // Session probe: Pi Web asks "do you own this session?" before falling
+      // back to loading the .jsonl itself. Returns metadata + live state.
+      const sessionProbe = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
+      if (request.method === "GET" && sessionProbe) {
+        const sid = decodeURIComponent(sessionProbe[1]);
+        const meta = execution.getLiveSessionMeta(sid);
+        if (!meta) return json(response, 404, { error: "session not live in loop host" });
+        const session = execution.getBySessionId(sid);
+        let state: unknown;
+        try { state = session ? await session.send({ type: "get_state" }) : undefined; }
+        catch { state = undefined; /* session not ready yet */ }
+        return json(response, 200, { ...meta, state });
+      }
+      // Session event stream: Pi Web proxies this SSE so the browser can watch
+      // a Loop orchestrator session run live, exactly like a local session.
+      const sessionEvents = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/events$/);
+      if (request.method === "GET" && sessionEvents) {
+        const sid = decodeURIComponent(sessionEvents[1]);
+        const session = execution.getBySessionId(sid);
+        if (!session) return json(response, 404, { error: "session not live in loop host" });
+        serveSessionSse(request, response, session);
+        return;
       }
       const run = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/runs\/([^/]+)$/);
       if (request.method === "GET" && run) {

@@ -78,6 +78,8 @@ export function applyAgentEvent(
         agentRunning: true,
         agentPhase: { kind: "waiting_model" },
         streamState: { isStreaming: true, streamingMessage: null },
+        // Fresh run: drop any stale partials from a previous run.
+        toolExecutionUpdates: {},
       };
       break;
     }
@@ -172,6 +174,27 @@ export function applyAgentEvent(
         ...runtime,
         streamState: { isStreaming: false, streamingMessage: null },
         agentPhase: { kind: "waiting_model" },
+      };
+      break;
+    }
+
+    case "tool_execution_update": {
+      const id = event.toolCallId as string | undefined;
+      const partial = event.partialResult as
+        | { content?: unknown; details?: unknown }
+        | undefined;
+      if (!id || !partial) break;
+      const content = Array.isArray(partial.content)
+        ? (partial.content as Array<{ type: "text"; text: string }>).filter(
+            (c) => c && c.type === "text" && typeof c.text === "string",
+          )
+        : [];
+      runtime = {
+        ...runtime,
+        toolExecutionUpdates: {
+          ...runtime.toolExecutionUpdates,
+          [id]: { toolCallId: id, content, details: partial.details },
+        },
       };
       break;
     }

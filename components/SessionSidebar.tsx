@@ -625,7 +625,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         // Session not found — notify parent so it can show the placeholder
         onInitialRestoreDone?.();
       }
-      const projects = getRecentProjects(allSessions);
+      // Exclude subagent-only projects so worker sessions don't pollute the list.
+      const projects = getRecentProjects(allSessions.filter((s) => !s.subagentChild));
       if (projects.length > 0) setSelectedCwd(projects[0]);
     }
   }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
@@ -784,7 +785,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onNewSession?.(tempId, selectedCwd);
   }, [selectedCwd, onNewSession]);
 
-  const recentProjects = getRecentProjects(allSessions);
+  // Exclude subagent worker sessions so a project that contains only subagent
+  // children doesn't surface as a phantom (empty) entry in the project list.
+  const recentProjects = getRecentProjects(allSessions.filter((s) => !s.subagentChild));
   const showProjectFilter = recentProjects.length > 8;
   const visibleProjects = projectFilter.trim()
     ? recentProjects.filter((p) => p.toLowerCase().includes(projectFilter.trim().toLowerCase()))
@@ -792,9 +795,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // Sessions of every worktree in the selected project are shown together
   const selectedProject = projectRootFor(selectedCwd);
-  const filteredSessions = selectedProject
+  // Subagent worker sessions are hidden from the list — they are reachable
+  // only by opening them from the parent's subagent result card.
+  const filteredSessions = (selectedProject
     ? allSessions.filter((s) => (s.projectRoot ?? s.cwd) === selectedProject)
-    : allSessions;
+    : allSessions).filter((s) => !s.subagentChild);
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
     && worktreeState.isTopLevel

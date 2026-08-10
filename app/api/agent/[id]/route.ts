@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { loopHostClient } from "@/lib/loop/client";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -46,6 +47,14 @@ export async function GET(
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
+      // A Loop orchestrator session lives in the Loop Host process. Probe it
+      // for live state so the UI reflects streaming/compaction correctly; an
+      // idle-looking snapshot here would make useAgentSession reconcile the
+      // loop run away as if it had already finished.
+      const loopMeta = await loopHostClient.probeSession(id);
+      if (loopMeta) {
+        return NextResponse.json({ running: loopMeta.running, state: loopMeta.state });
+      }
       return NextResponse.json({ running: false });
     }
 

@@ -365,7 +365,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     contextUsage, systemPrompt, thinkingLevel, sessionStatsOverride,
     isCompacting, compactError, compactResult, currentModelOverride,
     forkingEntryId, activeLeafId, extensionStatuses, extensionWidgets,
-    queuedMessages, pendingBash,
+    queuedMessages, pendingBash, toolExecutionUpdates,
   } = runtime;
 
   const loadSessionAbortRef = useRef<AbortController | null>(null);
@@ -1472,6 +1472,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
+    toolExecutionUpdates,
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,

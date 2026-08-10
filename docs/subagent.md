@@ -29,9 +29,10 @@ prompt), and an explicit `model`.
 
 ## Enable
 
-Add the `subagent` capability to a workspace manifest. `rpc-manager` then
-attaches the `pi-subagent` extension, which registers the `subagent` tool for
-that workspace's sessions.
+None required. `subagent` is a **global** capability: `rpc-manager` attaches the
+`pi-subagent` extension (which registers the `subagent` tool) to **every**
+session, independent of workspace capability toggles. (A manifest may still list
+`subagent` for documentation, but it has no gating effect.)
 
 ## Agent definitions
 
@@ -39,6 +40,7 @@ Markdown with YAML frontmatter, discovered from (project overrides user by name)
 
 - `<workspace>/.pi/agents/*.md` (workspace-scoped)
 - `~/.pi/agent/agents/*.md` (user-global)
+- a caller-injected trusted dir, e.g. a Loop's `loops/<loopId>/agents/*.md` ("loop" source, highest precedence, no confirmation gate — passed via `StartSessionOptions.extraAgentDirs`)
 
 ```markdown
 ---
@@ -72,7 +74,7 @@ link for `subagent` tool results; clicking opens the child session tab
 |------|----------------|
 | `lib/subagent/agents.ts` | Discover + parse agent definitions |
 | `lib/subagent/worker.ts` | Create in-process child sessions, run prompts, stream, parallel runner |
-| `lib/subagent/extension.ts` | Workspace `InlineExtension` registering the `subagent` tool |
-| `lib/rpc-manager.ts` | `startRpcSession` options: `parentSession`, `appendSystemPrompt`, `model` |
-| `lib/workspaces/extensions.ts` | Registers the factory under the `subagent` capability |
+| `lib/subagent/extension.ts` | `InlineExtension` registering the global `subagent` tool |
+| `lib/rpc-manager.ts` | `startRpcSession` options: `parentSession`, `appendSystemPrompt`, `model`, `extraAgentDirs` |
+| `lib/workspaces/extensions.ts` | Workspace capability registry (note: `subagent` is intentionally NOT registered here — it is global) |
 | `components/MessageView.tsx` | "open subagent →" child-session link in tool results |

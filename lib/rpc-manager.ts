@@ -12,6 +12,7 @@ import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-ty
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
 import { buildWorkspaceExtensions } from "./workspaces/extensions";
+import { createSubagentExtension } from "./subagent/extension";
 import { findWorkspaceForPath } from "./workspaces/service";
 
 // ============================================================================
@@ -1124,8 +1125,14 @@ export interface StartSessionOptions {
   parentSession?: string;
   /** Append this text to the session's system prompt (e.g. a subagent role prompt). */
   appendSystemPrompt?: string;
-  /** Explicit provider/model to use instead of the saved/default model. */
-  model?: { provider: string; modelId: string };
+  /** Explicit model to use instead of the saved/default model.
+   *  Provider may be omitted to resolve a bare model id (e.g. agent frontmatter
+   *  `model: claude-haiku-4-5`) against the model registry. */
+  model?: { provider?: string; modelId: string };
+  /** Extra trusted agent directories made discoverable to this session's
+   *  `subagent` tool (e.g. a Loop's own `agents/`). Loaded as a "loop" source
+   *  with highest precedence, bypassing the project-agent confirmation gate. */
+  extraAgentDirs?: string[];
 }
 
 export async function startRpcSession(
@@ -1179,9 +1186,14 @@ export async function startRpcSession(
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
     const workspace = await findWorkspaceForPath(cwd);
     const selectedWorkspaceSkills = new Set(workspace?.manifest.skills ?? []);
+    // `subagent` is a global capability: every session gets the tool regardless
+    // of workspace or capability toggles. Use the session cwd so project agents
+    // (.pi/agents) resolve against the real working directory. Callers (e.g. the
+    // Loop runtime) may inject extra trusted agent dirs via StartSessionOptions.
+    const extensionFactories = [createSubagentExtension("global", cwd, options?.extraAgentDirs)];
     const resourceLoaderOptions: Record<string, unknown> = workspace
       ? {
-          extensionFactories: buildWorkspaceExtensions(workspace.manifest, workspace.path),
+          extensionFactories: [...extensionFactories, ...buildWorkspaceExtensions(workspace.manifest, workspace.path)],
           ...(selectedWorkspaceSkills.size > 0
             ? {
                 skillsOverride: (base: { skills: Array<{ name: string }> }) => ({
@@ -1191,7 +1203,7 @@ export async function startRpcSession(
               }
             : {}),
         }
-      : {};
+      : { extensionFactories };
     if (options?.appendSystemPrompt) {
       resourceLoaderOptions.appendSystemPrompt = [options.appendSystemPrompt];
     }
@@ -1203,7 +1215,10 @@ export async function startRpcSession(
     });
     let modelOption: ReturnType<typeof services.modelRuntime.getModel>;
     if (options?.model) {
-      modelOption = services.modelRuntime.getModel(options.model.provider, options.model.modelId);
+      const { provider, modelId } = options.model;
+      modelOption = provider
+        ? services.modelRuntime.getModel(provider, modelId)
+        : services.modelRuntime.getModels().find((m) => m.id === modelId);
     }
     const { session: inner } = await createAgentSessionFromServices({
       services,

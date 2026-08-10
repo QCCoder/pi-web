@@ -22,6 +22,7 @@ import type {
   QueuedMessages,
   StreamingState,
   ThinkingLevelOption,
+  ToolExecutionPartial,
 } from "../agent/agent-types";
 
 export interface SessionRuntimeState {
@@ -58,6 +59,11 @@ export interface SessionRuntimeState {
   activeLeafId: string | null;
   forkingEntryId: string | null;
 
+  // --- 流式 tool 执行进度（tool_execution_update）---
+  /** toolCallId → partial result，供运行中的 tool call 块实时渲染（如 subagent 进度）。
+   *  最终 toolResult 消息落地后由 ChatWindow 以更高优先级覆盖；每个 agent_start 清空。 */
+  toolExecutionUpdates: Record<string, ToolExecutionPartial>;
+
   // --- 跨切换保留（阶段 B 新增，设计 4.1）---
   scrollPosition: number | null;
   lastActiveAt: number;
@@ -85,6 +91,7 @@ export const EMPTY_RUNTIME: SessionRuntimeState = {
   compactResult: null,
   activeLeafId: null,
   forkingEntryId: null,
+  toolExecutionUpdates: {},
   scrollPosition: null,
   lastActiveAt: 0,
 };
@@ -111,6 +118,7 @@ export function createDefaultSessionRuntimeState(): SessionRuntimeState {
     compactResult: null,
     activeLeafId: null,
     forkingEntryId: null,
+    toolExecutionUpdates: {},
     scrollPosition: null,
     lastActiveAt: Date.now(),
   };
