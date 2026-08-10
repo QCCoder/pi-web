@@ -1,11 +1,21 @@
 export const WORKSPACE_SCHEMA_VERSION = 1 as const;
 
+/**
+ * @deprecated Workspace creation is now capability-driven (see `CreateWorkspaceInput.capabilities`).
+ * These template ids remain only so legacy manifests can fall back to a built-in template's
+ * capabilities via `effectiveCapabilities`. New workspaces omit `template` entirely.
+ */
 export const BUILTIN_WORKSPACE_TEMPLATE_IDS = ["empty", "software-development"] as const;
+/** @deprecated Legacy built-in template id; retained for `effectiveCapabilities` fallback. */
 export type BuiltinWorkspaceTemplateId = (typeof BUILTIN_WORKSPACE_TEMPLATE_IDS)[number];
 
 /**
  * A workspace template id. Either a built-in id ("empty" | "software-development")
  * or a custom template id — any slug defined under `.pi/workspace-templates/<id>/`.
+ *
+ * @deprecated Template selection has been removed from workspace creation. This type is
+ * retained so legacy manifests (which still carry `template.id`) can be parsed and looked up
+ * for capability fallback. New workspaces do not set a template.
  */
 export type WorkspaceTemplateId = string;
 export type WorkspaceCapability =
@@ -13,6 +23,7 @@ export type WorkspaceCapability =
   | "explorer"
   | "work-items"
   | "repositories"
+  | "knowledge"
   | "overview"
   | "workflows"
   | "feishu-transport"
@@ -69,7 +80,10 @@ export interface WorkspaceManifest {
   id: string;
   slug: string;
   name: string;
-  template: {
+  /** @deprecated Legacy field. New (capability-driven) workspaces omit `template`;
+   *  it is retained for backward compatibility so `effectiveCapabilities` can fall back to a
+   *  built-in template's capabilities when a manifest has no cached `capabilities`. */
+  template?: {
     id: WorkspaceTemplateId;
     version: number;
   };
@@ -93,8 +107,10 @@ export interface WorkspaceSummary {
   slug: string;
   name: string;
   path: string;
-  templateId: WorkspaceTemplateId;
-  templateVersion: number;
+  /** @deprecated Absent for capability-driven workspaces (no `template`); kept for legacy ones. */
+  templateId?: WorkspaceTemplateId;
+  /** @deprecated Absent for capability-driven workspaces (no `template`); kept for legacy ones. */
+  templateVersion?: number;
   capabilities: WorkspaceCapability[];
   available: boolean;
   configStatus: "ready" | "directory-unavailable" | "config-missing" | "config-invalid";
@@ -105,6 +121,11 @@ export interface WorkspaceSummary {
   updatedAt: string;
 }
 
+/**
+ * @deprecated Template selection has been removed from workspace creation. Template metadata is
+ * still listed (GET /api/workspaces) and used for `effectiveCapabilities` fallback on legacy
+ * manifests, but new workspaces are created from a capability checklist instead.
+ */
 export interface WorkspaceTemplateInfo {
   id: WorkspaceTemplateId;
   name: string;
@@ -117,7 +138,12 @@ export interface WorkspaceTemplateInfo {
   editable: boolean;
 }
 
-/** A custom (user-defined) workspace template, parsed from `.pi/workspace-templates/<id>/template.yaml`. */
+/**
+ * A custom (user-defined) workspace template, parsed from `.pi/workspace-templates/<id>/template.yaml`.
+ *
+ * @deprecated Custom templates can no longer seed new workspaces (creation is capability-driven).
+ * Discovery/parsing is retained for the legacy `effectiveCapabilities` fallback path only.
+ */
 export interface WorkspaceCustomTemplate {
   schemaVersion: 1;
   id: string;
@@ -139,8 +165,10 @@ export interface WorkspaceIndexEntry {
   id: string;
   path: string;
   name: string;
-  templateId: string;
-  templateVersion: number;
+  /** @deprecated Absent for capability-driven workspaces; kept for legacy ones. */
+  templateId?: string;
+  /** @deprecated Absent for capability-driven workspaces; kept for legacy ones. */
+  templateVersion?: number;
   addedAt: string;
   lastOpenedAt: string;
 }
@@ -153,7 +181,9 @@ export interface WorkspaceIndex {
 export interface CreateWorkspaceInput {
   name: string;
   slug: string;
-  templateId: WorkspaceTemplateId;
+  /** Capabilities to enable. `sessions` + `explorer` are always force-included (mandatory);
+   *  any unknown value is rejected by `parseCapabilities`. See `INIT_CAPABILITY_CHECKLIST`. */
+  capabilities: WorkspaceCapability[];
 }
 
 export interface ImportWorkspaceInput {

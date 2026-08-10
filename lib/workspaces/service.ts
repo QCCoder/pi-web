@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import {
   access,
-  cp,
   lstat,
   mkdir,
   readFile,
@@ -19,19 +18,14 @@ import { parse, stringify } from "yaml";
 import { createUlid } from "./id.ts";
 import {
   BUILT_IN_WORKSPACE_TEMPLATES,
-  defaultGitForTemplate,
-  defaultSkillsForTemplate,
-  getWorkspaceTemplate,
-  isBuiltinWorkspaceTemplateId,
-  renderSoftwareDevelopmentAgents,
+  DEFAULT_GIT_SETTINGS,
+  normalizeInitCapabilities,
+  renderWorkspaceAgents,
   renderWorkspaceRepositories,
-  SOFTWARE_DEVELOPMENT_DIRECTORIES,
   SOFTWARE_DEVELOPMENT_GITIGNORE,
-  SOFTWARE_DEVELOPMENT_SKILLS,
 } from "./templates.ts";
 import {
   WORKSPACE_SCHEMA_VERSION,
-  type BuiltinWorkspaceTemplateId,
   type CreateWorkspaceInput,
   type AddWorkspaceRepositoryInput,
   type UpdateWorkspaceInput,
@@ -133,6 +127,7 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "explorer",
   "work-items",
   "repositories",
+  "knowledge",
   "overview",
   "workflows",
   // Module capabilities (toggled per-workspace, not part of built-in templates):
@@ -165,10 +160,13 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
  *  built-in template lookup, else the bare minimum. */
 export function effectiveCapabilities(manifest: WorkspaceManifest): WorkspaceCapability[] {
   if (manifest.capabilities) return manifest.capabilities;
-  const builtIn = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
-    candidate.id === manifest.template.id && candidate.version === manifest.template.version
-  );
-  return builtIn ? [...builtIn.capabilities] : (["sessions", "explorer"] as WorkspaceCapability[]);
+  if (manifest.template) {
+    const builtIn = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
+      candidate.id === manifest.template!.id && candidate.version === manifest.template!.version
+    );
+    if (builtIn) return [...builtIn.capabilities];
+  }
+  return ["sessions", "explorer"] as WorkspaceCapability[];
 }
 
 export async function listWorkspaceTemplates(root?: string): Promise<WorkspaceTemplateInfo[]> {
@@ -299,29 +297,6 @@ export async function getCustomTemplate(
   return customs.find((template) => template.id === id);
 }
 
-/** Copy a custom template's `seed/` contents into a freshly created workspace. */
-async function applyCustomTemplateSeed(workspacePath: string, templatePath: string): Promise<void> {
-  const seedDir = join(templatePath, "seed");
-  try {
-    if (!(await stat(seedDir)).isDirectory()) return;
-  } catch {
-    return; // no seed directory
-  }
-  for (const entry of await readdir(seedDir)) {
-    // Never let a seed overwrite the workspace manifest we are about to write.
-    if (entry === ".pi") {
-      const seedPi = join(seedDir, ".pi");
-      await mkdir(join(workspacePath, ".pi"), { recursive: true });
-      for (const piEntry of await readdir(seedPi)) {
-        if (piEntry === "workspace.yaml") continue;
-        await cp(join(seedPi, piEntry), join(workspacePath, ".pi", piEntry), { recursive: true });
-      }
-      continue;
-    }
-    await cp(join(seedDir, entry), join(workspacePath, entry), { recursive: true });
-  }
-}
-
 export function validateWorkspaceSlug(slug: string): string {
   const normalized = slug.trim().toLowerCase();
   if (!WORKSPACE_SLUG_RE.test(normalized)) {
@@ -399,12 +374,18 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
   if (record.schema_version !== WORKSPACE_SCHEMA_VERSION) {
     throw new WorkspaceValidationError(`Unsupported workspace schema: ${String(record.schema_version)}`);
   }
-  const template = record.template;
-  if (!template || typeof template !== "object") {
-    throw new WorkspaceValidationError("template is required");
+  const templateValue = record.template;
+  let template: WorkspaceManifest["template"] | undefined;
+  if (templateValue !== undefined) {
+    if (!templateValue || typeof templateValue !== "object") {
+      throw new WorkspaceValidationError("template must be an object");
+    }
+    const templateRecord = templateValue as Record<string, unknown>;
+    template = {
+      id: requireNonEmptyString(templateRecord.id, "template.id"),
+      version: parsePositiveInteger(templateRecord.version, "template.version"),
+    };
   }
-  const templateRecord = template as Record<string, unknown>;
-  const templateId = requireNonEmptyString(templateRecord.id, "template.id");
   const skills = record.skills ?? [];
   if (!Array.isArray(skills) || skills.some((skill) => typeof skill !== "string" || !skill.trim())) {
     throw new WorkspaceValidationError("skills must be an array of non-empty strings");
@@ -450,10 +431,7 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     id: requireNonEmptyString(record.id, "id"),
     slug,
     name: requireNonEmptyString(record.name, "name"),
-    template: {
-      id: templateId as WorkspaceManifest["template"]["id"],
-      version: parsePositiveInteger(templateRecord.version, "template.version"),
-    },
+    ...(template ? { template } : {}),
     skills: [...new Set((skills as string[]).map((skill) => skill.trim()))],
     repositories: parseRepositories(record.repositories),
     agent: {
@@ -487,7 +465,7 @@ export function serializeWorkspaceManifest(manifest: WorkspaceManifest): string 
     id: manifest.id,
     slug: manifest.slug,
     name: manifest.name,
-    template: manifest.template,
+    ...(manifest.template ? { template: manifest.template } : {}),
     skills: manifest.skills,
     repositories: manifest.repositories.map((repository) => ({
       id: repository.id,
@@ -574,8 +552,9 @@ export function workspaceSummary(workspacePath: string, manifest: WorkspaceManif
     slug: manifest.slug,
     name: manifest.name,
     path: workspacePath,
-    templateId: manifest.template.id,
-    templateVersion: manifest.template.version,
+    ...(manifest.template
+      ? { templateId: manifest.template.id, templateVersion: manifest.template.version }
+      : {}),
     capabilities: [...effectiveCapabilities(manifest)],
     available: true,
     configStatus: "ready",
@@ -857,11 +836,15 @@ function parseWorkspaceIndex(value: unknown): WorkspaceIndex {
       id,
       path,
       name: requireNonEmptyString(entry.name, `workspaces[${index}].name`),
-      templateId: requireNonEmptyString(entry.template_id, `workspaces[${index}].template_id`),
-      templateVersion: parsePositiveInteger(
-        entry.template_version,
-        `workspaces[${index}].template_version`,
-      ),
+      ...(entry.template_id !== undefined
+        ? {
+            templateId: requireNonEmptyString(entry.template_id, `workspaces[${index}].template_id`),
+            templateVersion: parsePositiveInteger(
+              entry.template_version,
+              `workspaces[${index}].template_version`,
+            ),
+          }
+        : {}),
       addedAt: requireNonEmptyString(entry.added_at, `workspaces[${index}].added_at`),
       lastOpenedAt: requireNonEmptyString(
         entry.last_opened_at,
@@ -879,8 +862,14 @@ function serializeWorkspaceIndex(index: WorkspaceIndex): string {
       id: workspace.id,
       path: workspace.path,
       name: workspace.name,
-      template_id: workspace.templateId,
-      template_version: workspace.templateVersion,
+      ...(workspace.templateId !== undefined
+        ? {
+            template_id: workspace.templateId,
+            ...(workspace.templateVersion !== undefined
+              ? { template_version: workspace.templateVersion }
+              : {}),
+          }
+        : {}),
       added_at: workspace.addedAt,
       last_opened_at: workspace.lastOpenedAt,
     })),
@@ -931,8 +920,9 @@ function indexEntryFromManifest(
     id: manifest.id,
     path,
     name: manifest.name,
-    templateId: manifest.template.id,
-    templateVersion: manifest.template.version,
+    ...(manifest.template
+      ? { templateId: manifest.template.id, templateVersion: manifest.template.version }
+      : {}),
     addedAt: existing?.addedAt ?? now,
     lastOpenedAt: existing?.lastOpenedAt ?? now,
   };
@@ -978,17 +968,21 @@ function unavailableWorkspaceSummary(
   entry: WorkspaceIndexEntry,
   status: WorkspaceSummary["configStatus"],
 ): WorkspaceSummary {
-  const template = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
-    candidate.id === entry.templateId && candidate.version === entry.templateVersion
-  );
+  const template = entry.templateId
+    ? BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
+        candidate.id === entry.templateId && candidate.version === entry.templateVersion)
+    : undefined;
   return {
     id: entry.id,
     slug: basename(entry.path),
     name: entry.name,
     path: entry.path,
-    templateId: entry.templateId as WorkspaceManifest["template"]["id"],
-    templateVersion: entry.templateVersion,
-    capabilities: template ? [...template.capabilities] : ["sessions", "explorer"],
+    ...(entry.templateId !== undefined
+      ? { templateId: entry.templateId, templateVersion: entry.templateVersion }
+      : {}),
+    capabilities: template
+      ? [...template.capabilities]
+      : (["sessions", "explorer"] as WorkspaceCapability[]),
     available: false,
     configStatus: status,
     skills: [],
@@ -1095,21 +1089,6 @@ async function ensureWorkspaceRoot(root: string): Promise<void> {
   await mkdir(join(root, ".pi", "workspace-templates"), { recursive: true });
 }
 
-async function initializeSoftwareDevelopmentWorkspace(
-  workspacePath: string,
-  manifest: WorkspaceManifest,
-): Promise<void> {
-  await Promise.all(
-    SOFTWARE_DEVELOPMENT_DIRECTORIES.map((relativePath) =>
-      mkdir(join(workspacePath, relativePath), { recursive: true })
-    ),
-  );
-  await writeFile(join(workspacePath, "AGENTS.md"), renderSoftwareDevelopmentAgents(manifest), "utf8");
-  await writeFile(join(workspacePath, ".gitignore"), SOFTWARE_DEVELOPMENT_GITIGNORE, "utf8");
-  await execFileAsync("git", ["init", "--initial-branch=main"], { cwd: workspacePath });
-  await commitWorkspaceChanges(workspacePath, "workspace: initialize", manifest);
-}
-
 export async function createWorkspace(
   input: CreateWorkspaceInput,
   root?: string,
@@ -1117,31 +1096,9 @@ export async function createWorkspace(
   const workspaceRoot = root ?? getWorkspaceRoot();
   const name = requireNonEmptyString(input.name, "name");
   const slug = validateWorkspaceSlug(input.slug);
-  const isBuiltin = isBuiltinWorkspaceTemplateId(input.templateId);
-
-  // Resolve the template: a built-in constant or a discovered custom definition.
-  let templateVersion: number;
-  let templateSkills: string[];
-  let templateCapabilities: WorkspaceCapability[];
-  let templateAgent: WorkspaceManifest["agent"];
-  let customTemplatePath: string | undefined;
-  if (isBuiltin) {
-    const builtin = getWorkspaceTemplate(input.templateId as BuiltinWorkspaceTemplateId);
-    templateVersion = builtin.version;
-    templateSkills = defaultSkillsForTemplate(input.templateId);
-    templateCapabilities = [...builtin.capabilities];
-    templateAgent = {};
-  } else {
-    const custom = await getCustomTemplate(input.templateId, root);
-    if (!custom) {
-      throw new WorkspaceValidationError(`Unknown workspace template: ${String(input.templateId)}`);
-    }
-    templateVersion = custom.version;
-    templateSkills = [...custom.skills];
-    templateCapabilities = [...custom.capabilities];
-    templateAgent = { ...custom.agent };
-    customTemplatePath = custom.path;
-  }
+  // Capability-driven init (redesign decision 5/7): validate the selection, then
+  // force-include the mandatory sessions/explorer. No template is consulted.
+  const capabilities = normalizeInitCapabilities(parseCapabilities(input.capabilities));
 
   await ensureWorkspaceRoot(workspaceRoot);
   const workspacePath = join(workspaceRoot, `workspace-${slug}`);
@@ -1152,6 +1109,15 @@ export async function createWorkspace(
     if (error instanceof WorkspaceConflictError) throw error;
   }
 
+  // Git settings (branch rules) are a work-items feature; git-init the workspace
+  // repo whenever a git-using capability (repositories or work-items) is on so the
+  // manifest/AGENTS.md stay tracked (redesign decision 6: lazy directories — only
+  // these are created up front, never requirements/bugs/designs/plans).
+  const needsGitRepo = capabilities.includes("repositories") || capabilities.includes("work-items");
+  const gitSettings = capabilities.includes("work-items")
+    ? structuredClone(DEFAULT_GIT_SETTINGS)
+    : undefined;
+
   const temporaryPath = join(workspaceRoot, `.creating-workspace-${slug}-${createUlid()}`);
   const now = new Date().toISOString();
   const manifest: WorkspaceManifest = {
@@ -1159,14 +1125,11 @@ export async function createWorkspace(
     id: createUlid(),
     slug,
     name,
-    template: { id: input.templateId, version: templateVersion },
-    skills: templateSkills,
+    skills: [],
     repositories: [],
-    agent: templateAgent,
-    capabilities: templateCapabilities,
-    ...(defaultGitForTemplate(input.templateId)
-      ? { git: defaultGitForTemplate(input.templateId) }
-      : {}),
+    agent: {},
+    capabilities,
+    ...(gitSettings ? { git: gitSettings } : {}),
     workItems: {
       nextRequirementNumber: 1,
       nextBugNumber: 1,
@@ -1177,15 +1140,19 @@ export async function createWorkspace(
 
   await mkdir(join(temporaryPath, ".pi"), { recursive: true });
   try {
-    if (customTemplatePath) {
-      await applyCustomTemplateSeed(temporaryPath, customTemplatePath);
-    }
     await writeFileAtomic(
       join(temporaryPath, ".pi", "workspace.yaml"),
       serializeWorkspaceManifest(manifest),
     );
-    if (isBuiltin && input.templateId === "software-development") {
-      await initializeSoftwareDevelopmentWorkspace(temporaryPath, manifest);
+    await writeFile(
+      join(temporaryPath, "AGENTS.md"),
+      renderWorkspaceAgents(manifest, capabilities),
+      "utf8",
+    );
+    if (needsGitRepo) {
+      await writeFile(join(temporaryPath, ".gitignore"), SOFTWARE_DEVELOPMENT_GITIGNORE, "utf8");
+      await execFileAsync("git", ["init", "--initial-branch=main"], { cwd: temporaryPath });
+      await commitWorkspaceChanges(temporaryPath, "workspace: initialize", manifest);
     }
     await rename(temporaryPath, workspacePath);
   } catch (error) {
@@ -1310,7 +1277,9 @@ export async function importWorkspace(
       id: createUlid(),
       slug: slugFromDirectoryName(basename(workspacePath)),
       name: basename(workspacePath),
-      template: { id: "empty", version: getWorkspaceTemplate("empty").version },
+      // Capability-driven: imported directories without a manifest get the bare
+      // mandatory minimum and no template (consistent with createWorkspace).
+      capabilities: ["sessions", "explorer"] as WorkspaceCapability[],
       skills: [],
       repositories: [],
       agent: {},

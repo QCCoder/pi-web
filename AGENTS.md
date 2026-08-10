@@ -70,12 +70,13 @@ schema_version: 1
 id: <ULID>
 slug: my-proj
 name: My Project
-template: { id: software-development, version: 1 }
-skills: [grilling, domain-modeling, codebase-design, tdd]
+template: { id: software-development, version: 1 }   # OPTIONAL/legacy — new workspaces omit this
+template?: { id, version }                          # (see "Template selection removed" below)
+skills: []                                          # new workspaces start with no skills
+capabilities: [sessions, explorer, work-items, repositories, knowledge, ...]  # always written explicitly
 repositories: [{ id, alias, name, kind: code|knowledge, status: active|removed, removed_at? }]
 agent: { default_model?, thinking_level? }
-capabilities: [sessions, explorer, work-items, repositories, overview, ...]   # cached snapshot
-git: { branch_rules: { requirement, bug }, create_after: plan_approved }      # sw-dev only
+git: { branch_rules: { requirement, bug }, create_after: plan_approved }      # only when work-items is on
 work_items: { next_requirement_number, next_bug_number }
 created_at / updated_at
 ```
@@ -84,22 +85,30 @@ created_at / updated_at
   `{ id, path, name, template_id, template_version, added_at, last_opened_at }`. `discoverWorkspaces()` reconciles it
   against disk on read and migrates legacy `workspace-*` dirs into it on first run.
 - **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", status }`. **`code` and `knowledge` behave
-  identically** — `kind` only drives the storage path (`repositories/<kind>/<alias>`), some UI labels, and that an
-  `init`-ed knowledge repo gets an `index.md`. There is *no* knowledge-specific behavior. (`docs/workspace-redesign.md` §5.1)
-- **Templates** (`lib/workspaces/templates.ts`): two built-ins — `empty` (sessions + explorer, nothing seeded) and
-  `software-development` (sessions, work-items, repositories, explorer, overview + the dev skills + git branch rules;
-  seeds `requirements/ bugs/ designs/ plans/ repositories/code/ repositories/knowledge/`, writes `AGENTS.md`,
-  `.gitignore`, then `git init` + initial commit). Custom templates live under `.pi/workspace-templates/<id>/`
-  (discovered from the workspaces root *and* a bundled `<cwd>/.pi/workspace-templates/`; user copies override bundled
-  ones by id) and may carry a `seed/` directory copied on creation.
+  identically** at the data layer — `kind` only drives the storage path (`repositories/<kind>/<alias>`) and some UI
+  labels. Note: `knowledge` is *also* now a top-level `WorkspaceCapability` (the UI "知识库" toggle); the repository
+  `kind` and the capability are separate concerns — the capability gates the module/UI, the kind gates the path.
+  (`docs/workspace-redesign.md` §5.1)
+- **Template selection removed (redesign decision 5/7)**: creating a Workspace is **capability-driven** —
+  `CreateWorkspaceInput = { name, slug, capabilities[] }`, no `templateId`. `createWorkspace()` validates the selection
+  via `parseCapabilities`, force-includes the mandatory `sessions`+`explorer` (`normalizeInitCapabilities`), writes
+  `manifest.capabilities` explicitly, and **omits `template`**. Per decision 6 (lazy directories) it does **not**
+  pre-create `requirements/ bugs/ designs/ plans/ repositories/` — those are `mkdir -p`'d on first use (work-item
+  creation, repo clone/init). It writes `.pi/workspace.yaml` + a capability-driven `AGENTS.md` always, and `git init`s
+  the workspace repo only when a git-using capability (`repositories` **or** `work-items`) is selected (git branch
+  rules are set only when `work-items` is on). The built-in templates (`empty`, `software-development`) and custom
+  template discovery (`lib/workspaces/templates.ts`, `.pi/workspace-templates/<id>/`) are **kept but `@deprecated`** —
+  they exist only so `effectiveCapabilities` can fall back to a built-in template's capabilities for legacy manifests
+  that have no cached `capabilities`.
 
 ### Capability system & extension mounting
 
-`WorkspaceCapability` (`types.ts`) is the per-workspace module switch. **`ALL_WORKSPACE_CAPABILITIES`** in
+`WorkspaceCapability` (`types.ts`) is the per-workspace module switch (includes `knowledge`, promoted from a mere
+repository `kind` to a first-class capability — redesign decision 4, type layer). **`ALL_WORKSPACE_CAPABILITIES`** in
 `lib/workspaces/service.ts` is the validation registry (the source of truth for which capabilities can be persisted):
 
 ```
-sessions, explorer, work-items, repositories, overview, workflows,
+sessions, explorer, work-items, repositories, knowledge, overview, workflows,
 feishu-transport, loop, feishu-channel
 ```
 
@@ -112,9 +121,11 @@ feishu-transport, loop, feishu-channel
 
 ### AGENTS.md auto-management (managed segments)
 
-Each workspace may carry an `AGENTS.md` at its root. **`renderSoftwareDevelopmentAgents(manifest)`** generates the full
-file for the software-development template: a collaboration policy, a git block, a repositories block, and work-item
-records.
+Each workspace may carry an `AGENTS.md` at its root. **`renderWorkspaceAgents(manifest, capabilities)`** is the
+**capability-driven** generator (redesign decision 9): it emits a title, a collaboration-flow block when `work-items`
+is on, a `<!-- workspace-managed:git:start/end -->` block when the manifest has `git` settings, and the repositories
+block — **without depending on a template id**, so template-free workspaces still get a tailored policy. The legacy
+`renderSoftwareDevelopmentAgents(manifest)` is retained for reference but no longer called by `createWorkspace`.
 
 The **repositories** block is *auto-maintained* between managed markers:
 
@@ -304,7 +315,7 @@ lib/
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
     service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md
-    templates.ts            built-in templates + renderSoftwareDevelopmentAgents + renderWorkspaceRepositories
+    templates.ts            capability init constants (MANDATORY/INIT checklist, normalizeInitCapabilities) + renderWorkspaceAgents (capability-driven) + renderWorkspaceRepositories + legacy built-in templates
     extensions.ts           WORKSPACE_EXTENSION_FACTORIES + buildWorkspaceExtensions (tool modules)
     id.ts                   ULID generator
   work-items/
@@ -425,13 +436,13 @@ Pi stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolC
 Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[]`). For existing sessions, the active preset is inferred on mount via `get_tools` → `getPresetFromTools()`. When tools are fully disabled (`toolNames = []`), `rpc-manager.ts` passes an empty tool allow-list and forces `agent.state.systemPrompt = ""` after startup/reload/resource discovery.
 
 ### Workspace capability registry is the source of truth
-`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent` — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered but currently inert — no factory, no template.)
+`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered but currently inert — no factory, no template.)
 
 ### `effectiveCapabilities` template fallback
-A manifest with no cached `capabilities` is derived from the built-in template lookup (by id **and** version). If that lookup misses (e.g. a custom template id that no longer exists), it falls back to `["sessions", "explorer"]`. New built-in templates *cache* capabilities into the manifest on creation, so edits persist independently of the template definition.
+`effectiveCapabilities(manifest)` reads `manifest.capabilities` first; if absent it falls back to the built-in template lookup (by id **and** version) for legacy manifests that still carry `template`; if that misses (or `template` is absent — now allowed for capability-driven workspaces) it returns `["sessions", "explorer"]`. **This template fallback path must be preserved** so existing `software-development` workspaces (which carry `template` + cached `capabilities`) keep working. New workspaces always write `capabilities` explicitly and omit `template`, so they never rely on the fallback.
 
 ### AGENTS.md managed-segment replacement is a no-op without markers
-`updateManagedRepositoryInstructions()` only rewrites content **between** `<!-- workspace-managed:repositories:start/end -->`. If a user deletes the markers it will silently stop syncing — it never recreates them. The git block (`<!-- workspace-managed:git:start/end -->`) is generated once by `renderSoftwareDevelopmentAgents` and not re-managed afterwards.
+`updateManagedRepositoryInstructions()` only rewrites content **between** `<!-- workspace-managed:repositories:start/end -->`. If a user deletes the markers it will silently stop syncing — it never recreates them. The git block (`<!-- workspace-managed:git:start/end -->`) is emitted once by `renderWorkspaceAgents` (when `git` settings exist) and not re-managed afterwards.
 
 ### Subagent is global, not a workspace capability
 The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs`.

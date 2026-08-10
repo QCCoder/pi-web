@@ -1,5 +1,6 @@
 import type {
   BuiltinWorkspaceTemplateId,
+  WorkspaceCapability,
   WorkspaceGitSettings,
   WorkspaceManifest,
   WorkspaceTemplateId,
@@ -52,6 +53,41 @@ export const SOFTWARE_DEVELOPMENT_DIRECTORIES = [
   "repositories/code",
   "repositories/knowledge",
 ] as const;
+
+/** Capabilities that are always on for every workspace. They are hard-coded (not
+ *  toggleable) — `normalizeInitCapabilities` force-includes them regardless of the
+ *  caller's selection. (Workspace redesign decision 7 / §6.3.) */
+export const MANDATORY_CAPABILITIES = ["sessions", "explorer"] as const;
+
+/** The capabilities offered as toggleable checkboxes when creating a workspace.
+ *  Per redesign §6.2 this intentionally excludes `overview`, `feishu-transport`,
+ *  `feishu-channel`, `subagent`, and `workflows` — those exist as legal capabilities
+ *  (and stay toggleable via PATCH), but are not surfaced in the init checklist. */
+export const INIT_CAPABILITY_CHECKLIST: readonly WorkspaceCapability[] = [
+  "repositories",
+  "knowledge",
+  "loop",
+  "work-items",
+];
+
+/** Normalize a caller-provided capability selection for a brand-new workspace:
+ *  validate each entry, drop duplicates, and force-include the mandatory set
+ *  (`sessions`, `explorer`). The result is the exact `capabilities` stored on the
+ *  manifest — it never relies on template fallback. */
+export function normalizeInitCapabilities(
+  selected: readonly WorkspaceCapability[],
+): WorkspaceCapability[] {
+  const seen = new Set<WorkspaceCapability>();
+  const result: WorkspaceCapability[] = [];
+  const push = (capability: WorkspaceCapability) => {
+    if (seen.has(capability)) return;
+    seen.add(capability);
+    result.push(capability);
+  };
+  for (const capability of MANDATORY_CAPABILITIES) push(capability);
+  for (const capability of selected) push(capability);
+  return result;
+}
 
 export function isBuiltinWorkspaceTemplateId(value: unknown): value is BuiltinWorkspaceTemplateId {
   return value === "empty" || value === "software-development";
@@ -118,6 +154,58 @@ ${renderWorkspaceRepositories(manifest)}
 - Do not overwrite the Original Description with later analysis.
 - Keep low-level tool calls in the Conversation and record only meaningful milestones on the Work Item.
 `;
+}
+
+/** Capability-driven AGENTS.md generator (redesign decision 9). Unlike
+ *  `renderSoftwareDevelopmentAgents` it depends only on the manifest's
+ *  capabilities/git settings, not on a template id, so new (template-free)
+ *  workspaces get a tailored collaboration policy. The repositories block uses the
+ *  same `<!-- workspace-managed:repositories:start/end -->` markers as the legacy
+ *  generator, so `updateManagedRepositoryInstructions` keeps working unchanged. */
+export function renderWorkspaceAgents(
+  manifest: WorkspaceManifest,
+  capabilities: readonly WorkspaceCapability[],
+): string {
+  const hasWorkItems = capabilities.includes("work-items");
+  const lines: string[] = [];
+  lines.push(`# ${manifest.name} Collaboration Policy`);
+  lines.push("");
+  lines.push("This Workspace uses Pi Agent. Keep authoritative artifacts in Workspace files and link meaningful outcomes to their Work Item.");
+  lines.push("");
+  if (hasWorkItems) {
+    lines.push("## Collaboration flow");
+    lines.push("");
+    lines.push("1. Clarify the Requirement or Bug and preserve the user's Original Description.");
+    lines.push("2. Produce analysis and acceptance criteria, then wait for user approval.");
+    lines.push("3. Produce the design and implementation plan, then wait for user approval.");
+    lines.push("4. Implement, test, review, and record meaningful milestones.");
+    lines.push("5. Do not claim completion until verification evidence is available.");
+    lines.push("");
+  }
+  if (manifest.git) {
+    const requirementBranch = manifest.git.branchRules.requirement;
+    const bugBranch = manifest.git.branchRules.bug;
+    lines.push("<!-- workspace-managed:git:start -->");
+    lines.push("## Git collaboration");
+    lines.push("");
+    lines.push(`- Requirement branches use \`${requirementBranch}\`.`);
+    lines.push(`- Bug branches use \`${bugBranch}\`.`);
+    lines.push("- Create implementation branches only after the plan is approved.");
+    lines.push("- Never delete or force-push a remote branch without explicit user approval.");
+    lines.push("<!-- workspace-managed:git:end -->");
+    lines.push("");
+  }
+  lines.push(renderWorkspaceRepositories(manifest));
+  if (hasWorkItems) {
+    lines.push("");
+    lines.push("## Work Item records");
+    lines.push("");
+    lines.push("- Use the Pi Workspace Work Item tools for structured metadata and milestones.");
+    lines.push("- Do not rewrite `events.jsonl`; it is append-only.");
+    lines.push("- Do not overwrite the Original Description with later analysis.");
+    lines.push("- Keep low-level tool calls in the Conversation and record only meaningful milestones on the Work Item.");
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 export const SOFTWARE_DEVELOPMENT_GITIGNORE = `# Pi Workspace rebuildable state

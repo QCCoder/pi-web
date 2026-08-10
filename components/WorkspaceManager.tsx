@@ -6,12 +6,13 @@ import { FeishuConfig } from "./FeishuConfig";
 import { LoopConfig } from "./LoopConfig";
 import { FeishuChannelPanel } from "./FeishuChannelPanel";
 import type {
+  WorkspaceCapability,
   WorkspaceRepositoryState,
   WorkspaceRepositoryKind,
   WorkspaceSummary,
-  WorkspaceTemplateId,
   WorkspaceTemplateInfo,
 } from "@/lib/workspaces/types";
+import { INIT_CAPABILITY_CHECKLIST, MANDATORY_CAPABILITIES } from "@/lib/workspaces/templates";
 import type {
   WorkItemDetail,
   WorkItemPhase,
@@ -70,6 +71,15 @@ const PHASE_OPTIONS: WorkItemPhase[] = [
   "complete",
 ];
 const PRIORITY_OPTIONS: WorkItemPriority[] = ["P0", "P1", "P2", "P3"];
+
+const CAPABILITY_LABELS: Record<string, string> = {
+  sessions: "会话",
+  explorer: "Explorer",
+  repositories: "代码仓库",
+  knowledge: "知识库",
+  loop: "Loop",
+  "work-items": "工作项",
+};
 
 const STATUS_LABELS: Record<WorkItemStatus, string> = {
   open: "待处理",
@@ -179,7 +189,7 @@ export function WorkspaceManager({
   const [error, setError] = useState<string | null>(null);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
-  const [workspaceTemplate, setWorkspaceTemplate] = useState<WorkspaceTemplateId>("software-development");
+  const [selectedCapabilities, setSelectedCapabilities] = useState<WorkspaceCapability[]>(["repositories", "work-items"]);
   const [repositoryFormOpen, setRepositoryFormOpen] = useState(false);
   const [repositoryMode, setRepositoryMode] = useState<"clone" | "init">("clone");
   const [repositoryKind, setRepositoryKind] = useState<WorkspaceRepositoryKind>("code");
@@ -382,7 +392,7 @@ export function WorkspaceManager({
           body: JSON.stringify({
             name: workspaceName,
             slug: slugify(workspaceName),
-            templateId: workspaceTemplate,
+            capabilities: selectedCapabilities,
           }),
         }),
       );
@@ -395,7 +405,7 @@ export function WorkspaceManager({
     } finally {
       setSaving(false);
     }
-  }, [loadWorkspaces, workspaceName, workspaceTemplate]);
+  }, [loadWorkspaces, workspaceName, selectedCapabilities]);
 
   const removeWorkspace = useCallback(async (workspace: WorkspaceSummary) => {
     if (!window.confirm(`从列表移除 ${workspace.name}？目录和 Workspace 配置不会被删除。`)) return;
@@ -793,6 +803,24 @@ export function WorkspaceManager({
         }
         .skill-selection-item input { margin-top: 2px; }
         .skill-selection-item span { min-width: 0; }
+        .capability-checklist {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+          margin-top: 6px;
+        }
+        .capability-check-item {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          border: 1px solid var(--border);
+          border-radius: 7px;
+          padding: 8px 10px;
+          background: var(--bg);
+          color: var(--text);
+          font-size: 12px;
+        }
+        .capability-check-item input { margin: 0; }
         .skill-selection-item small {
           display: block;
           margin-top: 2px;
@@ -943,6 +971,7 @@ export function WorkspaceManager({
           .workspace-form-grid { grid-template-columns: 1fr; }
           .repository-row { grid-template-columns: minmax(0, 1fr) auto; }
           .skill-selection-list { grid-template-columns: 1fr; }
+          .capability-checklist { grid-template-columns: 1fr; }
           .repository-row > code { grid-column: 1 / -1; grid-row: 2; }
           .repository-actions { grid-column: 1 / -1; grid-row: 3; }
           .workspace-page-header h2 { font-size: 17px; }
@@ -1028,7 +1057,7 @@ export function WorkspaceManager({
                 <span className="workspace-rail-meta">{workspace.path}</span>
                 <span className="workspace-rail-meta">
                   {workspace.available
-                    ? `${workspace.templateId} · ${workspace.repositoryCount} repos`
+                    ? `${workspace.templateId ?? "自定义"} · ${workspace.repositoryCount} repos`
                     : "目录或配置不可用"}
                 </span>
               </button>
@@ -1073,21 +1102,35 @@ export function WorkspaceManager({
                           autoFocus
                         />
                       </label>
-                      <label className="workspace-field">
-                        <span>模板</span>
-                        <select
-                          value={workspaceTemplate}
-                          onChange={(event) => setWorkspaceTemplate(event.target.value as WorkspaceTemplateId)}
-                        >
-                          {workspaceData?.templates.map((template) => (
-                            <option key={template.id} value={template.id}>{template.name}</option>
-                          ))}
-                        </select>
-                      </label>
                     </div>
-                    <p className="workspace-rail-meta">
-                      {workspaceData?.templates.find((template) => template.id === workspaceTemplate)?.description}
-                    </p>
+                    <div className="workspace-field">
+                      <span>能力（Capability）</span>
+                      <div className="capability-checklist">
+                        {MANDATORY_CAPABILITIES.map((capability) => (
+                          <label className="capability-check-item" key={capability}>
+                            <input type="checkbox" checked disabled readOnly />
+                            {CAPABILITY_LABELS[capability]}（必带）
+                          </label>
+                        ))}
+                        {INIT_CAPABILITY_CHECKLIST.map((capability) => (
+                          <label className="capability-check-item" key={capability}>
+                            <input
+                              type="checkbox"
+                              checked={selectedCapabilities.includes(capability)}
+                              onChange={(event) => {
+                                setSelectedCapabilities((current) => event.target.checked
+                                  ? [...new Set([...current, capability])]
+                                  : current.filter((value) => value !== capability));
+                              }}
+                            />
+                            {CAPABILITY_LABELS[capability]}
+                          </label>
+                        ))}
+                      </div>
+                      <p className="workspace-rail-meta" style={{ marginTop: 6 }}>
+                        会话与 Explorer 始终开启；勾选其它能力后，相应目录会在首次使用时自动创建。
+                      </p>
+                    </div>
                     <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                       <button className="workspace-action" onClick={() => setCreateWorkspaceOpen(false)}>取消</button>
                       <button
@@ -1108,8 +1151,8 @@ export function WorkspaceManager({
                           <code>{selectedWorkspace.path}</code>
                         </div>
                         <div>
-                          <div className="workspace-rail-meta">模板</div>
-                          <div>{selectedWorkspace.templateId}</div>
+                          <div className="workspace-rail-meta">能力</div>
+                          <div>{selectedWorkspace.capabilities.join(", ")}</div>
                         </div>
                         <div>
                           <div className="workspace-rail-meta">Skills</div>
@@ -1323,7 +1366,7 @@ export function WorkspaceManager({
                   </>
                 ) : (
                   <div className="workspace-summary-card">
-                    创建第一个 Workspace，从 Empty 或 Software Development 模板开始。
+                    创建第一个 Workspace，从勾选能力开始（会话与 Explorer 始终必带）。
                   </div>
                 )}
               </>
