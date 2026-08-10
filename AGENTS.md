@@ -115,7 +115,7 @@ feishu-transport, loop, feishu-channel
   (by id **and** version), else `["sessions", "explorer"]`. Legacy manifests without a cached `capabilities` snapshot
   are derived from the template lookup.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
-- **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `feishu-transport` → feishu send tools. **`subagent` is deliberately NOT registered here** (see Subagent below). **`feishu-channel`** is a service module, not an extension (see Feishu).
+- **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `feishu-transport` → feishu send tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below). **`feishu-channel`** is a service module, not an extension (see Feishu).
 - **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by effective capabilities. `lib/rpc-manager.ts` always attaches `createSubagentExtension(...)` globally, then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
 
 ### AGENTS.md auto-management (managed segments)
@@ -162,7 +162,8 @@ Per-view content (data still comes from `loadWorkspaceData` — only the render 
   `init`'d bundle is seeded with `index.md` (progressive-disclosure entry), `log.md`, and a `concepts/welcome.md`
   example concept (`lib/workspaces/okf.ts`, `renderOkfSeed`); a `clone`d bundle keeps the remote structure untouched.
   **L0 access is always built-in** — `read`/`ls`/`grep` need no tool. The view has an "open index.md" hint as the L0
-  entry point. Retrieval augmentation (`kb_search`) is opt-in in a later slice.
+  entry point. Ranked retrieval augmentation (`kb_search`) is **opt-in**: the tool is mounted automatically when the
+  `knowledge` capability is on, and searches across all active bundles (see "kb_search" below).
 - **Loop** — a "管理 Loops" entry that opens the center `LoopConfig` view (the icon also highlights when the center shows loops).
 - **工作项** — the requirements/bugs groups.
 
@@ -349,6 +350,9 @@ lib/
     service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments)
     templates.ts            capability init constants (MANDATORY/INIT checklist, normalizeInitCapabilities) + renderWorkspaceAgents (capability-driven) + renderWorkspaceRepositories + renderKnowledgeSection + legacy built-in templates
     okf.ts                  OKF v0.2 structure constants + renderOkfSeed (index.md/log.md/example concept for newly init'd knowledge repos)
+    kb-search/              opt-in L1 `kb_search` tool + pure-JS BM25 index (self-healing, cross-bundle)
+      index.ts              ensureIndex() (mtime-incremental, .pi/cache rebuildable) + searchIndex() (Okapi BM25, CJK-aware tokenize)
+      extension.ts          createKbSearchExtension() — `kb_search` InlineExtension (query/limit/filters), re-resolves active bundles per call
     extensions.ts           WORKSPACE_EXTENSION_FACTORIES + buildWorkspaceExtensions (tool modules)
     id.ts                   ULID generator
   work-items/
@@ -489,6 +493,25 @@ and `concepts/welcome.md` (`type: concept` + tags). `mode: "clone"` is **never**
 structure. **L0 access (read/ls/grep) is always built-in** and needs no tool (redesign decisions 11/12); existing
 frontmatter-less bundles (e.g. legacy ones) are **not force-migrated** (decision 13, progressive) — they still work via
 L0. The AGENTS.md knowledge segment **references** each bundle's `index.md` rather than inlining it (decision 10).
+
+### kb_search is opt-in, self-healing, cross-bundle (L1)
+The `knowledge` capability carries **two coexisting layers** (redesign decisions 11/14, §6.1): **L0** (always built-in
+`read`/`ls`/`grep` — needs no tool) and **L1 `kb_search`** (an enhancement mounted by `buildWorkspaceExtensions` when
+the capability is on). `kb_search` is implemented by `lib/workspaces/kb-search/` and is **pure-JS** (no native deps):
+frontmatter (`type`/`tags`) + body are tokenized and ranked with **BM25**. It searches across **all active knowledge
+bundles** of the workspace and merges results.
+
+- **Self-healing index (decision 14)**: each `kb_search` call runs `ensureIndex()` first, which walks each bundle's
+  `.md` files and compares **mtime** to the cached entry, re-parsing only new/changed files (deleted files are dropped).
+  The index is a **rebuildable cache** at `<workspacePath>/.pi/cache/kb-index/<repoAlias>.json` (git-ignored). A
+  missing or corrupt cache simply triggers a full rebuild — never a failure. Index writes are serialized with
+  `withWorkspaceWriteLock`; a torn write (interrupted) is made harmless by tmp+rename atomic write.
+- **Degrades gracefully**: if indexing fails for a bundle it is skipped; if all bundles fail, the tool returns an L0
+  hint (`grep`/`ls`). L0 never depends on `kb_search`.
+- The tool re-resolves the live active-knowledge-repo set on **each call**, so bundles added/removed during a session
+  are picked up without a restart.
+- The factory passes an initial repo snapshot at mount time; the source of truth at execution is the fresh manifest
+  read (so `kb_search` and L0 always agree on which bundles exist).
 
 ### Subagent is global, not a workspace capability
 The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs`.

@@ -1,7 +1,9 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceWorkItemExtension } from "../work-items/extension.ts";
 import { createFeishuTransportExtension } from "../feishu/extension.ts";
-import { effectiveCapabilities } from "./service.ts";
+import { effectiveCapabilities, workspaceRepositoryPath } from "./service.ts";
+import type { KnowledgeRepoRef } from "./kb-search/index.ts";
+import { createKbSearchExtension } from "./kb-search/extension.ts";
 import type { WorkspaceCapability, WorkspaceManifest } from "./types.ts";
 
 /**
@@ -41,6 +43,21 @@ export const WORKSPACE_EXTENSION_FACTORIES: readonly WorkspaceExtensionFactory[]
   {
     capability: "feishu-transport",
     build: (manifest) => createFeishuTransportExtension(manifest),
+  },
+  {
+    // knowledge capability carries BOTH always-on L0 (agent read/grep/ls, no tool)
+    // AND this opt-in L1 `kb_search` enhancement (redesign decisions 11/14). The two
+    // coexist: L0 needs no extension, this factory only adds the ranked-search tool.
+    capability: "knowledge",
+    build: (manifest, workspacePath) => {
+      const knowledgeRepos: KnowledgeRepoRef[] = manifest.repositories
+        .filter((repository) => repository.kind === "knowledge" && repository.status === "active")
+        .map((repository) => ({
+          alias: repository.alias,
+          path: workspaceRepositoryPath(workspacePath, repository).absolutePath,
+        }));
+      return createKbSearchExtension(manifest.id, workspacePath, knowledgeRepos);
+    },
   },
 ];
 
