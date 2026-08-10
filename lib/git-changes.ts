@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { promisify } from "util";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
-import { discoverRepoRoots } from "./git-discover";
+import { discoverRepoAndWorktreeRoots } from "./git-discover";
 import type {
   GitFileDiffResponse,
   GitStatusResponse,
@@ -99,14 +99,21 @@ function countUntrackedTextLines(filePath: string): number {
 
 export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
   const primaryRoot = await findRepositoryRoot(cwd);
-  const nestedRoots = discoverRepoRoots(cwd);
+  // Worktrees are separated out so they are not queried as independent repos
+  // (their branch-vs-HEAD diff is not workspace change). Their paths are still
+  // returned so the nested-boundary dedup below can drop each parent repo's
+  // `worktrees/<name>` untracked entry.
+  const { repoRoots: nestedRoots, worktreeRoots } = discoverRepoAndWorktreeRoots(cwd);
   const allRoots = new Set<string>();
   if (primaryRoot) allRoots.add(primaryRoot);
   for (const root of nestedRoots) allRoots.add(root);
+  for (const root of worktreeRoots) allRoots.add(root);
 
   // Repositories to query: the primary (enclosing) repo scoped to cwd, plus
-  // every nested repo scoped to its own root. The primary may also appear in
-  // nestedRoots (when cwd is itself a repo) — skip it so it's queried once.
+  // every nested MAIN repo scoped to its own root. Worktrees are deliberately
+  // excluded — they are parallel checkouts of an already-queried main repo.
+  // The primary may also appear in nestedRoots (when cwd is itself a repo) —
+  // skip it so it's queried once.
   const queryRepos: Array<{ root: string; isPrimary: boolean; scopeCwd: string }> = [];
   if (primaryRoot) queryRepos.push({ root: primaryRoot, isPrimary: true, scopeCwd: cwd });
   for (const root of nestedRoots) {
