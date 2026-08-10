@@ -5,7 +5,6 @@ import { FileExplorer } from "./FileExplorer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useGitStatus } from "@/hooks/useGitStatus";
 import { ChangesPanel } from "./ChangesPanel";
-import { GIT_STATUS_COLORS } from "./git-ui";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
@@ -105,6 +104,93 @@ function SectionHeader({
   );
 }
 
+/** Explorer section 内顶部的 [ 文件 | 改动(N) ] 分段切换。
+ *  Changes 已并入 Explorer（决策 8）：改动列表沿用 Explorer 当前 cwd scope。
+ *  仅在 git 目录渲染；非 git 目录父组件直接渲染 FileExplorer。 */
+function ExplorerSegmentedTabs({
+  active,
+  changesCount,
+  onSelect,
+}: {
+  active: "files" | "changes";
+  changesCount: number;
+  onSelect: (tab: "files" | "changes") => void;
+}) {
+  const tabBase: React.CSSProperties = {
+    flex: 1,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    padding: "4px 8px",
+    border: 0,
+    borderRadius: 5,
+    background: "transparent",
+    color: "var(--text-muted)",
+    cursor: "pointer",
+    fontSize: "var(--pi-sidebar-fs-meta)",
+    fontWeight: 600,
+  };
+  const activeStyle: React.CSSProperties = {
+    background: "var(--bg-panel)",
+    color: "var(--text)",
+    boxShadow: "0 1px 2px rgba(0,0,0,0.12)",
+  };
+  return (
+    <div
+      role="tablist"
+      aria-label="Explorer 视图"
+      style={{
+        display: "flex",
+        gap: 3,
+        margin: "6px 8px",
+        padding: 3,
+        background: "var(--bg-hover)",
+        borderRadius: 7,
+      }}
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={active === "files"}
+        style={active === "files" ? { ...tabBase, ...activeStyle } : tabBase}
+        onClick={() => onSelect("files")}
+      >
+        文件
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={active === "changes"}
+        style={active === "changes" ? { ...tabBase, ...activeStyle } : tabBase}
+        onClick={() => onSelect("changes")}
+      >
+        改动
+        {changesCount > 0 && (
+          <span
+            title={`${changesCount} 个改动`}
+            style={{
+              minWidth: 16,
+              height: 16,
+              padding: "0 5px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: 8,
+              background: "var(--accent)",
+              color: "var(--bg-panel)",
+              fontSize: 10,
+              fontWeight: 700,
+            }}
+          >
+            {changesCount}
+          </span>
+        )}
+      </button>
+    </div>
+  );
+}
+
 function rowStyle(active = false): React.CSSProperties {
   return {
     width: "100%",
@@ -177,6 +263,7 @@ export function WorkspaceSidebar({
   const [bugsOpen, setBugsOpen] = useState(true);
   const [repositoriesOpen, setRepositoriesOpen] = useState(true);
   const [explorerOpen, setExplorerOpen] = useState(false);
+  const [explorerTab, setExplorerTab] = useState<"files" | "changes">("files");
   const hasCapability = useCallback(
     (capability: WorkspaceSummary["capabilities"][number]) =>
       activeWorkspace?.capabilities.includes(capability) ?? false,
@@ -187,7 +274,10 @@ export function WorkspaceSidebar({
     explorerRefreshKey,
   );
   const changesCount = gitStatus ? gitStatus.groups.reduce((total, group) => total + group.files.length, 0) : 0;
-  const [changesOpen, setChangesOpen] = useState(false);
+  const isGitRepo = Boolean(gitStatus?.isGitRepository);
+  // 非 git 目录隐藏"改动"分段，强制回落到"文件"。
+  const effectiveExplorerTab: "files" | "changes" =
+    isGitRepo && explorerTab === "changes" ? "changes" : "files";
 
   const loadWorkspaceData = useCallback(async () => {
     if (!activeWorkspace) {
@@ -249,6 +339,22 @@ export function WorkspaceSidebar({
     setBugsOpen(localStorage.getItem(`${prefix}bugs`) !== "closed");
   }, [activeWorkspace]);
 
+  // Explorer 内部 [ 文件 | 改动 ] 分段选择，按工作区持久化。
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    const stored = localStorage.getItem(`pi-explorer-tab:${activeWorkspace.id}`);
+    setExplorerTab(stored === "changes" ? "changes" : "files");
+  }, [activeWorkspace]);
+
+  const handleSelectExplorerTab = useCallback((tab: "files" | "changes") => {
+    setExplorerTab(tab);
+    if (activeWorkspace) {
+      localStorage.setItem(`pi-explorer-tab:${activeWorkspace.id}`, tab);
+    }
+    // 切到"改动"时若 Explorer section 当前折叠，自动展开（分段控件在其内）。
+    if (tab === "changes") setExplorerOpen(true);
+  }, [activeWorkspace]);
+
   const toggleWorkItemGroup = useCallback((
     group: "requirements" | "bugs",
     current: boolean,
@@ -273,6 +379,8 @@ export function WorkspaceSidebar({
       collapsedSecondaryOnMobileRef.current = true;
       setWorkItemsOpen(false);
       setRepositoriesOpen(false);
+      // Changes 已并入 Explorer：移动端保持 Explorer 默认展开，避免改动入口被折叠隐藏。
+      setExplorerOpen(true);
     }
   }, [isMobile]);
 
@@ -622,29 +730,6 @@ export function WorkspaceSidebar({
               </>
             )}
 
-            {hasCapability("explorer") && gitStatus?.isGitRepository && (
-              <>
-                <SectionHeader
-                  label="Changes"
-                  open={changesOpen}
-                  onToggle={() => setChangesOpen((current) => !current)}
-                  meta={
-                    <>
-                      <span style={{ color: "var(--text-dim)" }}>{changesCount}</span>
-                      <span style={{ color: GIT_STATUS_COLORS.added, fontFamily: "var(--font-mono)" }}>+{gitStatus?.additions ?? 0}</span>
-                      <span style={{ color: GIT_STATUS_COLORS.deleted, fontFamily: "var(--font-mono)" }}>-{gitStatus?.deletions ?? 0}</span>
-                    </>
-                  }
-                />
-                {changesOpen && (
-                  <ChangesPanel
-                    groups={gitStatus?.groups ?? []}
-                    cwd={activeWorkspace.path}
-                    onOpenFile={onOpenFile}
-                  />
-                )}
-              </>
-            )}
             {hasCapability("explorer") && (
               <>
                 <SectionHeader
@@ -654,13 +739,28 @@ export function WorkspaceSidebar({
                 />
                 {explorerOpen && (
                   <div style={{ minHeight: 220 }}>
-                    <FileExplorer
-                      cwd={activeWorkspace.path}
-                      onOpenFile={onOpenFile}
-                      refreshKey={explorerRefreshKey}
-                      gitStatusByPath={gitStatusByPath}
-                      changedDirectoryPaths={changedDirectoryPaths}
-                    />
+                    {isGitRepo && (
+                      <ExplorerSegmentedTabs
+                        active={effectiveExplorerTab}
+                        changesCount={changesCount}
+                        onSelect={handleSelectExplorerTab}
+                      />
+                    )}
+                    {isGitRepo && effectiveExplorerTab === "changes" ? (
+                      <ChangesPanel
+                        groups={gitStatus?.groups ?? []}
+                        cwd={activeWorkspace.path}
+                        onOpenFile={onOpenFile}
+                      />
+                    ) : (
+                      <FileExplorer
+                        cwd={activeWorkspace.path}
+                        onOpenFile={onOpenFile}
+                        refreshKey={explorerRefreshKey}
+                        gitStatusByPath={gitStatusByPath}
+                        changedDirectoryPaths={changedDirectoryPaths}
+                      />
+                    )}
                   </div>
                 )}
               </>

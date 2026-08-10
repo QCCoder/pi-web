@@ -216,7 +216,10 @@ Only streamed status + final result return to the parent; the full child run is 
   "new file" patch for untracked; `git diff HEAD` otherwise; respects rename pairs).
 - APIs: `GET /api/git/status?cwd=`, `GET /api/git/diff?cwd=&path=` — guarded by the file-access allow-list. Polled by
   `hooks/useGitStatus.ts`; rendered by `components/ChangesPanel.tsx` (flat list for one repo, collapsible per-repo
-  groups when cwd spans several).
+  groups when cwd spans several). In `WorkspaceSidebar` the Changes list is **no longer a standalone section** — it is
+  a `[ 文件 | 改动(N) ]` tab inside the Explorer section (redesign decision 8), following the Explorer's current cwd
+  scope; `ChangesPanel` itself is unchanged. Tab choice persists in `localStorage` key `pi-explorer-tab:<wsId>`;
+  non-git directories hide the "改动" tab. `SessionSidebar` keeps its own standalone Changes section.
 
 ### Feishu (`lib/feishu/`, `lib/feishu-channel/`)
 
@@ -373,7 +376,7 @@ lib/
 components/
   AppShell.tsx              top-level layout + URL state + tab management
   HomeLanding.tsx           the workspace picker / home screen
-  WorkspaceSidebar.tsx      stacked-group sidebar: sessions / work-items / repositories(code|knowledge) / explorer / archive
+  WorkspaceSidebar.tsx      stacked-group sidebar: sessions / work-items / repositories(code|knowledge) / explorer(+ 文件/改动(N) 分段切换) / archive
   WorkspaceManager.tsx      workspace create/import + settings modal (capabilities, skills, feishu)
   WorkspaceOverview.tsx     workspace landing view (recent sessions, work items, repos)
   WorkspaceTabBar.tsx       workspace switcher tabs (shortest-unique labels)
