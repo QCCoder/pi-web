@@ -121,6 +121,39 @@ ${lines.join("\n")}
 <!-- workspace-managed:repositories:end -->`;
 }
 
+/** Render the workspace-managed **knowledge** segment of AGENTS.md (redesign
+ *  decisions 9, 10, 11, 13). Lists every *active knowledge* repository and
+ *  **references** each bundle's `index.md` rather than inlining it — pi injects
+ *  AGENTS.md verbatim with no `@`-include expansion, so large content must be
+ *  referenced out and the model follows the reference to `read` it on demand.
+ *
+ *  Lives here (next to `renderWorkspaceRepositories`) so `renderWorkspaceAgents`
+ *  below can call it without a service.ts → templates.ts cycle, and so
+ *  `updateManagedRepositoryInstructions` in service.ts can import it the same way
+ *  it already imports `renderWorkspaceRepositories`. The marker anchors follow the
+ *  exact same `<!-- workspace-managed:knowledge:start/end -->` pattern. */
+export function renderKnowledgeSection(manifest: WorkspaceManifest): string {
+  const active = manifest.repositories.filter(
+    (repository) => repository.kind === "knowledge" && repository.status === "active",
+  );
+  const lines = active.length === 0
+    ? ["- No knowledge bundles are configured. Initialize or clone one under the 知识库 view."]
+    : active.map(
+      (repository) =>
+        `- \`${repository.alias}\` (id: \`${repository.id}\`): OKF bundle — read its index at \`repositories/knowledge/${repository.alias}/index.md\` to traverse it (L0: \`read\`/\`ls\`/\`grep\`, no tool required).`,
+    );
+  return `<!-- workspace-managed:knowledge:start -->
+## Knowledge bundles (OKF v0.2)
+
+Each knowledge bundle is an OKF directory tree of Markdown + YAML frontmatter. The
+\`index.md\` of each bundle is the progressive-disclosure entry point — **read it on
+demand**, do not load a whole bundle up front. L0 access (\`read\`/\`ls\`/\`grep\`) is
+always available and needs no search tool.
+
+${lines.join("\n")}
+<!-- workspace-managed:knowledge:end -->`;
+}
+
 export function renderSoftwareDevelopmentAgents(manifest: WorkspaceManifest): string {
   const requirementBranch = manifest.git?.branchRules.requirement ?? DEFAULT_GIT_SETTINGS.branchRules.requirement;
   const bugBranch = manifest.git?.branchRules.bug ?? DEFAULT_GIT_SETTINGS.branchRules.bug;
@@ -196,6 +229,10 @@ export function renderWorkspaceAgents(
     lines.push("");
   }
   lines.push(renderWorkspaceRepositories(manifest));
+  if (capabilities.includes("knowledge")) {
+    lines.push("");
+    lines.push(renderKnowledgeSection(manifest));
+  }
   if (hasWorkItems) {
     lines.push("");
     lines.push("## Work Item records");

@@ -20,10 +20,12 @@ import {
   BUILT_IN_WORKSPACE_TEMPLATES,
   DEFAULT_GIT_SETTINGS,
   normalizeInitCapabilities,
+  renderKnowledgeSection,
   renderWorkspaceAgents,
   renderWorkspaceRepositories,
   SOFTWARE_DEVELOPMENT_GITIGNORE,
 } from "./templates.ts";
+import { renderOkfSeed } from "./okf.ts";
 import {
   WORKSPACE_SCHEMA_VERSION,
   type CreateWorkspaceInput,
@@ -616,7 +618,15 @@ async function updateManagedRepositoryInstructions(
   workspacePath: string,
   manifest: WorkspaceManifest,
 ): Promise<void> {
-  if (!effectiveCapabilities(manifest).includes("repositories")) return;
+  // Maintain BOTH managed segments (repositories + knowledge) using the same
+  // anchor-replace pattern. Each is only touched when its capability is effective;
+  // a segment whose markers are absent is left untouched (never created here). This
+  // mirrors the historical repositories-only behavior and never fuzzy-matches user
+  // content outside the markers (redesign decision 9, high-risk trap).
+  const capabilities = effectiveCapabilities(manifest);
+  const hasRepositories = capabilities.includes("repositories");
+  const hasKnowledge = capabilities.includes("knowledge");
+  if (!hasRepositories && !hasKnowledge) return;
   const agentsPath = join(workspacePath, "AGENTS.md");
   let current: string;
   try {
@@ -624,11 +634,19 @@ async function updateManagedRepositoryInstructions(
   } catch {
     return; // no AGENTS.md to maintain
   }
-  const managed = renderWorkspaceRepositories(manifest);
-  const next = current.replace(
-    /<!-- workspace-managed:repositories:start -->[\s\S]*?<!-- workspace-managed:repositories:end -->/,
-    managed,
-  );
+  let next = current;
+  if (hasRepositories) {
+    next = next.replace(
+      /<!-- workspace-managed:repositories:start -->[\s\S]*?<!-- workspace-managed:repositories:end -->/,
+      renderWorkspaceRepositories(manifest),
+    );
+  }
+  if (hasKnowledge) {
+    next = next.replace(
+      /<!-- workspace-managed:knowledge:start -->[\s\S]*?<!-- workspace-managed:knowledge:end -->/,
+      renderKnowledgeSection(manifest),
+    );
+  }
   if (next === current) return; // no managed block present; nothing to update
   await writeFileAtomic(agentsPath, next);
 }
@@ -730,7 +748,16 @@ export async function addWorkspaceRepository(
         const title = `# ${repository.name}\n`;
         await writeFile(join(absolutePath, "README.md"), title, "utf8");
         if (kind === "knowledge") {
-          await writeFile(join(absolutePath, "index.md"), "# Index\n", "utf8");
+          // OKF v0.2 seed (redesign decision 13 / §4): a progressive-disclosure
+          // index.md, a log.md, and a frontmatter'd example concept. This replaces
+          // the old bare `# Index` file. Clone mode above is untouched — a cloned
+          // knowledge repo brings its own OKF structure from the remote.
+          const seed = renderOkfSeed(alias);
+          for (const [relativePath, content] of Object.entries(seed.files)) {
+            const target = join(absolutePath, relativePath);
+            await mkdir(dirname(target), { recursive: true });
+            await writeFile(target, content, "utf8");
+          }
         }
         if (remote) {
           await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: absolutePath });

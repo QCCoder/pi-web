@@ -84,11 +84,10 @@ created_at / updated_at
 - **Global index**: `~/.pi/workspace.yaml` (or `$PI_WORKSPACE_INDEX_FILE`) lists every known workspace
   `{ id, path, name, template_id, template_version, added_at, last_opened_at }`. `discoverWorkspaces()` reconciles it
   against disk on read and migrates legacy `workspace-*` dirs into it on first run.
-- **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", status }`. **`code` and `knowledge` behave
-  identically** at the data layer — `kind` only drives the storage path (`repositories/<kind>/<alias>`) and some UI
-  labels. Note: `knowledge` is *also* now a top-level `WorkspaceCapability` (the UI "知识库" toggle); the repository
-  `kind` and the capability are separate concerns — the capability gates the module/UI, the kind gates the path.
-  (`docs/workspace-redesign.md` §5.1)
+- **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", status }`. `kind` drives the storage path
+  (`repositories/<kind>/<alias>`) and, for `knowledge`, the **OKF seed** written on `init` (see Knowledge below). Note:
+  `knowledge` is *also* a top-level `WorkspaceCapability` (the UI "知识库" toggle); the repository `kind` and the
+  capability are separate concerns — the capability gates the module/UI, the kind gates the path. (`docs/workspace-redesign.md` §5.1)
 - **Template selection removed (redesign decision 5/7)**: creating a Workspace is **capability-driven** —
   `CreateWorkspaceInput = { name, slug, capabilities[] }`, no `templateId`. `createWorkspace()` validates the selection
   via `parseCapabilities`, force-includes the mandatory `sessions`+`explorer` (`normalizeInitCapabilities`), writes
@@ -158,8 +157,12 @@ Per-view content (data still comes from `loadWorkspaceData` — only the render 
 - **会话** — session list + 新建会话 (header).
 - **Explorer** — Slice-3 Explorer, including the `[ 文件 | 改动(N) ]` segmented tabs (`pi-explorer-tab:<wsId>`).
 - **仓库** — **only `kind === "code"`** repositories (decision 3: Repositories only holds code).
-- **知识库** — **only `kind === "knowledge"`** repositories; MVP browses each OKF bundle via a `FileExplorer` pointed at
-  `repositories/knowledge/<alias>` (L0 = directory tree, no专用 UI yet; Slice-5 strengthens it).
+- **知识库** — **only `kind === "knowledge"`** repositories; each is an **OKF (Open Knowledge Format v0.2)** bundle
+  (Markdown + YAML frontmatter) browsed via a `FileExplorer` pointed at `repositories/knowledge/<alias>`. A newly
+  `init`'d bundle is seeded with `index.md` (progressive-disclosure entry), `log.md`, and a `concepts/welcome.md`
+  example concept (`lib/workspaces/okf.ts`, `renderOkfSeed`); a `clone`d bundle keeps the remote structure untouched.
+  **L0 access is always built-in** — `read`/`ls`/`grep` need no tool. The view has an "open index.md" hint as the L0
+  entry point. Retrieval augmentation (`kb_search`) is opt-in in a later slice.
 - **Loop** — a "管理 Loops" entry that opens the center `LoopConfig` view (the icon also highlights when the center shows loops).
 - **工作项** — the requirements/bugs groups.
 
@@ -343,8 +346,9 @@ lib/
   rpc-manager.ts            AgentSessionWrapper + registry + startRpcSession (extension/skill/workspace wiring)
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
-    service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md
-    templates.ts            capability init constants (MANDATORY/INIT checklist, normalizeInitCapabilities) + renderWorkspaceAgents (capability-driven) + renderWorkspaceRepositories + legacy built-in templates
+    service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments)
+    templates.ts            capability init constants (MANDATORY/INIT checklist, normalizeInitCapabilities) + renderWorkspaceAgents (capability-driven) + renderWorkspaceRepositories + renderKnowledgeSection + legacy built-in templates
+    okf.ts                  OKF v0.2 structure constants + renderOkfSeed (index.md/log.md/example concept for newly init'd knowledge repos)
     extensions.ts           WORKSPACE_EXTENSION_FACTORIES + buildWorkspaceExtensions (tool modules)
     id.ts                   ULID generator
   work-items/
@@ -472,7 +476,19 @@ Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[
 `effectiveCapabilities(manifest)` reads `manifest.capabilities` first; if absent it falls back to the built-in template lookup (by id **and** version) for legacy manifests that still carry `template`; if that misses (or `template` is absent — now allowed for capability-driven workspaces) it returns `["sessions", "explorer"]`. **This template fallback path must be preserved** so existing `software-development` workspaces (which carry `template` + cached `capabilities`) keep working. New workspaces always write `capabilities` explicitly and omit `template`, so they never rely on the fallback.
 
 ### AGENTS.md managed-segment replacement is a no-op without markers
-`updateManagedRepositoryInstructions()` only rewrites content **between** `<!-- workspace-managed:repositories:start/end -->`. If a user deletes the markers it will silently stop syncing — it never recreates them. The git block (`<!-- workspace-managed:git:start/end -->`) is emitted once by `renderWorkspaceAgents` (when `git` settings exist) and not re-managed afterwards.
+`updateManagedRepositoryInstructions()` only rewrites content **between** the managed markers, and now maintains **two**
+segments — `<!-- workspace-managed:repositories:start/end -->` and `<!-- workspace-managed:knowledge:start/end -->`.
+Each is touched only when its capability (`repositories` / `knowledge`) is effective. If a user deletes a segment's
+markers it will silently stop syncing — it never recreates them. The git block (`<!-- workspace-managed:git:start/end -->`)
+is emitted once by `renderWorkspaceAgents` (when `git` settings exist) and not re-managed afterwards.
+
+### Knowledge repos use OKF; L0 is always built-in, clone never overwrites
+A `knowledge` repo initialized with `mode: "init"` is seeded with an **OKF v0.2** structure via `renderOkfSeed`
+(`lib/workspaces/okf.ts`): `index.md` (progressive-disclosure entry, frontmatter `type: index`), `log.md` (`type: log`),
+and `concepts/welcome.md` (`type: concept` + tags). `mode: "clone"` is **never** overwritten — the remote brings its own
+structure. **L0 access (read/ls/grep) is always built-in** and needs no tool (redesign decisions 11/12); existing
+frontmatter-less bundles (e.g. legacy ones) are **not force-migrated** (decision 13, progressive) — they still work via
+L0. The AGENTS.md knowledge segment **references** each bundle's `index.md` rather than inlining it (decision 10).
 
 ### Subagent is global, not a workspace capability
 The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs`.

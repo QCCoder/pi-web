@@ -578,13 +578,26 @@ export function WorkspaceSidebar({
                   })}
                 </div>
                 {effectiveKnowledgeRepo && (
-                  <FileExplorer
-                    cwd={effectiveKnowledgeRepo.path}
-                    onOpenFile={onOpenFile}
-                    refreshKey={explorerRefreshKey}
-                    gitStatusByPath={EMPTY_GIT_STATUS_BY_PATH}
-                    changedDirectoryPaths={EMPTY_CHANGED_DIRECTORY_PATHS}
-                  />
+                  <>
+                    <div style={{ padding: "4px 12px 6px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
+                      OKF bundle —{" "}
+                      <button
+                        type="button"
+                        onClick={() => onOpenFile(`${effectiveKnowledgeRepo.path}/index.md`, "index.md")}
+                        style={{ border: 0, background: "transparent", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "inherit", textDecoration: "underline" }}
+                      >
+                        open index.md
+                      </button>
+                      {" "}to traverse (L0: read/ls/grep).
+                    </div>
+                    <FileExplorer
+                      cwd={effectiveKnowledgeRepo.path}
+                      onOpenFile={onOpenFile}
+                      refreshKey={explorerRefreshKey}
+                      gitStatusByPath={EMPTY_GIT_STATUS_BY_PATH}
+                      changedDirectoryPaths={EMPTY_CHANGED_DIRECTORY_PATHS}
+                    />
+                  </>
                 )}
               </>
             )}
