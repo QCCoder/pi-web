@@ -142,6 +142,32 @@ The **repositories** block is *auto-maintained* between managed markers:
 runs when the `repositories` capability is effective. `pi` injects `AGENTS.md` into the system prompt **verbatim** —
 there is no `@`-include expansion; large content must be *referenced* and the model follows the reference to `read` it.
 
+### Navigation: Activity Bar (single focus)
+
+`WorkspaceSidebar` is **no longer a stacked-group sidebar** — it is a left **Activity Bar** (`components/ActivityBar.tsx`) + a
+single focused view (redesign decisions 2 & 6). Exactly one view is active at a time (`activeView`, persisted per workspace
+in `localStorage` key `pi-active-view:<wsId>`, default `sessions`); switching workspace re-derives the stored view and falls
+back to `sessions` if it is absent or no longer valid.
+
+Icon order is fixed and strict (redesign §6 decision 6):
+**会话(sessions) → Explorer(explorer) → 仓库(repositories) → 知识库(knowledge) → Loop(loop) → 工作项(work-items)**.
+`sessions` and `explorer` are **always shown** (mandatory capabilities); the rest appear only when the workspace capability is
+on. `ACTIVITY_VIEW_ORDER` + `visibleActivityViews()` in `ActivityBar.tsx` are the single source of truth for order/visibility.
+
+Per-view content (data still comes from `loadWorkspaceData` — only the render organization changed; decision 3 splits repos by kind):
+- **会话** — session list + 新建会话 (header).
+- **Explorer** — Slice-3 Explorer, including the `[ 文件 | 改动(N) ]` segmented tabs (`pi-explorer-tab:<wsId>`).
+- **仓库** — **only `kind === "code"`** repositories (decision 3: Repositories only holds code).
+- **知识库** — **only `kind === "knowledge"`** repositories; MVP browses each OKF bundle via a `FileExplorer` pointed at
+  `repositories/knowledge/<alias>` (L0 = directory tree, no专用 UI yet; Slice-5 strengthens it).
+- **Loop** — a "管理 Loops" entry that opens the center `LoopConfig` view (the icon also highlights when the center shows loops).
+- **工作项** — the requirements/bugs groups.
+
+Mobile: the Activity Bar becomes a **bottom tab bar** (`variant="horizontal"`); desktop is a left icon strip
+(`variant="vertical"`). The header (workspace switcher / 新建 / 设置), the 归档 button and `SettingsBar` are preserved outside
+the focus area. **Don't reintroduce stacked sections** — a new module gets an Activity Bar icon (register it in
+`ACTIVITY_VIEW_ORDER` + `visibleActivityViews`), not a new collapsible group.
+
 ### Work Items (`lib/work-items/`)
 
 File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage under
@@ -217,7 +243,7 @@ Only streamed status + final result return to the parent; the full child run is 
 - APIs: `GET /api/git/status?cwd=`, `GET /api/git/diff?cwd=&path=` — guarded by the file-access allow-list. Polled by
   `hooks/useGitStatus.ts`; rendered by `components/ChangesPanel.tsx` (flat list for one repo, collapsible per-repo
   groups when cwd spans several). In `WorkspaceSidebar` the Changes list is **no longer a standalone section** — it is
-  a `[ 文件 | 改动(N) ]` tab inside the Explorer section (redesign decision 8), following the Explorer's current cwd
+  a `[ 文件 | 改动(N) ]` tab inside the single-focus **Explorer view** (redesign decision 8), following the Explorer's current cwd
   scope; `ChangesPanel` itself is unchanged. Tab choice persists in `localStorage` key `pi-explorer-tab:<wsId>`;
   non-git directories hide the "改动" tab. `SessionSidebar` keeps its own standalone Changes section.
 
@@ -376,7 +402,8 @@ lib/
 components/
   AppShell.tsx              top-level layout + URL state + tab management
   HomeLanding.tsx           the workspace picker / home screen
-  WorkspaceSidebar.tsx      stacked-group sidebar: sessions / work-items / repositories(code|knowledge) / explorer(+ 文件/改动(N) 分段切换) / archive
+  ActivityBar.tsx           workspace Activity Bar — single-focus capability switcher (left icon strip on desktop / bottom tab bar on mobile); icon order sessions→explorer→repositories(code)→knowledge→loop→work-items
+  WorkspaceSidebar.tsx      single-focus sidebar: ActivityBar (left) + one focused view (sessions / explorer / repositories(code-only) / knowledge / loop / work-items); explorer view has [ 文件 | 改动(N) ] tabs; archive + SettingsBar footer
   WorkspaceManager.tsx      workspace create/import + settings modal (capabilities, skills, feishu)
   WorkspaceOverview.tsx     workspace landing view (recent sessions, work items, repos)
   WorkspaceTabBar.tsx       workspace switcher tabs (shortest-unique labels)
