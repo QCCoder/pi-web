@@ -5,7 +5,6 @@ import {
   discoverWorkspaces,
   getWorkspaceRoot,
   importWorkspace,
-  listWorkspaceTemplates,
   WorkspaceConflictError,
   WorkspaceValidationError,
 } from "@/lib/workspaces/service";
@@ -21,7 +20,6 @@ export async function GET() {
     return NextResponse.json({
       root,
       workspaces,
-      templates: await listWorkspaceTemplates(),
     });
   } catch (error) {
     return NextResponse.json(

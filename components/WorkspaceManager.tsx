@@ -10,7 +10,6 @@ import type {
   WorkspaceRepositoryState,
   WorkspaceRepositoryKind,
   WorkspaceSummary,
-  WorkspaceTemplateInfo,
 } from "@/lib/workspaces/types";
 import { INIT_CAPABILITY_CHECKLIST, MANDATORY_CAPABILITIES } from "@/lib/workspaces/templates";
 import type {
@@ -26,7 +25,6 @@ import type { SkillInfo } from "@/lib/api-types";
 interface WorkspaceListResponse {
   root: string;
   workspaces: WorkspaceSummary[];
-  templates: WorkspaceTemplateInfo[];
 }
 
 interface WorkItemListResponse {
@@ -1057,7 +1055,7 @@ export function WorkspaceManager({
                 <span className="workspace-rail-meta">{workspace.path}</span>
                 <span className="workspace-rail-meta">
                   {workspace.available
-                    ? `${workspace.templateId ?? "自定义"} · ${workspace.repositoryCount} repos`
+                    ? `${workspace.capabilities.length} capabilities · ${workspace.repositoryCount} repos`
                     : "目录或配置不可用"}
                 </span>
               </button>

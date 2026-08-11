@@ -441,7 +441,7 @@ export function WorkspaceSidebar({
               <strong style={{ fontSize: "var(--pi-sidebar-fs)" }}>{workspace.name}</strong>
               <span style={{ fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
                 {workspace.available
-                  ? `${workspace.templateId ?? "自定义"} · ${workspace.repositoryCount} repositories`
+                  ? `${workspace.capabilities.length} capabilities · ${workspace.repositoryCount} repositories`
                   : "目录或配置不可用"}
               </span>
             </button>

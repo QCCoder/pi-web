@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import {
   access,
   lstat,
@@ -18,7 +17,6 @@ import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { createUlid } from "./id.ts";
 import {
-  BUILT_IN_WORKSPACE_TEMPLATES,
   DEFAULT_GIT_SETTINGS,
   normalizeInitCapabilities,
   renderKnowledgeSection,
@@ -33,7 +31,6 @@ import {
   type AddWorkspaceRepositoryInput,
   type UpdateWorkspaceInput,
   type WorkspaceCapability,
-  type WorkspaceCustomTemplate,
   type WorkspaceManifest,
   type WorkspaceIndex,
   type WorkspaceIndexEntry,
@@ -41,7 +38,6 @@ import {
   type WorkspaceRepositoryKind,
   type WorkspaceRepositoryState,
   type WorkspaceSummary,
-  type WorkspaceTemplateInfo,
 } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
@@ -79,24 +75,11 @@ export function workspaceRepositoryPath(
 } {
   // Flat layout: knowledge bundles live at `knowledge/<alias>` (sibling of
   // `repositories/`); code repos at `repositories/<alias>`. `WorkspaceRepositoryKind`
-  // is unchanged — it still drives this path selection and the UI labels.
-  //
-  // Backward compatibility: existing workspaces created under the legacy
-  // `repositories/{code,knowledge}/<alias>` layout keep resolving in place via
-  // the fallback below. We never force-move repos — a forced move would break
-  // linked worktrees whose `.git/worktrees/` pointers are absolute paths, and it
-  // would violate the redesign's "evolve, don't overturn" principle. New repos
-  // (addWorkspaceRepository) always write to the new layout because their new path
-  // does not yet exist, so the legacy branch is never taken for them.
-  const newRelative = repository.kind === "knowledge"
+  // drives this path selection and the UI labels.
+  const relativePath = repository.kind === "knowledge"
     ? `knowledge/${repository.alias}`
     : `repositories/${repository.alias}`;
-  const newAbsolute = resolve(workspacePath, newRelative);
-  const legacyRelative = `repositories/${repository.kind}/${repository.alias}`;
-  if (!existsSync(newAbsolute) && existsSync(resolve(workspacePath, legacyRelative))) {
-    return { relativePath: legacyRelative, absolutePath: resolve(workspacePath, legacyRelative) };
-  }
-  return { relativePath: newRelative, absolutePath: newAbsolute };
+  return { relativePath, absolutePath: resolve(workspacePath, relativePath) };
 }
 
 declare global {
@@ -150,7 +133,7 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "knowledge",
   "overview",
   "workflows",
-  // Module capabilities (toggled per-workspace, not part of built-in templates):
+  // Module capabilities (toggled per-workspace, not surfaced in the init checklist):
   "feishu-transport",
   "loop",
   "feishu-channel",
@@ -176,176 +159,10 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   return result;
 }
 
-/** Capabilities currently in effect for a workspace: cached snapshot, else the
- *  built-in template lookup, else the bare minimum. Active repositories of a
- *  kind also surface the matching capability (backward-compat; see below). */
+/** Capabilities currently in effect for a workspace: the cached snapshot, else
+ *  the bare mandatory minimum (`sessions` + `explorer`). */
 export function effectiveCapabilities(manifest: WorkspaceManifest): WorkspaceCapability[] {
-  // Base set: cached snapshot > built-in template lookup > bare minimum.
-  let base: WorkspaceCapability[];
-  if (manifest.capabilities) {
-    base = [...manifest.capabilities];
-  } else if (manifest.template) {
-    const builtIn = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
-      candidate.id === manifest.template!.id && candidate.version === manifest.template!.version
-    );
-    base = builtIn
-      ? [...builtIn.capabilities]
-      : (["sessions", "explorer"] as WorkspaceCapability[]);
-  } else {
-    base = ["sessions", "explorer"] as WorkspaceCapability[];
-  }
-  // Backward-compat: surface the capability for repositories of a kind that were
-  // registered before the capability existed. `knowledge` was promoted from a
-  // repository kind to a WorkspaceCapability in the redesign, but pre-redesign
-  // workspaces (no cached `capabilities` field, e.g. legacy `software-development`
-  // template ones) never had it — so their knowledge repositories became
-  // invisible: no Activity Bar view, no kb_search, no AGENTS.md knowledge section.
-  // There is also no general capability toggle in settings to enable it manually.
-  // This is read-time derivation; the manifest is not mutated. Pure additive — it
-  // only ever appends a capability the base lacks, never removes one, so new
-  // workspaces (explicit capabilities) are unaffected.
-  const active = manifest.repositories.filter((repository) => repository.status === "active");
-  if (
-    active.some((repository) => repository.kind === "code")
-    && !base.includes("repositories")
-  ) {
-    base.push("repositories");
-  }
-  if (
-    active.some((repository) => repository.kind === "knowledge")
-    && !base.includes("knowledge")
-  ) {
-    base.push("knowledge");
-  }
-  return base;
-}
-
-export async function listWorkspaceTemplates(root?: string): Promise<WorkspaceTemplateInfo[]> {
-  const builtIns: WorkspaceTemplateInfo[] = BUILT_IN_WORKSPACE_TEMPLATES.map((template) => ({
-    id: template.id,
-    name: template.name,
-    description: template.description,
-    version: template.version,
-    capabilities: [...template.capabilities],
-    source: "built-in",
-    skills: [...template.skills],
-    editable: false,
-  }));
-  const customs = await discoverCustomTemplates(root);
-  const customInfos: WorkspaceTemplateInfo[] = customs.map((template) => ({
-    id: template.id,
-    name: template.name,
-    description: template.description,
-    version: template.version,
-    capabilities: [...template.capabilities],
-    source: "custom",
-    skills: [...template.skills],
-    editable: !template.bundled,
-  }));
-  return [...builtIns, ...customInfos];
-}
-
-function customTemplatesDir(root?: string): string {
-  return join(root ?? getWorkspaceRoot(), ".pi", "workspace-templates");
-}
-
-/** Directory holding app-shipped ("bundled") custom templates, discovered in
- *  addition to the user's workspaces-root templates. Defaults to the running
- *  app's `<cwd>/.pi/workspace-templates/`; override with PI_BUNDLED_TEMPLATES_DIR. */
-function bundledTemplatesDir(): string {
-  const configured = process.env.PI_BUNDLED_TEMPLATES_DIR?.trim();
-  return resolve(configured || join(process.cwd(), ".pi", "workspace-templates"));
-}
-
-async function scanTemplatesDir(
-  templatesDir: string,
-  bundled: boolean,
-): Promise<WorkspaceCustomTemplate[]> {
-  let entries;
-  try {
-    entries = await readdir(templatesDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const templates: WorkspaceCustomTemplate[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const dir = join(templatesDir, entry.name);
-    try {
-      const content = await readFile(join(dir, "template.yaml"), "utf8");
-      templates.push({ ...parseCustomTemplate(parse(content), dir), bundled });
-    } catch {
-      // Skip malformed or incomplete custom template directories.
-    }
-  }
-  return templates;
-}
-
-export function parseCustomTemplate(value: unknown, templatePath: string): WorkspaceCustomTemplate {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new WorkspaceValidationError("Custom template must be an object");
-  }
-  const record = value as Record<string, unknown>;
-  if (record.schema_version !== 1) {
-    throw new WorkspaceValidationError("Custom template schema_version must be 1");
-  }
-  const id = validateWorkspaceSlug(requireNonEmptyString(record.id, "id"));
-  const dirName = basename(templatePath);
-  if (id !== dirName) {
-    throw new WorkspaceValidationError(
-      `Custom template id "${id}" must equal its directory name "${dirName}"`,
-    );
-  }
-  const skillsRaw = record.skills ?? [];
-  if (
-    !Array.isArray(skillsRaw)
-    || skillsRaw.some((skill) => typeof skill !== "string" || !skill.trim())
-  ) {
-    throw new WorkspaceValidationError("skills must be an array of non-empty strings");
-  }
-  const agentValue = record.agent ?? {};
-  if (!agentValue || typeof agentValue !== "object" || Array.isArray(agentValue)) {
-    throw new WorkspaceValidationError("agent must be an object");
-  }
-  const agentRecord = agentValue as Record<string, unknown>;
-  return {
-    schemaVersion: 1,
-    id,
-    name: requireNonEmptyString(record.name, "name"),
-    description: optionalString(record.description, "description") ?? "",
-    version: parsePositiveInteger(record.version, "version"),
-    capabilities: parseCapabilities(record.capabilities),
-    skills: [...new Set((skillsRaw as string[]).map((skill) => skill.trim()))],
-    agent: {
-      ...(optionalString(agentRecord.default_model, "agent.default_model")
-        ? { defaultModel: optionalString(agentRecord.default_model, "agent.default_model") }
-        : {}),
-      ...(optionalString(agentRecord.thinking_level, "agent.thinking_level")
-        ? { thinkingLevel: optionalString(agentRecord.thinking_level, "agent.thinking_level") }
-        : {}),
-    },
-    path: templatePath,
-  };
-}
-
-export async function discoverCustomTemplates(root?: string): Promise<WorkspaceCustomTemplate[]> {
-  // Bundled (app-shipped) templates are scanned first; a user-defined template
-  // with the same id under the workspaces root overrides the bundled one so
-  // users can customize shipped defaults without editing the bundle.
-  const bundled = await scanTemplatesDir(bundledTemplatesDir(), true);
-  const user = await scanTemplatesDir(customTemplatesDir(root), false);
-  const byId = new Map<string, WorkspaceCustomTemplate>();
-  for (const template of bundled) byId.set(template.id, template);
-  for (const template of user) byId.set(template.id, template);
-  return [...byId.values()];
-}
-
-export async function getCustomTemplate(
-  id: string,
-  root?: string,
-): Promise<WorkspaceCustomTemplate | undefined> {
-  const customs = await discoverCustomTemplates(root);
-  return customs.find((template) => template.id === id);
+  return manifest.capabilities ?? (["sessions", "explorer"] as WorkspaceCapability[]);
 }
 
 export function validateWorkspaceSlug(slug: string): string {
@@ -425,18 +242,6 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
   if (record.schema_version !== WORKSPACE_SCHEMA_VERSION) {
     throw new WorkspaceValidationError(`Unsupported workspace schema: ${String(record.schema_version)}`);
   }
-  const templateValue = record.template;
-  let template: WorkspaceManifest["template"] | undefined;
-  if (templateValue !== undefined) {
-    if (!templateValue || typeof templateValue !== "object") {
-      throw new WorkspaceValidationError("template must be an object");
-    }
-    const templateRecord = templateValue as Record<string, unknown>;
-    template = {
-      id: requireNonEmptyString(templateRecord.id, "template.id"),
-      version: parsePositiveInteger(templateRecord.version, "template.version"),
-    };
-  }
   const skills = record.skills ?? [];
   if (!Array.isArray(skills) || skills.some((skill) => typeof skill !== "string" || !skill.trim())) {
     throw new WorkspaceValidationError("skills must be an array of non-empty strings");
@@ -482,7 +287,6 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     id: requireNonEmptyString(record.id, "id"),
     slug,
     name: requireNonEmptyString(record.name, "name"),
-    ...(template ? { template } : {}),
     skills: [...new Set((skills as string[]).map((skill) => skill.trim()))],
     repositories: parseRepositories(record.repositories),
     agent: {
@@ -516,7 +320,6 @@ export function serializeWorkspaceManifest(manifest: WorkspaceManifest): string 
     id: manifest.id,
     slug: manifest.slug,
     name: manifest.name,
-    ...(manifest.template ? { template: manifest.template } : {}),
     skills: manifest.skills,
     repositories: manifest.repositories.map((repository) => ({
       id: repository.id,
@@ -603,9 +406,6 @@ export function workspaceSummary(workspacePath: string, manifest: WorkspaceManif
     slug: manifest.slug,
     name: manifest.name,
     path: workspacePath,
-    ...(manifest.template
-      ? { templateId: manifest.template.id, templateVersion: manifest.template.version }
-      : {}),
     capabilities: [...effectiveCapabilities(manifest)],
     available: true,
     configStatus: "ready",
@@ -917,15 +717,6 @@ function parseWorkspaceIndex(value: unknown): WorkspaceIndex {
       id,
       path,
       name: requireNonEmptyString(entry.name, `workspaces[${index}].name`),
-      ...(entry.template_id !== undefined
-        ? {
-            templateId: requireNonEmptyString(entry.template_id, `workspaces[${index}].template_id`),
-            templateVersion: parsePositiveInteger(
-              entry.template_version,
-              `workspaces[${index}].template_version`,
-            ),
-          }
-        : {}),
       addedAt: requireNonEmptyString(entry.added_at, `workspaces[${index}].added_at`),
       lastOpenedAt: requireNonEmptyString(
         entry.last_opened_at,
@@ -943,14 +734,6 @@ function serializeWorkspaceIndex(index: WorkspaceIndex): string {
       id: workspace.id,
       path: workspace.path,
       name: workspace.name,
-      ...(workspace.templateId !== undefined
-        ? {
-            template_id: workspace.templateId,
-            ...(workspace.templateVersion !== undefined
-              ? { template_version: workspace.templateVersion }
-              : {}),
-          }
-        : {}),
       added_at: workspace.addedAt,
       last_opened_at: workspace.lastOpenedAt,
     })),
@@ -1001,9 +784,6 @@ function indexEntryFromManifest(
     id: manifest.id,
     path,
     name: manifest.name,
-    ...(manifest.template
-      ? { templateId: manifest.template.id, templateVersion: manifest.template.version }
-      : {}),
     addedAt: existing?.addedAt ?? now,
     lastOpenedAt: existing?.lastOpenedAt ?? now,
   };
@@ -1049,21 +829,12 @@ function unavailableWorkspaceSummary(
   entry: WorkspaceIndexEntry,
   status: WorkspaceSummary["configStatus"],
 ): WorkspaceSummary {
-  const template = entry.templateId
-    ? BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
-        candidate.id === entry.templateId && candidate.version === entry.templateVersion)
-    : undefined;
   return {
     id: entry.id,
     slug: basename(entry.path),
     name: entry.name,
     path: entry.path,
-    ...(entry.templateId !== undefined
-      ? { templateId: entry.templateId, templateVersion: entry.templateVersion }
-      : {}),
-    capabilities: template
-      ? [...template.capabilities]
-      : (["sessions", "explorer"] as WorkspaceCapability[]),
+    capabilities: ["sessions", "explorer"] as WorkspaceCapability[],
     available: false,
     configStatus: status,
     skills: [],
@@ -1131,11 +902,7 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
       }
       const nextEntry = indexEntryFromManifest(entry.path, manifest, entry);
       nextEntry.lastOpenedAt = entry.lastOpenedAt;
-      if (
-        nextEntry.name !== entry.name
-        || nextEntry.templateId !== entry.templateId
-        || nextEntry.templateVersion !== entry.templateVersion
-      ) {
+      if (nextEntry.name !== entry.name) {
         Object.assign(entry, nextEntry);
         snapshotsChanged = true;
       }
@@ -1166,10 +933,6 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
     .map(({ summary }) => summary);
 }
 
-async function ensureWorkspaceRoot(root: string): Promise<void> {
-  await mkdir(join(root, ".pi", "workspace-templates"), { recursive: true });
-}
-
 export async function createWorkspace(
   input: CreateWorkspaceInput,
   root?: string,
@@ -1181,7 +944,6 @@ export async function createWorkspace(
   // force-include the mandatory sessions/explorer. No template is consulted.
   const capabilities = normalizeInitCapabilities(parseCapabilities(input.capabilities));
 
-  await ensureWorkspaceRoot(workspaceRoot);
   const workspacePath = join(workspaceRoot, `workspace-${slug}`);
   try {
     await access(workspacePath);

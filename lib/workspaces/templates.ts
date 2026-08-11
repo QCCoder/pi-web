@@ -1,42 +1,9 @@
 import type {
-  BuiltinWorkspaceTemplateId,
   WorkspaceCapability,
   WorkspaceGitSettings,
   WorkspaceManifest,
   WorkspaceRepository,
-  WorkspaceTemplateId,
-  WorkspaceTemplateInfo,
 } from "./types.ts";
-
-export const SOFTWARE_DEVELOPMENT_SKILLS = [
-  "grilling",
-  "domain-modeling",
-  "codebase-design",
-  "tdd",
-] as const;
-
-export const BUILT_IN_WORKSPACE_TEMPLATES: readonly WorkspaceTemplateInfo[] = [
-  {
-    id: "empty",
-    name: "Empty",
-    description: "Only create the Workspace manifest and leave the directory structure open.",
-    version: 1,
-    capabilities: ["sessions", "explorer"],
-    source: "built-in",
-    skills: [],
-    editable: false,
-  },
-  {
-    id: "software-development",
-    name: "Software Development",
-    description: "Requirements, bugs, designs, plans, typed repositories, and collaboration rules.",
-    version: 1,
-    capabilities: ["sessions", "work-items", "repositories", "explorer", "overview"],
-    source: "built-in",
-    skills: [...SOFTWARE_DEVELOPMENT_SKILLS],
-    editable: false,
-  },
-];
 
 export const DEFAULT_GIT_SETTINGS: WorkspaceGitSettings = {
   branchRules: {
@@ -45,21 +12,6 @@ export const DEFAULT_GIT_SETTINGS: WorkspaceGitSettings = {
   },
   createAfter: "plan_approved",
 };
-
-export const SOFTWARE_DEVELOPMENT_DIRECTORIES = [
-  "requirements",
-  "bugs",
-  "designs",
-  "plans",
-  "repositories",
-  "knowledge",
-] as const;
-// NOTE: this list is documentation only — it reflects the *current* flat layout
-// (code repos under `repositories/`, knowledge bundles under `knowledge/`, a
-// sibling of `repositories/`). New workspaces are capability-driven and do NOT
-// pre-create these directories; they are `mkdir -p`'d on first use (work-item
-// creation, repo clone/init). Retained only as the legacy "software-development"
-// built-in template reference.
 
 /** Capabilities that are always on for every workspace. They are hard-coded (not
  *  toggleable) — `normalizeInitCapabilities` force-includes them regardless of the
@@ -80,7 +32,7 @@ export const INIT_CAPABILITY_CHECKLIST: readonly WorkspaceCapability[] = [
 /** Normalize a caller-provided capability selection for a brand-new workspace:
  *  validate each entry, drop duplicates, and force-include the mandatory set
  *  (`sessions`, `explorer`). The result is the exact `capabilities` stored on the
- *  manifest — it never relies on template fallback. */
+ *  manifest. */
 export function normalizeInitCapabilities(
   selected: readonly WorkspaceCapability[],
 ): WorkspaceCapability[] {
@@ -96,24 +48,6 @@ export function normalizeInitCapabilities(
   return result;
 }
 
-export function isBuiltinWorkspaceTemplateId(value: unknown): value is BuiltinWorkspaceTemplateId {
-  return value === "empty" || value === "software-development";
-}
-
-export function getWorkspaceTemplate(id: BuiltinWorkspaceTemplateId): WorkspaceTemplateInfo {
-  return BUILT_IN_WORKSPACE_TEMPLATES.find((template) => template.id === id)!;
-}
-
-export function defaultSkillsForTemplate(id: WorkspaceTemplateId): string[] {
-  return id === "software-development" ? [...SOFTWARE_DEVELOPMENT_SKILLS] : [];
-}
-
-export function defaultGitForTemplate(id: WorkspaceTemplateId): WorkspaceGitSettings | undefined {
-  return id === "software-development"
-    ? structuredClone(DEFAULT_GIT_SETTINGS)
-    : undefined;
-}
-
 export function renderWorkspaceRepositories(
   manifest: WorkspaceManifest,
   resolveRelativePath?: (repository: WorkspaceRepository) => string,
@@ -121,9 +55,8 @@ export function renderWorkspaceRepositories(
   // The repositories section lists CODE repos only (knowledge bundles have their
   // own `renderKnowledgeSection` segment). Path defaults to the flat
   // `repositories/<alias>` layout; `resolveRelativePath` lets callers (e.g.
-  // `updateManagedRepositoryInstructions` for existing workspaces) pass the actual
-  // on-disk path so a legacy repo at `repositories/code/<alias>` shows its real
-  // location in AGENTS.md.
+  // `updateManagedRepositoryInstructions`) pass the actual on-disk path so each
+  // repo shows its real location in AGENTS.md.
   const active = manifest.repositories.filter(
     (repository) => repository.kind === "code" && repository.status === "active",
   );
@@ -178,47 +111,11 @@ ${lines.join("\n")}
 <!-- workspace-managed:knowledge:end -->`;
 }
 
-export function renderSoftwareDevelopmentAgents(manifest: WorkspaceManifest): string {
-  const requirementBranch = manifest.git?.branchRules.requirement ?? DEFAULT_GIT_SETTINGS.branchRules.requirement;
-  const bugBranch = manifest.git?.branchRules.bug ?? DEFAULT_GIT_SETTINGS.branchRules.bug;
-  return `# ${manifest.name} Collaboration Policy
-
-This Workspace uses Pi Agent for requirements, bug diagnosis, design, implementation, and verification. Keep authoritative artifacts in the Workspace files and link meaningful outcomes to their Work Item.
-
-## Collaboration flow
-
-1. Clarify the Requirement or Bug and preserve the user's Original Description.
-2. Produce analysis and acceptance criteria, then wait for user approval.
-3. Produce the design and implementation plan, then wait for user approval.
-4. Implement, test, review, and record meaningful milestones.
-5. Do not claim completion until verification evidence is available.
-
-<!-- workspace-managed:git:start -->
-## Git collaboration
-
-- Requirement branches use \`${requirementBranch}\`.
-- Bug branches use \`${bugBranch}\`.
-- Create implementation branches only after the plan is approved.
-- Never delete or force-push a remote branch without explicit user approval.
-<!-- workspace-managed:git:end -->
-
-${renderWorkspaceRepositories(manifest)}
-
-## Work Item records
-
-- Use the Pi Workspace Work Item tools for structured metadata and milestones.
-- Do not rewrite \`events.jsonl\`; it is append-only.
-- Do not overwrite the Original Description with later analysis.
-- Keep low-level tool calls in the Conversation and record only meaningful milestones on the Work Item.
-`;
-}
-
-/** Capability-driven AGENTS.md generator (redesign decision 9). Unlike
- *  `renderSoftwareDevelopmentAgents` it depends only on the manifest's
- *  capabilities/git settings, not on a template id, so new (template-free)
- *  workspaces get a tailored collaboration policy. The repositories block uses the
- *  same `<!-- workspace-managed:repositories:start/end -->` markers as the legacy
- *  generator, so `updateManagedRepositoryInstructions` keeps working unchanged. */
+/** Capability-driven AGENTS.md generator (redesign decision 9). It depends only on
+ *  the manifest's capabilities/git settings, not on a template id, so every
+ *  workspace gets a tailored collaboration policy. The repositories block uses the
+ *  `<!-- workspace-managed:repositories:start/end -->` markers, so
+ *  `updateManagedRepositoryInstructions` keeps working unchanged. */
 export function renderWorkspaceAgents(
   manifest: WorkspaceManifest,
   capabilities: readonly WorkspaceCapability[],
@@ -269,6 +166,9 @@ export function renderWorkspaceAgents(
   return `${lines.join("\n")}\n`;
 }
 
+/** `.gitignore` written for git-using workspaces (a git repo is initialized when
+ *  the `repositories` or `work-items` capability is on). Ignores rebuildable
+ *  workspace state and the independently-managed nested repositories. */
 export const SOFTWARE_DEVELOPMENT_GITIGNORE = `# Pi Workspace rebuildable state
 /.pi/cache/
 /.pi/*.sqlite

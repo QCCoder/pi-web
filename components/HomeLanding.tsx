@@ -322,7 +322,7 @@ function WorkspaceCard({
         {workspace.path}
       </code>
       <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
-        <span style={badgeStyle}>{workspace.templateId ?? "自定义"}</span>
+        <span style={badgeStyle}>{workspace.capabilities.length} 能力</span>
         <span style={badgeStyle}>{workspace.repositoryCount} 仓库</span>
         {workspace.skills.length > 0 && <span style={badgeStyle}>{workspace.skills.length} 技能</span>}
       </div>
