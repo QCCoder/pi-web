@@ -1,6 +1,7 @@
-import { readdirSync } from "fs";
+import { readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
+import { parse } from "yaml";
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { isExistingPathWithinRoots } from "./path-security";
 import { listAllSessions } from "./session-reader";
@@ -48,8 +49,52 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
 
   for (const root of getAdditionalAllowedRoots()) roots.add(root);
 
+  // Workspace-owned directories (repositories/code|knowledge/*, work-items, loops)
+  // are owned by the workspace, so they are inherently readable via /api/files.
+  // We read the global workspace index — the single source of truth for every
+  // workspace path (including imported workspaces at arbitrary locations) — so
+  // this is self-sufficient: it does not depend on the in-memory allowFileRoot()
+  // set (lost on restart) nor on GET /api/workspaces having been called first.
+  addWorkspaceIndexRoots(roots);
+
   globalThis.__piAllowedRootsCache = { roots, expiresAt: now + ALLOWED_ROOTS_TTL_MS };
   return roots;
+}
+
+/**
+ * Add every workspace path listed in the global workspace index to `roots`.
+ *
+ * The index path is resolved inline (mirroring lib/workspaces/service.ts'
+ * getWorkspaceIndexPath) rather than importing the service module, to keep the
+ * file-access import graph light. Missing/unreadable/unparseable index is
+ * silently skipped — this path is purely additive on top of the session and
+ * additional roots already collected.
+ */
+function addWorkspaceIndexRoots(roots: Set<string>): void {
+  const indexPath =
+    process.env.PI_WORKSPACE_INDEX_FILE?.trim() || path.join(homedir(), ".pi", "workspace.yaml");
+  let raw: string;
+  try {
+    raw = readFileSync(indexPath, "utf8");
+  } catch {
+    return; // index missing or unreadable — skip
+  }
+  let parsed: unknown;
+  try {
+    parsed = parse(raw);
+  } catch {
+    return; // malformed YAML — skip
+  }
+  if (!parsed || typeof parsed !== "object") return;
+  const workspaces = (parsed as { workspaces?: unknown }).workspaces;
+  if (!Array.isArray(workspaces)) return;
+  for (const entry of workspaces) {
+    if (!entry || typeof entry !== "object") continue;
+    const wsPath = (entry as { path?: unknown }).path;
+    if (typeof wsPath === "string" && wsPath.trim()) {
+      roots.add(normalizeSlashes(wsPath));
+    }
+  }
 }
 
 export function isFilePathAllowed(target: string, allowedRoots: Set<string>): boolean {
