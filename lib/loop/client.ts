@@ -1,4 +1,5 @@
 import type { GateCommand, LoopDefinition, LoopRun, TriggerCommand, TriggerReceipt } from "./types.ts";
+import type { ImporterRunSummary } from "../importers/runner.ts";
 
 const baseUrl = () => (process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
 
@@ -57,4 +58,21 @@ export const loopHostClient = {
    *  (pipe) its body straight to the browser. */
   sessionEvents: (sessionId: string, signal?: AbortSignal) =>
     fetch(`${baseUrl()}/v1/sessions/${encodeURIComponent(sessionId)}/events`, { signal }),
+  /** Trigger a manual Importer sync on the Loop Host (a non-Loop system task).
+   *  Returns null when the host is unreachable so the web route can fall back to
+   *  an in-process run (a one-shot sync is not a timer — see instrumentation.ts). */
+  syncImporters: async (workspaceId: string): Promise<ImporterRunSummary | null> => {
+    let response: Response;
+    try {
+      response = await fetch(
+        `${baseUrl()}/v1/workspaces/${encodeURIComponent(workspaceId)}/importers/sync`,
+        { method: "POST" },
+      );
+    } catch {
+      return null;
+    }
+    if (!response.ok) return null;
+    const value = (await response.json().catch(() => ({}))) as { summary?: ImporterRunSummary };
+    return value.summary ?? null;
+  },
 };

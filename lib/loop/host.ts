@@ -4,6 +4,8 @@ import { PiRoundExecutionBackend } from "./pi-execution.ts";
 import { LoopHostScheduler } from "./scheduler.ts";
 import { PiWorkspaceResolver } from "./workspace-resolver.ts";
 import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./store.ts";
+import { ImporterScheduler } from "../importers/scheduler.ts";
+import { syncImporterForWorkspace } from "../importers/runner.ts";
 import type { AgentSessionWrapper } from "../rpc-manager.ts";
 import type { GateCommand, TriggerCommand } from "./types.ts";
 
@@ -60,6 +62,7 @@ export function createLoopHost() {
   const execution = new PiRoundExecutionBackend();
   const runtime = new DefaultLoopRuntime(workspaces, execution);
   const scheduler = new LoopHostScheduler(runtime, workspaces);
+  const importerScheduler = new ImporterScheduler();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -113,6 +116,13 @@ export function createLoopHost() {
           }),
         });
       }
+      // Importer manual/webhook sync — a non-Loop system task. Runs the same
+      // runner the ImporterScheduler cron uses, just on demand.
+      const importerSync = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/importers\/sync$/);
+      if (request.method === "POST" && importerSync) {
+        const summary = await syncImporterForWorkspace(decodeURIComponent(importerSync[1]));
+        return json(response, 200, { summary });
+      }
       return json(response, 404, { error: "route not found" });
     } catch (error) {
       console.error("[pi-loop] request failed:", error);
@@ -121,7 +131,7 @@ export function createLoopHost() {
       });
     }
   });
-  return { server, scheduler, runtime };
+  return { server, scheduler, runtime, importerScheduler };
 }
 
 export async function startLoopHost(options: { host?: string; port?: number } = {}): Promise<void> {
@@ -134,9 +144,11 @@ export async function startLoopHost(options: { host?: string; port?: number } = 
     app.server.listen(port, host, () => resolve());
   });
   app.scheduler.start();
+  app.importerScheduler.start();
   console.log(`[pi-loop] listening on http://${host}:${port}`);
   const stop = () => {
     app.scheduler.stop();
+    app.importerScheduler.stop();
     app.server.close(() => process.exit(0));
   };
   process.once("SIGINT", stop);
