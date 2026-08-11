@@ -32,7 +32,7 @@ const KB_INDEX_CACHE_SCHEMA_VERSION = 1 as const;
 /** A knowledge bundle to index/search: its alias + absolute filesystem path. */
 export interface KnowledgeRepoRef {
   alias: string;
-  /** Absolute path to the bundle directory (`repositories/knowledge/<alias>`). */
+  /** Absolute path to the bundle directory (`knowledge/<alias>`). */
   path: string;
 }
 

@@ -49,7 +49,7 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
 
   for (const root of getAdditionalAllowedRoots()) roots.add(root);
 
-  // Workspace-owned directories (repositories/code|knowledge/*, work-items, loops)
+  // Workspace-owned directories (repositories/* and knowledge/*, work-items, loops)
   // are owned by the workspace, so they are inherently readable via /api/files.
   // We read the global workspace index — the single source of truth for every
   // workspace path (including imported workspaces at arbitrary locations) — so

@@ -3,6 +3,7 @@ import type {
   WorkspaceCapability,
   WorkspaceGitSettings,
   WorkspaceManifest,
+  WorkspaceRepository,
   WorkspaceTemplateId,
   WorkspaceTemplateInfo,
 } from "./types.ts";
@@ -50,9 +51,15 @@ export const SOFTWARE_DEVELOPMENT_DIRECTORIES = [
   "bugs",
   "designs",
   "plans",
-  "repositories/code",
-  "repositories/knowledge",
+  "repositories",
+  "knowledge",
 ] as const;
+// NOTE: this list is documentation only — it reflects the *current* flat layout
+// (code repos under `repositories/`, knowledge bundles under `knowledge/`, a
+// sibling of `repositories/`). New workspaces are capability-driven and do NOT
+// pre-create these directories; they are `mkdir -p`'d on first use (work-item
+// creation, repo clone/init). Retained only as the legacy "software-development"
+// built-in template reference.
 
 /** Capabilities that are always on for every workspace. They are hard-coded (not
  *  toggleable) — `normalizeInitCapabilities` force-includes them regardless of the
@@ -107,13 +114,25 @@ export function defaultGitForTemplate(id: WorkspaceTemplateId): WorkspaceGitSett
     : undefined;
 }
 
-export function renderWorkspaceRepositories(manifest: WorkspaceManifest): string {
-  const active = manifest.repositories.filter((repository) => repository.status === "active");
+export function renderWorkspaceRepositories(
+  manifest: WorkspaceManifest,
+  resolveRelativePath?: (repository: WorkspaceRepository) => string,
+): string {
+  // The repositories section lists CODE repos only (knowledge bundles have their
+  // own `renderKnowledgeSection` segment). Path defaults to the flat
+  // `repositories/<alias>` layout; `resolveRelativePath` lets callers (e.g.
+  // `updateManagedRepositoryInstructions` for existing workspaces) pass the actual
+  // on-disk path so a legacy repo at `repositories/code/<alias>` shows its real
+  // location in AGENTS.md.
+  const active = manifest.repositories.filter(
+    (repository) => repository.kind === "code" && repository.status === "active",
+  );
   const lines = active.length === 0
     ? ["- No active repositories are configured."]
-    : active.map((repository) =>
-        `- \`${repository.alias}\` (${repository.kind}, id: \`${repository.id}\`): \`repositories/${repository.kind}/${repository.alias}\``
-      );
+    : active.map((repository) => {
+        const rel = resolveRelativePath?.(repository) ?? `repositories/${repository.alias}`;
+        return `- \`${repository.alias}\` (${repository.kind}, id: \`${repository.id}\`): \`${rel}\``;
+      });
   return `<!-- workspace-managed:repositories:start -->
 ## Workspace repositories
 
@@ -132,15 +151,20 @@ ${lines.join("\n")}
  *  `updateManagedRepositoryInstructions` in service.ts can import it the same way
  *  it already imports `renderWorkspaceRepositories`. The marker anchors follow the
  *  exact same `<!-- workspace-managed:knowledge:start/end -->` pattern. */
-export function renderKnowledgeSection(manifest: WorkspaceManifest): string {
+export function renderKnowledgeSection(
+  manifest: WorkspaceManifest,
+  resolveRelativePath?: (repository: WorkspaceRepository) => string,
+): string {
   const active = manifest.repositories.filter(
     (repository) => repository.kind === "knowledge" && repository.status === "active",
   );
   const lines = active.length === 0
     ? ["- No knowledge bundles are configured. Initialize or clone one under the 知识库 view."]
     : active.map(
-      (repository) =>
-        `- \`${repository.alias}\` (id: \`${repository.id}\`): OKF bundle — read its index at \`repositories/knowledge/${repository.alias}/index.md\` to traverse it (L0: \`read\`/\`ls\`/\`grep\`, no tool required).`,
+      (repository) => {
+        const rel = resolveRelativePath?.(repository) ?? `knowledge/${repository.alias}`;
+        return `- \`${repository.alias}\` (id: \`${repository.id}\`): OKF bundle — read its index at \`${rel}/index.md\` to traverse it (L0: \`read\`/\`ls\`/\`grep\`, no tool required).`;
+      },
     );
   return `<!-- workspace-managed:knowledge:start -->
 ## Knowledge bundles (OKF v0.2)

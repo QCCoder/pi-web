@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   access,
   lstat,
@@ -76,9 +77,26 @@ export function workspaceRepositoryPath(
   relativePath: string;
   absolutePath: string;
 } {
-  const normalized = `repositories/${repository.kind}/${repository.alias}`;
-  const absolutePath = resolve(workspacePath, normalized);
-  return { relativePath: normalized, absolutePath };
+  // Flat layout: knowledge bundles live at `knowledge/<alias>` (sibling of
+  // `repositories/`); code repos at `repositories/<alias>`. `WorkspaceRepositoryKind`
+  // is unchanged — it still drives this path selection and the UI labels.
+  //
+  // Backward compatibility: existing workspaces created under the legacy
+  // `repositories/{code,knowledge}/<alias>` layout keep resolving in place via
+  // the fallback below. We never force-move repos — a forced move would break
+  // linked worktrees whose `.git/worktrees/` pointers are absolute paths, and it
+  // would violate the redesign's "evolve, don't overturn" principle. New repos
+  // (addWorkspaceRepository) always write to the new layout because their new path
+  // does not yet exist, so the legacy branch is never taken for them.
+  const newRelative = repository.kind === "knowledge"
+    ? `knowledge/${repository.alias}`
+    : `repositories/${repository.alias}`;
+  const newAbsolute = resolve(workspacePath, newRelative);
+  const legacyRelative = `repositories/${repository.kind}/${repository.alias}`;
+  if (!existsSync(newAbsolute) && existsSync(resolve(workspacePath, legacyRelative))) {
+    return { relativePath: legacyRelative, absolutePath: resolve(workspacePath, legacyRelative) };
+  }
+  return { relativePath: newRelative, absolutePath: newAbsolute };
 }
 
 declare global {
@@ -665,17 +683,22 @@ async function updateManagedRepositoryInstructions(
   } catch {
     return; // no AGENTS.md to maintain
   }
+  // Resolve each repo to its actual on-disk path (legacy fallback included) so an
+  // existing workspace's repos show their real location in AGENTS.md, not the
+  // new-layout default. New repos naturally resolve to the new layout.
+  const resolveRelativePath = (repository: WorkspaceRepository): string =>
+    workspaceRepositoryPath(workspacePath, repository).relativePath;
   let next = current;
   if (hasRepositories) {
     next = next.replace(
       /<!-- workspace-managed:repositories:start -->[\s\S]*?<!-- workspace-managed:repositories:end -->/,
-      renderWorkspaceRepositories(manifest),
+      renderWorkspaceRepositories(manifest, resolveRelativePath),
     );
   }
   if (hasKnowledge) {
     next = next.replace(
       /<!-- workspace-managed:knowledge:start -->[\s\S]*?<!-- workspace-managed:knowledge:end -->/,
-      renderKnowledgeSection(manifest),
+      renderKnowledgeSection(manifest, resolveRelativePath),
     );
   }
   if (next === current) return; // no managed block present; nothing to update

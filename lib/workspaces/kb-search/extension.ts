@@ -98,7 +98,7 @@ export function createKbSearchExtension(
         name: "kb_search",
         label: "Search Knowledge Bundles",
         description:
-          "Ranked full-text search across all active OKF knowledge bundles of this workspace (BM25). Returns the most relevant notes with a snippet and the bundle they came from. L0 access (read/ls/grep over repositories/knowledge/*) is always available without this tool — use kb_search when you need ranked relevance or to find notes across large bundles.",
+          "Ranked full-text search across all active OKF knowledge bundles of this workspace (BM25). Returns the most relevant notes with a snippet and the bundle they came from. L0 access (read/ls/grep over knowledge/*) is always available without this tool — use kb_search when you need ranked relevance or to find notes across large bundles.",
         promptSnippet: "Ranked full-text search across knowledge bundles",
         promptGuidelines: [
           "Use kb_search for ranked retrieval across knowledge bundles; use read/grep/ls (L0) to open or enumerate notes.",
@@ -161,7 +161,7 @@ export function createKbSearchExtension(
               results: [],
               errors: indexErrors,
               hint:
-                "Indexing failed for every knowledge bundle. Fall back to L0: use `grep` / `read` / `ls` directly under repositories/knowledge/<alias>/.",
+                "Indexing failed for every knowledge bundle. Fall back to L0: use `grep` / `read` / `ls` directly under knowledge/<alias>/.",
             });
           }
 
