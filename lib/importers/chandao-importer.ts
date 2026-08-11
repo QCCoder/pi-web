@@ -12,6 +12,15 @@ import type {
  *  importer injects this so tests can mock HTTP without touching the network. */
 export type ChandaoFetch = typeof fetch;
 
+/** Chandao statuses that mean "ready to be developed" (待开发): a bug that is
+ *  still `active` (needs fixing), or a task in `wait` (assigned but not started).
+ *  Resolved/closed bugs and doing/done/closed tasks are excluded — they are not
+ *  part of the dev backlog. Drives the `listAssigned` filter. */
+const READY_STATUSES: Record<SourceItemKind, ReadonlyArray<string>> = {
+  bug: ["active"],
+  task: ["wait"],
+};
+
 /** Chandao (禅道) REST+Token Importer (design §5 + appendix A). Uses the token
  *  API (`POST /api.php/v1/tokens`), NOT the web-login md5 flow. Tokens are
  *  cached in-memory and re-signed automatically on 401 using account+password.
@@ -84,13 +93,15 @@ export class ChandaoImporter {
       `/api.php/v1/products/${this.config.productId}/bugs?assignedTo=${encodeURIComponent(assignee)}`,
     );
     if (!response.ok) throw new Error(`Chandao bugs list failed (HTTP ${response.status})`);
-    const data = (await response.json().catch(() => ({}))) as { bugs?: Array<{ id: number; title?: string }> };
-    return (data.bugs ?? []).map((bug) => ({
-      sourceId: String(bug.id),
-      kind: "bug" as const,
-      title: bug.title ?? `Bug #${bug.id}`,
-      url: `${this.base}/index.php?m=bug&f=view&bugID=${bug.id}`,
-    }));
+    const data = (await response.json().catch(() => ({}))) as { bugs?: Array<{ id: number; title?: string; status?: string }> };
+    return (data.bugs ?? [])
+      .filter((bug) => READY_STATUSES.bug.includes(bug.status ?? ""))
+      .map((bug) => ({
+        sourceId: String(bug.id),
+        kind: "bug" as const,
+        title: bug.title ?? `Bug #${bug.id}`,
+        url: `${this.base}/index.php?m=bug&f=view&bugID=${bug.id}`,
+      }));
   }
 
   private async listTasks(assignee: string): Promise<SourceItem[]> {
@@ -98,13 +109,15 @@ export class ChandaoImporter {
       `/api.php/v1/executions/${this.config.executionId}/tasks?assignedTo=${encodeURIComponent(assignee)}`,
     );
     if (!response.ok) throw new Error(`Chandao tasks list failed (HTTP ${response.status})`);
-    const data = (await response.json().catch(() => ({}))) as { tasks?: Array<{ id: number; name?: string }> };
-    return (data.tasks ?? []).map((task) => ({
-      sourceId: String(task.id),
-      kind: "task" as const,
-      title: task.name ?? `Task #${task.id}`,
-      url: `${this.base}/index.php?m=task&f=view&taskID=${task.id}`,
-    }));
+    const data = (await response.json().catch(() => ({}))) as { tasks?: Array<{ id: number; name?: string; status?: string }> };
+    return (data.tasks ?? [])
+      .filter((task) => READY_STATUSES.task.includes(task.status ?? ""))
+      .map((task) => ({
+        sourceId: String(task.id),
+        kind: "task" as const,
+        title: task.name ?? `Task #${task.id}`,
+        url: `${this.base}/index.php?m=task&f=view&taskID=${task.id}`,
+      }));
   }
 
   async getDetail(sourceId: string): Promise<SourceItemDetail> {
