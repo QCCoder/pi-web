@@ -30,12 +30,13 @@ export function extractChandaoFileIds(html: string): string[] {
 export function rewriteChandaoImageSources(
   html: string,
   extOf: (fileId: string) => string,
+  prefix = "chandao",
 ): string {
   return html.replace(
     /src=(["'])([^"']*fileID=(\d+)[^"']*)\1/gi,
     (full, quote: string, _url: string, id: string) => {
       const ext = extOf(id) || "bin";
-      return `src=${quote}attachments/chandao-${id}.${ext}${quote}`;
+      return `src=${quote}attachments/${prefix}-${id}.${ext}${quote}`;
     },
   );
 }
