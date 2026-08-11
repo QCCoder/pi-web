@@ -108,7 +108,7 @@ repository `kind` to a first-class capability — redesign decision 4, type laye
 
 ```
 sessions, explorer, work-items, repositories, knowledge, overview, workflows,
-feishu-transport, loop, feishu-channel
+feishu-transport, requirement-sources, loop, feishu-channel
 ```
 
 - **`effectiveCapabilities(manifest)`** = `manifest.capabilities` if present, else the matching built-in template's set
@@ -266,6 +266,21 @@ git repos) at `~/.pi/agent/feishu/<workspaceId>.json` (mode `0600`).
   persisted at `~/.pi/agent/feishu-channel/<workspaceId>/bindings.json`.
 - Capability toggles and credential writes both re-sync the channel (`ensureFeishuChannelStarted` / `restartFeishuChannel`).
 
+### Importer (`lib/importers/`)
+
+**Inbound work-item source adapter** (design: `docs/autonomous-dev-loop.md`). The first (and currently only) adapter is **Chandao (禅道)**. This is the P0+P1 slice; the dev Loop / evolution / Exporter are later cycles and **not** here.
+
+- **Capability**: `requirement-sources` (registered in `ALL_WORKSPACE_CAPABILITIES`; toggled per-workspace, NOT in the init checklist — like `feishu-transport`). It gates the config UI + the cron runner. It is **not** an LLM extension (the runner is deterministic I/O, no tools).
+- **Importer SPI** (`types.ts`): `listAssigned/getDetail/getAttachment` — the deep-module seam hiding REST+token+image-binary behind three methods. Swapping Chandao for Jira changes one adapter, not the runner.
+- **`ChandaoImporter`** (`chandao-importer.ts`): REST+Token (`POST /api.php/v1/tokens`, **not** the web-login md5 flow). Token cached in-memory, **re-signed once on 401** via account+password. Field differences hidden (bug `steps` vs task `desc`; task list title is `name`). `fetch` is injectable for tests.
+- **Credentials** (`config.ts`): `~/.pi/agent/importers/<workspaceId>.json` (mode `0600`), mirroring `lib/feishu/config.ts`; `toPublicConfig` never leaks password/token. Shape `{chandao:{base,account,password,token?,assignee,productId,executionId}}`.
+- **Images** (`images.ts`, pure): `extractChandaoFileIds` / `rewriteChandaoImageSources` / `detectImageExt` (magic-byte sniffing). The runner downloads each `fileID` via `GET /api.php/v1/files/{id}` and rewrites README `<img src>` to a relative `attachments/<kind>-<id>.<ext>` so the work item renders offline and travels into git.
+- **Runner** (`runner.ts`): `syncImporterForWorkspace(id)` is the deep-module seam hiding pull→dedup→create→localize-images→event. Per item: dedup by `external.source:sourceId`; not-exists→create (bug→`BUG-####`, task→`REQ-####`, KEY from `manifest.work_items.next{Bug,Requirement}Number`), download+persist images, append `imported` milestone; exists&open→`imported` sync heartbeat; archived→skip. Per-item errors recorded, never abort the run. **Deterministic I/O — never delegated to an LLM.**
+- **Work-item `external` field**: `WorkItemExternalRef {source, sourceId, url?, lastSyncedAt}` added as an **optional** field on `WorkItemRecord`/`CreateWorkItemInput` (design §4/§5). Serialized as a snake_case `external:` block in `item.yaml`. Stamped at creation by the Importer only; the LLM work-item tools don't touch it. The dedup key.
+- **Runner lives in the loop host, NOT the web server**: `ImporterScheduler` (`scheduler.ts`) is a **non-Loop system timer** (30min) in the loop host process — a sibling of `LoopHostScheduler`, independent of the Loop engine. **`instrumentation.ts` is untouched** (web server holds no timers — design §5). The host also exposes `POST /v1/workspaces/:id/importers/sync` for manual/webhook.
+- **Web manual sync** (`app/api/workspaces/[id]/importers/sync/route.ts`): forwards to the host; **falls back to an in-process run if the host is down** (a one-shot sync is not a timer, so this does not violate "web owns no timers").
+- **Config UI**: `components/ImporterConfig.tsx` (mirrors `FeishuConfig.tsx`: capability toggle + credential form + "测试连接"), mounted in `WorkspaceManager`.
+
 ### Workspace directory layout (reference)
 
 ```
@@ -322,6 +337,9 @@ app/api/
   workspaces/[id]/feishu/route.ts                GET/PUT/DELETE feishu credentials
   workspaces/[id]/feishu-channel/route.ts        GET status | POST restart
   workspaces/[id]/feishu/test/route.ts           POST send a test message
+  workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
+  workspaces/[id]/importers/test/route.ts        POST test chandao connection (listAssigned)
+  workspaces/[id]/importers/sync/route.ts        POST manual importer sync (forward to host / in-process fallback)
   git/status/route.ts                    GET ?cwd= — per-repo changed files + totals
   git/diff/route.ts                      GET ?cwd=&path= — unified patch for one file
   auth/all-providers|providers/route.ts  GET provider lists (OAuth)
@@ -381,6 +399,14 @@ lib/
     client.ts               Feishu HTTP API client
     config.ts               credential read/write (under ~/.pi/agent/feishu/, 0600)
     types.ts                FeishuConfig / FeishuConfigPublic
+  importers/                         requirement-sources inbound adapter (design: autonomous-dev-loop.md)
+    types.ts                Importer SPI (listAssigned/getDetail/getAttachment) + config shapes
+    config.ts               chandao credentials ~/.pi/agent/importers/<wsId>.json (0600)
+    images.ts               PURE extractChandaoFileIds / rewriteChandaoImageSources / detectImageExt
+    chandao-importer.ts     ChandaoImporter: REST+Token API (POST /tokens, 401 re-sign), injectable fetch
+    mapping.ts              PURE mapSourceKindToWorkItemType + buildExternalIndex (dedup)
+    runner.ts               syncImporterForWorkspace — pull->dedup->work item->images->event (deep seam)
+    scheduler.ts            ImporterScheduler — NON-Loop 30min system timer in the loop host
   feishu-channel/
     manager.ts              long-connection lifecycle (globalThis.__piFeishuChannels), boot scan
     long-connection.ts      Feishu WS long-connection (callback pings, reconnect backoff)
@@ -422,6 +448,7 @@ components/
   CapabilityToggle.tsx      the capability on/off switch used in settings panels
   LoopConfig.tsx            loop author/run/gate UI (+ LoopLaunchOverlay)
   FeishuConfig.tsx          feishu-transport credential + test panel
+  ImporterConfig.tsx        requirement-sources (chandao importer) credential + test panel
   FeishuChannelPanel.tsx    feishu-channel status + bindings panel
   ChatWindow.tsx            chat composition + completion sound wrapper
   ChatInput.tsx             input bar + model/thinking/tools/compact controls
