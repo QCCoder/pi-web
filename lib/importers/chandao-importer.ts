@@ -13,13 +13,23 @@ import type {
 export type ChandaoFetch = typeof fetch;
 
 /** Chandao statuses that mean "ready to be developed" (待开发): a bug that is
- *  still `active` (needs fixing), or a task in `wait` (assigned but not started).
- *  Resolved/closed bugs and doing/done/closed tasks are excluded — they are not
- *  part of the dev backlog. Drives the `listAssigned` filter. */
+ *  still `active` (needs fixing), or a task in `doing` (the team marks tasks to
+ *  develop by setting them to `doing`). Resolved/closed bugs and wait/done/closed
+ *  tasks are excluded. Drives the `listAssigned` filter. */
 const READY_STATUSES: Record<SourceItemKind, ReadonlyArray<string>> = {
   bug: ["active"],
-  task: ["wait"],
+  task: ["doing"],
 };
+
+/** Extract the assignee account from a Chandao `assignedTo` field, which is an
+ *  object `{account, realname, ...}` on detail/list responses (and may be null
+ *  for parent/deleted users). */
+function assignedToAccount(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === "string") return value;
+  if (typeof value === "object") return (value as { account?: string }).account;
+  return undefined;
+}
 
 /** Chandao (禅道) REST+Token Importer (design §5 + appendix A). Uses the token
  *  API (`POST /api.php/v1/tokens`), NOT the web-login md5 flow. Tokens are
@@ -93,9 +103,12 @@ export class ChandaoImporter {
       `/api.php/v1/products/${this.config.productId}/bugs?assignedTo=${encodeURIComponent(assignee)}`,
     );
     if (!response.ok) throw new Error(`Chandao bugs list failed (HTTP ${response.status})`);
-    const data = (await response.json().catch(() => ({}))) as { bugs?: Array<{ id: number; title?: string; status?: string }> };
+    // NOTE: the Chandao REST API IGNORES the `assignedTo` query param (it returns
+    // every bug/task in the product/execution regardless), so we filter by both
+    // status and the real assignee client-side.
+    const data = (await response.json().catch(() => ({}))) as { bugs?: Array<{ id: number; title?: string; status?: string; assignedTo?: unknown }> };
     return (data.bugs ?? [])
-      .filter((bug) => READY_STATUSES.bug.includes(bug.status ?? ""))
+      .filter((bug) => READY_STATUSES.bug.includes(bug.status ?? "") && assignedToAccount(bug.assignedTo) === assignee)
       .map((bug) => ({
         sourceId: String(bug.id),
         kind: "bug" as const,
@@ -109,9 +122,9 @@ export class ChandaoImporter {
       `/api.php/v1/executions/${this.config.executionId}/tasks?assignedTo=${encodeURIComponent(assignee)}`,
     );
     if (!response.ok) throw new Error(`Chandao tasks list failed (HTTP ${response.status})`);
-    const data = (await response.json().catch(() => ({}))) as { tasks?: Array<{ id: number; name?: string; status?: string }> };
+    const data = (await response.json().catch(() => ({}))) as { tasks?: Array<{ id: number; name?: string; status?: string; assignedTo?: unknown }> };
     return (data.tasks ?? [])
-      .filter((task) => READY_STATUSES.task.includes(task.status ?? ""))
+      .filter((task) => READY_STATUSES.task.includes(task.status ?? "") && assignedToAccount(task.assignedTo) === assignee)
       .map((task) => ({
         sourceId: String(task.id),
         kind: "task" as const,
