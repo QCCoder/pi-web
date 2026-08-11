@@ -6,6 +6,7 @@ import { PiWorkspaceResolver } from "./workspace-resolver.ts";
 import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./store.ts";
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
+import { ExporterScheduler } from "../exporters/scheduler.ts";
 import type { AgentSessionWrapper } from "../rpc-manager.ts";
 import type { GateCommand, TriggerCommand } from "./types.ts";
 
@@ -63,6 +64,7 @@ export function createLoopHost() {
   const runtime = new DefaultLoopRuntime(workspaces, execution);
   const scheduler = new LoopHostScheduler(runtime, workspaces);
   const importerScheduler = new ImporterScheduler();
+  const exporterScheduler = new ExporterScheduler();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -123,6 +125,13 @@ export function createLoopHost() {
         const summary = await syncImporterForWorkspace(decodeURIComponent(importerSync[1]));
         return json(response, 200, { summary });
       }
+      // Exporter manual dispatch — a non-Loop system task. Drives Work Item
+      // events through the registered Exporters (FeishuNotifier) on demand.
+      const exporterDispatch = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/exporters\/dispatch$/);
+      if (request.method === "POST" && exporterDispatch) {
+        const summary = await exporterScheduler.runOnce(decodeURIComponent(exporterDispatch[1]));
+        return json(response, 200, { summary });
+      }
       return json(response, 404, { error: "route not found" });
     } catch (error) {
       console.error("[pi-loop] request failed:", error);
@@ -131,7 +140,7 @@ export function createLoopHost() {
       });
     }
   });
-  return { server, scheduler, runtime, importerScheduler };
+  return { server, scheduler, runtime, importerScheduler, exporterScheduler };
 }
 
 export async function startLoopHost(options: { host?: string; port?: number } = {}): Promise<void> {
@@ -145,10 +154,12 @@ export async function startLoopHost(options: { host?: string; port?: number } = 
   });
   app.scheduler.start();
   app.importerScheduler.start();
+  app.exporterScheduler.start();
   console.log(`[pi-loop] listening on http://${host}:${port}`);
   const stop = () => {
     app.scheduler.stop();
     app.importerScheduler.stop();
+    app.exporterScheduler.stop();
     app.server.close(() => process.exit(0));
   };
   process.once("SIGINT", stop);
