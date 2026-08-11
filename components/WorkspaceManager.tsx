@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { FeishuConfig } from "./FeishuConfig";
+import { ImporterConfig } from "./ImporterConfig";
 import { LoopConfig } from "./LoopConfig";
 import { FeishuChannelPanel } from "./FeishuChannelPanel";
 import type {
@@ -1230,6 +1231,10 @@ export function WorkspaceManager({
                       </div>
                     </section>
                     <FeishuConfig
+                      workspace={selectedWorkspace}
+                      onWorkspaceChanged={() => void loadWorkspaces()}
+                    />
+                    <ImporterConfig
                       workspace={selectedWorkspace}
                       onWorkspaceChanged={() => void loadWorkspaces()}
                     />
