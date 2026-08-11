@@ -10,6 +10,7 @@ import type { SessionInfo } from "@/lib/types";
 import type { GitFileStatus } from "@/lib/git-types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
+import { joinFilePath } from "@/lib/file-paths";
 
 interface Props {
   activeWorkspace: WorkspaceSummary | null;
@@ -583,7 +584,7 @@ export function WorkspaceSidebar({
                       OKF bundle —{" "}
                       <button
                         type="button"
-                        onClick={() => onOpenFile(`${effectiveKnowledgeRepo.path}/index.md`, "index.md")}
+                        onClick={() => onOpenFile(`${joinFilePath(activeWorkspace.path, effectiveKnowledgeRepo.path)}/index.md`, "index.md")}
                         style={{ border: 0, background: "transparent", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "inherit", textDecoration: "underline" }}
                       >
                         open index.md
@@ -591,7 +592,7 @@ export function WorkspaceSidebar({
                       {" "}to traverse (L0: read/ls/grep).
                     </div>
                     <FileExplorer
-                      cwd={effectiveKnowledgeRepo.path}
+                      cwd={joinFilePath(activeWorkspace.path, effectiveKnowledgeRepo.path)}
                       onOpenFile={onOpenFile}
                       refreshKey={explorerRefreshKey}
                       gitStatusByPath={EMPTY_GIT_STATUS_BY_PATH}
