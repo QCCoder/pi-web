@@ -90,11 +90,17 @@ export async function runImporterForWorkspace(
         }
         const extOf = (fileId: string) => attachments.get(fileId)?.ext ?? "bin";
         const body = rewriteChandaoImageSources(detail.body, extOf, importer.kind);
+        // Chandao tasks (and occasionally bugs) may have an empty description.
+        // The work item requires a non-empty Original Description, so substitute
+        // a traceable placeholder rather than dropping the item.
+        const description = body.trim()
+          ? body
+          : `（${importer.kind} 来源描述为空，详见标题与外部链接）`;
 
         const created = await createWorkItem(workspaceId, {
           type: mapSourceKindToWorkItemType(item.kind),
           title: detail.title,
-          originalDescription: body,
+          originalDescription: description,
           external: {
             source: importer.kind,
             sourceId: detail.sourceId,
