@@ -135,6 +135,7 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "workflows",
   // Module capabilities (toggled per-workspace, not surfaced in the init checklist):
   "feishu-transport",
+  "requirement-sources",
   "loop",
   "feishu-channel",
 ];

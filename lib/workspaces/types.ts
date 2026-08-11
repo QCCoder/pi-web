@@ -9,6 +9,7 @@ export type WorkspaceCapability =
   | "overview"
   | "workflows"
   | "feishu-transport"
+  | "requirement-sources"
 
   | "loop"
   | "subagent"
