@@ -281,6 +281,42 @@ git repos) at `~/.pi/agent/feishu/<workspaceId>.json` (mode `0600`).
 - **Web manual sync** (`app/api/workspaces/[id]/importers/sync/route.ts`): forwards to the host; **falls back to an in-process run if the host is down** (a one-shot sync is not a timer, so this does not violate "web owns no timers").
 - **Config UI**: `components/ImporterConfig.tsx` (mirrors `FeishuConfig.tsx`: capability toggle + credential form + "测试连接"), mounted in `WorkspaceManager`.
 
+### Exporter (`lib/exporters/`)
+
+**Outbound work-item event adapter** (design §6; P3). The symmetric counterpart to the Importer: where Importers materialize third-party items *into* work items, Exporters react to work-item lifecycle events and push *out* to channels. The dev Loop is **channel-blind** — it only writes work-item phase/event changes; notifications are 100% event-driven (§6 "触发即消息").
+
+- **Exporter SPI** (`types.ts`): `onWorkItemEvent(context, event, item)` — the deep-module seam hiding "work-item event → any channel" behind one method. `FeishuNotifier` is the first impl; a future `ChandaoWriteback`/`EmailNotifier` implements the same interface.
+- **`FeishuNotifier`** (`feishu-notifier.ts`): turns phase→`verification`/`complete` and status→`blocked` transitions into Feishu cards. **Deterministic, no LLM** (§6); reads `readFeishuConfig` per event and degrades silently when no app is configured (cxin today). Pure rendering in `feishu-format.ts` (`shouldNotify` + `formatPhaseChangeCard`, tested).
+- **Dispatcher** (`dispatcher.ts`): the deep seam hiding "scan all work-items' `events.jsonl` → dedup by ULID event id → hand each to every Exporter (per-error swallowed)". `selectEventsSince` is pure + tested; idempotent (re-run with the persisted watermark dispatches nothing). `dispatchWorkspaceEvents` is the async driver.
+- **`ExporterScheduler`** (`scheduler.ts`): a **non-Loop host timer** (60s), sibling of `ImporterScheduler`. Persists a per-workspace event-id watermark under `<workspace>/.pi/cache/exporter-watermark.json`. Web holds no timers. Host route `POST /v1/workspaces/:id/exporters/dispatch` for manual dispatch.
+
+### Dev Loop (`lib/loop/dev-loop/`, `lib/loop/checkers.ts`)
+
+**The one Loop that evolves** (design §7; P3). It is a **user of the engine**, not engine code — the generic engine (`runtime`/`pi-execution`/`store`/`scheduler`) is untouched. Its entire behavior is encoded in a **definition** (`loops/dev-loop/`) whose `LOOP.md` contract guides the orchestrator (a capable LLM) through OODA + triple judgment + TDD maker/checker + gates + learn, using **only existing tools** (work-item tools, bash, edit, subagent, kb_search). No new tools are injected (decision D10).
+
+- **`checkers.ts`** (pure, tested): repo alias → checker command. cargoware (module-scoped `mvn -pl <module>`), cargoware-h5 (`npm run test:ci`), cargo-report-server-haichuang (`mvn test`); cargoapi/cargo-h5-mp return null (Phase-0 finding — no usable gate). Both `LOOP.md` and the `tester` subagent read the same commands.
+- **`contract.ts`** (pure renderers, tested): `renderDevLoopInstructions()` (LOOP.md — OODA + §7.3 triple judgment ①confidence×②verification×③risk + phase mapping + **L0 invariants** + maker/checker + minimal learn + LEARN schema), `renderDevLoopState()`, `renderDeveloperAgent()` (TDD maker: branch_rules + test-first), `renderTesterAgent()` (binary green/red checker, never writes prod code).
+- **`authoring.ts`**: `createDevLoopDefinition`/`ensureDevLoopDefinition` write `loops/dev-loop/{loop.yaml (autonomy L2, weekday-09:00 cron + manual), LOOP.md, STATE.md, agents/{developer,tester}.md, audit/, LEARN.jsonl}` with `flag:wx` + rollback. Idempotent ensure.
+- **Phase mapping** (reuses the work-item state machine verbatim, zero new enums): 待开发=`intake` → 待计划评审(gate1)=`plan_approval` → `implementation` → 待评审(gate2)=`verification` → `complete`+`done`; 受阻=status `blocked`.
+- **PR = push branch** (no `gh` CLI; repos have codeup remotes): maker pushes `git push origin <branch>`, records branch on the work item, phase→`verification`; gate2 (human merge) **never skipped** (L0①).
+- **API**: `POST /api/workspaces/[id]/dev-loop` creates (idempotent `ensure`); `GET` reports existence.
+
+### Learn / Evolution (`lib/loop/learn/`)
+
+**The dev Loop's evolution core** (design §7.4; P4). Split exactly on the computable/judgment line: the orchestrator writes *qualitative* LEARN records during its round; a **pure function** does the math (never an LLM — §7.4 core A "never trust an LLM to count"). Memory is keyed by **module/repo**, not work item (§7.7 — survives channel swaps).
+
+- **`LEARN.jsonl`** (per dev-loop): append-only feedback log, one line per round: `{runId,workItemKey,module,repo,predictedConf,riskTier,outcome,tests,humanDecision,ts}`. Written by the orchestrator (bash append). Separate from the engine's `RUNS.jsonl` (which stores `LoopRun` snapshots) to avoid collision (decision D2).
+- **`aggregate.ts`** (pure, tested): `parseLearnRecords` (skips malformed lines) + `aggregate(records)→DerivedState` (per-module high-conf accuracy, strikes, stuck-rate; **asymmetric** — only demotes tiers below `ACCURACY_FLOOR` and auto-adds sensitive modules at `STRIKE_THRESHOLD`; never promotes/removes) + `effectiveTier(module,conf,derived)` (the DECIDE lookup; high→med when accuracy < floor). The §7.4 example (finance-service 0.6 accuracy → tier=med) is a live test.
+- **`state.ts`** (pure, tested): `mergeStateFile` overwrites STATE.md's `<!-- dev-loop:derived:* -->` managed block (idempotent recompute; STATE is in git so bad evolution reverts — §7.5).
+- **`knowledge.ts`** (pure, tested): OKF learning-note formatter (`author:loop, autoManaged, derivedFrom:run:*`). **Anti-pollution (§7.6, D6)**: the Loop always creates a NEW note file under `learnings/` and never edits an existing one — trivially satisfying "human-edited notes become authoritative".
+- **`config.ts`**: asymmetric thresholds (`MIN_SAMPLES=3`, `ACCURACY_FLOOR=0.7`, `STRIKE_THRESHOLD=3`).
+- **`LearnScheduler`**: a **non-Loop host timer** (5min), sibling of Importer/Exporter schedulers. Per dev-loop: read LEARN.jsonl → aggregate → merge STATE. Host route `POST /v1/workspaces/:id/learn/aggregate` for manual recompute. **Zero engine changes.**
+
+### cxin reference (研发 Loop target workspace)
+
+- **dev Loop instance**: `~/.pi/workspaces/workspace-c/loops/dev-loop/` (autonomy L2). Sensitive module list + module→repo map: `cargo-knowledge/standards/dev-loop-modules.md` (Phase-0 artifact, §8). Learning notes append to `cargo-knowledge/learnings/`.
+- **Host wiring**: `createLoopHost()` now starts three sibling non-Loop timers — `ImporterScheduler`, `ExporterScheduler`, `LearnScheduler` — alongside `LoopHostScheduler`. None runs in the web server (`instrumentation.ts` untouched).
+
 ### Workspace directory layout (reference)
 
 ```
@@ -340,6 +376,7 @@ app/api/
   workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
   workspaces/[id]/importers/test/route.ts        POST test chandao connection (listAssigned)
   workspaces/[id]/importers/sync/route.ts        POST manual importer sync (forward to host / in-process fallback)
+  workspaces/[id]/dev-loop/route.ts              GET dev-loop existence | POST create/ensure the dev-loop definition
   git/status/route.ts                    GET ?cwd= — per-repo changed files + totals
   git/diff/route.ts                      GET ?cwd=&path= — unified patch for one file
   auth/all-providers|providers/route.ts  GET provider lists (OAuth)
@@ -380,7 +417,7 @@ lib/
     web.ts                  error → HTTP mapping
   loop/
     types.ts                LoopDefinition / LoopRun / LoopRuntime / RoundExecutionBackend
-    host.ts                 pi-loop HTTP host (createLoopHost/startLoopHost)
+    host.ts                 pi-loop HTTP host (createLoopHost/startLoopHost) — wires Importer+Exporter+Learn sibling timers
     runtime.ts              DefaultLoopRuntime — lifecycle only (infer/execute/gate/fail)
     pi-execution.ts         PiRoundExecutionBackend — drives the orchestrator session + subagent delegation
     store.ts                loop.yaml / RUNS.jsonl read+append, validation
@@ -389,6 +426,16 @@ lib/
     client.ts               loopHostClient — HTTP client to the loop host (PI_LOOP_URL)
     workspace-resolver.ts   PiWorkspaceResolver (lists loop-capable workspaces)
     web.ts                  error → HTTP mapping
+    checkers.ts             PURE repo-alias → checker command (cargoware/h5/report-server; cargoapi=null)
+    dev-loop/               the one evolving Loop — a USER of the engine (design §7)
+      contract.ts           PURE renderers: LOOP.md (OODA+triple judgment+L0) / STATE.md / developer+tester agents
+      authoring.ts          create/ensureDevLoopDefinition (autonomy L2, weekday cron + manual)
+    learn/                  dev-loop evolution core (design §7.4); PURE math + host timer
+      types.ts/config.ts    LearnRecord schema + asymmetric thresholds (ACCURACY_FLOOR/STRIKE_THRESHOLD/MIN_SAMPLES)
+      aggregate.ts          PURE parseLearnRecords + aggregate(RUNS→DerivedState) + effectiveTier (never LLM-counts)
+      state.ts              PURE mergeStateFile (overwrites STATE managed derived block, idempotent)
+      knowledge.ts          PURE OKF learning-note formatter (author:loop; anti-pollution: always new file)
+      scheduler.ts          LearnScheduler — NON-Loop 5min host timer; route POST /v1/.../learn/aggregate
   subagent/
     extension.ts            `subagent` tool (single/parallel) + project-agent approval gate
     worker.ts               spawn real child AgentSessions; stream usage + display trail
@@ -407,6 +454,12 @@ lib/
     mapping.ts              PURE mapSourceKindToWorkItemType + buildExternalIndex (dedup)
     runner.ts               syncImporterForWorkspace — pull->dedup->work item->images->event (deep seam)
     scheduler.ts            ImporterScheduler — NON-Loop 30min system timer in the loop host
+  exporters/                         outbound work-item event adapter (design §6; symmetric to importers)
+    types.ts                Exporter SPI (onWorkItemEvent) + DispatchSummary
+    feishu-format.ts        PURE shouldNotify + formatPhaseChangeCard (review-ready/complete/blocked)
+    feishu-notifier.ts      FeishuNotifier — phase/status → Feishu card (deterministic, no LLM; graceful skip)
+    dispatcher.ts           readWorkspaceWorkItemEvents + PURE selectEventsSince + dispatchWorkspaceEvents (deep seam)
+    scheduler.ts            ExporterScheduler — NON-Loop 60s host timer; watermark in .pi/cache/
   feishu-channel/
     manager.ts              long-connection lifecycle (globalThis.__piFeishuChannels), boot scan
     long-connection.ts      Feishu WS long-connection (callback pings, reconnect backoff)
@@ -544,7 +597,7 @@ bundles** of the workspace and merges results.
 The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs`.
 
 ### Loop runs in its own process; the web server only manages + proxies
-`npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/gate are thin proxies over `loopHostClient`; only authoring writes files directly. A loop orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live.
+`npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/gate are thin proxies over `loopHostClient`; only authoring writes files directly. A loop orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live. The host also runs **three sibling non-Loop system timers** alongside `LoopHostScheduler`: `ImporterScheduler` (inbound), `ExporterScheduler` (outbound work-item events → channels), and `LearnScheduler` (dev-loop evolution: pure aggregate → STATE). None of these touches the engine core or runs in the web server.
 
 ### Feishu channel is a boot-time service, not an extension
 `feishu-channel` long-connections are started by `instrumentation.ts` for every workspace with the capability + credentials, and live on `globalThis.__piFeishuChannels`. Capability toggles and credential writes re-sync the channel via `ensureFeishuChannelStarted`/`restartFeishuChannel`. It reuses `startRpcSession` (1 chat ↔ 1 long-lived session) — it never spawns its own AgentSession.
