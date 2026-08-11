@@ -159,16 +159,47 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
 }
 
 /** Capabilities currently in effect for a workspace: cached snapshot, else the
- *  built-in template lookup, else the bare minimum. */
+ *  built-in template lookup, else the bare minimum. Active repositories of a
+ *  kind also surface the matching capability (backward-compat; see below). */
 export function effectiveCapabilities(manifest: WorkspaceManifest): WorkspaceCapability[] {
-  if (manifest.capabilities) return manifest.capabilities;
-  if (manifest.template) {
+  // Base set: cached snapshot > built-in template lookup > bare minimum.
+  let base: WorkspaceCapability[];
+  if (manifest.capabilities) {
+    base = [...manifest.capabilities];
+  } else if (manifest.template) {
     const builtIn = BUILT_IN_WORKSPACE_TEMPLATES.find((candidate) =>
       candidate.id === manifest.template!.id && candidate.version === manifest.template!.version
     );
-    if (builtIn) return [...builtIn.capabilities];
+    base = builtIn
+      ? [...builtIn.capabilities]
+      : (["sessions", "explorer"] as WorkspaceCapability[]);
+  } else {
+    base = ["sessions", "explorer"] as WorkspaceCapability[];
   }
-  return ["sessions", "explorer"] as WorkspaceCapability[];
+  // Backward-compat: surface the capability for repositories of a kind that were
+  // registered before the capability existed. `knowledge` was promoted from a
+  // repository kind to a WorkspaceCapability in the redesign, but pre-redesign
+  // workspaces (no cached `capabilities` field, e.g. legacy `software-development`
+  // template ones) never had it — so their knowledge repositories became
+  // invisible: no Activity Bar view, no kb_search, no AGENTS.md knowledge section.
+  // There is also no general capability toggle in settings to enable it manually.
+  // This is read-time derivation; the manifest is not mutated. Pure additive — it
+  // only ever appends a capability the base lacks, never removes one, so new
+  // workspaces (explicit capabilities) are unaffected.
+  const active = manifest.repositories.filter((repository) => repository.status === "active");
+  if (
+    active.some((repository) => repository.kind === "code")
+    && !base.includes("repositories")
+  ) {
+    base.push("repositories");
+  }
+  if (
+    active.some((repository) => repository.kind === "knowledge")
+    && !base.includes("knowledge")
+  ) {
+    base.push("knowledge");
+  }
+  return base;
 }
 
 export async function listWorkspaceTemplates(root?: string): Promise<WorkspaceTemplateInfo[]> {
