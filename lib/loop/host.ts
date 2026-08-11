@@ -7,6 +7,7 @@ import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./sto
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { ExporterScheduler } from "../exporters/scheduler.ts";
+import { LearnScheduler } from "./learn/scheduler.ts";
 import type { AgentSessionWrapper } from "../rpc-manager.ts";
 import type { GateCommand, TriggerCommand } from "./types.ts";
 
@@ -65,6 +66,7 @@ export function createLoopHost() {
   const scheduler = new LoopHostScheduler(runtime, workspaces);
   const importerScheduler = new ImporterScheduler();
   const exporterScheduler = new ExporterScheduler();
+  const learnScheduler = new LearnScheduler();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -132,6 +134,13 @@ export function createLoopHost() {
         const summary = await exporterScheduler.runOnce(decodeURIComponent(exporterDispatch[1]));
         return json(response, 200, { summary });
       }
+      // Learn manual aggregate — a non-Loop system task. Recomputes the dev
+      // Loop's STATE derived block from LEARN.jsonl on demand.
+      const learnAggregate = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/learn\/aggregate$/);
+      if (request.method === "POST" && learnAggregate) {
+        const summary = await learnScheduler.runOnce(decodeURIComponent(learnAggregate[1]));
+        return json(response, 200, { summary });
+      }
       return json(response, 404, { error: "route not found" });
     } catch (error) {
       console.error("[pi-loop] request failed:", error);
@@ -140,7 +149,7 @@ export function createLoopHost() {
       });
     }
   });
-  return { server, scheduler, runtime, importerScheduler, exporterScheduler };
+  return { server, scheduler, runtime, importerScheduler, exporterScheduler, learnScheduler };
 }
 
 export async function startLoopHost(options: { host?: string; port?: number } = {}): Promise<void> {
@@ -155,11 +164,13 @@ export async function startLoopHost(options: { host?: string; port?: number } = 
   app.scheduler.start();
   app.importerScheduler.start();
   app.exporterScheduler.start();
+  app.learnScheduler.start();
   console.log(`[pi-loop] listening on http://${host}:${port}`);
   const stop = () => {
     app.scheduler.stop();
     app.importerScheduler.stop();
     app.exporterScheduler.stop();
+    app.learnScheduler.stop();
     app.server.close(() => process.exit(0));
   };
   process.once("SIGINT", stop);
