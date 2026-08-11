@@ -2,9 +2,6 @@ schema_version: 1
 id: 01KYS95BM782JYC81DSGWBAP4A
 slug: pi-web
 name: pi-web
-template:
-  id: empty
-  version: 1
 skills: []
 repositories: []
 agent: {}
