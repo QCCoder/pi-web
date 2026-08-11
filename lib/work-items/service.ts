@@ -28,6 +28,7 @@ import {
   type WorkItemActor,
   type WorkItemDetail,
   type WorkItemEvent,
+  type WorkItemExternalRef,
   type WorkItemPhase,
   type WorkItemPriority,
   type WorkItemRecord,
@@ -74,6 +75,21 @@ function requireStringArray(value: unknown, field: string): string[] {
     throw new WorkItemValidationError(`${field} must be an array of non-empty strings`);
   }
   return [...new Set(value.map((entry) => String(entry).trim()))];
+}
+
+function parseExternalRef(value: unknown): WorkItemExternalRef {
+  if (!value || typeof value !== "object") {
+    throw new WorkItemValidationError("external must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const source = requireText(record.source, "external.source");
+  const sourceId = requireText(record.source_id ?? record.sourceId, "external.sourceId");
+  return {
+    source,
+    sourceId,
+    ...(typeof record.url === "string" && record.url ? { url: record.url } : {}),
+    lastSyncedAt: requireText(record.last_synced_at ?? record.lastSyncedAt, "external.lastSyncedAt"),
+  };
 }
 
 function requireEnum<T extends string>(
@@ -150,6 +166,16 @@ function serializeWorkItem(item: WorkItemRecord): string {
     related_items: item.relatedItems,
     designs: item.designs,
     plans: item.plans,
+    ...(item.external
+      ? {
+          external: {
+            source: item.external.source,
+            source_id: item.external.sourceId,
+            ...(item.external.url ? { url: item.external.url } : {}),
+            last_synced_at: item.external.lastSyncedAt,
+          },
+        }
+      : {}),
     archived_at: item.archivedAt,
     created_at: item.createdAt,
     updated_at: item.updatedAt,
@@ -185,6 +211,9 @@ export function parseWorkItem(value: unknown): WorkItemRecord {
     relatedItems: requireStringArray(record.related_items, "related_items"),
     designs: requireStringArray(record.designs, "designs"),
     plans: requireStringArray(record.plans, "plans"),
+    ...(record.external !== undefined && record.external !== null
+      ? { external: parseExternalRef(record.external) }
+      : {}),
     archivedAt: record.archived_at === undefined || record.archived_at === null
       ? null
       : requireText(record.archived_at, "archived_at"),
@@ -367,6 +396,7 @@ export async function createWorkItem(
   const repositories = requireStringArray(input.repositories, "repositories");
   validateRepositorySelection(manifest, repositories);
   const tags = requireStringArray(input.tags, "tags");
+  const external = input.external === undefined ? undefined : parseExternalRef(input.external);
   const priority = input.priority === undefined
     ? "P2"
     : requireEnum(input.priority, WORK_ITEM_PRIORITIES, "priority");
@@ -391,6 +421,7 @@ export async function createWorkItem(
     relatedItems: [],
     designs: [],
     plans: [],
+    ...(external ? { external } : {}),
     archivedAt: null,
     createdAt: now,
     updatedAt: now,

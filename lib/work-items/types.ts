@@ -30,6 +30,8 @@ export interface WorkItemRecord {
   relatedItems: string[];
   designs: string[];
   plans: string[];
+  /** Importer-written external link; absent for manually created items. */
+  external?: WorkItemExternalRef;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -42,6 +44,21 @@ export interface WorkItemEvent {
   actor: WorkItemActor;
   conversationId?: string;
   data?: Record<string, unknown>;
+}
+
+/** Optional link to an external source (Importer-written). `source` + `sourceId`
+ *  form the dedup key so re-importing the same Chandao item never duplicates the
+ *  work item (design §4/§5). Written at creation by an Importer; not mutated by
+ *  the LLM tools. */
+export interface WorkItemExternalRef {
+  /** Source adapter id, e.g. "chandao". */
+  source: string;
+  /** Stable id at the source, e.g. the Chandao bug/task id. */
+  sourceId: string;
+  /** Optional deep link back to the source item. */
+  url?: string;
+  /** ISO timestamp of the last successful import sync. */
+  lastSyncedAt: string;
 }
 
 export interface WorkItemDetail {
@@ -66,6 +83,8 @@ export interface CreateWorkItemInput {
   tags?: string[];
   actor?: WorkItemActor;
   conversationId?: string;
+  /** Importer-only: stamps the external dedup link at creation. */
+  external?: WorkItemExternalRef;
 }
 
 export interface UpdateWorkItemInput {
