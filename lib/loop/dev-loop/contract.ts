@@ -166,6 +166,7 @@ export function renderDevLoopInstructions(): string {
 - **① 信心**：自评对"需求理解+方案明确"= high/med/low；用 STATE 校准表
   修正（某模块历史 high 准确率低 → 把 high 当 med）。
 - **③ 风险**：改动是否落在敏感清单（费用/风控/鉴权/退关/对外接口）。
+- **选品排除（硬）**：若原始描述含 排查/刷数据/数据修正/配置/同步/迁移/重启/重跑 等运维/数据类关键词，或问题本质是“查原因/洗数据”而非可测代码改动 → 不自主做：记 milestone 标注“非自主 TDD 候选”，phase 回 intake 态、或转 gate1，选下一个候选。不要为这类项勉强化码。
 - **决策**：
   - 全绿（①high ∧ ③非敏感 ∧ 校准允许）→ 推进 ACT。
   - 否则 → 在 plan 里标注需人审，引擎在 L2 会要求人批计划（gate1）。
@@ -191,6 +192,7 @@ export function renderDevLoopInstructions(): string {
 - 人打回 → 你收到 reject：status=\`blocked\`，记录原因。
 
 ### 5. learn（P3 最简：append 一条反馈记录）
+- **硬规则：无论 maker 产出与否，learn 步必须 append 一条 LEARN 记录。** maker 无代码改动/被排除时 outcome=blocked、tests=none；这保证反馈数据集不丢（否则 aggregate 无法校准）。
 - 用 bash append 一条 JSON 到 \`loops/dev-loop/LEARN.jsonl\`（schema 见下）。
   **你只填本条的定性字段；统计/校准由 LearnScheduler 的纯函数做，不要自己数。**
 - 若有可泛化结论（陷阱/模式），在 cargo-knowledge \`learnings/\` **新建**一个
