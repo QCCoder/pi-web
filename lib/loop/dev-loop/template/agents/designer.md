@@ -18,6 +18,8 @@ orchestrator 在选品后派你。你读 `PLAN.md`（及工作项 `README.md`）
 ## needsDesign==true 时，写 DESIGN.md
 在工作项目录：frontmatter `workItem`、`repo`；正文含 **「全链路清单」（每跳 file:line）** + **「反证结果」** + 架构/接口/数据模型/关键决策/风险表。
 
+**覆盖 planner 预判**：若你的全链路追踪发现 scope 含后端/多仓、或信心降至 `med`/`low`，**无论 planner 的 needsDesign 是什么，都必须写 DESIGN.md**（把修订后的 scope/落点/未核实跳固化下来，别只留在返回文本里）。
+
 ## 硬约束
 - 只设计、只产出文档，**不改代码、不碰 git**。
 - 永不碰主干/受保护分支；集成分支合并是 orchestrator 的事。

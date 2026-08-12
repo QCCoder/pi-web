@@ -20,7 +20,7 @@ description: dev Loop 的 TDD maker。读 PLAN.md[+DESIGN.md]，在 feature 分�
    - frontmatter：`workItem`、`repo`、`branch`（实际起的）、`testCommand`（tester 该跑的）、`filesChanged:[]`、`confidence`
    - 正文：实现说明
 
-## 收到 rework / 打回请求（orchestrator 因 gate7 打回、merge 冲突重派你）
+## 收到 rework / 打回请求（orchestrator 因 final-verify 打回、merge 冲突重派你）
 1. **先写复现失败测试**：对准**上报症状**（如"等于{清关,派车} 返回 B 不是 A"），写一个失败测试、看它红，**再改**、看它绿。禁止读码猜改。
 2. `fetch` 最新集成分支 → 重新对齐解冲突 → tester 重验 → 更新 `IMPLEMENTATION.md`。
 3. **交付前 `git status` 核**：工作区有**非自己产生的改动 → 立即停下报告，不盲目 reconcile**（脏工作区 = 交人，不 = 自己擦）。
