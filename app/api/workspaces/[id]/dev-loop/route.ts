@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createDevLoopDefinition, ensureDevLoopDefinition } from "@/lib/loop/dev-loop/authoring";
+import { createDevLoopDefinition, ensureDevLoopDefinition } from "@/lib/loop/dev-loop/install";
 import { readLoopDefinition } from "@/lib/loop/store";
 import { LoopConflictError, LoopNotFoundError } from "@/lib/loop/store";
 import { effectiveCapabilities, getWorkspace } from "@/lib/workspaces/service";

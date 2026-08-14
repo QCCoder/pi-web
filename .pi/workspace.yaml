@@ -9,8 +9,9 @@ capabilities:
   - sessions
   - explorer
   - loop
+  - feishu-transport
 work_items:
   next_requirement_number: 1
   next_bug_number: 1
 created_at: 2026-07-30T10:29:45.223Z
-updated_at: 2026-08-03T09:33:50.206Z
+updated_at: 2026-08-14T01:55:51.710Z

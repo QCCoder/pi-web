@@ -1,16 +1,14 @@
 "use client";
 
+import { useState } from "react";
 import type { LoopRun } from "@/lib/loop/types";
 
 const STATUS_LABEL: Record<string, string> = {
   queued: "排队中",
-  inferring: "正在分析任务",
-  waiting_for_confirmation: "等待你确认计划",
   running: "正在执行",
   waiting_for_gate: "等待你确认",
   succeeded: "已完成",
   failed: "失败",
-  cancelled: "已取消",
 };
 
 const btnBase: React.CSSProperties = {
@@ -23,6 +21,17 @@ const btnBase: React.CSSProperties = {
   color: "var(--text)",
 };
 const btnPrimary: React.CSSProperties = { ...btnBase, background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" };
+const gateInput: React.CSSProperties = {
+  flex: 1,
+  minWidth: 120,
+  border: "1px solid var(--border)",
+  borderRadius: 6,
+  padding: "3px 8px",
+  fontSize: 12,
+  background: "var(--bg)",
+  color: "var(--text)",
+  outline: "none",
+};
 
 /** Full-area placeholder shown the instant a Loop is triggered, before the
  *  orchestrator session even exists. Replaced by the live ChatWindow as soon as
@@ -47,30 +56,47 @@ export function LoopLaunchingPlaceholder({ name, status, error }: { name: string
 }
 
 /** Compact bar pinned above the chat while a Loop run is in flight. Carries the
- *  plan summary and the human-gate approve/reject controls so the user never has
- *  to leave the conversation to advance an L2 run. */
-export function LoopStatusBar({ run, onDecide, onClose }: {
+ *  last `LOOP_GATE:` request and the free-text answer + independent abort
+ *  controls, so the user never has to leave the conversation to advance a run. */
+export function LoopStatusBar({ run, onAnswer, onAbort, onClose }: {
   run: LoopRun;
-  onDecide: (decision: "approve" | "reject") => void;
+  onAnswer: (message: string) => void;
+  onAbort: () => void;
   onClose: () => void;
 }) {
-  const waiting = run.status === "waiting_for_confirmation" || run.status === "waiting_for_gate";
+  const [message, setMessage] = useState("");
+  const waiting = run.status === "waiting_for_gate";
+  const submit = () => {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    onAnswer(trimmed);
+    setMessage("");
+  };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 14px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", fontSize: 13, flexShrink: 0 }}>
       <span style={{ width: 8, height: 8, borderRadius: "50%", background: waiting ? "var(--accent)" : run.status === "failed" ? "#e5484d" : "var(--text-dim)", flexShrink: 0 }} />
       <span style={{ color: "var(--text-dim)" }}>Loop</span>
       <span style={{ fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap" }}>{STATUS_LABEL[run.status] ?? run.status}</span>
-      {run.plan?.summary && (
-        <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{run.plan.summary}</span>
+      {run.gateRequest && (
+        <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0, maxWidth: "40%" }}>{run.gateRequest}</span>
       )}
-      {run.gateRequest && !waiting && (
-        <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{run.gateRequest}</span>
-      )}
-      {waiting && (
-        <span style={{ display: "flex", gap: 6 }}>
-          <button type="button" style={btnPrimary} onClick={() => onDecide("approve")}>确认继续</button>
-          <button type="button" style={btnBase} onClick={() => onDecide("reject")}>拒绝</button>
-        </span>
+      {waiting ? (
+        <>
+          <input
+            style={gateInput}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            placeholder="回复后让 Loop 继续…"
+            aria-label="回复 Loop"
+          />
+          <button type="button" style={btnPrimary} onClick={submit} disabled={!message.trim()}>回复</button>
+          <button type="button" style={btnBase} onClick={onAbort}>终止</button>
+        </>
+      ) : (
+        run.verdict && (
+          <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{run.verdict}</span>
+        )
       )}
       <button type="button" style={{ ...btnBase, padding: "3px 8px" }} onClick={onClose} aria-label="关闭状态条">×</button>
     </div>

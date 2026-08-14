@@ -1,19 +1,26 @@
-/** Public domain model for the generic Loop Runtime. */
+/** Public domain model for the generic Loop Runtime.
+
+ * The engine is deliberately domain-agnostic. It only:
+ *  - triggers (loop.yaml `triggers`),
+ *  - hosts the orchestrator session,
+ *  - pauses on `LOOP_GATE:` and resumes on a free-text `{message}`,
+ *  - completes on `LOOP_VERDICT:` / natural end,
+ *  - exposes an independent `abort` (destroy session -> failed),
+ *  - writes RUNS.jsonl and hands `run.id` + the orchestrator `sessionId` to it.
+ *
+ * There is no autonomy level, no infer phase, no gate1, no JSON plan, and no
+ * approve/reject. All domain behavior lives in each loop's own LOOP.md. */
 
 export const LOOP_DEFINITION_SCHEMA_VERSION = 1 as const;
 
 export type LoopTriggerSource = "cron" | "manual" | "message" | "webhook";
+
 export type LoopRunStatus =
   | "queued"
-  | "inferring"
-  | "waiting_for_confirmation"
   | "running"
   | "waiting_for_gate"
   | "succeeded"
-  | "failed"
-  | "cancelled";
-export type MonitorVerdict = "changed" | "unchanged" | "unknown";
-export type AutonomyLevel = "L1" | "L2" | "L3";
+  | "failed";
 
 export interface CronTriggerDefinition {
   id: string;
@@ -31,14 +38,16 @@ export interface ExternalTriggerDefinition {
 
 export type LoopTriggerDefinition = CronTriggerDefinition | ExternalTriggerDefinition;
 
-/** Parsed from `<workspace>/loops/<loopId>/loop.yaml`. */
+/** Parsed from `<workspace>/loops/<loopId>/loop.yaml`.
+ *
+ *  Legacy `autonomy` keys in on-disk loop.yaml files are tolerated (the store
+ *  reads them silently without validating) and are NOT surfaced here. */
 export interface LoopDefinition {
   schemaVersion: typeof LOOP_DEFINITION_SCHEMA_VERSION;
   id: string;
   name: string;
   description: string;
   enabled: boolean;
-  autonomy: AutonomyLevel;
   workspaceId: string;
   workspacePath: string;
   directory: string;
@@ -62,18 +71,6 @@ export interface TriggerReceipt {
   runId: string;
 }
 
-export interface InferredLoopPlan {
-  summary: string;
-  steps: Array<{
-    id: string;
-    maker: string;
-    verifier: string;
-    gate?: string;
-  }>;
-  improve: string;
-  fingerprint: string;
-}
-
 export interface LoopRun {
   id: string;
   workspaceId: string;
@@ -85,18 +82,23 @@ export interface LoopRun {
   updatedAt: string;
   finishedAt?: string;
   sessionId?: string;
-  plan?: InferredLoopPlan;
+  /** Free-text payload of the last `LOOP_GATE:` line the orchestrator emitted.
+   *  Set when the run pauses on a gate; cleared when it resumes. */
   gateRequest?: string;
-  verdict?: MonitorVerdict;
+  /** Free-text payload of the `LOOP_VERDICT:` line (any conclusion, not a fixed
+   *  enum). Undefined when the run ended without an explicit verdict. */
+  verdict?: string;
   output?: string;
   error?: string;
 }
 
-export interface GateCommand {
+/** A free-text answer to a paused `LOOP_GATE:`. The engine forwards `message`
+ *  verbatim as the orchestrator's next prompt — its meaning is defined by each
+ *  loop's LOOP.md. */
+export interface GateAnswer {
   workspaceId: string;
   runId: string;
-  decision: "approve" | "reject";
-  comment?: string;
+  message: string;
 }
 
 /** The deliberately small interface consumed by every adapter. */
@@ -104,7 +106,10 @@ export interface LoopRuntime {
   listLoops(workspaceId: string): Promise<LoopDefinition[]>;
   trigger(command: TriggerCommand): Promise<TriggerReceipt>;
   getRun(workspaceId: string, runId: string): Promise<LoopRun>;
-  answerGate(command: GateCommand): Promise<LoopRun>;
+  answerGate(command: GateAnswer): Promise<LoopRun>;
+  /** Destroy the orchestrator session and mark the run failed. Independent of
+   *  gate answering; works while the run is running or paused at a gate. */
+  abortRun(workspaceId: string, runId: string): Promise<LoopRun>;
 }
 
 export interface WorkspaceLocation {
@@ -118,20 +123,34 @@ export interface WorkspaceResolver {
   list(): Promise<WorkspaceLocation[]>;
 }
 
+/** A round outcome shared by `startRound` and `resumeRound`. */
+export interface RoundResult {
+  output: string;
+  /** The orchestrator's `LOOP_VERDICT:` text (any conclusion), if emitted. */
+  verdict?: string;
+  /** The orchestrator's `LOOP_GATE:` payload, if it paused for a human. */
+  gateRequest?: string;
+}
+
+/** Adapter seam between the domain-agnostic runtime and the orchestrator host
+ *  (pi, in-process). One orchestrator session is kept alive across gates;
+ *  it is only destroyed on a terminal result or an abort. */
 export interface RoundExecutionBackend {
-  infer(
+  /** Start the orchestrator session and run its first prompt. The session is
+   *  registered and kept alive (for a later `resumeRound`) unless this returns
+   *  a terminal result (no `gateRequest`), in which case it is destroyed. */
+  startRound(
     definition: LoopDefinition,
     run: LoopRun,
-    /** Called as soon as the orchestrator session exists, before inference finishes. */
+    /** Called as soon as the orchestrator session exists, before the round
+     *  finishes, so the runtime can persist the session id early. */
     onSessionReady?: (sessionId: string) => void,
-  ): Promise<{
-    sessionId: string;
-    plan: InferredLoopPlan;
-  }>;
-  execute(definition: LoopDefinition, run: LoopRun, comment?: string): Promise<{
-    output: string;
-    verdict?: MonitorVerdict;
-    gateRequest?: string;
-  }>;
-  reject(run: LoopRun, comment?: string): Promise<void>;
+  ): Promise<RoundResult>;
+  /** Continue an existing (paused) orchestrator session with a free-text
+   *  message — the gate answer, used verbatim as the next prompt. The session
+   *  is kept alive unless this returns a terminal result. */
+  resumeRound(run: LoopRun, message: string): Promise<RoundResult>;
+  /** Destroy the orchestrator session backing `run`, if any. Must not throw
+   *  when there is no live session. Does not prompt. */
+  abortRound(run: LoopRun): Promise<void>;
 }

@@ -129,12 +129,15 @@ export async function runImporterForWorkspace(
         continue;
       }
 
-      // Existing & open: record a re-sync heartbeat (no content change in P1).
-      await recordWorkItemMilestone(workspaceId, existing.key, {
-        type: "imported",
-        actor: "external",
-        data: { action: "synced", source: importer.kind, sourceId: item.sourceId, lastSyncedAt },
-      });
+      // Existing & open: nothing changed (P1 does not diff upstream content yet).
+      // A no-op sync is NOT a timeline event — appending one on every timer tick
+      // (ImporterScheduler = every 30min) floods events.jsonl with redundant
+      // `imported:synced` rows: one open item produces ~48 noise rows/day, which
+      // is exactly what polluted REQ-0012's timeline (35 identical rows). The run
+      // summary still counts it as `synced` so the report is informative; the
+      // one-time `imported:created` provenance row from the first import stays.
+      // Nothing consumes `imported:synced` (the exporter only reacts to
+      // work_item.updated), so dropping it is behavior-safe.
       summary.synced += 1;
       summary.details.push({ sourceId: item.sourceId, kind: item.kind, action: "synced", key: existing.key });
     } catch (error) {

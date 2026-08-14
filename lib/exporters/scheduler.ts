@@ -1,5 +1,5 @@
 /** Exporter system timer. Runs IN THE LOOP HOST PROCESS (not the web server),
- *  as a sibling to ImporterScheduler / LearnScheduler — a non-Loop scheduled I/O
+ *  as a sibling to ImporterScheduler — a non-Loop scheduled I/O
  *  task (design §6). Per design "the dev Loop never calls a channel directly;
  *  notifications are 100% event-driven": this timer is what turns Work Item
  *  events into Exporter calls.
@@ -12,7 +12,10 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { discoverWorkspaces, getWorkspace } from "../workspaces/service.ts";
+import { orderedEnabledChannels, readNotifyConfig } from "../notify/config.ts";
+import type { NotifyChannelKind, NotifyConfig } from "../notify/config.ts";
 import { FeishuNotifier } from "./feishu-notifier.ts";
+import { WeComNotifier } from "./wecom-notifier.ts";
 import { dispatchWorkspaceEvents, readWorkspaceWorkItemEvents } from "./dispatcher.ts";
 import type { Exporter } from "./types.ts";
 
@@ -39,10 +42,16 @@ async function writeWatermark(workspacePath: string, lastEventId: string | null)
   await writeFile(path, JSON.stringify({ lastEventId }, null, 2), "utf8");
 }
 
-/** Build the Exporter set for one workspace. FeishuNotifier self-skips when no
- *  Feishu app is configured, so it is always registered; future Exporters hook in here. */
-function exportersFor(log: (m: string) => void): Exporter[] {
-  return [new FeishuNotifier(log)];
+/** Build the ordered Exporter set for one workspace from its notify config.
+ *  `orderedEnabledChannels` already sorts enabled channels by priority, so the
+ *  returned array is in failover-try order. Each Notifier self-skips when its own
+ *  credentials are missing, so a channel can be enabled here yet still no-op. */
+function buildExporters(config: NotifyConfig, log: (m: string) => void): Exporter[] {
+  const factories: Record<NotifyChannelKind, () => Exporter> = {
+    feishu: () => new FeishuNotifier(log),
+    wecom: () => new WeComNotifier(log),
+  };
+  return orderedEnabledChannels(config).map((ch) => factories[ch.kind]());
 }
 
 export class ExporterScheduler {
@@ -91,17 +100,24 @@ export class ExporterScheduler {
   async runOnce(workspaceId: string) {
     const { path: workspacePath, manifest } = await getWorkspace(workspaceId);
     const name = manifest.name;
+    const notifyConfig = await readNotifyConfig(manifest.id);
+    const exporters = buildExporters(notifyConfig, this.log);
     const snapshots = await readWorkspaceWorkItemEvents(workspacePath);
     const since = await readWatermark(workspacePath);
     const summary = await dispatchWorkspaceEvents(
-      { workspaceId },
-      exportersFor(this.log),
+      { workspaceId: manifest.id },
+      exporters,
       snapshots,
       since,
+      notifyConfig.mode,
     );
     await writeWatermark(workspacePath, summary.lastEventId);
-    if (summary.dispatched > 0 || Object.keys(summary.errors).length > 0) {
-      this.log(`[exporter] ${name}: dispatched ${summary.dispatched} events${Object.keys(summary.errors).length > 0 ? ` (errors: ${JSON.stringify(summary.errors)})` : ""}`);
+    if (summary.delivered > 0 || summary.retried > 0 || Object.keys(summary.errors).length > 0) {
+      const parts = [`delivered ${summary.delivered}`];
+      if (summary.skipped > 0) parts.push(`skipped ${summary.skipped}`);
+      if (summary.retried > 0) parts.push(`held ${summary.retried} for retry`);
+      if (Object.keys(summary.errors).length > 0) parts.push(`errors ${JSON.stringify(summary.errors)}`);
+      this.log(`[exporter] ${name}: ${parts.join(", ")}`);
     }
     return summary;
   }

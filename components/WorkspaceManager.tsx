@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { FeishuConfig } from "./FeishuConfig";
 import { ImporterConfig } from "./ImporterConfig";
+import { NotifyConfig } from "./NotifyConfig";
 import { LoopConfig } from "./LoopConfig";
 import { FeishuChannelPanel } from "./FeishuChannelPanel";
 import type {
@@ -1234,6 +1235,7 @@ export function WorkspaceManager({
                       workspace={selectedWorkspace}
                       onWorkspaceChanged={() => void loadWorkspaces()}
                     />
+                    <NotifyConfig workspace={selectedWorkspace} />
                     <ImporterConfig
                       workspace={selectedWorkspace}
                       onWorkspaceChanged={() => void loadWorkspaces()}
@@ -1483,7 +1485,10 @@ export function WorkspaceManager({
                     </>
                   ) : (
                     <div className="work-item-content">
-                      <MarkdownBody>{selectedWorkItem.content}</MarkdownBody>
+                      {/* cwd = work-item dir so relative image refs (e.g. importer-written
+                          `attachments/chandao-<id>.png`) resolve to /api/files and actually render;
+                          without it the browser 404s the relative src and images vanish. */}
+                      <MarkdownBody cwd={selectedWorkItem.path}>{selectedWorkItem.content}</MarkdownBody>
                     </div>
                   )}
                   <section className="work-item-events">

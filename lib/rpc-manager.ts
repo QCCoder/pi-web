@@ -125,7 +125,7 @@ export class AgentSessionWrapper {
   private forceEmptySystemPrompt = false;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private onDestroyCallback: (() => void) | null = null;
+  private onDestroyCallbacks: Array<() => void> = [];
   private _alive = true;
 
   constructor(public readonly inner: AgentSessionLike) {}
@@ -307,8 +307,12 @@ export class AgentSessionWrapper {
     };
   }
 
-  onDestroy(cb: () => void): void {
-    this.onDestroyCallback = cb;
+  onDestroy(cb: () => void): () => void {
+    this.onDestroyCallbacks.push(cb);
+    return () => {
+      const i = this.onDestroyCallbacks.indexOf(cb);
+      if (i !== -1) this.onDestroyCallbacks.splice(i, 1);
+    };
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
@@ -630,7 +634,7 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
-    this.onDestroyCallback?.();
+    for (const cb of [...this.onDestroyCallbacks]) cb();
     notifyRunningChange();
   }
 

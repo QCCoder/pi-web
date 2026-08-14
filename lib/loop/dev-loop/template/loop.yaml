@@ -1,0 +1,14 @@
+schema_version: 1
+id: dev-loop
+name: 研发 Loop（通用）
+description: 自主选品 -> 判定 -> TDD maker/checker -> 合并集成分支 -> 人验证
+enabled: true
+triggers:
+  - id: weekday-workhours
+    type: cron
+    expression: "*/30 9-22 * * 1-5"
+    timezone: Asia/Shanghai
+    enabled: false  # paused — drive via manual trigger while debugging
+  - id: run-now
+    type: manual
+    enabled: true

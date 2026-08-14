@@ -490,6 +490,9 @@ export function AppShell() {
   // sessionId 一出现就接上实时流；run 状态/plan/gate 也由这里维护，状态条挂在
   // chat 顶部，L2 的人工确认不用切回 Loops 视图。
   const [loopRun, setLoopRun] = useState<LoopRun | null>(null);
+  // 记录已经"自动打开过实时流"的编排会话 id，每个编排会话只自动切一次：
+  // 避免 loop 运行期间用户切到别的会话后，每秒轮询又把焦点抢回 loop 编排会话。
+  const loopSessionAutoOpenedRef = useRef<string | null>(null);
   const activeLoopPending = activeTab?.loopPending ?? null;
 
   const handleLoopTriggered = useCallback((loop: LoopDefinition) => {
@@ -520,13 +523,23 @@ export function AppShell() {
     })();
   }, [activeTabId, updateTab, navigateUrl]);
 
-  const handleLoopGate = useCallback(async (decision: "approve" | "reject") => {
+  const handleLoopAnswer = useCallback(async (message: string) => {
     const run = loopRun;
     if (!run) return;
     try {
       const res = await fetch(`/api/workspaces/${encodeURIComponent(run.workspaceId)}/loop/runs/${encodeURIComponent(run.id)}/gate`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }),
       });
+      const value = await res.json() as { run: LoopRun };
+      setLoopRun(value.run);
+    } catch { /* 下一次轮询会修正状态 */ }
+  }, [loopRun]);
+
+  const handleLoopAbort = useCallback(async () => {
+    const run = loopRun;
+    if (!run) return;
+    try {
+      const res = await fetch(`/api/workspaces/${encodeURIComponent(run.workspaceId)}/loop/runs/${encodeURIComponent(run.id)}/abort`, { method: "POST" });
       const value = await res.json() as { run: LoopRun };
       setLoopRun(value.run);
     } catch { /* 下一次轮询会修正状态 */ }
@@ -538,7 +551,7 @@ export function AppShell() {
     const workspaceId = activeLoopPending.workspaceId;
     if (!runId) return; // trigger POST 还没返回 runId，暂不轮询；runId 写入后本 effect 重跑
     const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/loop`;
-    const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+    const TERMINAL = new Set(["succeeded", "failed"]);
     let stopped = false;
     const poll = async () => {
       if (stopped) return;
@@ -548,8 +561,10 @@ export function AppShell() {
         const { run } = await res.json() as { run: LoopRun };
         if (stopped) return;
         setLoopRun(run);
-        // 编排会话一存在就接上实时流。
-        if (run.sessionId && selectedSession?.id !== run.sessionId) {
+        // 编排会话一存在就接上实时流——但每个编排会话只自动切换一次。
+        // 之后用户若主动切到别的会话，不再被抢回（loopSessionAutoOpenedRef 去重）。
+        if (run.sessionId && loopSessionAutoOpenedRef.current !== run.sessionId) {
+          loopSessionAutoOpenedRef.current = run.sessionId;
           handleOpenLoopSession(run.sessionId);
         }
         if (TERMINAL.has(run.status)) {
@@ -564,7 +579,9 @@ export function AppShell() {
     };
     const timer = setTimeout(poll, 300);
     return () => { stopped = true; clearTimeout(timer); };
-  }, [activeLoopPending, selectedSession, handleOpenLoopSession, updateTab]);
+  // 注意：不把 selectedSession 放进依赖——自动切换只靠 ref 去重，与当前选中会话无关，
+  // 否则用户切换会话会触发 effect 重跑并重新抢回焦点。
+  }, [activeLoopPending, handleOpenLoopSession, updateTab]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
     const id = ensureTab(workspace);
@@ -1921,7 +1938,7 @@ export function AppShell() {
             />
           ) : showChat ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              {loopRun && <LoopStatusBar run={loopRun} onDecide={handleLoopGate} onClose={() => setLoopRun(null)} />}
+              {loopRun && <LoopStatusBar run={loopRun} onAnswer={handleLoopAnswer} onAbort={handleLoopAbort} onClose={() => setLoopRun(null)} />}
               <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                 {activeTab?.loopPending && !selectedSession ? (
                   <LoopLaunchingPlaceholder name={activeTab.loopPending.loopName} status={loopRun?.status} error={loopRun?.error} />

@@ -271,6 +271,15 @@ export async function runWorker(opts: RunWorkerOptions): Promise<WorkerResult> {
     });
   };
 
+  // Emit an initial "running" partial immediately so the parent UI can render
+  // the child-session "open →" button the moment the session exists — NOT only
+  // after the worker's first assistant turn (message_end). Without this, the
+  // streamed details (which carry childSessionId) wouldn't reach the parent
+  // until the first turn ends, leaving the child unopenable for a while. This
+  // also covers parallel mode: runParallel forwards each worker's onUpdate
+  // (including this initial one) into the aggregate panel.
+  emit({ turns: 0, usage: { ...EMPTY_USAGE }, displayItems: [], lastText: "" });
+
   try {
     const outcome = await capturePrompt(session, opts.task, emit, opts.signal);
     const failed = Boolean(outcome.errorMessage);

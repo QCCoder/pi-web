@@ -15,9 +15,11 @@ import { parse } from "yaml";
 import { listWorkItems, parseWorkItem } from "../work-items/service.ts";
 import type { WorkItemRecord } from "../work-items/types.ts";
 import type {
+  DispatchMode,
   DispatchSummary,
   Exporter,
   ExporterContext,
+  ExporterOutcome,
   WorkItemEventPayload,
 } from "./types.ts";
 
@@ -107,35 +109,74 @@ export function selectEventsSince(
 }
 
 /** Drive all registered Exporters over new Work Item events for one workspace.
- *  Inject `snapshots` to test without filesystem I/O. */
+ *
+ *  Watermark contract: an event is advanced past only when it is *settled* —
+ *  some channel delivered it, or every channel intentionally skipped it. If some
+ *  channel errored and nothing delivered (and not all skipped), the event is
+ *  *held*: the watermark stops at the previous event (head-of-line block) so the
+ *  event retries on the next tick. This never re-sends an already-delivered event
+ *  (we stop before it) and never silently drops a notification on a transient
+ *  outage. `exporters` must already be ordered by priority for `failover` mode;
+ *  the scheduler does that. Inject `snapshots` to test without filesystem I/O. */
 export async function dispatchWorkspaceEvents(
   context: ExporterContext,
   exporters: readonly Exporter[],
   snapshots: readonly WorkItemWithEvents[],
   sinceEventId: string | null,
+  mode: DispatchMode = "all",
 ): Promise<DispatchSummary> {
   const errors: Record<string, number> = {};
+  const counts = { delivered: 0, skipped: 0, retried: 0 };
   if (exporters.length === 0) {
-    return { workspaceId: context.workspaceId, lastEventId: sinceEventId, dispatched: 0, errors };
+    // Nothing wired: leave the watermark where it was (a channel added later
+    // resumes from the stored watermark; older events were never actionable).
+    return { workspaceId: context.workspaceId, lastEventId: sinceEventId, ...counts, errors };
   }
   const selected = selectEventsSince(snapshots, sinceEventId);
-  let dispatched = 0;
   let lastEventId = sinceEventId;
   for (const { event, item } of selected) {
-    let anyDispatched = false;
-    for (const exporter of exporters) {
-      try {
-        await exporter.onWorkItemEvent(context, event, item);
-        anyDispatched = true;
-      } catch (error) {
-        errors[exporter.kind] = (errors[exporter.kind] ?? 0) + 1;
-        // swallow: one channel/one event failure never stops the others
-        void error;
-      }
+    const settled = await dispatchOneEvent(context, exporters, event, item, mode, errors);
+    if (settled.delivered) {
+      counts.delivered += 1;
+      lastEventId = event.id;
+    } else if (settled.allSkipped) {
+      counts.skipped += 1;
+      lastEventId = event.id;
+    } else {
+      // Held for retry: stop here so this event (and later ones) retry next tick.
+      counts.retried += 1;
+      break;
     }
-    if (anyDispatched) dispatched += 1;
-    // Advance the watermark to the highest event id seen (ULID-ordered).
-    if (event.id > (lastEventId ?? "")) lastEventId = event.id;
   }
-  return { workspaceId: context.workspaceId, lastEventId, dispatched, errors };
+  return { workspaceId: context.workspaceId, lastEventId, ...counts, errors };
+}
+
+/** Run one event through the exporters. Returns whether it settled as delivered
+ *  or all-skipped; mutates `errors` with per-kind error counts. In `failover`
+ *  mode the first delivery short-circuits the remaining (lower-priority) channels. */
+async function dispatchOneEvent(
+  context: ExporterContext,
+  exporters: readonly Exporter[],
+  event: WorkItemEventPayload,
+  item: WorkItemRecord,
+  mode: DispatchMode,
+  errors: Record<string, number>,
+): Promise<{ delivered: boolean; allSkipped: boolean }> {
+  let delivered = false;
+  let allSkipped = exporters.length > 0;
+  for (const exporter of exporters) {
+    let outcome: ExporterOutcome;
+    try {
+      outcome = await exporter.onWorkItemEvent(context, event, item);
+    } catch (error) {
+      outcome = { delivered: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (outcome.error) {
+      errors[exporter.kind] = (errors[exporter.kind] ?? 0) + 1;
+    }
+    if (outcome.delivered) delivered = true;
+    if (!outcome.skipped) allSkipped = false; // delivered or errored => not a skip
+    if (mode === "failover" && outcome.delivered) break; // first delivery wins
+  }
+  return { delivered, allSkipped };
 }

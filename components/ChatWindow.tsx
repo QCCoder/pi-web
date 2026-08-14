@@ -347,7 +347,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   // rebuilds the whole list every token, freezing long sessions. The key
   // object changes identity only when an input that affects the render
   // changes, so the IIFE reuses the cached nodes while streaming.
-  const historyRenderKey = useMemo(() => ({}), [messages, entryIds, visibleCount, sessionBusy, isNew, streamState.isStreaming, forkingEntryId, modelNames, messageCwd, onOpenFile, handleFork, handleNavigate, handleEditContent, session?.id, t]);
+  // toolExecutionUpdates must be a dep: a running tool that streams progress
+  // (e.g. subagent) emits tool_execution_update events whose details carry the
+  // child-session id + live trail. Those updates mutate toolExecutionUpdates
+  // WITHOUT touching messages/entryIds/isStreaming, so omitting it makes the
+  // cache below short-circuit the re-render — and the subagent panel / "open →"
+  // button never appears while the subagent is running.
+  const historyRenderKey = useMemo(() => ({}), [messages, entryIds, visibleCount, sessionBusy, isNew, streamState.isStreaming, forkingEntryId, modelNames, messageCwd, onOpenFile, handleFork, handleNavigate, handleEditContent, session?.id, t, toolExecutionUpdates]);
   const historyRenderCacheRef = useRef<{ key: object; nodes: ReactNode } | null>(null);
 
   // Partial tool results streamed via tool_execution_update, surfaced to the

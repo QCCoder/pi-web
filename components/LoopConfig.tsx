@@ -2,31 +2,59 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AutonomyLevel, CronTriggerDefinition, LoopDefinition, LoopRun } from "@/lib/loop/types";
+import type { CronTriggerDefinition, LoopDefinition, LoopRun } from "@/lib/loop/types";
 import type { WorkspaceCapability, WorkspaceSummary } from "@/lib/workspaces/types";
 import { CapabilityToggle } from "./CapabilityToggle";
 import styles from "./LoopConfig.module.css";
 
 interface AgentEntry { filename: string; content: string; isNew: boolean; deleted?: boolean }
 interface EditLoopForm {
-  name: string; description: string; autonomy: AutonomyLevel;
+  name: string; description: string;
   enabled: boolean; cronEnabled: boolean;
   cronExpression: string; timezone: string; instructions: string;
   agents: AgentEntry[];
 }
 
+/** Inline free-text gate answer + independent abort, shown in a run panel
+ *  while a run is paused at a LOOP_GATE. Holds its own input state so the
+ *  surrounding .map() stays stateless. */
+function RunGateForm({ onAnswer, onAbort }: { onAnswer: (message: string) => void; onAbort: () => void }) {
+  const [message, setMessage] = useState("");
+  const trimmed = message.trim();
+  const canSend = trimmed.length > 0;
+  const send = () => {
+    if (!canSend) return;
+    onAnswer(trimmed);
+    setMessage("");
+  };
+  return (
+    <div className={styles.actions}>
+      <input
+        type="text"
+        value={message}
+        onChange={(e) => setMessage(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); send(); } }}
+        placeholder="回复这一轮…"
+        style={{ flex: "1 1 auto", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", background: "var(--bg)", color: "var(--text)", font: "inherit", outline: "none" }}
+      />
+      <button className={styles.primaryButton} disabled={!canSend} onClick={send}>回复</button>
+      <button className={styles.secondaryButton} onClick={onAbort}>终止</button>
+    </div>
+  );
+}
+
 const LOOP_CAPABILITY: WorkspaceCapability = "loop";
-const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+const TERMINAL = new Set(["succeeded", "failed"]);
 const STEPS = ["基本信息", "触发方式", "执行契约"] as const;
 
 interface CreateLoopForm {
-  id: string; name: string; description: string; autonomy: AutonomyLevel;
+  id: string; name: string; description: string;
   manualTrigger: boolean; cronEnabled: boolean; cronExpression: string; timezone: string;
   goal: string; executionRules: string; verificationRules: string; gateRules: string; improveRules: string;
 }
 
 const EMPTY_CREATE_FORM: CreateLoopForm = {
-  id: "", name: "", description: "", autonomy: "L1",
+  id: "", name: "", description: "",
   manualTrigger: true, cronEnabled: true, cronExpression: "0 9 * * 1-5", timezone: "Asia/Shanghai",
   goal: "", executionRules: "",
   verificationRules: "检查 Maker 的结果是否完整、准确，并且每个结论都有可追溯证据。",
@@ -108,7 +136,7 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
           sessionHandled = true;
           onSession(run.sessionId);
         }
-        if (!TERMINAL.has(run.status) && run.status !== "waiting_for_confirmation" && run.status !== "waiting_for_gate") {
+        if (!TERMINAL.has(run.status) && run.status !== "waiting_for_gate") {
           setTimeout(() => void poll(), 1500);
         }
       } catch (pollError) { setError(pollError instanceof Error ? pollError.message : String(pollError)); }
@@ -130,16 +158,25 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
     })();
   }, [base, pollRun, onOpenSession, onTriggered]);
 
-  const decide = useCallback(async (loopId: string, runId: string, decision: "approve" | "reject") => {
+  const answer = useCallback(async (loopId: string, runId: string, message: string) => {
     setError(null);
     try {
       const { run } = await responseJson<{ run: LoopRun }>(await fetch(`${base}/runs/${encodeURIComponent(runId)}/gate`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }),
       }));
       setRuns((current) => ({ ...current, [loopId]: run }));
-      if (decision === "approve") pollRun(loopId, runId);
-    } catch (decisionError) { setError(decisionError instanceof Error ? decisionError.message : String(decisionError)); }
+      // 回复后会继续跑，保持轮询直到终态。
+      pollRun(loopId, runId);
+    } catch (answerError) { setError(answerError instanceof Error ? answerError.message : String(answerError)); }
   }, [base, pollRun]);
+
+  const abort = useCallback(async (loopId: string, runId: string) => {
+    setError(null);
+    try {
+      const { run } = await responseJson<{ run: LoopRun }>(await fetch(`${base}/runs/${encodeURIComponent(runId)}/abort`, { method: "POST" }));
+      setRuns((current) => ({ ...current, [loopId]: run }));
+    } catch (abortError) { setError(abortError instanceof Error ? abortError.message : String(abortError)); }
+  }, [base]);
 
   const toggle = useCallback(async (next: boolean) => {
     setToggling(true); setError(null);
@@ -208,7 +245,7 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
       if (!res.ok) throw new Error(value.error ?? `HTTP ${res.status}`);
       const cron = loop.triggers.find((trigger): trigger is CronTriggerDefinition => trigger.type === "cron");
       setEditForm({
-        name: loop.name, description: loop.description, autonomy: loop.autonomy, enabled: loop.enabled,
+        name: loop.name, description: loop.description, enabled: loop.enabled,
         cronEnabled: Boolean(cron),
         cronExpression: cron ? cron.expression : "0 9 * * 1-5",
         timezone: cron ? cron.timezone : "Asia/Shanghai",
@@ -231,7 +268,7 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
         if (filename) agentMap[filename] = agent.content;
       }
       const body = {
-        name: editForm.name, description: editForm.description, autonomy: editForm.autonomy,
+        name: editForm.name, description: editForm.description,
         enabled: editForm.enabled, cronEnabled: editForm.cronEnabled,
         cronExpression: editForm.cronExpression, timezone: editForm.timezone,
         instructions: editForm.instructions, agents: agentMap,
@@ -293,7 +330,7 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
         const run = runs[loop.id];
         return <article key={loop.id} className={`${styles.loopCard} ${loop.enabled ? "" : styles.loopCardDisabled}`}>
           <div className={styles.loopTop}>
-            <div><div className={styles.loopName}>{loop.name}</div><div className={styles.loopMeta}>{loop.id} · {loop.autonomy} · {loop.description || "无说明"}</div></div>
+            <div><div className={styles.loopName}>{loop.name}</div><div className={styles.loopMeta}>{loop.id} · {loop.description || "无说明"}</div></div>
             <button className={styles.secondaryButton} disabled={!loop.enabled || Boolean(run && !TERMINAL.has(run.status))} onClick={() => void trigger(loop)}>运行一轮</button>
           </div>
           <div className={styles.triggers}>{loop.triggers.map((item) => <span className={styles.tag} key={item.id}>{item.type === "cron" ? `◷ ${item.expression} · ${item.timezone}` : `▶ ${item.type}`}</span>)}</div>
@@ -314,11 +351,7 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
               )}
             </div>
             {run.gateRequest && <div className={styles.gate}>需要决定：{run.gateRequest}</div>}
-            {run.plan && <div className={styles.plan}><strong>{run.plan.summary}</strong><ol>{run.plan.steps.map((step) => <li key={step.id}>{step.id}: {step.maker} → {step.verifier}{step.gate ? ` → gate: ${step.gate}` : ""}</li>)}</ol></div>}
-            {(run.status === "waiting_for_confirmation" || run.status === "waiting_for_gate") && <div className={styles.actions}>
-              <button className={styles.primaryButton} onClick={() => void decide(loop.id, run.id, "approve")}>确认并继续</button>
-              <button className={styles.secondaryButton} onClick={() => void decide(loop.id, run.id, "reject")}>拒绝</button>
-            </div>}
+            {run.status === "waiting_for_gate" && <RunGateForm onAnswer={(message) => void answer(loop.id, run.id, message)} onAbort={() => void abort(loop.id, run.id)} />}
             {run.error && <div className={styles.error}>{run.error}</div>}
           </div>}
         </article>;
@@ -337,8 +370,6 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
               <label className={`${styles.field} ${styles.fieldWide}`}><span>一句话说明（可选）</span><input value={createForm.description} onChange={(e) => setCreateField("description", e.target.value)} placeholder="每天检查状态，只报告值得处理的问题" /></label>
               <label className={`${styles.field} ${styles.fieldWide}`}><span>目标</span><textarea value={createForm.goal} onChange={(e) => setCreateField("goal", e.target.value)} placeholder="这一轮最终要解决什么问题？什么结果才算有价值？" /></label>
             </div>
-            <h3 className={styles.sectionTitle} style={{ marginTop: 20 }}>Autonomy Level</h3><p className={styles.sectionHint}>从 L1 开始最安全，之后根据审计证据逐步升级。</p>
-            <div className={styles.choiceGrid}>{([['L1','只报告','输出结果，不自动执行外部动作'],['L2','辅助执行','准备动作，关键节点需要审核'],['L3','无人值守','仅用于已经长期验证的低风险动作']] as const).map(([level,title,desc]) => <button type="button" key={level} className={`${styles.choiceCard} ${createForm.autonomy === level ? styles.choiceSelected : ""}`} onClick={() => setCreateField("autonomy", level)}><strong>{level} · {title}</strong><span>{desc}</span></button>)}</div>
           </>}
           {createStep === 1 && <>
             <h3 className={styles.sectionTitle}>什么时候启动一轮？</h3><p className={styles.sectionHint}>手动运行始终可用（点「运行一轮」即可）；下面选择是否额外定时触发。</p>
@@ -367,8 +398,6 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
             <label className={`${styles.field} ${styles.fieldWide}`}><span>一句话说明</span><input value={editForm.description} onChange={(e) => setEditField("description", e.target.value)} /></label>
           </div>
           <label className={`${styles.field} ${styles.toggleRow}`}><input type="checkbox" checked={editForm.enabled} onChange={(e) => setEditField("enabled", e.target.checked)} /><span>启用（关闭后 Host 不再自动触发，仍可手动运行）</span></label>
-          <h3 className={styles.sectionTitle} style={{ marginTop: 20 }}>Autonomy Level</h3>
-          <div className={styles.choiceGrid}>{([['L1','只报告','输出结果，不自动执行外部动作'],['L2','辅助执行','准备动作，关键节点需要审核'],['L3','无人值守','仅用于已经长期验证的低风险动作']] as const).map(([level,title,desc]) => <button type="button" key={level} className={`${styles.choiceCard} ${editForm.autonomy === level ? styles.choiceSelected : ""}`} onClick={() => setEditField("autonomy", level)}><strong>{level} · {title}</strong><span>{desc}</span></button>)}</div>
           <h3 className={styles.sectionTitle} style={{ marginTop: 20 }}>触发方式</h3>
           <p className={styles.sectionHint}>手动运行始终可用；下面选择是否额外定时触发。</p>
           <label className={styles.triggerCard}><input type="checkbox" checked={editForm.cronEnabled} onChange={(e) => setEditField("cronEnabled", e.target.checked)} /><span><strong>定时运行</strong><span>由常驻 Loop Host 按 Cron 自动触发</span></span></label>

@@ -2,13 +2,12 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stringify } from "yaml";
 import { LoopConflictError, LoopValidationError, readLoopDefinition, validateLoopId } from "./store.ts";
-import type { AutonomyLevel, CronTriggerDefinition, LoopDefinition, WorkspaceLocation } from "./types.ts";
+import type { CronTriggerDefinition, LoopDefinition, WorkspaceLocation } from "./types.ts";
 
 export interface CreateLoopInput {
   id: string;
   name: string;
   description?: string;
-  autonomy?: AutonomyLevel;
   manualTrigger?: boolean;
   cronEnabled?: boolean;
   cronExpression?: string;
@@ -63,7 +62,7 @@ function renderInstructions(input: CreateLoopInput): string {
     ...(gate ? [`   - Gate：${gate}`] : []),
     "2. `improve`",
     `   - ${text(input.improveRules, "improveRules")}`,
-    "   - 根据本轮证据提出建议；不得超越当前 Autonomy Level 自动扩大权限。",
+    "   - 根据本轮证据提出建议。",
     "",
     "## 完成条件",
     "",
@@ -81,10 +80,6 @@ export async function createLoopDefinition(
 ): Promise<LoopDefinition> {
   const id = validateLoopId(input.id);
   const name = text(input.name, "name");
-  const autonomy = input.autonomy ?? "L1";
-  if (autonomy !== "L1" && autonomy !== "L2" && autonomy !== "L3") {
-    throw new LoopValidationError("autonomy must be L1, L2, or L3");
-  }
   const manualTrigger = input.manualTrigger !== false;
   const cronEnabled = input.cronEnabled === true;
   const triggers: Array<Record<string, unknown>> = [];
@@ -119,7 +114,6 @@ export async function createLoopDefinition(
       name,
       description: input.description?.trim() ?? "",
       enabled: true,
-      autonomy,
       triggers,
     }, { lineWidth: 0 });
     await Promise.all([
@@ -139,7 +133,6 @@ export async function createLoopDefinition(
 export interface UpdateLoopInput {
   name?: string;
   description?: string;
-  autonomy?: AutonomyLevel;
   /** 启用/停用：关闭后 Host 不再自动触发，仍可手动运行。 */
   enabled?: boolean;
   manualTrigger?: boolean;
@@ -185,10 +178,6 @@ export async function updateLoopDefinition(
 
   const name = input.name !== undefined ? text(input.name, "name") : existing.name;
   const description = input.description !== undefined ? input.description.trim() : existing.description;
-  const autonomy = input.autonomy ?? existing.autonomy;
-  if (autonomy !== "L1" && autonomy !== "L2" && autonomy !== "L3") {
-    throw new LoopValidationError("autonomy must be L1, L2, or L3");
-  }
   const enabled = input.enabled ?? existing.enabled;
 
   const triggersTouched = input.manualTrigger !== undefined || input.cronEnabled !== undefined
@@ -219,7 +208,7 @@ export async function updateLoopDefinition(
   }
 
   const yaml = stringify(
-    { schema_version: 1, id, name, description, enabled, autonomy, triggers },
+    { schema_version: 1, id, name, description, enabled, triggers },
     { lineWidth: 0 },
   );
   await writeFile(join(directory, "loop.yaml"), yaml, { encoding: "utf8" });

@@ -2,7 +2,6 @@ import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
 import type {
-  AutonomyLevel,
   LoopDefinition,
   LoopRun,
   LoopTriggerDefinition,
@@ -14,7 +13,6 @@ export class LoopConflictError extends Error {}
 export class LoopNotFoundError extends Error {}
 
 const LOOP_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const AUTONOMY_LEVELS = new Set<AutonomyLevel>(["L1", "L2", "L3"]);
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) {
@@ -83,8 +81,8 @@ export async function readLoopDefinition(
   if (record.schema_version !== 1) throw new LoopValidationError("schema_version must be 1");
   const fileId = validateLoopId(requiredString(record.id, "id"));
   if (fileId !== id) throw new LoopValidationError(`loop id ${fileId} must match directory ${id}`);
-  const autonomy = (record.autonomy ?? "L1") as AutonomyLevel;
-  if (!AUTONOMY_LEVELS.has(autonomy)) throw new LoopValidationError("autonomy must be L1, L2, or L3");
+  // Legacy `autonomy` keys are tolerated: we neither validate nor surface them.
+  // (They are simply not read — `LoopDefinition` no longer carries the field.)
   const instructionsPath = join(directory, "LOOP.md");
   try {
     await readFile(instructionsPath, "utf8");
@@ -97,7 +95,6 @@ export async function readLoopDefinition(
     name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : id,
     description: typeof record.description === "string" ? record.description.trim() : "",
     enabled: record.enabled !== false,
-    autonomy,
     workspaceId: workspace.id,
     workspacePath: workspace.path,
     directory,

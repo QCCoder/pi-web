@@ -14,6 +14,23 @@ export async function POST(
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
 
+    // A Loop orchestrator session lives in the Loop Host process. Probe it FIRST:
+    // if the host owns it, never create a local wrapper here — that would spawn a
+    // second AgentSession writing the same .jsonl, racing the host and corrupting
+    // the run (the host's orchestrator would detect "two executions overwriting
+    // one run"). Loop orchestrators are driven via gates (/loop/runs/.../gate),
+    // not direct chat, so reject the command outright.
+    try {
+      if (await loopHostClient.probeSession(id)) {
+        return NextResponse.json(
+          { error: "This session is owned by the Loop Host. Interact via the Loop run gate, not direct messages." },
+          { status: 409 },
+        );
+      }
+    } catch {
+      // Loop Host unreachable → the session is not loop-host-owned; proceed normally.
+    }
+
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {

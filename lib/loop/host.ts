@@ -7,9 +7,8 @@ import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./sto
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { ExporterScheduler } from "../exporters/scheduler.ts";
-import { LearnScheduler } from "./learn/scheduler.ts";
 import type { AgentSessionWrapper } from "../rpc-manager.ts";
-import type { GateCommand, TriggerCommand } from "./types.ts";
+import type { TriggerCommand } from "./types.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 30142;
@@ -66,7 +65,6 @@ export function createLoopHost() {
   const scheduler = new LoopHostScheduler(runtime, workspaces);
   const importerScheduler = new ImporterScheduler();
   const exporterScheduler = new ExporterScheduler();
-  const learnScheduler = new LearnScheduler();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -111,13 +109,21 @@ export function createLoopHost() {
       }
       const gate = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/runs\/([^/]+)\/gate$/);
       if (request.method === "POST" && gate) {
-        const input = await body(request) as Omit<GateCommand, "workspaceId" | "runId">;
+        const input = await body(request) as { message?: string };
         return json(response, 200, {
           run: await runtime.answerGate({
-            ...input,
+            message: typeof input.message === "string" ? input.message : "",
             workspaceId: decodeURIComponent(gate[1]),
             runId: decodeURIComponent(gate[2]),
           }),
+        });
+      }
+      // Independent abort: destroy the orchestrator session and mark the run
+      // failed. Works whether the run is running or paused at a gate.
+      const abort = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/runs\/([^/]+)\/abort$/);
+      if (request.method === "POST" && abort) {
+        return json(response, 200, {
+          run: await runtime.abortRun(decodeURIComponent(abort[1]), decodeURIComponent(abort[2])),
         });
       }
       // Importer manual/webhook sync — a non-Loop system task. Runs the same
@@ -134,13 +140,6 @@ export function createLoopHost() {
         const summary = await exporterScheduler.runOnce(decodeURIComponent(exporterDispatch[1]));
         return json(response, 200, { summary });
       }
-      // Learn manual aggregate — a non-Loop system task. Recomputes the dev
-      // Loop's STATE derived block from LEARN.jsonl on demand.
-      const learnAggregate = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/learn\/aggregate$/);
-      if (request.method === "POST" && learnAggregate) {
-        const summary = await learnScheduler.runOnce(decodeURIComponent(learnAggregate[1]));
-        return json(response, 200, { summary });
-      }
       return json(response, 404, { error: "route not found" });
     } catch (error) {
       console.error("[pi-loop] request failed:", error);
@@ -149,7 +148,7 @@ export function createLoopHost() {
       });
     }
   });
-  return { server, scheduler, runtime, importerScheduler, exporterScheduler, learnScheduler };
+  return { server, scheduler, runtime, importerScheduler, exporterScheduler };
 }
 
 export async function startLoopHost(options: { host?: string; port?: number } = {}): Promise<void> {
@@ -164,13 +163,11 @@ export async function startLoopHost(options: { host?: string; port?: number } = 
   app.scheduler.start();
   app.importerScheduler.start();
   app.exporterScheduler.start();
-  app.learnScheduler.start();
   console.log(`[pi-loop] listening on http://${host}:${port}`);
   const stop = () => {
     app.scheduler.stop();
     app.importerScheduler.stop();
     app.exporterScheduler.stop();
-    app.learnScheduler.stop();
     app.server.close(() => process.exit(0));
   };
   process.once("SIGINT", stop);
