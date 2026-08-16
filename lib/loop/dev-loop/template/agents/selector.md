@@ -24,7 +24,8 @@ orchestrator 给你一份 intake 候选短名单（前 3，含 key/目录/优先
      planModel: cheap|standard,          // writing-plans：简单→cheap，多落点→standard
      implementerModel: cheap|standard,   // 机械→cheap，多文件集成→standard
      reviewerModel: cheap|standard,      // 敏感项由 orchestrator 升 strongest
-     verifierModel: cheap|standard       // 简单纯 gate→cheap，复杂→standard
+     verifierModel: cheap|standard,      // 简单纯 gate→cheap，复杂→standard
+     learnerModel: cheap                 // 泛化测试+格式化，机械活
    }
    ```
 

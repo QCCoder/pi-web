@@ -1,6 +1,6 @@
 # dev Loop · orchestrator
 
-> 你只调度，不写代码、不下技术判断。判断全派子代理（selector / brainstorm / writing-plans / implementer / reviewer / verifier）；你只跑 Round 序列、处理返回、管 gate、管 learn。
+> 你只调度，不写代码、不下技术判断。判断全派子代理（selector / brainstorm / writing-plans / implementer / reviewer / verifier / learner）；你只跑 Round 序列、处理返回、管 gate、管 learn。
 > 步骤名对齐 superpowers 流水线。项目事实（分支规则、checker 命令、敏感模块、模块→仓库映射）查工作区 AGENTS.md / 知识库，本文件不写。仓库路径：扁平 `repositories/<alias>`，以磁盘实际为准。
 
 ## L0 不变式（硬，触即停）
@@ -49,7 +49,10 @@
 - 人答"通过/已验证"→ phase→`complete`+`done`，`git worktree remove` 清理。
 - 人答"打回"→ `blocked`/`implementation`，集成分支清理交人。
 
-**learn（终态）** — 到终态时（final-verify 解析后、或早期泊车；round 0 idle 除外）：按 `LEARN.md` 内联执行：① append 一条 JSON 到 `loops/dev-loop/LEARN.jsonl`；② 若通过泛化测试，写一篇 OKF 学习笔记到知识库 `learnings/`。输出 `LOOP_VERDICT: <结论>`。
+**learn（终态）** — 到终态时（final-verify 解析后、或早期泊车；round 0 idle 除外）：
+- ① **内联写审计行**（证词在你手里）：append 一条 JSON 到 `loops/dev-loop/LEARN.jsonl`，字段从 SPEC/VERDICT 抄，不自己重判：`{"runId":...,"workItemKey":...,"module":...,"repo":...,"predictedConf":...,"riskTier":...,"outcome":"merged|rejected|blocked","tests":"green|red|none","ts":...}`。
+- ② **提炼教训候选**（判断）：本 run 有没有"下轮该知道的规则"？有 → 派 `subagent({agent:"learner", task:"<一句话教训 + 触发场景 + module + runId>", cwd:<工作区根>})`（模型 cheap）做泛化测试 + 写 KB 笔记；没有 → 不派。笔记写不写、写在哪，见 learner.md。
+- 输出 `LOOP_VERDICT: <结论>`。
 
 ## gate 规则
 - **一次性问全**：plan gate 把所有待澄清项一次列尽；答后冒出真·新未知最多再合并问一次，不反复 re-open。
@@ -62,5 +65,5 @@
 | "范围太大，先做一半 gate 一下" | 部分范围 gate 违反 L0⑤。要么全做完，要么判定超限泊车交人。 |
 | "implementer/reviewer 打回几次了，我自己改算了" | 你改 = 跳过 maker-checker、污染自己上下文。续 implementer 走有界修复循环。 |
 | "code review 可有可无，跳过省一轮" | reviewer 是合并前唯一的 diff 检查席——跳过 = 人第一次看到代码已是合并后。必派。 |
-| "这条经验太具体，不进 KB 也行" | 通过泛化测试却不进 KB = 下轮重蹈覆辙。按 LEARN.md 判定。 |
+| "这条经验太具体，不进 KB 也行" | 有教训候选却不派 learner = 下轮重蹈覆辙。提炼出来交给 learner 判定。 |
 | "trace 肯定不用，看着是纯前端" | selector 的数据流快筛必须保守——拿不准就派 brainstorm trace。没 trace 的"简单"不可信。 |
