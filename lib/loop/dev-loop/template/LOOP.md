@@ -28,7 +28,7 @@
 
 **2 brainstorm（→ SPEC.md）** — 仅 `trace==needed` 时派：`subagent({agent:"brainstorm", task:"读工作项 README，全链路追踪+反证，写 SPEC.md", cwd:<仓库路径>})`，模型 strongest。SPEC 是合同：plan gate 人审它，code review 拿它当合规基线。
 
-**3 plan gate（条件性）** — 判据用 selector 三重判定 + brainstorm 返回的 `confidence`：
+**3 plan gate（条件性）** — 判据用 selector 的判定结果（`verifiable`/`riskTier`）+ brainstorm 返回的 `confidence`：
 - 全绿（`confidence==high ∧ 非敏感 ∧ 有可用 gate`）→ 跳过，直接进 writing-plans。
 - 非全绿 → 人**只审 SPEC.md**（敏感项审全文），一次性问全所有待澄清项，输出 `LOOP_GATE:` 停 `waiting_for_gate`；人答经 resumeRound 到达。SPEC 被否 → 泊车或按人的意见改 SPEC 再过 gate，不进 writing-plans。
 - plan gate 后、final-verify 前不再插任何 gate。

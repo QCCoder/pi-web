@@ -305,15 +305,14 @@ git repos) at `~/.pi/agent/feishu/<workspaceId>.json` (mode `0600`).
 - **PR = push branch** (no `gh` CLI; repos have codeup remotes): maker pushes `git push origin <branch>`, records branch on the work item, phase→`verification`; gate2 (human merge) **never skipped** (L0①).
 - **API**: `POST /api/workspaces/[id]/dev-loop` creates (idempotent `ensure`); `GET` reports existence.
 
-### Learn (`lib/loop/learn/`)
+### Learn (`template/LEARN.md` — spec lives entirely in template text)
 
-**Qualitative knowledge transfer, not quantitative calibration.** The old §7.4 "aggregate LEARN.jsonl → STATE.md calibration table → demote confidence tiers" machinery was **removed** (it never fired — needed `MIN_SAMPLES=3` per module, never reached). Evolution now works by writing **generalizable process/judgment rules into the knowledge base**, where `kb_search` surfaces them in future selector/architect rounds.
+**Qualitative knowledge transfer, not quantitative calibration.** The old §7.4 "aggregate LEARN.jsonl → STATE.md calibration table → demote confidence tiers" machinery was **removed** (it never fired — needed `MIN_SAMPLES=3` per module, never reached). Evolution works by writing **generalizable process/judgment rules into the knowledge base**, where `kb_search` surfaces them in future selector/brainstorm rounds.
 
 - **Inline learn step** (`LEARN.md`, the spec): at terminal state the orchestrator runs learn **inline** (not a subagent — learn is neither maker nor checker, needs no isolation). It does two things: ① append a thin JSON line to `LEARN.jsonl` (audit); ② if the round's lesson passes the **generalizability test**, write one OKF learning note to the KB.
-- **`LEARN.jsonl`** (per dev-loop): now a **thin append-only audit log**, one line per run: `{runId,workItemKey,module,repo,predictedConf,riskTier,outcome,tests,ts}` (no `humanDecision` — rich lessons go to the KB, not the JSONL). Machine-readable trail; nothing parses it structurally anymore.
-- **Generalizability test** (mechanical, in `LEARN.md`): delete the specific keys/class names from the lesson — is the remaining sentence still a rule that guides a future round? ✅ "查询类需求必须 trace 完整请求路径含后端专用拦截器"; ❌ "`<ServiceImpl>` 硬编码 OR" (rots with the code). Failing lessons stay in `LEARN.jsonl` audit only; code-specific facts belong in the work item's own PLAN/DESIGN/IMPLEMENTATION.md (in git).
-- **`knowledge.ts`** (pure, tested — the only survivor of the old learn/ dir): OKF learning-note formatter (`learningNotePath` → `<kb>/learnings/<module>-<runId>.md`; `formatLearningNote` → `author:loop, autoManaged, derivedFrom:run:*`). **Anti-pollution**: always a NEW file (runId in path guarantees uniqueness), never edits an existing note → trivially satisfies "human-edited notes become authoritative".
-- **Deleted**: `aggregate.ts` / `state.ts` / `scheduler.ts` (LearnScheduler) / `completeness.ts` / `config.ts` / `types.ts` — the calibration math + the 5min host timer + the STATE.md derived-block rewriter are all gone. STATE.md itself is removed from the dev-loop (the generic loop framework still has it for non-dev loops).
+- **`LEARN.jsonl`** (per dev-loop): a **thin append-only audit log**, one line per run: `{runId,workItemKey,module,repo,predictedConf,riskTier,outcome,tests,ts}` (no `humanDecision` — rich lessons go to the KB, not the JSONL). Machine-readable trail; nothing parses it structurally.
+- **Generalizability test** (mechanical, in `LEARN.md`): delete the specific keys/class names from the lesson — is the remaining sentence still a rule that guides a future round? ✅ "查询类需求必须 trace 完整请求路径含后端专用拦截器"; ❌ "`<ServiceImpl>` 硬编码 OR" (rots with the code). Failing lessons stay in `LEARN.jsonl` audit only; code-specific facts belong in the work item's own SPEC/PLAN/IMPLEMENTATION.md (in git).
+- **No learn code**: `lib/loop/learn/` (the old `knowledge.ts` formatter + test) was **deleted** — the orchestrator is an LLM that follows `LEARN.md` text; there is no runtime caller. `LEARN.md` is the single source of truth (path scheme `learnings/<module>-<runId>.md`, frontmatter `author: loop`/`autoManaged`/`derivedFrom: run:*`, anti-pollution "always a new file, never edit existing notes"). STATE.md is removed from the dev-loop (the generic loop framework still has it for non-dev loops).
 - **Three artifacts, three purposes (no overlap)**: KB `learnings/*.md` = generalizable rules (loop-authored); `standards/dev-loop-modules.md` = module-specific traps/sensitive map (hand-maintained + loop append); `LEARN.jsonl` = raw outcome audit log.
 
 ### cxin reference (研发 Loop target workspace)
@@ -437,8 +436,6 @@ lib/
     dev-loop/               the one evolving Loop — a USER of the engine (design §7); behavior ships as static template files
       install.ts            create/ensureDevLoopDefinition — cp template/ into loops/dev-loop/ (errorOnExist + rollback); idempotent
       template/             the source of truth: LOOP.md (thin dispatcher) + LEARN.md (inline learn spec) + agents/{selector,brainstorm,writing-plans,implementer,reviewer,verifier}.md + loop.yaml + LEARN.jsonl (no STATE.md, no generators)
-    learn/                  dev-loop learn = qualitative KB transfer (calibration machinery removed)
-      knowledge.ts          PURE OKF learning-note formatter (learningNotePath/formatLearningNote; author:loop; anti-pollution: always new file)
   subagent/
     extension.ts            `subagent` tool (single/parallel) + project-agent approval gate
     worker.ts               spawn real child AgentSessions; stream usage + display trail
