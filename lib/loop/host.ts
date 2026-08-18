@@ -1,4 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { DefaultLoopRuntime } from "./runtime.ts";
 import { PiRoundExecutionBackend } from "./pi-execution.ts";
 import { LoopHostScheduler } from "./scheduler.ts";
@@ -7,7 +10,8 @@ import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./sto
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { findWorkItemByConversation } from "../work-items/service.ts";
-import { getRpcSession, type AgentSessionWrapper } from "../rpc-manager.ts";
+import { getRpcSession, getRunningRpcSessionIds, startRpcSession, type AgentSessionWrapper } from "../rpc-manager.ts";
+import { resolveSessionPath } from "../session-reader.ts";
 import type { TriggerCommand } from "./types.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -106,6 +110,76 @@ export function createLoopHost() {
       if (request.method === "GET" && loops) {
         return json(response, 200, { loops: await runtime.listLoops(decodeURIComponent(loops[1])) });
       }
+      // ---- Session-daemon surface (C2 Phase 1) -------------------------------
+      // The host is being promoted to THE single session-owning process. These
+      // routes mirror Pi Web's /api/agent routes so the web layer can become a
+      // pure proxy (Phase 2) and drop its own session registry (Phase 3).
+      // NOTE: must be matched BEFORE the /v1/sessions/:id probe regex — "running"
+      // would otherwise be treated as a session id.
+      if (request.method === "GET" && url.pathname === "/v1/sessions/running") {
+        // Registry is keyed by real session id and contains interactive
+        // sessions, subagent children AND loop orchestrators alike — so this
+        // single set is the complete "what is running" answer for the whole
+        // process (the web-side loop-badge merge hack becomes unnecessary).
+        return json(response, 200, { ids: getRunningRpcSessionIds() });
+      }
+      if (request.method === "POST" && url.pathname === "/v1/sessions") {
+        const input = await body(request) as {
+          cwd?: string;
+          provider?: string;
+          modelId?: string;
+          toolNames?: string[];
+          thinkingLevel?: string;
+          command?: { type: string; [key: string]: unknown };
+        };
+        if (!input.cwd || typeof input.cwd !== "string") {
+          return json(response, 400, { error: "cwd is required" });
+        }
+        if (!existsSync(input.cwd)) {
+          return json(response, 400, { error: `Directory does not exist: ${input.cwd}` });
+        }
+        // One-time key so startRpcSession's start-lock never coalesces two
+        // concurrent creates onto one session (mirrors /api/agent/new).
+        const tempKey = `__new__${randomUUID()}`;
+        const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, input.toolNames);
+        if (input.provider && input.modelId) {
+          await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
+        }
+        if (input.thinkingLevel) {
+          await session.send({ type: "set_thinking_level", level: input.thinkingLevel });
+        }
+        const data = input.command ? await session.send(input.command) : null;
+        return json(response, 200, { success: true, sessionId: realSessionId, cwd: session.cwd, data });
+      }
+      const sessionCommand = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/commands$/);
+      if (request.method === "POST" && sessionCommand) {
+        const sid = decodeURIComponent(sessionCommand[1]);
+        const command = await body(request) as { type?: string };
+        if (typeof command?.type !== "string") {
+          return json(response, 400, { error: "command.type is required" });
+        }
+        // Loop orchestrators are driven exclusively through gate answers —
+        // reject direct commands exactly like the web route does today.
+        if (execution.getBySessionId(sid)) {
+          return json(response, 409, {
+            error: "This session is owned by the Loop Host. Interact via the Loop run gate, not direct messages.",
+          });
+        }
+        // Live session (interactive / subagent child) first, then cold-start
+        // from the .jsonl on disk — the same revive semantics /api/agent/[id]
+        // POST implements in the web process.
+        const live = findLiveSession(sid);
+        if (live) {
+          return json(response, 200, { success: true, data: await live.send(command) });
+        }
+        const filePath = await resolveSessionPath(sid);
+        if (!filePath) return json(response, 404, { error: "Session not found" });
+        const header = SessionManager.open(filePath).getHeader();
+        const cwd = header?.cwd ?? process.cwd();
+        const { session } = await startRpcSession(sid, filePath, cwd);
+        return json(response, 200, { success: true, data: await session.send(command) });
+      }
+      // ---- End session-daemon surface ---------------------------------------
       if (request.method === "POST" && url.pathname === "/v1/triggers") {
         return json(response, 202, await runtime.trigger(await body(request) as TriggerCommand));
       }

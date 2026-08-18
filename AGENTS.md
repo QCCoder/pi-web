@@ -429,7 +429,9 @@ lib/
     store.ts                loop.yaml / RUNS.jsonl read+append, validation
     authoring.ts            create/update/delete loop definitions (writes files in the web process)
     scheduler.ts            cron evaluation + per-minute dedup (runs in the loop host only)
-    client.ts               loopHostClient — HTTP client to the loop host (PI_LOOP_URL)
+    client.ts               loopHostClient — HTTP client to the loop host / session daemon (PI_LOOP_URL): loop mgmt + session-daemon surface (createSession/sendSessionCommand/runningSessionIds)
+  session-daemon/                   sidecar lifecycle for the session daemon (C2)
+    sidecar.ts               ensureSessionDaemonStarted (probe→attach / spawn detached) + pure guards (decideSidecarAction, spawnableDaemonUrl, sidecarSpawnEnv)
     workspace-resolver.ts   PiWorkspaceResolver (lists loop-capable workspaces)
     web.ts                  error → HTTP mapping
     dev-loop/               the one evolving Loop — a USER of the engine (design §7); behavior ships as static template files
@@ -578,6 +580,19 @@ bundles** of the workspace and merges results.
 
 ### Subagent is global, not a workspace capability
 The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs`.
+
+### The session daemon (C2 redesign): one process owns every AgentSession
+
+The loop host process (`npm run loop` → `bin/pi-loop.js` → `lib/loop/host.ts`) is being promoted from "loop engine container" to **THE single session-owning daemon**. Motivation: the old split — web process and loop host each holding AgentSessions, with the UI needing to answer "who owns session X" in six places (state probe, pin/reprobe, client-side badge merge, host probe, locate bypass, reducer promotion) — accreted a patch cluster that this redesign eliminates at the source. Strangler phases:
+
+- **Phase 0 (done)**: all outbound/inbound channels removed (feishu/wecom/notify/exporters). The daemon surface is now purely sessions + loop + importer.
+- **Phase 1 (done)**: daemon command surface + sidecar lifecycle (below). Web routes still own interactive sessions locally — nothing flipped yet.
+- **Phase 2**: flip `/api/agent/new`, `/api/agent/[id]` (GET/POST), `/api/agent/[id]/events`, and the session lifecycle routes to pure proxies over the daemon client. The pin/reprobe/loop-badge-merge hacks retire here. The web proxy for create-session must call `allowFileRoot(cwd)` with the daemon's returned cwd (the files/git routes' allow-list lives in the web process).
+- **Phase 3**: delete the web-side session registry (`globalThis.__piSessions` usage in web); the probe-404-fallback double-writer race becomes structurally impossible.
+
+**Daemon command surface (host routes, `lib/loop/host.ts`)**: `POST /v1/sessions` (create + optional pre-selected model/thinking/tools + optional first command — mirrors `/api/agent/new` including the one-time `__new__<uuid>` key), `POST /v1/sessions/:id/commands` (generic passthrough to `wrapper.send` — ANY command incl. extension UI responses; orchestrators are 409, everything else live-or-cold-started exactly like `/api/agent/[id]` POST), `GET /v1/sessions/running` (`{ids}` — the registry is keyed by real session id and contains interactive sessions + subagent children + orchestrators, so this one set is the complete running answer), plus the pre-existing `GET /v1/sessions/:id` probe and `/v1/sessions/:id/events` SSE. Client methods: `loopHostClient.createSession/sendSessionCommand/runningSessionIds` (`lib/loop/client.ts`).
+
+**Sidecar lifecycle (`lib/session-daemon/sidecar.ts`)**: `ensureSessionDaemonStarted()` — probe `/health` (attach if healthy), else spawn `node bin/pi-loop.js` detached+unref'd and wait (≤15s) for health. Wired fire-and-forget from `instrumentation.ts` (`PI_SESSION_DAEMON_DISABLED=1` opts out). In-flight guard on `globalThis` dedupes concurrent callers and retries after failure. Guards: `spawnableDaemonUrl` refuses to spawn for non-local `PI_LOOP_URL` (a remote URL means the daemon is managed elsewhere); `sidecarSpawnEnv` translates `PI_LOOP_URL` → the child's `PI_LOOP_HOST`/`PI_LOOP_PORT` (explicit env wins) — without this a URL-only config spawns a daemon on the default port while the web polls the URL's port forever. Spawn races resolve quietly: the EADDRINUSE loser exits 0 (`bin/pi-loop.js`). The "web owns no unattended timers" rule is preserved — daemon timers live in the daemon process and survive web restarts; the web only ever re-attaches by port probe.
 
 ### Loop runs in its own process; the web server only manages + proxies
 `npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/gate are thin proxies over `loopHostClient`; only authoring writes files directly. A loop orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live. The host also runs **one sibling non-Loop system timer** alongside `LoopHostScheduler`: `ImporterScheduler` (inbound). (The old `LearnScheduler` was removed — dev-loop learn is now an inline orchestrator step writing to the knowledge base, not a host timer; `ExporterScheduler` was deleted with the outbound channels.) None of these touches the engine core or runs in the web server.

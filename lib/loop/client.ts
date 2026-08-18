@@ -3,6 +3,17 @@ import type { ImporterRunSummary } from "../importers/runner.ts";
 
 const baseUrl = () => (process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
 
+/** Input for the session-daemon create route — mirrors /api/agent/new's body
+ *  (cwd + optional pre-selection + optional first command). */
+export interface CreateSessionInput {
+  cwd: string;
+  provider?: string;
+  modelId?: string;
+  toolNames?: string[];
+  thinkingLevel?: string;
+  command?: { type: string; [key: string]: unknown };
+}
+
 /** Max wait for the Loop Host on graceful-degradation probes. The host is on
  *  localhost and answers in single-digit ms when healthy; if it cannot answer
  *  within this window it is effectively unavailable (event loop blocked by a
@@ -37,6 +48,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const loopHostClient = {
+  /** Session-daemon surface (C2 Phase 1): create a new session in the daemon
+   *  process. Response carries the real pi session id plus the session cwd so
+   *  the web proxy can sync its file-access allow-list. */
+  createSession: (input: CreateSessionInput) => request<{ success: boolean; sessionId: string; cwd: string; data: unknown }>("/v1/sessions", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  }),
+  /** Session-daemon surface: send any command to a session the daemon owns
+   *  (or revives from disk). Mirrors POST /api/agent/[id]. */
+  sendSessionCommand: (sessionId: string, command: { type: string; [key: string]: unknown }) =>
+    request<{ success: boolean; data: unknown }>(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(command),
+    }),
+  /** Session-daemon surface: the complete set of running session ids in the
+   *  daemon process (interactive sessions + subagent children + loop
+   *  orchestrators — the registry is keyed by real session id). */
+  runningSessionIds: () => request<{ ids: string[] }>("/v1/sessions/running"),
   listLoops: (workspaceId: string) => request<{ loops: LoopDefinition[] }>(
     `/v1/workspaces/${encodeURIComponent(workspaceId)}/loops`,
   ),
