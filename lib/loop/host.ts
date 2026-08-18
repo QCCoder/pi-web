@@ -6,8 +6,8 @@ import { PiWorkspaceResolver } from "./workspace-resolver.ts";
 import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./store.ts";
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
-import { ExporterScheduler } from "../exporters/scheduler.ts";
-import type { AgentSessionWrapper } from "../rpc-manager.ts";
+import { findWorkItemByConversation } from "../work-items/service.ts";
+import { getRpcSession, type AgentSessionWrapper } from "../rpc-manager.ts";
 import type { TriggerCommand } from "./types.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -27,7 +27,10 @@ function json(response: ServerResponse, status: number, value: unknown): void {
 
 /** Stream a Loop-owned orchestrator session's agent events to an HTTP
  *  client (Pi Web proxies this to the browser so a Loop session that lives in
- *  this process can be watched live). Mirrors the SSE shape Pi Web emits. */
+ *  this process can be watched live). Mirrors the SSE shape Pi Web emits.
+ *  The stream also ends when the session is destroyed (round terminal /
+ *  timeout / abort) — otherwise the browser-side pinned runtime would keep
+ *  `agentRunning` true forever with no `agent_end` ever arriving. */
 function serveSessionSse(request: IncomingMessage, response: ServerResponse, session: AgentSessionWrapper): void {
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -45,8 +48,10 @@ function serveSessionSse(request: IncomingMessage, response: ServerResponse, ses
   const cleanup = () => {
     clearInterval(heartbeat);
     unsubscribe();
+    offDestroy();
     try { response.end(); } catch { /* already ended */ }
   };
+  const offDestroy = session.onDestroy(cleanup);
   request.on("close", cleanup);
   request.on("error", cleanup);
 }
@@ -60,11 +65,37 @@ function errorStatus(error: unknown): number {
 
 export function createLoopHost() {
   const workspaces = new PiWorkspaceResolver();
-  const execution = new PiRoundExecutionBackend();
+  // Name an orchestrator session after the requirement its run picked: the
+  // orchestrator links itself to a work item by appending its session id to the
+  // item's `conversations` (per the dev-loop LOOP.md), so we resolve the title
+  // from that linkage. Returns undefined for runs that picked nothing (idle /
+  // park-all) -> those keep their default title.
+  const execution = new PiRoundExecutionBackend(async (workspacePath, sessionId) => {
+    const item = await findWorkItemByConversation(workspacePath, sessionId);
+    return item ? `(Loop) ${item.title}` : undefined;
+  });
+  /** Any live pi session in THIS host process: Loop orchestrators first
+   *  (authoritative, indexed by real session id), then the ordinary rpc
+   *  registry — which is where the subagent children an orchestrator spawns
+   *  live (worker.ts starts them via startRpcSession). Exposing both lets Pi
+   *  Web probe + SSE-proxy a RUNNING subagent child exactly like its
+   *  orchestrator; without this the child probe 404s and Pi Web would load the
+   *  .jsonl itself — a second writer racing the live child. */
+  const findLiveSession = (sid: string): AgentSessionWrapper | undefined => {
+    const orchestrator = execution.getBySessionId(sid);
+    if (orchestrator) return orchestrator;
+    const child = getRpcSession(sid);
+    return child?.isAlive() ? child : undefined;
+  };
+  const liveMeta = (session: AgentSessionWrapper) => ({
+    id: session.sessionId,
+    cwd: session.cwd,
+    sessionFile: session.sessionFile,
+    running: session.isRunning(),
+  });
   const runtime = new DefaultLoopRuntime(workspaces, execution);
   const scheduler = new LoopHostScheduler(runtime, workspaces);
   const importerScheduler = new ImporterScheduler();
-  const exporterScheduler = new ExporterScheduler();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -80,23 +111,25 @@ export function createLoopHost() {
       }
       // Session probe: Pi Web asks "do you own this session?" before falling
       // back to loading the .jsonl itself. Returns metadata + live state.
+      // Covers orchestrators AND their running subagent children (both live in
+      // this process).
       const sessionProbe = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
       if (request.method === "GET" && sessionProbe) {
         const sid = decodeURIComponent(sessionProbe[1]);
-        const meta = execution.getLiveSessionMeta(sid);
-        if (!meta) return json(response, 404, { error: "session not live in loop host" });
-        const session = execution.getBySessionId(sid);
+        const session = findLiveSession(sid);
+        if (!session) return json(response, 404, { error: "session not live in loop host" });
         let state: unknown;
-        try { state = session ? await session.send({ type: "get_state" }) : undefined; }
+        try { state = await session.send({ type: "get_state" }); }
         catch { state = undefined; /* session not ready yet */ }
-        return json(response, 200, { ...meta, state });
+        return json(response, 200, { ...liveMeta(session), state });
       }
       // Session event stream: Pi Web proxies this SSE so the browser can watch
-      // a Loop orchestrator session run live, exactly like a local session.
+      // a Loop orchestrator — or its running subagent child — live, exactly
+      // like a local session.
       const sessionEvents = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/events$/);
       if (request.method === "GET" && sessionEvents) {
         const sid = decodeURIComponent(sessionEvents[1]);
-        const session = execution.getBySessionId(sid);
+        const session = findLiveSession(sid);
         if (!session) return json(response, 404, { error: "session not live in loop host" });
         serveSessionSse(request, response, session);
         return;
@@ -133,13 +166,6 @@ export function createLoopHost() {
         const summary = await syncImporterForWorkspace(decodeURIComponent(importerSync[1]));
         return json(response, 200, { summary });
       }
-      // Exporter manual dispatch — a non-Loop system task. Drives Work Item
-      // events through the registered Exporters (FeishuNotifier) on demand.
-      const exporterDispatch = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/exporters\/dispatch$/);
-      if (request.method === "POST" && exporterDispatch) {
-        const summary = await exporterScheduler.runOnce(decodeURIComponent(exporterDispatch[1]));
-        return json(response, 200, { summary });
-      }
       return json(response, 404, { error: "route not found" });
     } catch (error) {
       console.error("[pi-loop] request failed:", error);
@@ -148,7 +174,7 @@ export function createLoopHost() {
       });
     }
   });
-  return { server, scheduler, runtime, importerScheduler, exporterScheduler };
+  return { server, scheduler, runtime, importerScheduler };
 }
 
 export async function startLoopHost(options: { host?: string; port?: number } = {}): Promise<void> {
@@ -162,12 +188,20 @@ export async function startLoopHost(options: { host?: string; port?: number } = 
   });
   app.scheduler.start();
   app.importerScheduler.start();
-  app.exporterScheduler.start();
+  // Reap ghost gates: runs paused at a gate whose orchestrator `.jsonl` was
+  // archived/removed (e.g. an idle-timed-out session whose file later got
+  // archived) can never be resumed. Mark them failed so the UI stops offering a
+  // dead gate. Runs whose file is still live are left for transparent rehydrate.
+  try {
+    const reaped = await app.runtime.reapOrphanedGates();
+    if (reaped > 0) console.log(`[pi-loop] reaped ${reaped} orphaned gate run(s)`);
+  } catch (error) {
+    console.error("[pi-loop] orphan-gate reap failed:", error);
+  }
   console.log(`[pi-loop] listening on http://${host}:${port}`);
   const stop = () => {
     app.scheduler.stop();
     app.importerScheduler.stop();
-    app.exporterScheduler.stop();
     app.server.close(() => process.exit(0));
   };
   process.once("SIGINT", stop);

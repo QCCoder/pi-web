@@ -2,11 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MarkdownBody } from "./MarkdownBody";
-import { FeishuConfig } from "./FeishuConfig";
 import { ImporterConfig } from "./ImporterConfig";
-import { NotifyConfig } from "./NotifyConfig";
 import { LoopConfig } from "./LoopConfig";
-import { FeishuChannelPanel } from "./FeishuChannelPanel";
 import type {
   WorkspaceCapability,
   WorkspaceRepositoryState,
@@ -1231,11 +1228,6 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
-                    <FeishuConfig
-                      workspace={selectedWorkspace}
-                      onWorkspaceChanged={() => void loadWorkspaces()}
-                    />
-                    <NotifyConfig workspace={selectedWorkspace} />
                     <ImporterConfig
                       workspace={selectedWorkspace}
                       onWorkspaceChanged={() => void loadWorkspaces()}
@@ -1248,10 +1240,6 @@ export function WorkspaceManager({
                         void loadWorkspaces();
                         onWorkspaceChanged?.();
                       }}
-                    />
-                    <FeishuChannelPanel
-                      workspace={selectedWorkspace}
-                      onRefresh={loadWorkspaces}
                     />
                     {selectedWorkspace.capabilities.includes("repositories") && (
                     <section className="repository-section">

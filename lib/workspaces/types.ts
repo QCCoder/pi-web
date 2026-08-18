@@ -8,12 +8,9 @@ export type WorkspaceCapability =
   | "knowledge"
   | "overview"
   | "workflows"
-  | "feishu-transport"
   | "requirement-sources"
-
   | "loop"
-  | "subagent"
-  | "feishu-channel";
+  | "subagent";
 export type WorkspaceRepositoryKind = "code" | "knowledge";
 export type WorkspaceRepositoryStatus = "active" | "removed";
 

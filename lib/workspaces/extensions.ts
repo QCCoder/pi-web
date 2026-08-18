@@ -1,6 +1,5 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceWorkItemExtension } from "../work-items/extension.ts";
-import { createFeishuTransportExtension } from "../feishu/extension.ts";
 import { effectiveCapabilities, workspaceRepositoryPath } from "./service.ts";
 import type { KnowledgeRepoRef } from "./kb-search/index.ts";
 import { createKbSearchExtension } from "./kb-search/extension.ts";
@@ -13,7 +12,7 @@ import type { WorkspaceCapability, WorkspaceManifest } from "./types.ts";
  *
  * This is the "module" abstraction for tool-providing modules:
  *   module = capability (manifest toggle) + extension (tools) + config UI.
- * Server-side modules (loop, feishu-channel) are not extensions; they are
+ * Server-side modules (loop) are not extensions; they are
  * background services gated by the same capabilities.
  */
 export interface WorkspaceExtensionFactory {
@@ -39,10 +38,6 @@ export const WORKSPACE_EXTENSION_FACTORIES: readonly WorkspaceExtensionFactory[]
     capability: "work-items",
     build: (manifest, workspacePath) =>
       createWorkspaceWorkItemExtension(manifest.id, workspacePath),
-  },
-  {
-    capability: "feishu-transport",
-    build: (manifest) => createFeishuTransportExtension(manifest),
   },
   {
     // knowledge capability carries BOTH always-on L0 (agent read/grep/ls, no tool)

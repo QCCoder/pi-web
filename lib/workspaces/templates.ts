@@ -19,9 +19,9 @@ export const DEFAULT_GIT_SETTINGS: WorkspaceGitSettings = {
 export const MANDATORY_CAPABILITIES = ["sessions", "explorer"] as const;
 
 /** The capabilities offered as toggleable checkboxes when creating a workspace.
- *  Per redesign §6.2 this intentionally excludes `overview`, `feishu-transport`,
- *  `feishu-channel`, `subagent`, and `workflows` — those exist as legal capabilities
- *  (and stay toggleable via PATCH), but are not surfaced in the init checklist. */
+ *  Per redesign §6.2 this intentionally excludes `overview`, `subagent`, and
+ *  `workflows` — those exist as legal capabilities (and stay toggleable via
+ *  PATCH), but are not surfaced in the init checklist. */
 export const INIT_CAPABILITY_CHECKLIST: readonly WorkspaceCapability[] = [
   "repositories",
   "knowledge",

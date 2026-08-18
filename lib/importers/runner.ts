@@ -136,7 +136,7 @@ export async function runImporterForWorkspace(
       // is exactly what polluted REQ-0012's timeline (35 identical rows). The run
       // summary still counts it as `synced` so the report is informative; the
       // one-time `imported:created` provenance row from the first import stays.
-      // Nothing consumes `imported:synced` (the exporter only reacts to
+      // Nothing consumes `imported:synced` (timeline consumers only react to
       // work_item.updated), so dropping it is behavior-safe.
       summary.synced += 1;
       summary.details.push({ sourceId: item.sourceId, kind: item.kind, action: "synced", key: existing.key });

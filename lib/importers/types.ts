@@ -50,7 +50,7 @@ export interface Importer {
   getAttachment(fileId: string): Promise<Attachment>;
 }
 
-// ---- Credential shapes (mirror lib/feishu/types.ts) ------------------------
+// ---- Credential shapes ------------------------------------------------------
 
 /** Per-workspace Chandao REST credentials. Stored outside the workspace dir
  *  (under the global pi agent dir) because the password is sensitive and

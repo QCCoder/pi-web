@@ -2,7 +2,7 @@
 
 Pi Web is a web UI for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent). It runs a Next.js
 server that owns **AgentSessions in-process**, plus a **Workspace** subsystem (manifest/capability/repositories,
-work-items, loop, subagent, git/changes, feishu) layered on top.
+work-items, loop, subagent, git/changes) layered on top.
 
 > **Read this first when changing the project.** It documents the *current baseline* code. When you add or change a
 > module, update the corresponding section here so the next person doesn't reinvent it (see
@@ -34,7 +34,7 @@ Browser                Next.js Server                AgentSession (in-process)
   │  │ manifest .pi/workspace.yaml      │                    │
   │  │ capabilities → extensions        │                    │
   │  │ repositories / work-items /      │                    │
-  │  │ loops / feishu-channel           │                    │
+  │  │ loops / work-items            │                    │
   │  └──────────────┬───────────────────┘                    │
   │                 │                                          │
   ├─ GET /api/sessions ──────▶ reads ~/.pi/agent/sessions/    │
@@ -52,7 +52,7 @@ Browser                Next.js Server                AgentSession (in-process)
 
 - **Session browsing** (read-only): reads `.jsonl` files via SDK `SessionManager` helpers and `lib/session-reader.ts` — no AgentSession is created.
 - **Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` creates an AgentSession in-process. At creation it resolves the enclosing **Workspace** (if any) and attaches that workspace's extensions + skills + AGENTS.md.
-- **Workspace management**: `app/api/workspaces/**` reads/writes `~/.pi/workspaces/**` and `~/.pi/workspace.yaml` (the global index). Capability edits, repository add/remove, work-item CRUD, loop authoring, and feishu config all flow through this surface.
+- **Workspace management**: `app/api/workspaces/**` reads/writes `~/.pi/workspaces/**` and `~/.pi/workspace.yaml` (the global index). Capability edits, repository add/remove, work-item CRUD, loop authoring) all flow through this surface.
 
 ---
 
@@ -108,14 +108,16 @@ repository `kind` to a first-class capability — redesign decision 4, type laye
 
 ```
 sessions, explorer, work-items, repositories, knowledge, overview, workflows,
-feishu-transport, requirement-sources, loop, feishu-channel
+requirement-sources, loop
 ```
+
+(Retired channel capabilities — `feishu-transport`, `feishu-channel`, `wecom-channel` — were removed together with their modules; `parseCapabilities` silently strips them from legacy manifests, so old workspaces keep loading and self-heal on the next save.)
 
 - **`effectiveCapabilities(manifest)`** = `manifest.capabilities` if present, else the matching built-in template's set
   (by id **and** version), else `["sessions", "explorer"]`. Legacy manifests without a cached `capabilities` snapshot
   are derived from the template lookup.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
-- **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `feishu-transport` → feishu send tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below). **`feishu-channel`** is a service module, not an extension (see Feishu).
+- **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below).
 - **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by effective capabilities. `lib/rpc-manager.ts` always attaches `createSubagentExtension(...)` globally, then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
 
 ### AGENTS.md auto-management (managed segments)
@@ -172,6 +174,13 @@ Mobile: the Activity Bar becomes a **bottom tab bar** (`variant="horizontal"`); 
 the focus area. **Don't reintroduce stacked sections** — a new module gets an Activity Bar icon (register it in
 `ACTIVITY_VIEW_ORDER` + `visibleActivityViews`), not a new collapsible group.
 
+**Desktop sidebar is drag-resizable.** The width is a CSS var (`--pi-sidebar-width`, default `260px`) set inline on
+`.sidebar-container` from `AppShell`'s `sidebarWidth` state; a thin `.sidebar-resize-handle` strip (sibling of the
+container, desktop + open only) drives it via `onMouseDown` window listeners. Width persists in `localStorage`
+(`pi-sidebar-width`), clamped `[200, 560]`; double-click the handle resets to 260. Mobile keeps a fixed 280px drawer
+(its CSS overrides the var, and the handle isn't rendered). During drag a `sidebar-resizing` class disables the
+open/close `width` transition so it tracks the cursor instantly.
+
 ### Work Items (`lib/work-items/`)
 
 File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage under
@@ -206,18 +215,39 @@ Per-loop files under `<workspace>/loops/<loopId>/`: `loop.yaml` (definition: tri
 Round lifecycle (`runtime.ts` + `pi-execution.ts`):
 1. **trigger** (`host.ts`) — dedups by `(workspace, loop, eventId)`; cron triggers fire from `LoopHostScheduler`
    (30s tick, per-minute slot dedup).
-2. **infer** — starts an orchestrator AgentSession (rpc key `__loop_host__${run.id}`), injects the loop's own `agents/`
-   dir as trusted subagent source, asks for a JSON maker/checker plan.
-3. `L1/L2` → `waiting_for_confirmation` (human approves/rejects the plan); `L3` → auto-execute.
-4. **execute** — runs the plan, delegating each maker/checker step to the `subagent` tool when available (else inline,
-   but producer and verifier are always separate). In-round gates pause on `LOOP_GATE: <decision>`; monitors emit
-   `LOOP_VERDICT: changed|unchanged|unknown`.
+2. **startRound** (`pi-execution.ts`) — starts an orchestrator AgentSession (rpc key `__loop_host__${run.id}`), injects
+   the loop's own `agents/` dir as trusted subagent source, runs `LOOP.md` as the first prompt. The whole turn (many
+   tool/LLM round-trips, incl. subagent delegation) is one `capturePrompt`, bounded by a **30-min timeout**
+   (`RUN_TIMEOUT_MS`, `unref`'d) that rejects → run `failed`. Mid-turn the orchestrator emits `LOOP_GATE: <payload>`
+   to pause for a human, or `LOOP_VERDICT: <conclusion>` (free text) to end.
+3. **gate** — `LOOP_GATE:` → run `waiting_for_gate` (orchestrator session kept alive in-memory across the pause). A
+   free-text answer (`answerGate`) resumes the same session via `resumeRound`. The session is **file-backed**: if the
+   in-memory wrapper expired (rpc-manager's 10-min idle timeout) or the host restarted while paused, `resumeRound`
+   **rehydrates** it from its `.jsonl` (`resolveSessionPath` + `startRpcSession`) so the gate continues transparently.
+   Only an archived/missing file is unrecoverable (→ run `failed`).
+4. **heartbeat** — a long round sits in `running` with no status transition for many minutes (subagent trace, slow
+   model), which looks frozen in the UI. `capturePrompt` emits a throttled (60s) `onProgress` hint; the runtime turns
+   each into a `progress`-field snapshot (`LoopRun.progress`, e.g. `tool: bash` / `subagent: brainstorm`) so the run
+   card's `updatedAt` advances. Snapshot appends are **serialized per run** (`runtime.writeSnapshot`) so a
+   fire-and-forget heartbeat cannot overtake the terminal snapshot. `progress` is cleared on terminal.
+5. **reap orphaned gates** (`runtime.reapOrphanedGates`, called at host startup) — every `waiting_for_gate` run whose
+   orchestrator `.jsonl` is gone from the live sessions dir (archived/removed) is marked `failed`; runs whose file is
+   still live are left alone (they rehydrate on the next answer). This is the only recovery for a gate whose session
+   was archived out from under it (e.g. archive-cascade on a linked work item).
 
 The web layer: `/api/workspaces/[id]/loop/**` calls `loopHostClient` (`loop/client.ts`, `PI_LOOP_URL`) for
 list/trigger/run/gate, and `lib/loop/authoring.ts` for create/update/delete (which writes `loop.yaml`/`LOOP.md`/agents
 **directly in the web process**). The web server also **probes** the loop host for live orchestrator sessions
 (`/v1/sessions/:id`) and **proxies their SSE** so a Loop run can be watched in the browser even though the session
 lives in the loop process.
+
+**Orchestrator session titles.** Every orchestrator session is seeded with the same generic bootstrap prompt, so
+without intervention they all share an identical title. The host fixes this with an injected `sessionNamer` seam:
+after a round settles, `PiRoundExecutionBackend` asks the namer for a title and renames a still-unnamed session. The
+host's namer (`findWorkItemByConversation`) resolves the requirement a dev-loop run picked by scanning work items
+whose `conversations` includes the orchestrator's session id (the dev-loop LOOP.md appends it on selection) and
+returns `(Loop) <title>`. Runs that pick nothing (idle / park-all) keep their default title. The engine stays
+domain-agnostic — it just calls the host-provided callback and never imports work-items code itself.
 
 ### Subagent (`lib/subagent/`)
 
@@ -251,48 +281,24 @@ Only streamed status + final result return to the parent; the full child run is 
   scope; `ChangesPanel` itself is unchanged. Tab choice persists in `localStorage` key `pi-explorer-tab:<wsId>`;
   non-git directories hide the "改动" tab. `SessionSidebar` keeps its own standalone Changes section.
 
-### Feishu (`lib/feishu/`, `lib/feishu-channel/`)
-
-Two modules sharing **one Feishu app per workspace**. Credentials live outside the workspace dir (workspaces are often
-git repos) at `~/.pi/agent/feishu/<workspaceId>.json` (mode `0600`).
-
-- **feishu-transport** (capability + **extension**): outbound tools `feishu_send_message` / `feishu_send_card`.
-  Degrades to a clear message when credentials are missing.
-- **feishu-channel** (capability + **service module**, not an extension): inbound 1:1 DM bot over a Feishu WebSocket
-  long-connection. 1 app ↔ 1 workspace; 1 chat ↔ 1 long-lived pi session (`/new` starts fresh). **pi-web is the single
-  session owner** — the router (`feishu-channel/router.ts`) reuses `startRpcSession`, never spawns its own. Handles
-  live on `globalThis.__piFeishuChannels` and are **booted at server start** by `instrumentation.ts`
-  (`ensureAllFeishuChannelsStarted`) for every workspace with the capability + credentials. Chat↔session bindings are
-  persisted at `~/.pi/agent/feishu-channel/<workspaceId>/bindings.json`.
-- Capability toggles and credential writes both re-sync the channel (`ensureFeishuChannelStarted` / `restartFeishuChannel`).
-
 ### Importer (`lib/importers/`)
 
-**Inbound work-item source adapter** (design: `docs/autonomous-dev-loop.md`). The first (and currently only) adapter is **Chandao (禅道)**. This is the P0+P1 slice; the dev Loop / evolution / Exporter are later cycles and **not** here.
+**Inbound work-item source adapter** (design: `docs/autonomous-dev-loop.md`). The first (and currently only) adapter is **Chandao (禅道)**. This is the P0+P1 slice; the dev Loop / evolution are later cycles and **not** here.
 
-- **Capability**: `requirement-sources` (registered in `ALL_WORKSPACE_CAPABILITIES`; toggled per-workspace, NOT in the init checklist — like `feishu-transport`). It gates the config UI + the cron runner. It is **not** an LLM extension (the runner is deterministic I/O, no tools).
+- **Capability**: `requirement-sources` (registered in `ALL_WORKSPACE_CAPABILITIES`; toggled per-workspace, NOT in the init checklist). It gates the config UI + the cron runner. It is **not** an LLM extension (the runner is deterministic I/O, no tools).
 - **Importer SPI** (`types.ts`): `listAssigned/getDetail/getAttachment` — the deep-module seam hiding REST+token+image-binary behind three methods. Swapping Chandao for Jira changes one adapter, not the runner.
 - **`ChandaoImporter`** (`chandao-importer.ts`): REST+Token (`POST /api.php/v1/tokens`, **not** the web-login md5 flow). Token cached in-memory, **re-signed once on 401** via account+password. Field differences hidden (bug `steps` vs task `desc`; task list title is `name`). `fetch` is injectable for tests.
-- **Credentials** (`config.ts`): `~/.pi/agent/importers/<workspaceId>.json` (mode `0600`), mirroring `lib/feishu/config.ts`; `toPublicConfig` never leaks password/token. Shape `{chandao:{base,account,password,token?,assignee,productId,executionId}}`.
+- **Credentials** (`config.ts`): `~/.pi/agent/importers/<workspaceId>.json` (mode `0600`); `toPublicConfig` never leaks password/token. Shape `{chandao:{base,account,password,token?,assignee,productId,executionId}}`.
 - **Images** (`images.ts`, pure): `extractChandaoFileIds` / `rewriteChandaoImageSources` / `detectImageExt` (magic-byte sniffing). The runner downloads each `fileID` via `GET /api.php/v1/files/{id}` and rewrites README `<img src>` to a relative `attachments/<kind>-<id>.<ext>` so the work item renders offline and travels into git.
 - **Runner** (`runner.ts`): `syncImporterForWorkspace(id)` is the deep-module seam hiding pull→dedup→create→localize-images→event. Per item: dedup by `external.source:sourceId`; not-exists→create (bug→`BUG-####`, task→`REQ-####`, KEY from `manifest.work_items.next{Bug,Requirement}Number`), download+persist images, append `imported` milestone; exists&open→`imported` sync heartbeat; archived→skip. Per-item errors recorded, never abort the run. **Deterministic I/O — never delegated to an LLM.**
 - **Work-item `external` field**: `WorkItemExternalRef {source, sourceId, url?, lastSyncedAt}` added as an **optional** field on `WorkItemRecord`/`CreateWorkItemInput` (design §4/§5). Serialized as a snake_case `external:` block in `item.yaml`. Stamped at creation by the Importer only; the LLM work-item tools don't touch it. The dedup key.
 - **Runner lives in the loop host, NOT the web server**: `ImporterScheduler` (`scheduler.ts`) is a **non-Loop system timer** (30min) in the loop host process — a sibling of `LoopHostScheduler`, independent of the Loop engine. **`instrumentation.ts` is untouched** (web server holds no timers — design §5). The host also exposes `POST /v1/workspaces/:id/importers/sync` for manual/webhook.
 - **Web manual sync** (`app/api/workspaces/[id]/importers/sync/route.ts`): forwards to the host; **falls back to an in-process run if the host is down** (a one-shot sync is not a timer, so this does not violate "web owns no timers").
-- **Config UI**: `components/ImporterConfig.tsx` (mirrors `FeishuConfig.tsx`: capability toggle + credential form + "测试连接"), mounted in `WorkspaceManager`.
+- **Config UI**: `components/ImporterConfig.tsx` (capability toggle + credential form + "测试连接"), mounted in `WorkspaceManager`.
 
-### Exporter (`lib/exporters/`)
+### 对外通知渠道（已移除）
 
-**Outbound work-item event adapter** (design §6; P3). The symmetric counterpart to the Importer: where Importers materialize third-party items *into* work items, Exporters react to work-item lifecycle events and push *out* to channels. The dev Loop is **channel-blind** — it only writes work-item phase/event changes; notifications are 100% event-driven (§6 "触发即消息"). **Multi-channel with priority**: each workspace picks a delivery `mode` and an ordered, toggleable channel list (`lib/notify/`); the dispatcher honors it.
-
-- **Notify config** (`lib/notify/config.ts`): the single source of truth for HOW a workspace pushes — `{ mode: "failover"|"all", channels: [{kind, enabled, priority, webhook?}] }` at `~/.pi/agent/notify/<wsId>.json` (0600). **Secrets stay separate**: Feishu app/appSecret remain in `lib/feishu/config.ts`; only the WeCom webhook (non-app-credential) lives here, masked in the public projection. Default = failover, feishu on, **wecom off** (so a Feishu-only workspace keeps its exact prior behavior). `mergeNotifyConfig` is the PUT semantics — an absent/empty `webhook` keeps the stored value (the UI only ever holds the masked form), mirroring Feishu's appSecret rule.
-- **Exporter SPI** (`types.ts`): `onWorkItemEvent(context, event, item): Promise<ExporterOutcome>` — the deep-module seam hiding "work-item event → any channel" behind one method. The outcome `{delivered, skipped?, error?}` lets the dispatcher drive failover + the watermark (a void return is not enough — failover must know whether a channel *actually sent*). `FeishuNotifier` and `WeComNotifier` are the two impls; a future `ChandaoWriteback`/`EmailNotifier` implements the same interface.
-- **Shared notify logic** (`notify-rules.ts`, pure + tested): `shouldNotify(event, item)` (only phase→`verification`/`complete` and status→`blocked` qualify) + `renderNotifyBody(reason, item)` (the channel-agnostic Markdown body). `feishu-format.ts` now only wraps that body into a Feishu card (color template); `WeComNotifier` sends the same Markdown via the webhook.
-- **`FeishuNotifier`** (`feishu-notifier.ts`): reads `readFeishuConfig` per event; returns `skipped` when no app is configured (cxin today), `delivered` on send success, `{delivered:false, error}` on send failure (so failover can move on / retry).
-- **`WeComNotifier`** (`wecom-notifier.ts`): 企业微信群机器人 webhook (`lib/wecom/client.ts`) — the simplest outbound surface (one URL, POST markdown, no app/secret). Self-skips when WeCom is disabled or has no webhook.
-- **Dispatcher** (`dispatcher.ts`): the deep seam hiding "scan all work-items' `events.jsonl` → dedup by ULID event id → drive each event through the ordered Exporters". Two modes: `all` (fan-out, every channel) and `failover` (try in priority order, **stop at the first `delivered`**). **Watermark contract**: an event is advanced past only when it is *settled* — some channel delivered, or every channel intentionally `skipped`; if some channel errored and nothing delivered, the event is *held* (head-of-line block) so it retries next tick without being lost and without re-sending anything that already went out. `selectEventsSince` + the per-event loop are pure/tested; idempotent (re-run with the persisted watermark dispatches nothing).
-- **`ExporterScheduler`** (`scheduler.ts`): a **non-Loop host timer** (60s), sibling of `ImporterScheduler`. `buildExporters(notifyConfig)` turns the ordered enabled channels into exporter instances (priority order preserved for failover); the scheduler passes `notifyConfig.mode` to the dispatcher. Persists a per-workspace event-id watermark under `<workspace>/.pi/cache/exporter-watermark.json`. Web holds no timers. Host route `POST /v1/workspaces/:id/exporters/dispatch` for manual dispatch. Config changes take effect on the next tick (read fresh each run) — no restart needed.
-- **Web routes**: `GET/PUT/DELETE /api/workspaces/[id]/notify` (read masked / patch-merge / reset-to-default) + `POST .../notify/test` (send a test message through `feishu` or `wecom`, no agent involved). UI: `components/NotifyConfig.tsx` (mode radio, per-channel enable + ↑/↓ priority reorder, WeCom webhook field, per-channel test), mounted in `WorkspaceManager` right after `FeishuConfig`.
+Feishu (`lib/feishu/` + `lib/feishu-channel/`)、企微 (`lib/wecom-channel/` + `lib/wecom/`)、多通道通知 (`lib/notify/` + `lib/exporters/`) 已全部删除（2025 清场决策：pi-web 不再有任何对外通信渠道，为 session-daemon 化准备）。三个 capability 值保留在 `RETIRED_CAPABILITIES` 里惰性剔除；磁盘上残留的凭证文件（`~/.pi/agent/feishu|notify|feishu-channel|wecom-channel/`）无代码引用，可手动清理。git 历史可找回全部实现。
 
 ### Dev Loop (`lib/loop/dev-loop/`)
 
@@ -318,7 +324,7 @@ git repos) at `~/.pi/agent/feishu/<workspaceId>.json` (mode `0600`).
 ### cxin reference (研发 Loop target workspace)
 
 - **dev Loop instance**: `~/.pi/workspaces/workspace-c/loops/dev-loop/` (autonomy-free engine; manual + weekday cron triggers). Sensitive module list + module→repo map: `cargo-knowledge/standards/dev-loop-modules.md` (Phase-0 artifact, §8). Generalizable process lessons append to `cargo-knowledge/learnings/` (one back-filled note seeded from the REQ-0012 run).
-- **Host wiring**: `createLoopHost()` starts **two** sibling non-Loop timers — `ImporterScheduler`, `ExporterScheduler` — alongside `LoopHostScheduler`. (The old `LearnScheduler` was removed — learn is now an inline orchestrator step, not a host timer.) None runs in the web server (`instrumentation.ts` untouched).
+- **Host wiring**: `createLoopHost()` starts **one** sibling non-Loop timer — `ImporterScheduler` — alongside `LoopHostScheduler`. (The old `LearnScheduler` and `ExporterScheduler` were removed — learn is now an inline orchestrator step, and the outbound exporters were deleted with the channel cleanup.) None runs in the web server (`instrumentation.ts` untouched).
 
 ### Workspace directory layout (reference)
 
@@ -339,9 +345,7 @@ git repos) at `~/.pi/agent/feishu/<workspaceId>.json` (mode `0600`).
   agent/                                 (~/.pi/agent)
     sessions/<encoded-cwd>/*.jsonl
     agents/*.md                          user subagents
-    feishu/<workspaceId>.json            feishu credentials (0600)
-    notify/<workspaceId>.json           multi-channel notify config: mode + channel priority/enable + wecom webhook (0600)
-    feishu-channel/<workspaceId>/bindings.json
+    importers/<workspaceId>.json         chandao importer credentials (0600)
     subagent-children.txt                child session id registry
 ```
 
@@ -374,11 +378,6 @@ app/api/
   workspaces/[id]/loop/loops/[loopId]/trigger/route.ts  POST manual trigger
   workspaces/[id]/loop/runs/[runId]/route.ts     GET a run
   workspaces/[id]/loop/runs/[runId]/gate/route.ts  POST approve/reject gate
-  workspaces/[id]/feishu/route.ts                GET/PUT/DELETE feishu credentials
-  workspaces/[id]/feishu-channel/route.ts        GET status | POST restart
-  workspaces/[id]/feishu/test/route.ts           POST send a test message
-  workspaces/[id]/notify/route.ts                GET/PUT/DELETE multi-channel notify config (mode + channels priority, webhook masked)
-  workspaces/[id]/notify/test/route.ts           POST test one channel (feishu | wecom) end-to-end
   workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
   workspaces/[id]/importers/test/route.ts        POST test chandao connection (listAssigned)
   workspaces/[id]/importers/sync/route.ts        POST manual importer sync (forward to host / in-process fallback)
@@ -418,14 +417,14 @@ lib/
     id.ts                   ULID generator
   work-items/
     types.ts                WorkItemRecord / phases / events
-    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation
+    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation; findWorkItemByConversation (loop session naming)
     extension.ts            pi extension: list/get/create/update/record-milestone tools
     web.ts                  error → HTTP mapping
   loop/
     types.ts                LoopDefinition / LoopRun / LoopRuntime / RoundExecutionBackend
-    host.ts                 pi-loop HTTP host (createLoopHost/startLoopHost) — wires Importer+Exporter sibling timers
+    host.ts                 pi-loop HTTP host (createLoopHost/startLoopHost) — wires the Importer sibling timer; injects the orchestrator sessionNamer
     runtime.ts              DefaultLoopRuntime — lifecycle only (infer/execute/gate/fail)
-    pi-execution.ts         PiRoundExecutionBackend — drives the orchestrator session + subagent delegation; abort/timeout reaps orphaned round processes
+    pi-execution.ts         PiRoundExecutionBackend — drives the orchestrator session + subagent delegation; abort/timeout reaps orphaned round processes; optional host sessionNamer renames the orchestrator after a round
     process-cleanup.ts      reapOrphanedRoundProcesses — SIGTERM→SIGKILL bash/npm/mvn trees a destroyed session leaves behind (scoped by workspace cwd)
     store.ts                loop.yaml / RUNS.jsonl read+append, validation
     authoring.ts            create/update/delete loop definitions (writes files in the web process)
@@ -441,11 +440,6 @@ lib/
     worker.ts               spawn real child AgentSessions; stream usage + display trail
     agents.ts               discover agents (user / project / loop dirs), built-in "general"
     registry.ts             append-only child-id registry (~/.pi/agent/subagent-children.txt)
-  feishu/
-    extension.ts            feishu_send_message / feishu_send_card tools
-    client.ts               Feishu HTTP API client
-    config.ts               credential read/write (under ~/.pi/agent/feishu/, 0600)
-    types.ts                FeishuConfig / FeishuConfigPublic
   importers/                         requirement-sources inbound adapter (design: autonomous-dev-loop.md)
     types.ts                Importer SPI (listAssigned/getDetail/getAttachment) + config shapes
     config.ts               chandao credentials ~/.pi/agent/importers/<wsId>.json (0600)
@@ -454,30 +448,12 @@ lib/
     mapping.ts              PURE mapSourceKindToWorkItemType + buildExternalIndex (dedup)
     runner.ts               syncImporterForWorkspace — pull->dedup->work item->images->event (deep seam)
     scheduler.ts            ImporterScheduler — NON-Loop 30min system timer in the loop host
-  exporters/                         outbound work-item event adapter (design §6; symmetric to importers)
-    types.ts                Exporter SPI (onWorkItemEvent → ExporterOutcome) + DispatchMode + DispatchSummary
-    notify-rules.ts         PURE shouldNotify + renderNotifyBody (channel-agnostic decision + Markdown body)
-    feishu-format.ts        Feishu card wrapper — formatPhaseChangeCard + REASON_TEMPLATE (wraps notify-rules body)
-    feishu-notifier.ts      FeishuNotifier — phase/status → Feishu card (deterministic, no LLM; graceful skip)
-    wecom-notifier.ts       WeComNotifier — phase/status → 企业微信群机器人 webhook markdown
-    dispatcher.ts           readWorkspaceWorkItemEvents + PURE selectEventsSince + dispatchWorkspaceEvents (all|failover; watermark settle/hold contract)
-    scheduler.ts            ExporterScheduler — NON-Loop 60s host timer; buildExporters(notifyConfig); watermark in .pi/cache/
-  notify/                            multi-channel notify config (design §6)
-    config.ts               readNotifyConfig/mergeNotifyConfig/toPublicNotifyConfig/maskWebhook/orderedEnabledChannels — ~/.pi/agent/notify/<wsId>.json (0600)
-  wecom/                             企业微信群机器人 webhook client
-    client.ts               WeComClient — POST markdown/text to webhook (injectable fetch)
-    types.ts                WeComSendResult
-  feishu-channel/
-    manager.ts              long-connection lifecycle (globalThis.__piFeishuChannels), boot scan
-    long-connection.ts      Feishu WS long-connection (callback pings, reconnect backoff)
-    router.ts               inbound DM → pi session turn + reply (1 chat ↔ 1 session)
-    binding-store.ts        chat↔session bindings (~/.pi/agent/feishu-channel/<id>/bindings.json)
-    proto.ts / types.ts     Feishu event proto + module types
   git-changes.ts            getGitStatus (multi-repo groups) + getGitFileDiff (patch)
   git-status.ts             porcelain-v1 parse, status classify, buildRepoGroups (pure)
   git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index)
   git-types.ts              GitFileStatus / RepoGroup / response shapes
   session-reader.ts         SessionManager wrappers + path cache + buildSessionContext adapter
+  session-changed-files.ts  PURE deriveSessionChangedFiles — files written/edited in a session from the message stream (write/edit toolCalls + subagent displayItems; relative `file_path` args resolved against session cwd so openFile passes the /api/files allow-list; NOT git state; survives commits); isEditToolName consolidated here
   session-archive.ts        move .jsonl to/from .archived/ to hide/restore sessions
   archive-cascade.ts        work-item archive ↔ session archive bridge
   worktree.ts               project/worktree resolution (worktree→main repo) + git worktree ops
@@ -498,7 +474,7 @@ components/
   HomeLanding.tsx           the workspace picker / home screen
   ActivityBar.tsx           workspace Activity Bar — single-focus capability switcher (left icon strip on desktop / bottom tab bar on mobile); icon order sessions→explorer→repositories(code)→knowledge→loop→work-items
   WorkspaceSidebar.tsx      single-focus sidebar: ActivityBar (left) + one focused view (sessions / explorer / repositories(code-only) / knowledge / loop / work-items); explorer view has [ 文件 | 改动(N) ] tabs; archive + SettingsBar footer
-  WorkspaceManager.tsx      workspace create/import + settings modal (capabilities, skills, feishu)
+  WorkspaceManager.tsx      workspace create/import + settings modal (capabilities, skills)
   WorkspaceOverview.tsx     workspace landing view (recent sessions, work items, repos)
   WorkspaceTabBar.tsx       workspace switcher tabs (shortest-unique labels)
   SessionSidebar.tsx        in-workspace session tree + FileExplorer + Changes section
@@ -507,11 +483,9 @@ components/
   FileViewer.tsx            file content in a tab
   CapabilityToggle.tsx      the capability on/off switch used in settings panels
   LoopConfig.tsx            loop author/run/gate UI (+ LoopLaunchOverlay)
-  FeishuConfig.tsx          feishu-transport credential + test panel
-  NotifyConfig.tsx          multi-channel notify config (mode, per-channel enable + priority reorder, wecom webhook, per-channel test)
   ImporterConfig.tsx        requirement-sources (chandao importer) credential + test panel
-  FeishuChannelPanel.tsx    feishu-channel status + bindings panel
   ChatWindow.tsx            chat composition + completion sound wrapper
+  SessionChangedFiles.tsx   "本会话改动 N 个文件" toolbar button (right of the sound toggle in ChatInput) + slide-in drawer (desktop) / full-screen list (mobile); entries open the file via the openFile/file-tab pipeline
   ChatInput.tsx             input bar + model/thinking/tools/compact controls
   MessageView.tsx           renders one message (user/assistant/toolCall/toolResult)
   BranchNavigator.tsx       in-session branch switcher
@@ -543,6 +517,7 @@ hooks/
 - One `AgentSessionWrapper` per session id, keyed in `globalThis.__piSessions`.
 - `globalThis` survives Next.js hot-reload; a plain module-level Map does not.
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`).
+- **`destroy()` aborts an in-flight prompt** (`promptRunning || isStreaming → inner.abort()`). Without this, destroying a wrapper mid-run (Loop round timeout/abort) only unsubscribes events and drops the registry entry — the inner prompt keeps executing as an invisible zombie: still writing the .jsonl and spawning subagents for many minutes after every surface (run status, running badge, host probe) says it is gone. The idle-timer path is unaffected (it guards on `isRunning()` and never destroys a busy session), and fork is idle-only, so the abort branch fires only where a kill is intended.
 - Session creation resolves the enclosing **Workspace** (`findWorkspaceForPath`) and attaches its extensions + filtered skills. If none, only the global `subagent` extension is attached.
 
 ### Fork must destroy the wrapper immediately
@@ -605,12 +580,26 @@ bundles** of the workspace and merges results.
 The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs`.
 
 ### Loop runs in its own process; the web server only manages + proxies
-`npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/gate are thin proxies over `loopHostClient`; only authoring writes files directly. A loop orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live. The host also runs **two sibling non-Loop system timers** alongside `LoopHostScheduler`: `ImporterScheduler` (inbound), `ExporterScheduler` (outbound work-item events → channels). (The old `LearnScheduler` was removed — dev-loop learn is now an inline orchestrator step writing to the knowledge base, not a host timer.) None of these touches the engine core or runs in the web server.
+`npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/gate are thin proxies over `loopHostClient`; only authoring writes files directly. A loop orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live. The host also runs **one sibling non-Loop system timer** alongside `LoopHostScheduler`: `ImporterScheduler` (inbound). (The old `LearnScheduler` was removed — dev-loop learn is now an inline orchestrator step writing to the knowledge base, not a host timer; `ExporterScheduler` was deleted with the outbound channels.) None of these touches the engine core or runs in the web server.
+
+**Watching a Loop session live requires three cooperating pieces** (all must hold, or the chat view is static with no running indicator):
+
+1. `GET /api/sessions/[id]/state` **probes the Loop Host** (like `GET /api/agent/[id]`) and returns `{running, state, loopOwned:true}` for host-owned sessions. This is the route ChatWindow's mount uses — without the probe it would answer `running:false` for a mid-round orchestrator, never mark `agentRunning`, and never connect the SSE proxy (the "no spinner while subagents run" bug).
+2. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — Loop sessions never appear in the web process's running-id set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (including across a gate pause, so a resumed round's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `loopOwned` and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the host no longer owns it).
+3. The event reducer promotes `agentPhase` to `running_tools` on a `tool_execution_update` partial even without a prior `tool_execution_start` — a viewer joining mid-subagent-run never saw the start event, and the subagent worker's streamed partials are the only proof the tool is running. Without this the phase sits on `waiting_model` (「思考中」) for the whole multi-minute run.
+
+**The Loop Host serves ANY live session in its process, not just orchestrators.** `/v1/sessions/:id` (probe) and `/v1/sessions/:id/events` (SSE) resolve via `findLiveSession`: the orchestrator index first, then the ordinary rpc registry (`getRpcSession`, keyed by real session id) — which is where the **subagent children** an orchestrator spawns live (worker.ts starts them via `startRpcSession`). This is what makes a *running* subagent child of a Loop run watchable live: without it the probe 404s and Pi Web would load the child's .jsonl itself — a second writer racing the live child. (For a subagent child of a normal web session, the child lives in the web process's registry and streams natively.)
+
+**Opening a subagent child by click goes through `/api/sessions/[id]/locate`, never the cached `/api/sessions` list.** `handleOpenSessionViewer` resolves the child id via locate (Loop-Host probe first — now hitting for children too — then a forced disk scan that bypasses the 30s list cache). The old list lookup silently no-op'd for a freshly spawned running child (it isn't in the cached list yet), which felt like "you must wait for the subagent to finish before you can open it". Locate also enriches a loop-hit from disk (real firstMessage/stats for the tab label, keeping the probe's authoritative path/cwd).
+
+**Tab/sidebar running badges cover Loop sessions via a client-side merge.** The badge set (`/api/agent/running/events` ← web-process registry) can never contain Loop sessions. AppShell merges `globalAgentEvents.loopRunningSnapshot()` (pinned ids whose runtime `agentRunning` is true) into `effectiveRunningIds` for the sidebar/workspace-tab badges. The manager notifies on pin/unpin, on `agentRunning` flips via onMessage, and via a global `sessionRuntimeStore.subscribe` (so mount-time `patchRuntime` paths count too); the snapshot is a stable sorted-joined string so `useSyncExternalStore` bails when unchanged.
+
+**The host's session SSE ends on destroy.** `serveSessionSse` registers `session.onDestroy(cleanup)` — when a round ends (terminal/timeout/abort) the stream closes, the browser's pinned EventSource fails fatally, `reprobePinned` sees the host no longer owns the session, unpins and clears the badge. Without this a destroyed round leaves the pinned runtime `agentRunning=true` forever (no `agent_end` is ever emitted after destroy), spinning the tab badge indefinitely.
 
 **Orphan-process reaping on abort/timeout.** `session.destroy()` — used by `abortRound` and reached on the 30-min `capturePrompt` timeout — does **not** kill the bash subprocesses a round spawned via subagents: pi-coding-agent's bash tool spawns each shell `detached` (own process group) and only sweeps its tracked detached children on a **process-level** SIGHUP/SIGTERM, which a never-exiting loop host never sends. Those `bash → npm → node` trees would otherwise orphan into launchd (PID 1) still holding `node_modules` handles (which is why `rm -rf` then fails and they sit at ~100% CPU). So `PiRoundExecutionBackend` keeps a `run.id → workspacePath` map and, on abort/timeout/error, calls `reapOrphanedRoundProcesses` (`lib/loop/process-cleanup.ts`): it SIGTERM→SIGKILL every pid in the round's trees — discovered as (a) direct children of the host whose cwd is in the workspace, plus (b) launchd-reparented (ppid 1) build/shell processes whose cwd is in the workspace. Pure parsers (`parsePgrepChildren`/`parseLsofCwd`/`parsePsRows`/`isCwdInWorkspace`/`isBuildOrShellCommand`) are tested. Scoped by workspace cwd so concurrent rounds in other workspaces are untouched; never throws (cleanup must not break the abort flow).
 
-### Feishu channel is a boot-time service, not an extension
-`feishu-channel` long-connections are started by `instrumentation.ts` for every workspace with the capability + credentials, and live on `globalThis.__piFeishuChannels`. Capability toggles and credential writes re-sync the channel via `ensureFeishuChannelStarted`/`restartFeishuChannel`. It reuses `startRpcSession` (1 chat ↔ 1 long-lived session) — it never spawns its own AgentSession.
+### Session changed-files quick access (SessionChangedFiles)
+"本会话改动 N 个文件" — a compact icon+count button at the end of the ChatInput controls row (right of the sound toggle; on mobile it lives inside the "更多控件" pill; not rendered in `embedded` view mode), opening a slide-in drawer (full-screen list on mobile). **Data source is the message stream, not git**: `deriveSessionChangedFiles` (`lib/session-changed-files.ts`, pure + tested) walks write/edit toolCalls (incl. `isEditToolName` variants) + subagent result `details.displayItems`, plus the streaming message and live `tool_execution_update` partials for **real-time** counting (partials already finalized are de-duped by `toolCallId`). Scope is the **whole session file** (not just the current branch path), deduped **most-recent-first** with a ×N badge; bash-written files (`cat >`, `git commit`) are deliberately not counted. Clicking an entry → `openFile` (existing file-tab pipeline; `/api/files` allow-list already covers session cwds). The list intentionally **survives commits** — it answers "what did this session touch", not "what is uncommitted" (that's the Explorer 改动 tab). Drawer state is not persisted; switching sessions closes it.
 
 ### Model defaults for new sessions
 `GET /api/models` returns `defaultModel` read from `~/.pi/agent/settings.json`. `ChatWindow` pre-selects this on mount for new sessions.
@@ -641,7 +630,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `/api/plugins` uses pi's `SettingsManager` + `DefaultPackageManager` for global/project package install, remove, update, enable, and disable. Disabling writes empty `extensions/skills/prompts/themes` arrays for that package entry.
 - `/api/skills` uses `DefaultResourceLoader` so settings paths, package skills, and project `.agents/skills` are listed the same way the runtime sees them. Per-workspace, skills are filtered to `manifest.skills` at session creation (`skillsOverride`).
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
-- `/api/skills/install` shells through `npx skills add ... --agent pi`; project installs run with the selected cwd.
+- `/api/skills/install` shells through `npx skills add ... --agent pi`; project installs run with the selected cwd. **Timeout is 5 min** (`runNpx`), because installs `git clone` whole source repos (e.g. `anthropics/skills` ≈ 15MB, >60s even on a fast link). If installs hang forever at `Cloning repository…`, the machine can't reach github.com directly — `runNpx` passes `process.env` through, so start the dev server with `https_proxy` set, or scope it in git: `git config --global http.https://github.com.proxy http://127.0.0.1:<clash-port>`. `npm warn exec ... will be installed: skills@x` in the output is harmless (npx cache priming).
 
 ### Auth and model config
 - `ModelsConfig` combines models from `~/.pi/agent/models.json` with provider auth status from pi's `AuthStorage`/`ModelRegistry`.

@@ -8,9 +8,8 @@ import type {
 } from "./types.ts";
 
 /** Importer credentials are stored under the global pi agent dir (NOT the
- *  workspace dir), keyed by workspace id — exactly like Feishu credentials
- *  (`lib/feishu/config.ts`) — because workspace dirs are frequently git repos
- *  and the password is sensitive. */
+ *  workspace dir), keyed by workspace id — because workspace dirs are
+ *  frequently git repos and the password is sensitive. */
 function configFilePath(workspaceId: string): string {
   return join(getAgentDir(), "importers", `${workspaceId}.json`);
 }

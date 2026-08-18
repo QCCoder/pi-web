@@ -134,11 +134,19 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "overview",
   "workflows",
   // Module capabilities (toggled per-workspace, not surfaced in the init checklist):
-  "feishu-transport",
   "requirement-sources",
   "loop",
-  "feishu-channel",
 ];
+
+/** Capabilities that have been retired (their module was removed). Legacy
+ *  manifests on disk may still carry them; they are silently stripped when a
+ *  manifest is read or a PATCH submits a full stale list — never a validation
+ *  error, so old workspaces keep loading and self-heal on the next save. */
+const RETIRED_CAPABILITIES: ReadonlySet<string> = new Set([
+  "feishu-transport",
+  "feishu-channel",
+  "wecom-channel",
+]);
 
 export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   if (!Array.isArray(value)) {
@@ -147,10 +155,12 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   const result: WorkspaceCapability[] = [];
   const seen = new Set<string>();
   for (const item of value) {
-    if (
-      typeof item !== "string"
-      || !ALL_WORKSPACE_CAPABILITIES.includes(item as WorkspaceCapability)
-    ) {
+    if (typeof item !== "string") {
+      throw new WorkspaceValidationError(`Unknown capability: ${String(item)}`);
+    }
+    // Retired capabilities are dropped, not rejected.
+    if (RETIRED_CAPABILITIES.has(item)) continue;
+    if (!ALL_WORKSPACE_CAPABILITIES.includes(item as WorkspaceCapability)) {
       throw new WorkspaceValidationError(`Unknown capability: ${String(item)}`);
     }
     if (seen.has(item)) continue;

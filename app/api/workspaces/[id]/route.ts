@@ -43,17 +43,6 @@ export async function PATCH(
     const { id } = await params;
     const input = await req.json() as UpdateWorkspaceInput;
     const workspace = await updateWorkspace(id, input);
-    // Sync the feishu-channel service when capabilities change: start the
-    // long-connection if feishu-channel was just enabled, stop it if removed.
-    if (input.capabilities !== undefined) {
-      const { ensureFeishuChannelStarted } = await import("@/lib/feishu-channel/manager");
-      void ensureFeishuChannelStarted(id).catch((err) => {
-        console.error(
-          "[feishu-channel] sync after workspace update failed:",
-          err instanceof Error ? err.message : err,
-        );
-      });
-    }
     return NextResponse.json({ workspace });
   } catch (error) {
     return errorResponse(error);
