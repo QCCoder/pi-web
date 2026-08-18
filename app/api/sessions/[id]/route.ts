@@ -11,9 +11,9 @@ import {
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
-import { getRpcSession } from "@/lib/rpc-manager";
 import { deleteArchivedSession, isSessionArchived } from "@/lib/session-archive";
 import { skillMessageTitle } from "@/lib/skill-message";
+import { daemonProxy } from "@/lib/agent-proxy";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -211,8 +211,12 @@ export async function PATCH(
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-    const sm = SessionManager.open(filePath);
-    sm.appendSessionInfo(name.trim());
+    // Rename through the session daemon (C2): a live wrapper may hold the
+    // session — writing the file directly from here would race its appends.
+    // The daemon cold-starts idle sessions from the .jsonl, so this also
+    // covers never-opened sessions.
+    const client = await daemonProxy();
+    await client.sendSessionCommand(id, { type: "set_session_name", name: name.trim() });
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
@@ -229,6 +233,15 @@ export async function DELETE(
   try {
     // Archived sessions are deleted directly (no fork re-parenting — the
     // parentSession links are preserved so a restore reconnects the tree).
+    // Tell the session daemon to destroy a live wrapper first (best-effort:
+    // loop orchestrators are skipped engine-side; the web layer's file surgery
+    // proceeds regardless — a daemon hiccup must not block deletion).
+    try {
+      const client = await daemonProxy();
+      await client.destroySession(id);
+    } catch {
+      // daemon unreachable — proceed with the file surgery
+    }
     if (await isSessionArchived(id)) {
       return NextResponse.json(await deleteArchivedSession(id));
     }
@@ -269,7 +282,6 @@ export async function DELETE(
       }
     } catch { /* skip if dir unreadable */ }
 
-    getRpcSession(id)?.destroy();
     unlinkSync(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();

@@ -68,6 +68,12 @@ interface WorkspaceTabState {
 }
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
+// Desktop sidebar is drag-resizable (handle between sidebar and center). Width is
+// persisted in localStorage; clamped to these bounds. Mobile keeps a fixed drawer.
+const SIDEBAR_DEFAULT_WIDTH = 260;
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 560;
+const SIDEBAR_WIDTH_KEY = "pi-sidebar-width";
 
 export function AppShell() {
   const { isDark, toggleTheme } = useTheme();
@@ -95,6 +101,11 @@ export function AppShell() {
   const activeCwd = activeTab?.workspace.path ?? null;
   const [refreshKey, setRefreshKey] = useState(0);
   const sessionActivity = useSessionActivity(selectedSession?.id ?? null, refreshKey);
+  // Running-id 集来自 session daemon 的 SSE（/api/agent/running/events 代理它的
+  // /v1/sessions/running/events）。daemon 的注册表按真 session id 存交互会话、
+  // subagent child 和 loop orchestrator —— 单一集合就是完整答案，不再需要
+  // 客户端把「pin 住的 loop 会话」合并进来（那套合并存在的原因是 web 进程的
+  // running 集永远不含 Loop-Host 会话）。
   // 全局 SSE：为每个 running session 维护一条事件流，后台 session 事件不丢（决策 8 / B4b）。
   useGlobalAgentEvents(sessionActivity.runningIds);
   const [sessionKey, setSessionKey] = useState(0);
@@ -130,6 +141,57 @@ export function AppShell() {
   useEffect(() => {
     setMobileSidebarReady(true);
   }, []);
+
+  // ---- Desktop sidebar resize -------------------------------------------------
+  // Default width until localStorage hydrates (SSR-safe: no localStorage in the
+  // initializer). `sidebarWidthRef` mirrors state so the mouseup handler can
+  // persist the final value without stale-closure issues.
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
+  const sidebarContainerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { sidebarWidthRef.current = sidebarWidth; }, [sidebarWidth]);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+      if (raw) {
+        const n = Number(raw);
+        if (Number.isFinite(n)) {
+          setSidebarWidth(Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(n))));
+        }
+      }
+    } catch { /* localStorage unavailable — keep default */ }
+  }, []);
+  const clampSidebarWidth = (n: number) =>
+    Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(n)));
+  const startSidebarResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = sidebarContainerRef.current;
+    if (!container) return;
+    const startX = e.clientX;
+    const startWidth = container.getBoundingClientRect().width;
+    setSidebarResizing(true);
+    const onMove = (ev: MouseEvent) => {
+      setSidebarWidth(clampSidebarWidth(startWidth + (ev.clientX - startX)));
+    };
+    const onUp = () => {
+      setSidebarResizing(false);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidthRef.current)); } catch { /* ignore */ }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+  const resetSidebarWidth = useCallback(() => {
+    setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
+    try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(SIDEBAR_DEFAULT_WIDTH)); } catch { /* ignore */ }
+  }, []);
+
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const pendingWorkItemConversationRef = useRef<{
     workspaceId: string;
@@ -934,14 +996,19 @@ export function AppShell() {
 
   // Open a (subagent) session in the right split pane as a closable tab, so the
   // main conversation stays put. Mirrors handleOpenFile but for sessions.
+  // Resolves the id via the locate endpoint (Loop-Host probe first, then a
+  // FORCED disk scan) — NOT the cached /api/sessions list: a freshly spawned
+  // running subagent isn't in the 30s list cache yet, and the old list lookup
+  // made the click silently do nothing until the cache caught up (felt like
+  // "you must wait for the subagent to finish before opening it").
   const handleOpenSessionViewer = useCallback(async (sessionId: string) => {
     if (!activeTabId) return;
     let info: SessionInfo | undefined;
     try {
-      const res = await fetch("/api/sessions");
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
       if (res.ok) {
-        const data = await res.json() as { sessions: SessionInfo[] };
-        info = data.sessions.find((s) => s.id === sessionId);
+        const data = await res.json() as { session?: SessionInfo };
+        info = data.session;
       }
     } catch { /* ignore — cannot resolve */ }
     if (!info) return;
@@ -1207,7 +1274,8 @@ export function AppShell() {
 
       {/* Left sidebar */}
       <div
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}
+        ref={sidebarContainerRef}
+        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizing ? " sidebar-resizing" : ""}`}
         style={{
           background: "var(--bg-panel)",
           borderRight: "1px solid var(--border)",
@@ -1215,10 +1283,22 @@ export function AppShell() {
           flexDirection: "column",
           flexShrink: 0,
           zIndex: 200,
-        }}
+          "--pi-sidebar-width": `${sidebarWidth}px`,
+        } as React.CSSProperties}
       >
         {sidebarContent}
       </div>
+      {/* Desktop sidebar resize handle (drag to widen/narrow; double-click resets) */}
+      {!isMobile && sidebarOpen && (
+        <div
+          className="sidebar-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          title={translate("sidebar.resize")}
+          onMouseDown={startSidebarResize}
+          onDoubleClick={resetSidebarWidth}
+        />
+      )}
 
       {/* Center: chat */}
       <div className="app-shell-center" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>

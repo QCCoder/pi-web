@@ -14,7 +14,7 @@ import {
   readSessionHeader,
   resolveSessionPath,
 } from "./session-reader";
-import { getRpcSession } from "./rpc-manager";
+import { daemonProxy } from "./agent-proxy";
 import { skillMessageTitle } from "./skill-message";
 
 /** Root directory holding all per-cwd session folders (~/.pi/agent/sessions). */
@@ -155,11 +155,24 @@ async function resolveArchivedSessionPath(sessionId: string): Promise<string | n
   return globalThis.__piArchivedSessionsCache?.pathById.get(sessionId) ?? null;
 }
 
+/** Best-effort wrapper teardown in the session daemon before moving/deleting
+ *  the file underneath it (C2: the daemon owns every live wrapper now). A
+ *  daemon hiccup must not block archive/restore — the moved file simply
+ *  becomes an orphan the existing reapers handle. */
+async function destroyDaemonWrapper(sessionId: string): Promise<void> {
+  try {
+    const client = await daemonProxy();
+    await client.destroySession(sessionId);
+  } catch {
+    // daemon unreachable — proceed with the file move
+  }
+}
+
 /** Move an active session into its project's `.archived/` subdirectory. */
 export async function archiveSession(sessionId: string): Promise<{ archivedPath: string }> {
   const filePath = await resolveSessionPath(sessionId);
   if (!filePath) throw new SessionArchiveError("Session not found");
-  getRpcSession(sessionId)?.destroy();
+  await destroyDaemonWrapper(sessionId);
   const archiveDir = archiveDirFor(filePath);
   await mkdir(archiveDir, { recursive: true });
   const archivedPath = join(archiveDir, basename(filePath));
@@ -174,7 +187,7 @@ export async function archiveSession(sessionId: string): Promise<{ archivedPath:
 export async function restoreSession(sessionId: string): Promise<{ restoredPath: string }> {
   const archivedPath = await resolveArchivedSessionPath(sessionId);
   if (!archivedPath) throw new SessionArchiveError("Archived session not found");
-  getRpcSession(sessionId)?.destroy();
+  await destroyDaemonWrapper(sessionId);
   // `.archived/` is one level below the cwd session dir; restore = move up one.
   const restoredPath = join(dirname(dirname(archivedPath)), basename(archivedPath));
   await rename(archivedPath, restoredPath);
@@ -188,7 +201,7 @@ export async function restoreSession(sessionId: string): Promise<{ restoredPath:
 export async function deleteArchivedSession(sessionId: string): Promise<{ ok: true }> {
   const archivedPath = await resolveArchivedSessionPath(sessionId);
   if (!archivedPath) throw new SessionArchiveError("Archived session not found");
-  getRpcSession(sessionId)?.destroy();
+  await destroyDaemonWrapper(sessionId);
   await unlink(archivedPath);
   invalidateArchivedSessionsCache();
   return { ok: true };

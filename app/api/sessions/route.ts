@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { invalidateSessionListCache, listAllSessions } from "@/lib/session-reader";
 import { listArchivedSessions } from "@/lib/session-archive";
 import { loadSubagentChildIds } from "@/lib/subagent/registry";
-import { getLiveRpcSessionInfos, getRunningRpcSessionIds } from "@/lib/rpc-manager";
+import { daemonProxy } from "@/lib/agent-proxy";
 import type { SessionInfo } from "@/lib/types";
 
 export async function GET(req: Request) {
@@ -18,13 +18,19 @@ export async function GET(req: Request) {
     if (url.searchParams.has("refresh")) invalidateSessionListCache();
     const sessions = await listAllSessions();
 
-    // Merge in-memory RPC sessions that are not yet on disk. A brand-new
-    // session exists in the registry before pi flushes its .jsonl, so without
+    // Merge live daemon sessions that are not yet on disk. A brand-new session
+    // exists in the daemon's registry before pi flushes its .jsonl, so without
     // this it would be missing from the (cached) disk scan until the cache
     // expires — making the sidebar list lag behind a freshly created session.
+    // (Registry access is daemon-side now — C2.)
+    const client = await daemonProxy();
+    const [liveMetas, runningIds] = await Promise.all([
+      client.liveSessions(),
+      client.runningSessionIds(),
+    ]);
     const presentIds = new Set(sessions.map((session) => session.id));
     const liveSynthesized: SessionInfo[] = [];
-    for (const live of getLiveRpcSessionInfos()) {
+    for (const live of liveMetas.sessions) {
       if (!live.id || presentIds.has(live.id)) continue;
       presentIds.add(live.id);
       liveSynthesized.push({
@@ -47,7 +53,7 @@ export async function GET(req: Request) {
       ? merged.map((session) => (subagentChildIds.has(session.id) ? { ...session, subagentChild: true } : session))
       : merged;
 
-    return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: getRunningRpcSessionIds() });
+    return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: runningIds.ids });
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },

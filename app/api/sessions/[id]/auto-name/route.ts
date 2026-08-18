@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
-import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { generateSessionTitle } from "@/lib/session-title";
-import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
-import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
+import { resolveSessionPath } from "@/lib/session-reader";
+import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
 
+// POST /api/sessions/[id]/auto-name - generate + apply a session title.
+// Pure proxy over the session daemon (C2): title generation needs the session's
+// AgentSession (message history + LLM call), which lives in the daemon. The
+// daemon cold-starts idle sessions from their .jsonl, exactly like the old
+// in-process implementation.
 export async function POST(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -11,36 +14,16 @@ export async function POST(
   const { id } = await params;
 
   try {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
+    if (!await resolveSessionPath(id)) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-
-    const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
-    const existing = getRpcSession(id);
-    const { session } = existing?.isAlive()
-      ? { session: existing }
-      : await startRpcSession(id, filePath, cwd);
-
-    // globalThis keeps wrappers alive across dev hot reloads; older instances
-    // may predate waitUntilReady(), but those have already completed startup.
-    await session.waitUntilReady?.();
-    const result = await generateSessionTitle(session.inner as unknown as AgentSession);
-
-    if (!session.isAlive()) {
-      return NextResponse.json(
-        { error: "The session was closed while its title was being generated. Please try again." },
-        { status: 409 },
-      );
-    }
-
-    session.inner.setSessionName(result.title);
-    invalidateSessionListCache();
+    const client = await daemonProxy();
+    const result = await client.autoNameSession(id);
     return NextResponse.json({ title: result.title, usage: result.usage ?? null });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : String(error) },
-      { status: 500 },
+      { status: daemonErrorStatus(error) },
     );
   }
 }

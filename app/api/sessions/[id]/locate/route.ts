@@ -33,6 +33,15 @@ export async function GET(
         firstMessage: "(loop session)",
         projectRoot: meta.cwd,
       };
+      // Best-effort enrich from disk: the probe carries no firstMessage/stats,
+      // and the .jsonl (orchestrator or running subagent child) usually exists
+      // already — real stats make the tab label meaningful. Keep the probe's
+      // authoritative path/cwd even when the scan hasn't caught up yet.
+      invalidateSessionListCache();
+      const onDisk = (await listAllSessions()).find((s) => s.id === id);
+      if (onDisk) {
+        return NextResponse.json({ session: { ...onDisk, path: session.path, cwd: session.cwd, projectRoot: session.projectRoot }, source: "loop" });
+      }
       return NextResponse.json({ session, source: "loop" });
     }
   } catch {

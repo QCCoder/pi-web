@@ -5,7 +5,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getProjectTrustStatus, trustProject } from "@/lib/project-trust";
-import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd } from "@/lib/rpc-manager";
+import { daemonProxy } from "@/lib/agent-proxy";
 
 export const dynamic = "force-dynamic";
 
@@ -49,13 +49,16 @@ export async function POST(req: Request) {
     if (!current.requiresTrust) {
       return NextResponse.json({ error: "This project has no resources that require trust" }, { status: 409 });
     }
-    if (hasBusyRpcSessionForCwd(result.cwd)) {
+    const client = await daemonProxy();
+    if ((await client.busyForCwd(result.cwd)).busy) {
       return NextResponse.json({ error: "Wait for the active session to finish before trusting this project" }, { status: 409 });
     }
 
     const status = trustProject(result.cwd, agentDir);
     invalidateModelsCache();
-    destroyRpcSessionsForCwd(result.cwd);
+    await client.reloadCwdSessions(result.cwd).catch(() => {
+      // best-effort: next command cold-starts anyway when the wrapper expired
+    });
     return NextResponse.json(status);
   } catch (error) {
     return NextResponse.json(

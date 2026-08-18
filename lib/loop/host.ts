@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { DefaultLoopRuntime } from "./runtime.ts";
 import { PiRoundExecutionBackend } from "./pi-execution.ts";
 import { LoopHostScheduler } from "./scheduler.ts";
@@ -10,8 +10,9 @@ import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./sto
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { findWorkItemByConversation } from "../work-items/service.ts";
-import { getRpcSession, getRunningRpcSessionIds, startRpcSession, type AgentSessionWrapper } from "../rpc-manager.ts";
+import { getRpcSession, getRunningRpcSessionIds, getLiveRpcSessionInfos, hasBusyRpcSessionForCwd, startRpcSession, subscribeRunningSessions, destroyRpcSessionsForCwd, type AgentSessionWrapper } from "../rpc-manager.ts";
 import { resolveSessionPath } from "../session-reader.ts";
+import { generateSessionTitle } from "../session-title.ts";
 import type { TriggerCommand } from "./types.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -65,6 +66,39 @@ function errorStatus(error: unknown): number {
   if (error instanceof LoopValidationError) return 400;
   if (error instanceof LoopConflictError) return 409;
   return 500;
+}
+
+/** SSE stream of the set of currently-running session ids in this process.
+ *  Mirrors the shape Pi Web's /api/agent/running/events emits, so the web
+ *  route can proxy it verbatim. Because the registry is keyed by real session
+ *  id and holds interactive sessions, subagent children AND loop
+ *  orchestrators alike, this single stream is the complete running answer —
+ *  the web-side pin/reprobe/badge-merge dance existed only because its local
+ *  set could never contain daemon-owned sessions. */
+function serveRunningSse(request: IncomingMessage, response: ServerResponse): void {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  const write = (data: unknown) => {
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  // Subscribe BEFORE the initial snapshot so no transition can slip between.
+  const unsubscribe = subscribeRunningSessions((ids) => {
+    try { write({ type: "running", runningSessionIds: ids }); } catch { /* closed */ }
+  });
+  write({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
+  const heartbeat = setInterval(() => {
+    try { response.write(": \n\n"); } catch { /* closed */ }
+  }, 30_000);
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+    try { response.end(); } catch { /* already ended */ }
+  };
+  request.on("close", cleanup);
+  request.on("error", cleanup);
 }
 
 export function createLoopHost() {
@@ -122,6 +156,35 @@ export function createLoopHost() {
         // single set is the complete "what is running" answer for the whole
         // process (the web-side loop-badge merge hack becomes unnecessary).
         return json(response, 200, { ids: getRunningRpcSessionIds() });
+      }
+      const runningSse = url.pathname === "/v1/sessions/running/events";
+      if (request.method === "GET" && runningSse) {
+        serveRunningSse(request, response);
+        return;
+      }
+      const liveSessions = url.pathname === "/v1/sessions/live";
+      if (request.method === "GET" && liveSessions) {
+        // Metas of every alive wrapper (interactive + children + orchestrators):
+        // lets the web session-list route synthesize brand-new sessions whose
+        // .jsonl has not been flushed/scanned yet, same as its old local-registry
+        // merge did.
+        return json(response, 200, { sessions: getLiveRpcSessionInfos() });
+      }
+      const busyByCwd = url.pathname === "/v1/sessions/busy";
+      if (request.method === "GET" && busyByCwd) {
+        const cwd = url.searchParams.get("cwd");
+        if (!cwd) return json(response, 400, { error: "cwd query parameter is required" });
+        return json(response, 200, { busy: hasBusyRpcSessionForCwd(cwd) });
+      }
+      const reloadCwd = url.pathname === "/v1/sessions/reload-cwd";
+      if (request.method === "POST" && reloadCwd) {
+        const input = await body(request) as { cwd?: string };
+        if (!input.cwd || typeof input.cwd !== "string") {
+          return json(response, 400, { error: "cwd is required" });
+        }
+        // Trust change: destroy every wrapper under this cwd so the next
+        // command cold-starts with fresh resource loading (extensions/skills).
+        return json(response, 200, { destroyed: destroyRpcSessionsForCwd(input.cwd) });
       }
       if (request.method === "POST" && url.pathname === "/v1/sessions") {
         const input = await body(request) as {
@@ -203,10 +266,59 @@ export function createLoopHost() {
       const sessionEvents = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/events$/);
       if (request.method === "GET" && sessionEvents) {
         const sid = decodeURIComponent(sessionEvents[1]);
-        const session = findLiveSession(sid);
-        if (!session) return json(response, 404, { error: "session not live in loop host" });
+        let session = findLiveSession(sid);
+        if (!session) {
+          // Cold-start: an idle session being VIEWED gets a wrapper here too
+          // (same semantics the web events route had) so the browser gets its
+          // `connected` frame + later events. The idle timer reaps it.
+          const filePath = await resolveSessionPath(sid);
+          if (!filePath) return json(response, 404, { error: "session not found" });
+          const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+          try {
+            ({ session } = await startRpcSession(sid, filePath, cwd));
+          } catch (error) {
+            return json(response, 500, { error: `Failed to start session: ${String(error)}` });
+          }
+        }
         serveSessionSse(request, response, session);
         return;
+      }
+      const autoName = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/auto-name$/);
+      if (request.method === "POST" && autoName) {
+        const sid = decodeURIComponent(autoName[1]);
+        if (execution.getBySessionId(sid)) {
+          return json(response, 409, { error: "Loop orchestrator sessions are named by the loop" });
+        }
+        const filePath = await resolveSessionPath(sid);
+        if (!filePath) return json(response, 404, { error: "Session not found" });
+        const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+        const live = findLiveSession(sid);
+        const { session } = live
+          ? { session: live }
+          : await startRpcSession(sid, filePath, cwd);
+        await session.waitUntilReady?.();
+        const result = await generateSessionTitle(session.inner as unknown as AgentSession);
+        if (!session.isAlive()) {
+          return json(response, 409, { error: "The session was closed while its title was being generated." });
+        }
+        session.inner.setSessionName(result.title);
+        return json(response, 200, { title: result.title, usage: result.usage ?? null });
+      }
+      // Best-effort wrapper teardown before the web layer deletes/archives the
+      // session file: destroy the live wrapper so it stops appending to a file
+      // that is about to move/disappear. Loop orchestrators are skipped — their
+      // lifecycle belongs to the loop engine (a mid-run file loss is handled by
+      // the orphan-gate reaper, not by destroying the round).
+      // NOTE: must run BEFORE the GET probe below — same path pattern.
+      if (request.method === "DELETE") {
+        const sessionTeardown = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
+        if (sessionTeardown) {
+          const sid = decodeURIComponent(sessionTeardown[1]);
+          if (!execution.getBySessionId(sid)) {
+            getRpcSession(sid)?.destroy();
+          }
+          return json(response, 200, { ok: true });
+        }
       }
       const run = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/runs\/([^/]+)$/);
       if (request.method === "GET" && run) {

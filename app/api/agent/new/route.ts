@@ -1,58 +1,50 @@
 import { NextResponse } from "next/server";
-import { existsSync } from "fs";
-import { randomUUID } from "crypto";
 import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
-import { startRpcSession } from "@/lib/rpc-manager";
+import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
+
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
-// Spawns a brand-new pi session. Most calls immediately send the first command;
-// type:"ensure_session" only creates the runtime so clients can query commands.
-// Returns { sessionId, data } where sessionId is pi's real session id.
+// Pure proxy over the session daemon (C2): the session is created in the
+// daemon process — the single session owner. The web layer only syncs its
+// file-access allow-list with the daemon-returned cwd and invalidates the
+// session-list cache so the new .jsonl shows up immediately.
 export async function POST(req: Request) {
   try {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
-    const { cwd, ...command } = body;
 
-    if (!cwd || typeof cwd !== "string") {
+    if (!body.cwd || typeof body.cwd !== "string") {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
     }
-    if (!existsSync(cwd)) {
-      return NextResponse.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
-    }
 
-    // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = body as {
+      provider?: string;
+      modelId?: string;
+      toolNames?: string[];
+      thinkingLevel?: string;
+      [key: string]: unknown;
+    };
 
-    // Must be unique per request: startRpcSession coalesces concurrent callers
-    // that share a key onto one session. Date.now() (ms resolution) collides for
-    // requests in the same millisecond, merging two new sessions into one.
-    const tempKey = `__new__${randomUUID()}`;
-    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames);
+    const client = await daemonProxy();
+    const result = await client.createSession({
+      cwd: body.cwd,
+      ...(provider ? { provider } : {}),
+      ...(modelId ? { modelId } : {}),
+      ...(toolNames ? { toolNames } : {}),
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+      // ensure_session (and any other create-only input) stops at creation.
+      ...(promptCommand.type === "ensure_session" || typeof promptCommand.type !== "string"
+        ? {}
+        : { command: promptCommand as { type: string; [key: string]: unknown } }),
+    });
 
-    // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
-    // in sync so the new cwd is immediately readable via /api/files. Without this,
-    // a file request under a brand-new cwd would 403 for up to the cache TTL.
-    allowFileRoot(cwd);
+    // Keep the files-route allowed-roots cache in sync so the new cwd is
+    // immediately readable via /api/files (the allow-list lives in the web
+    // process — the daemon only tells us where the session landed).
+    allowFileRoot(result.cwd || body.cwd);
     invalidateSessionListCache();
 
-    // Apply pre-selected model before sending the prompt
-    if (provider && modelId) {
-      await session.send({ type: "set_model", provider, modelId });
-    }
-
-    // Apply pre-selected thinking level before sending the prompt
-    if (thinkingLevel) {
-      await session.send({ type: "set_thinking_level", level: thinkingLevel });
-    }
-
-    if (promptCommand.type === "ensure_session") {
-      return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
-    }
-
-    const result = await session.send(promptCommand);
-
-    return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+    return NextResponse.json({ success: true, sessionId: result.sessionId, data: result.data });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: String(error) }, { status: daemonErrorStatus(error) });
   }
 }

@@ -35,15 +35,27 @@ export interface LoopSessionMeta {
   state?: unknown;
 }
 
+/** Error thrown for non-2xx daemon responses. Carries the daemon's HTTP
+ *  status so web proxies can surface it faithfully (e.g. 404 session-not-found,
+ *  409 orchestrator-owned). */
+export class DaemonHttpError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "DaemonHttpError";
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${baseUrl()}${path}`, init);
   } catch {
-    throw new Error(`Loop Host is unavailable at ${baseUrl()}; start it with \`npm run loop\``);
+    throw new Error(`Session daemon is unavailable at ${baseUrl()}`);
   }
   const value = await response.json().catch(() => ({})) as T & { error?: string };
-  if (!response.ok) throw new Error(value.error ?? `Loop Host returned HTTP ${response.status}`);
+  if (!response.ok) throw new DaemonHttpError(value.error ?? `Session daemon returned HTTP ${response.status}`, response.status);
   return value;
 }
 
@@ -64,6 +76,38 @@ export const loopHostClient = {
    *  daemon process (interactive sessions + subagent children + loop
    *  orchestrators — the registry is keyed by real session id). */
   runningSessionIds: () => request<{ ids: string[] }>("/v1/sessions/running"),
+  /** Session-daemon surface: metas of every alive wrapper (for the web
+   *  session-list route's live-session synthesis). */
+  liveSessions: () => request<{ sessions: Array<{ id: string; cwd: string; sessionFile?: string }> }>(
+    "/v1/sessions/live",
+  ),
+  /** Session-daemon surface: SSE of the running-id set (interactive + children
+   *  + orchestrators — the complete answer), for the web route to proxy. */
+  runningEvents: (signal?: AbortSignal) =>
+    fetch(`${baseUrl()}/v1/sessions/running/events`, { signal }),
+  /** Session-daemon surface: is any session in the daemon busy (starting or
+   *  running) under this cwd? Replaces the web-side registry check. */
+  busyForCwd: (cwd: string) => request<{ busy: boolean }>(
+    `/v1/sessions/busy?cwd=${encodeURIComponent(cwd)}`,
+  ),
+  /** Session-daemon surface: destroy every wrapper under this cwd (project
+   *  trust changed — next command cold-starts with fresh resources). */
+  reloadCwdSessions: (cwd: string) => request<{ destroyed: number }>("/v1/sessions/reload-cwd", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd }),
+  }),
+  /** Session-daemon surface: generate + apply an auto title to a session the
+   *  daemon owns (or revives from disk). */
+  autoNameSession: (sessionId: string) => request<{ title: string; usage: unknown }>(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/auto-name`,
+    { method: "POST" },
+  ),
+  /** Session-daemon surface: best-effort destroy of a live wrapper (skips loop
+   *  orchestrators — engine-owned). Called by the web layer before it deletes
+   *  or archives the session file. */
+  destroySession: (sessionId: string) => request<{ ok: boolean }>(
+    `/v1/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  ),
   listLoops: (workspaceId: string) => request<{ loops: LoopDefinition[] }>(
     `/v1/workspaces/${encodeURIComponent(workspaceId)}/loops`,
   ),

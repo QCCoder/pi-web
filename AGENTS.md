@@ -461,6 +461,7 @@ lib/
   worktree.ts               project/worktree resolution (worktree→main repo) + git worktree ops
   file-access.ts            allowed file roots for /api/files, /api/git, worktrees
   agent-client.ts           typed fetch helper for /api/agent commands
+  agent-proxy.ts            web-side entry to the session daemon: daemonProxy() (ensure sidecar + client) + daemonErrorStatus
   agent/                    agent event reducer + helpers + types
   stores/                   models-store, session-messages-cache, session-runtime-store, file-resource-cache, map-store
   sse/global-agent-events.ts  global running-session event fan-out

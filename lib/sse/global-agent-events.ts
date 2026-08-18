@@ -37,6 +37,11 @@ export type GlobalConnectStatus = "connected" | "timeout" | "closed";
 class GlobalAgentEventManager {
   private sources = new Map<string, EventSource>();
   private running = new Set<string>();
+  /** 观看中的「活而不 running」会话（主要是 gate 暂停中的 loop orchestrator）。
+   *  它们不在任何 running 集里（当前运行的定义是 prompt 在跑），但 resume 后的
+   *  agent_start 要从已连接的事件流直播到达 —— pin 住现看现保，不受
+   *  syncRunningIds 拆线影响，fatal 断开后重探 daemon 是否仍持有两决定重连。 */
+  private pinned = new Set<string>();
   private activeSid: string | null = null;
   private active: ActiveSessionHandlers | null = null;
 
@@ -54,8 +59,22 @@ class GlobalAgentEventManager {
       if (!this.sources.has(id)) void this.ensureConnected(id);
     }
     for (const id of this.sources.keys()) {
-      if (!next.has(id)) this.disconnect(id);
+      if (!next.has(id) && !this.pinned.has(id)) this.disconnect(id);
     }
+  }
+
+  /** Pin 一个「活而不 running」的被观看会话：立即连上事件流，且不受 running
+   *  集驱动的拆除影响。观看期间一直保持 —— 包括 gate 暂停期间（resume 后
+   *  agent_start 直接从这条流到达）。 */
+  pinSession(sid: string): void {
+    this.pinned.add(sid);
+    void this.ensureConnected(sid);
+  }
+
+  /** 解除 pin。会话已不在 running 集里时连带断开事件流。 */
+  unpinSession(sid: string): void {
+    this.pinned.delete(sid);
+    if (!this.running.has(sid)) this.disconnect(sid);
   }
 
   disconnect(sid: string): void {
@@ -103,6 +122,11 @@ class GlobalAgentEventManager {
               setTimeout(() => {
                 if (this.running.has(sid)) void this.ensureConnected(sid);
               }, 1000);
+            } else if (this.pinned.has(sid)) {
+              // pinned 会话不在 running 集里，无法从本集合区分「daemon 暂时
+              // 不可达」和「会话已终销」。重探 state 路由：daemon 仍持有才重连，
+              // 否则解除 pin，避免对已结束的会话无限重试。
+              void this.reprobePinned(sid);
             }
           }
         }
@@ -111,11 +135,43 @@ class GlobalAgentEventManager {
     });
   }
 
+  /** pinned 会话 fatal 断开后的持有重探（见 onerror 注释）。daemon 忙可能让
+   *  probe 超时，非确定性失败（网络/5xx）重试几次再放弃；daemon 明确回答
+   *  「不持有」才立即解除 pin。 */
+  private async reprobePinned(sid: string, attempt = 0): Promise<void> {
+    let data: { loopOwned?: boolean } | null = null;
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json() as { loopOwned?: boolean };
+    } catch {
+      // 探测本身失败（daemon 忙/网络抖动）：重试几次，仍失败才解除 pin。
+      if (attempt >= 2) {
+        this.unpinSession(sid);
+        return;
+      }
+      setTimeout(() => {
+        if (this.pinned.has(sid)) void this.reprobePinned(sid, attempt + 1);
+      }, 1000);
+      return;
+    }
+    if (data?.loopOwned) {
+      setTimeout(() => {
+        if (this.pinned.has(sid)) void this.ensureConnected(sid);
+      }, 1000);
+    } else {
+      // daemon 明确回答不再持有该会话（终销/归档）：解除 pin，连带断开。
+      this.unpinSession(sid);
+    }
+  }
+
   private onMessage(sid: string, event: AgentEvent): void {
     const prev = ensureSessionRuntime(sid);
     const messages = getCachedSession(sid)?.data.context.messages ?? [];
     const result = applyAgentEvent(prev, event, { sessionId: sid, messages });
-    if (result.runtime !== prev) sessionRuntimeStore.set(sid, result.runtime);
+    if (result.runtime !== prev) {
+      sessionRuntimeStore.set(sid, result.runtime);
+    }
     if (result.messages) {
       const next = result.messages;
       updateCachedSessionData(sid, (sd) => ({ ...sd, context: { ...sd.context, messages: next } }));

@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
-import { resolveSessionPath } from "@/lib/session-reader";
-import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { loopHostClient } from "@/lib/loop/client";
+import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
 
-// POST /api/agent/[id] - Send a command to an existing session
+// POST /api/agent/[id] - Send a command to an existing session.
+// Pure proxy over the session daemon (C2): the daemon is the single session
+// owner, so ANY command (prompt, fork, navigate_tree, extension UI responses,
+// …) is forwarded verbatim. The daemon cold-starts idle sessions from their
+// .jsonl exactly like this route used to, and answers 409 for loop
+// orchestrators (gate-driven only) — both semantics preserved end-to-end.
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -13,48 +15,21 @@ export async function POST(
 
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
-
-    // A Loop orchestrator session lives in the Loop Host process. Probe it FIRST:
-    // if the host owns it, never create a local wrapper here — that would spawn a
-    // second AgentSession writing the same .jsonl, racing the host and corrupting
-    // the run (the host's orchestrator would detect "two executions overwriting
-    // one run"). Loop orchestrators are driven via gates (/loop/runs/.../gate),
-    // not direct chat, so reject the command outright.
-    try {
-      if (await loopHostClient.probeSession(id)) {
-        return NextResponse.json(
-          { error: "This session is owned by the Loop Host. Interact via the Loop run gate, not direct messages." },
-          { status: 409 },
-        );
-      }
-    } catch {
-      // Loop Host unreachable → the session is not loop-host-owned; proceed normally.
+    if (typeof body.type !== "string") {
+      return NextResponse.json({ error: "command type is required" }, { status: 400 });
     }
-
-    // Fast path: already-running session
-    const existing = getRpcSession(id);
-    if (existing?.isAlive()) {
-      const result = await existing.send(body);
-      return NextResponse.json({ success: true, data: result });
-    }
-
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
-
-    const { session } = await startRpcSession(id, filePath, cwd);
-    const result = await session.send(body);
-
-    return NextResponse.json({ success: true, data: result });
+    const client = await daemonProxy();
+    const result = await client.sendSessionCommand(id, body);
+    return NextResponse.json({ success: true, data: result.data });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: String(error) }, { status: daemonErrorStatus(error) });
   }
 }
 
-// GET /api/agent/[id] - Get current agent state
+// GET /api/agent/[id] - Get current agent state.
+// Pure proxy: the daemon owns every session, so "is it running + its state"
+// has exactly one answer — the daemon's. An idle session (no live wrapper in
+// the daemon) reports { running: false }, same as before.
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -62,22 +37,13 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const session = getRpcSession(id);
-    if (!session || !session.isAlive()) {
-      // A Loop orchestrator session lives in the Loop Host process. Probe it
-      // for live state so the UI reflects streaming/compaction correctly; an
-      // idle-looking snapshot here would make useAgentSession reconcile the
-      // loop run away as if it had already finished.
-      const loopMeta = await loopHostClient.probeSession(id);
-      if (loopMeta) {
-        return NextResponse.json({ running: loopMeta.running, state: loopMeta.state });
-      }
+    const client = await daemonProxy();
+    const meta = await client.probeSession(id);
+    if (!meta) {
       return NextResponse.json({ running: false });
     }
-
-    const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json({ running: meta.running, state: meta.state ?? undefined });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: String(error) }, { status: daemonErrorStatus(error) });
   }
 }
