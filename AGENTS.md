@@ -298,18 +298,20 @@ Only streamed status + final result return to the parent; the full child run is 
 - **Web manual sync** (`app/api/workspaces/[id]/importers/sync/route.ts`): forwards to the host; **falls back to an in-process run if the host is down** (a one-shot sync is not a timer, so this does not violate "web owns no timers").
 - **Config UI**: `components/ImporterConfig.tsx` (capability toggle + credential form + "测试连接"), mounted in `WorkspaceManager`.
 
-### Dev Loop (`lib/loop/dev-loop/`)
+### Dev Loop (per-workspace custom loop; reference: workspace-c)
 
-**The one Loop that evolves** (v2 design: `docs/dev-loop-v2-design.md`). It is a **user of the engine**, not engine code — the generic engine (`runtime`/`pi-execution`/`store`/`scheduler`) is untouched. Its entire behavior ships as **static template files** under `lib/loop/dev-loop/template/` (`LOOP.md` + `agents/{selector,brainstorm,writing-plans,implementer,checker,learner}.md` + `loop.yaml`), copied verbatim into `loops/dev-loop/` by `install.ts`. **No generators, no hardcoded project facts** — and **no fixed pipeline** (v2): the `LOOP.md` contract gives the orchestrator (a capable LLM) a **role menu with evidence-based contracts** and lets it compose a **dispatch plan** per run; safety comes from hard invariants that hold for any plan shape, not from a fixed sequence. Uses **only existing tools** (work-item tools, bash, edit, subagent, kb_search); no new tools injected (decision D10).
+**Loops are per-workspace custom definitions — pi-web ships no loop templates.** The generic engine (`runtime`/`pi-execution`/`store`/`scheduler`/`authoring`) is domain-agnostic; every loop's behavior lives in its workspace (`loops/<loopId>/LOOP.md` + `agents/*.md` + `loop.yaml`), authored/edited via the generic loop surface (`LoopConfig` / `lib/loop/authoring.ts`). There is **no dev-loop code path in pi-web** (the former `lib/loop/dev-loop/` template + `install.ts` + `POST /api/workspaces/[id]/dev-loop` route are retired — a loop is created like any other loop definition).
+
+The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), v2 (design: `docs/dev-loop-v2-design.md`). It uses **only existing tools** (work-item tools, bash, edit, subagent, kb_search); no new tools injected. Its contracts are worth documenting because other workspaces can copy the pattern:
 
 - **Four-layer LOOP.md**: ① role menu (contracts: must-run **evidence** / optional / always) ② hard invariants — L0 branch/merge discipline plus orchestration bounds **N1 maker≠checker, N2 full gate exactly once before merge, N3 never split across coupling points** ③ composition rules + the **dispatch plan** as an explicit artifact (`loop.dispatch{steps[]}` milestone; illegal plans are re-composed, bounded ≤2; the plan gate can veto the composition) ④ recovery contract (adoption via selector, resume from dispatch plan + milestone gaps — "most mature artifact", not sequence position).
 - **Roles** (template `agents/*.md`, all subagents): **selector** (the single entry point — absorbs the old orient round: liveness/adoption/idle verdicts + 选品三重判定 + 数据流快筛; outputs an **evidence pack** `{crossLayer, sensitive, touchpoints, couplings, hasGate}` + per-role model tiers, NOT a flow tier; `predictedConf` is immutable once emitted — the calibration data source; writes the thin SPEC itself for pure-display items); **brainstorm** (全链路 trace UI→SQL + 反证, strongest model, produces `SPEC.md` = what-contract **+ task DAG** — coupling analysis decides split lines; `repos[]` is the repo-set authority; emits `tracedConf`, never overwrites `predictedConf`); **writing-plans** (optional plan step — only in the dispatch plan when multi-task/sensitive/multi-repo; produces `PLAN.md` = in-task steps + test plan w/ wiring coverage; cross-task ordering belongs to the SPEC DAG, never re-ordered here; re-dispatchable on plan-defect rework); **implementer** (TDD maker, **one instance per task** with per-task branch/worktree; integration-branch baseline — worktrees from `origin/<integ>`, diffs `<integ>...HEAD`; self-contained plan section when no standalone plan step; bounded fix loop, 5-round shared budget); **checker** (v2 merge of reviewer+verifier — the **single check seat**, join point after all tasks `impl_ready`; **review-then-run**: audits the full diff three ways (SPEC compliance / README 原始验收点 vs spec misreads / quality) before spending the single full gate; verdict worst-wins per-repo; rework list carries `<taskId> <file>:<line> <问题> <期望> <source: code|plan|spec>` — the orchestrator routes by source: code→implementer, plan→writing-plans, spec→contract-correction path; may be split back into reviewer+verifier seats for sensitive large items); **learner** (knowledge **consolidator**, see Learn below).
 - **Gates (three kinds, all terse)**: plan gate (non-all-green only — human reviews SPEC **+ dispatch plan**, may veto the split/composition; one-shot all-clarifications); final-verify (post-merge); **contract-correction gate** (the only L0 exception slot, rare: a gate-approved SPEC judged to misread the README by checker goes back to the human with 3 terse options instead of a silent rework — skip-gate SPECs just get fixed against README, no extra gate).
-- **`install.ts`**: unchanged — `cp` the template with `errorOnExist`+rollback, idempotent ensure. The template *is* the source of truth; deployed copies may drift (workspace-c carries v2 now; old copies keep `.bak` siblings).
+- **Install/authoring**: none special — the loop is a plain loop definition created via the generic loop authoring surface; its files are edited directly in the workspace (old copies in workspace-c keep `.bak` siblings).
 - **No `checkers.ts`**: checker commands live in the workspace's own AGENTS.md; the full gate's only definition is the AGENTS.md repo gate command (targeted = file/module-level, used inside fix loops).
 - **Phase mapping** (unchanged): 待开发=`intake` → 待计划评审=`plan_approval` → `implementation` → 待评审=`verification` → `complete`+`done`; 受阻=`blocked`.
 - **PR = push branch** (no `gh` CLI): merge to the integration branch per-repo in the run worktree via temp branch `loop-integ/<runId>`; master is human-merged only (L0①).
-- **API**: `POST /api/workspaces/[id]/dev-loop` creates (idempotent `ensure`); `GET` reports existence.
+- **API**: generic loop routes only (`/api/workspaces/[id]/loop/**`); no dev-loop-specific route.
 
 ### Learn (archive inline; consolidation via the `learner` agent)
 
@@ -379,7 +381,7 @@ app/api/
   workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
   workspaces/[id]/importers/test/route.ts        POST test chandao connection (listAssigned)
   workspaces/[id]/importers/sync/route.ts        POST manual importer sync (forward to host / in-process fallback)
-  workspaces/[id]/dev-loop/route.ts              GET dev-loop existence | POST create/ensure the dev-loop definition
+  workspaces/[id]/loop/**                 generic loop mgmt/trigger/gate (no dev-loop-specific routes)
   git/status/route.ts                    GET ?cwd= — per-repo changed files + totals
   git/diff/route.ts                      GET ?cwd=&path= — unified patch for one file
   auth/all-providers|providers/route.ts  GET provider lists (OAuth)
@@ -432,9 +434,7 @@ lib/
     sidecar.ts               ensureSessionDaemonStarted (probe→attach / spawn detached) + pure guards (decideSidecarAction, spawnableDaemonUrl, sidecarSpawnEnv)
     workspace-resolver.ts   PiWorkspaceResolver (lists loop-capable workspaces)
     web.ts                  error → HTTP mapping
-    dev-loop/               the one evolving Loop — a USER of the engine (design §7); behavior ships as static template files
-      install.ts            create/ensureDevLoopDefinition — cp template/ into loops/dev-loop/ (errorOnExist + rollback); idempotent
-      template/             the source of truth: LOOP.md (thin dispatcher) + agents/{selector,brainstorm,writing-plans,implementer,reviewer,verifier,learner}.md + loop.yaml + LEARN.jsonl (learn spec lives in agents/learner.md; no generators)
+  (dev-loop/ retired — loops are per-workspace custom definitions; the R&D loop pattern lives in workspace-c, see Dev Loop section above)
   subagent/
     extension.ts            `subagent` tool (single/parallel) + project-agent approval gate
     worker.ts               spawn real child AgentSessions; stream usage + display trail

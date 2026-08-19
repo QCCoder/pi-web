@@ -209,20 +209,17 @@ loop.adopted{prevRunId,dispatchResumed}
 
 ## 7. 交付物
 
-| 文件 | 动作 |
+> **后记（实现时架构调整）**：实现期间 pi-web 退役了 dev-loop 的代码特化路径（`lib/loop/dev-loop/` 模板 + `install.ts` + 专用 API）——**loop 是每个工作区自定义的资产**，pi-web 只提供通用引擎与授权面。因此交付物以工作区部署为准，仓库内不再有模板：
+
+| 对象 | 动作 |
 |---|---|
-| `lib/loop/dev-loop/template/LOOP.md` | 重写（四层结构，无 orient；以 cxin 部署版的实战补丁——收养、跨仓 worktree、md 契约、幂等 learn——为基底） |
-| `template/agents/selector.md` | 改：吸收活性/收养判定、ceremony 扩权、predictedConf 定稿 |
-| `template/agents/brainstorm.md` | 改：DAG 节、repos 权威、tracedConf、改稿重派 |
-| `template/agents/writing-plans.md` | 改：任务内排序缩限、可被重派 |
-| `template/agents/implementer.md` | 改：per-task、无独立 plan 步时自带计划节、集成分支基线 |
-| `template/agents/checker.md` | 新（合并 reviewer.md + verifier.md，两文件删除） |
-| `template/agents/learner.md` | 重写：整备员流程 + hash 机制 + 单归宿 |
-| `~/.pi/workspaces/workspace-c/loops/dev-loop/` | 同步新基线（部署版与模板归一）；`LEARN.jsonl` 冻结，建 `LEARN/` 目录 |
+| `~/.pi/workspaces/workspace-c/loops/dev-loop/LOOP.md` | v2 四层重写（以旧部署版实战补丁——收养、跨仓 worktree、md 契约、幂等 learn——为基底）；旧版 `.bak` 留档 |
+| 同目录 `agents/{selector,brainstorm,writing-plans,implementer,checker,learner}.md` | 六角色 v2 契约（checker 合并原 reviewer+verifier，两文件退役） |
+| 同目录 `LEARN/` | 新建（per-run 档案）；`LEARN.jsonl` 冻结退役 |
 | cargo-knowledge learnings | 一次性回填（§4.4） |
+| pi-web `AGENTS.md` / 本设计稿 | 文档同步 |
 
-`install.ts` / `loop.yaml` / `LEARN.jsonl`（模板内）不动。测试：模板为纯 prompt 资产，无单测；验证靠 typecheck/lint 通过 + 下一次真实 run 观测（RUNS 里程碑新字段 + LEARN/ 目录出现）。
-
+验证：纯 prompt 资产，无单测；验证靠下一次真实 run 观测（RUNS 里程碑新字段 + LEARN/ 目录出现）。
 ## 8. 风险与对策
 
 | 风险 | 对策 |
@@ -231,7 +228,7 @@ loop.adopted{prevRunId,dispatchResumed}
 | checker 一席两职，跑绿 gate 后放松审 diff | 契约写死顺序：**先审后跑**（审不过不烧全量 gate）；敏感项 strongest；反自欺表加条目 |
 | learner 抬象过头产出废话规则 | 两问闸门 + 实例内联锚定（规则必须挂着已见场景）+ 一 run 最多 1 篇 |
 | 合同修正 gate 被滥用变相开第三个 gate | L0 明文标注"唯一例外口子，必须 terse"；gate 计数进 RUNS 可审计 |
-| 部署版与模板再漂移 | 本次归一后：模板是唯一源，部署副本升级走"整目录替换 + LEARN/RUNS 保留" |
+| 部署版与代码库再漂移 | n/a——代码库已不携带 loop 模板；每个工作区的 loop 是自定义资产，自身即权威（v2 起点已归一） |
 
 ## 9. 开放决策（审稿时确认）
 
