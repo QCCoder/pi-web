@@ -14,7 +14,9 @@ work-items, loop, subagent, git/changes) layered on top.
 
 ```bash
 npm run dev    # Next.js dev server on http://127.0.0.1:30141
-npm run loop   # OPTIONAL — the Loop engine, a separate process on :30142 (see Loop subsystem)
+npm run loop   # OPTIONAL — the session daemon, a separate process on :30142
+               # (spawned automatically as a sidecar by `npm run dev` — see lib/session-daemon/sidecar.ts;
+               #  run it manually/systemd when you want it managed explicitly)
 ```
 
 Typecheck: `node_modules/.bin/tsc --noEmit`
@@ -28,30 +30,30 @@ Tests: `npm test` (node:test over `lib/**/*.test.mjs`)
 ## Architecture
 
 ```
-Browser                Next.js Server                AgentSession (in-process)
-  │                        │                                │
-  │  ┌──────── Workspace layer ────────┐                    │
-  │  │ manifest .pi/workspace.yaml      │                    │
-  │  │ capabilities → extensions        │                    │
+Browser                Next.js Server                Session Daemon (bin/pi-loop.js, :30142)
+  │                        │                                │ — THE single session owner
+  │  ┌──────── Workspace layer ────────┐                    │   (lib/rpc-manager.ts registry:
+  │  │ manifest .pi/workspace.yaml      │                    │    interactive + subagent children
+  │  │ capabilities → extensions        │                    │    + loop orchestrators)
   │  │ repositories / work-items /      │                    │
   │  │ loops / work-items            │                    │
   │  └──────────────┬───────────────────┘                    │
   │                 │                                          │
   ├─ GET /api/sessions ──────▶ reads ~/.pi/agent/sessions/    │
   ├─ GET /api/sessions/[id] ─▶ reads .jsonl directly          │
-  ├─ GET /api/agent/running/events ─▶ running-id SSE          │
+  │                 │  (+ daemon /v1/sessions/live for fresh) │
   │                 │                                          │
-  ├─ send message ──▶ POST /api/agent/[id]                     │
-  │                   startRpcSession() ──────────────────────▶│ createAgentSession()
-  │                   session.send(cmd) ──────────────────────▶│ session.prompt()
+  ├─ send message ──▶ POST /api/agent/[id] ── proxy ─────────▶ POST /v1/sessions/:id/commands
+  │                   (lib/agent-proxy.ts)                    │   startRpcSession()/wrapper.send()
   │                 │                                          │
-  ├─ SSE connect ───▶ GET /api/agent/[id]/events               │
-  │                   session.onEvent() ◀──────────────────────│ session.subscribe()
-  │◀── data: {...} ──│                                          │
+  ├─ SSE connect ───▶ GET /api/agent/[id]/events ── proxy ───▶ GET  /v1/sessions/:id/events
+  │◀── data: {...} ──│◀───────────── piped ◀──────────────────│ session.subscribe()
+  │                 │                                          │
+  ├─ running ids ───▶ GET /api/agent/running/events ─ proxy ─▶ GET  /v1/sessions/running/events
 ```
 
 - **Session browsing** (read-only): reads `.jsonl` files via SDK `SessionManager` helpers and `lib/session-reader.ts` — no AgentSession is created.
-- **Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` creates an AgentSession in-process. At creation it resolves the enclosing **Workspace** (if any) and attaches that workspace's extensions + skills + AGENTS.md.
+- **Sending a message**: the web routes are **pure proxies** (`lib/agent-proxy.ts` → `loopHostClient`) over the session daemon, where `startRpcSession()` in `lib/rpc-manager.ts` creates the AgentSession. At creation it resolves the enclosing **Workspace** (if any) and attaches that workspace's extensions + skills + AGENTS.md.
 - **Workspace management**: `app/api/workspaces/**` reads/writes `~/.pi/workspaces/**` and `~/.pi/workspace.yaml` (the global index). Capability edits, repository add/remove, work-item CRUD, loop authoring) all flow through this surface.
 
 ---
@@ -404,7 +406,7 @@ app/api/
   worktrees/route.ts                     GET/POST/DELETE git worktrees
 
 lib/
-  rpc-manager.ts            AgentSessionWrapper + registry + startRpcSession (extension/skill/workspace wiring)
+  rpc-manager.ts            DAEMON-ONLY session registry + AgentSessionWrapper + startRpcSession (extension/skill/workspace wiring). No web-process code may import it — web routes proxy through lib/agent-proxy.ts
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
     service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments)
@@ -516,9 +518,9 @@ hooks/
 
 ## Key Design Decisions & Traps
 
-### AgentSession lifecycle (`lib/rpc-manager.ts`)
+### AgentSession lifecycle (`lib/rpc-manager.ts` — daemon process)
 - One `AgentSessionWrapper` per session id, keyed in `globalThis.__piSessions`.
-- `globalThis` survives Next.js hot-reload; a plain module-level Map does not.
+- The registry lives in the **session daemon** (bin/pi-loop.js). Its lifecycle no longer follows web hot-reloads — the `globalThis` guard survives daemon-internal restarts of the module graph, and a daemon restart cold-starts sessions from their .jsonl on demand (same revive semantics as commands).
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`).
 - **`destroy()` aborts an in-flight prompt** (`promptRunning || isStreaming → inner.abort()`). Without this, destroying a wrapper mid-run (Loop round timeout/abort) only unsubscribes events and drops the registry entry — the inner prompt keeps executing as an invisible zombie: still writing the .jsonl and spawning subagents for many minutes after every surface (run status, running badge, host probe) says it is gone. The idle-timer path is unaffected (it guards on `isRunning()` and never destroys a busy session), and fork is idle-only, so the abort branch fires only where a kill is intended.
 - Session creation resolves the enclosing **Workspace** (`findWorkspaceForPath`) and attaches its extensions + filtered skills. If none, only the global `subagent` extension is attached.
@@ -589,7 +591,7 @@ The loop host process (`npm run loop` → `bin/pi-loop.js` → `lib/loop/host.ts
 - **Phase 0 (done)**: all outbound/inbound channels removed (feishu/wecom/notify/exporters). The daemon surface is now purely sessions + loop + importer.
 - **Phase 1 (done)**: daemon command surface + sidecar lifecycle (below). Web routes still own interactive sessions locally — nothing flipped yet.
 - **Phase 2**: flip `/api/agent/new`, `/api/agent/[id]` (GET/POST), `/api/agent/[id]/events`, and the session lifecycle routes to pure proxies over the daemon client. The pin/reprobe/loop-badge-merge hacks retire here. The web proxy for create-session must call `allowFileRoot(cwd)` with the daemon's returned cwd (the files/git routes' allow-list lives in the web process).
-- **Phase 3**: delete the web-side session registry (`globalThis.__piSessions` usage in web); the probe-404-fallback double-writer race becomes structurally impossible.
+- **Phase 3 (done)**: the web-side session registry is gone — no `app/`/`components/` code imports `lib/rpc-manager` (its header now declares it daemon-process-only; `notifyRunningChange` is module-private). The probe-404-fallback double-writer race is structurally impossible: the web process never constructs an AgentSession, so it cannot race the daemon for a .jsonl.
 
 **Daemon command surface (host routes, `lib/loop/host.ts`)**: `POST /v1/sessions` (create + optional pre-selected model/thinking/tools + optional first command — mirrors `/api/agent/new` including the one-time `__new__<uuid>` key), `POST /v1/sessions/:id/commands` (generic passthrough to `wrapper.send` — ANY command incl. extension UI responses; orchestrators are 409, everything else live-or-cold-started exactly like `/api/agent/[id]` POST), `GET /v1/sessions/running` (`{ids}` — the registry is keyed by real session id and contains interactive sessions + subagent children + orchestrators, so this one set is the complete running answer), plus the pre-existing `GET /v1/sessions/:id` probe and `/v1/sessions/:id/events` SSE. Client methods: `loopHostClient.createSession/sendSessionCommand/runningSessionIds` (`lib/loop/client.ts`).
 
@@ -598,19 +600,16 @@ The loop host process (`npm run loop` → `bin/pi-loop.js` → `lib/loop/host.ts
 ### Loop runs in its own process; the web server only manages + proxies
 `npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/gate are thin proxies over `loopHostClient`; only authoring writes files directly. A loop orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live. The host also runs **one sibling non-Loop system timer** alongside `LoopHostScheduler`: `ImporterScheduler` (inbound). (The old `LearnScheduler` was removed — dev-loop learn is now an inline orchestrator step writing to the knowledge base, not a host timer; `ExporterScheduler` was deleted with the outbound channels.) None of these touches the engine core or runs in the web server.
 
-**Watching a Loop session live requires three cooperating pieces** (all must hold, or the chat view is static with no running indicator):
+**Watching a live session (any session — interactive, subagent child, or orchestrator) is one mechanism now (C2).** The daemon owns every session; `/api/agent/[id]/events` is a pure pipe onto `/v1/sessions/:id/events`, which resolves via `findLiveSession` (orchestrator index first, then the ordinary registry where subagent children live) and cold-starts idle sessions for viewing. Two subtleties remain:
 
-1. `GET /api/sessions/[id]/state` **probes the Loop Host** (like `GET /api/agent/[id]`) and returns `{running, state, loopOwned:true}` for host-owned sessions. This is the route ChatWindow's mount uses — without the probe it would answer `running:false` for a mid-round orchestrator, never mark `agentRunning`, and never connect the SSE proxy (the "no spinner while subagents run" bug).
-2. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — Loop sessions never appear in the web process's running-id set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (including across a gate pause, so a resumed round's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `loopOwned` and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the host no longer owns it).
-3. The event reducer promotes `agentPhase` to `running_tools` on a `tool_execution_update` partial even without a prior `tool_execution_start` — a viewer joining mid-subagent-run never saw the start event, and the subagent worker's streamed partials are the only proof the tool is running. Without this the phase sits on `waiting_model` (「思考中」) for the whole multi-minute run.
-
-**The Loop Host serves ANY live session in its process, not just orchestrators.** `/v1/sessions/:id` (probe) and `/v1/sessions/:id/events` (SSE) resolve via `findLiveSession`: the orchestrator index first, then the ordinary rpc registry (`getRpcSession`, keyed by real session id) — which is where the **subagent children** an orchestrator spawns live (worker.ts starts them via `startRpcSession`). This is what makes a *running* subagent child of a Loop run watchable live: without it the probe 404s and Pi Web would load the child's .jsonl itself — a second writer racing the live child. (For a subagent child of a normal web session, the child lives in the web process's registry and streams natively.)
+1. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — a **gate-paused orchestrator is alive but not running** (no prompt in flight), so it appears in NO running set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (so a resumed round's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `loopOwned` (= "live in the daemon") and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the daemon no longer holds it).
+2. The event reducer promotes `agentPhase` to `running_tools` on a `tool_execution_update` partial even without a prior `tool_execution_start` — a viewer joining mid-subagent-run never saw the start event, and the subagent worker's streamed partials are the only proof the tool is running. Without this the phase sits on `waiting_model` (「思考中」) for the whole multi-minute run.
 
 **Opening a subagent child by click goes through `/api/sessions/[id]/locate`, never the cached `/api/sessions` list.** `handleOpenSessionViewer` resolves the child id via locate (Loop-Host probe first — now hitting for children too — then a forced disk scan that bypasses the 30s list cache). The old list lookup silently no-op'd for a freshly spawned running child (it isn't in the cached list yet), which felt like "you must wait for the subagent to finish before you can open it". Locate also enriches a loop-hit from disk (real firstMessage/stats for the tab label, keeping the probe's authoritative path/cwd).
 
-**Tab/sidebar running badges cover Loop sessions via a client-side merge.** The badge set (`/api/agent/running/events` ← web-process registry) can never contain Loop sessions. AppShell merges `globalAgentEvents.loopRunningSnapshot()` (pinned ids whose runtime `agentRunning` is true) into `effectiveRunningIds` for the sidebar/workspace-tab badges. The manager notifies on pin/unpin, on `agentRunning` flips via onMessage, and via a global `sessionRuntimeStore.subscribe` (so mount-time `patchRuntime` paths count too); the snapshot is a stable sorted-joined string so `useSyncExternalStore` bails when unchanged.
+**Running badges come from one server-side set.** `/api/agent/running/events` pipes the daemon's `/v1/sessions/running/events`; because the daemon registry holds interactive sessions + subagent children + orchestrators alike (keyed by real session id), the sidebar/tab badges need no client-side merge anymore (the old `loopRunningSnapshot` merge existed only because the web set could never contain Loop sessions).
 
-**The host's session SSE ends on destroy.** `serveSessionSse` registers `session.onDestroy(cleanup)` — when a round ends (terminal/timeout/abort) the stream closes, the browser's pinned EventSource fails fatally, `reprobePinned` sees the host no longer owns the session, unpins and clears the badge. Without this a destroyed round leaves the pinned runtime `agentRunning=true` forever (no `agent_end` is ever emitted after destroy), spinning the tab badge indefinitely.
+**The daemon's session SSE ends on destroy.** `serveSessionSse` registers `session.onDestroy(cleanup)` — when a round ends (terminal/timeout/abort) the stream closes, the browser's pinned EventSource fails fatally, `reprobePinned` sees the daemon no longer holds the session, unpins and clears the badge. Without this a destroyed round leaves the pinned runtime `agentRunning=true` forever (no `agent_end` is ever emitted after destroy), spinning the tab badge indefinitely.
 
 **Orphan-process reaping on abort/timeout.** `session.destroy()` — used by `abortRound` and reached on the 30-min `capturePrompt` timeout — does **not** kill the bash subprocesses a round spawned via subagents: pi-coding-agent's bash tool spawns each shell `detached` (own process group) and only sweeps its tracked detached children on a **process-level** SIGHUP/SIGTERM, which a never-exiting loop host never sends. Those `bash → npm → node` trees would otherwise orphan into launchd (PID 1) still holding `node_modules` handles (which is why `rm -rf` then fails and they sit at ~100% CPU). So `PiRoundExecutionBackend` keeps a `run.id → workspacePath` map and, on abort/timeout/error, calls `reapOrphanedRoundProcesses` (`lib/loop/process-cleanup.ts`): it SIGTERM→SIGKILL every pid in the round's trees — discovered as (a) direct children of the host whose cwd is in the workspace, plus (b) launchd-reparented (ppid 1) build/shell processes whose cwd is in the workspace. Pure parsers (`parsePgrepChildren`/`parseLsofCwd`/`parsePsRows`/`isCwdInWorkspace`/`isBuildOrShellCommand`) are tested. Scoped by workspace cwd so concurrent rounds in other workspaces are untouched; never throws (cleanup must not break the abort flow).
 
@@ -627,7 +626,7 @@ On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming ==
 Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `auto_compaction_start` / `auto_compaction_end`. `handleAgentEvent` accepts both sets to keep `isCompacting` in sync. Manual compact is a blocking POST — the button stays disabled until the response returns.
 
 ### Running state SSE + reconciliation
-- The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
+- The sidebar listens to `/api/agent/running/events` — a pure pipe onto the daemon's running-id SSE (the complete set: interactive + children + orchestrators), so running badges update without polling.
 - `useAgentSession` treats per-session SSE as primary, but while a run is active it periodically calls `GET /api/agent/[id]` and reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 

@@ -16,6 +16,15 @@ import { createSubagentExtension } from "./subagent/extension";
 import { findWorkspaceForPath } from "./workspaces/service";
 
 // ============================================================================
+// SESSION REGISTRY — daemon-process code only (C2 Phase 3)
+// ============================================================================
+// This module owns every AgentSession in the session-daemon process
+// (bin/pi-loop.js). NO web-process code may import it: the Next.js routes are
+// pure proxies (lib/agent-proxy.ts → lib/loop/client.ts) and the web side
+// never touches a live session. If a web route needs something from here, it
+// must be exposed as a daemon route (lib/loop/host.ts) and called through the
+// client instead.
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -629,6 +638,15 @@ export class AgentSessionWrapper {
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.inner.isBashRunning) this.inner.abortBash();
+    // Abort an in-flight agent run. Without this, a destroy that happens mid-run
+    // (Loop round timeout/abort, session idle-timeout during a slow round) only
+    // unsubscribes events and removes the wrapper from the registry — the inner
+    // prompt keeps executing in the background (a "zombie" round that keeps
+    // writing the .jsonl, spawning subagents and burning tokens while every
+    // surface — running badge, SSE probe, run status — says it is gone).
+    if (this.promptRunning || this.inner.isStreaming) {
+      void this.inner.abort().catch(() => { /* already settling */ });
+    }
     this.unsubscribe?.();
     for (const pending of this.pendingUiResponses.values()) pending.cancel();
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
@@ -1108,7 +1126,7 @@ let lastRunningSnapshot = "";
  * Recompute the running-session-id set and, if it changed since the last
  * notification, broadcast it to subscribers. Cheap to call often.
  */
-export function notifyRunningChange(): void {
+function notifyRunningChange(): void {
   const ids = getRunningRpcSessionIds();
   const snapshot = JSON.stringify([...ids].sort());
   if (snapshot === lastRunningSnapshot) return;
