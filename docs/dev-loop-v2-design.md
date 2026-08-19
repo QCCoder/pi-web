@@ -38,7 +38,7 @@ cxin（workspace-c）已跑 12 个 run（4 merged / 6 blocked-parked / 2 竞态�
 │ implementer(×N 并行)  checker(合并 reviewer+     │
 │ verifier)  learner(整备员)                       │
 ├ ② 硬不变式（全程约束，非步骤序列）───────────────┤
-│ L0 八条保留 + 编排自由的三条边界（§2.2）           │
+│ L0 七条（git 政策+单一基线合一条）+ N1-N3（§2.2）   │
 ├ ③ 拆解策略（指引）──────────────────────────────┤
 │ 证据→派发计划 · SPEC 含任务 DAG · 拓扑序派发 │
 └ ④ 恢复契约（按最成熟产物定位断点）────────────────┘
@@ -80,7 +80,7 @@ cxin（workspace-c）已跑 12 个 run（4 merged / 6 blocked-parked / 2 竞态�
 
 ### 2.2 硬不变式（②层）
 
-L0 现有八条全部保留，但按职责重划归属（设计原则：站点 git 政策的权威是工作区 AGENTS.md，LOOP.md 不复述——L0 只保留 loop 自身纪律：git 政策引用（未声明合并终点→泊车不猜）、单一基线（= AGENTS.md 通用流程声明的切分支基线，交付前对齐合并终点）、写范围限制、每仓至多一条分支、gate 纪律、可观测、自治代理安全底线（永不 force-push/删远端）。编排自由追加三条边界，**违反任一条即拆法本身错误**：
+L0 精简为七条（原①git 政策权威与②单一基线同源于 AGENTS.md，合为一条：受保护分支/切分支基线/合并终点/命名/合并方式全按工作区 AGENTS.md，未声明→泊车不猜；单一基线贯穿 worktree 起点与 diff，交付前对齐合并终点）。其余保留：写范围限制、每仓至多一条分支、gate 纪律（两常规 gate + 合同修正唯一例外）、可观测、自治代理安全底线（永不 force-push/删远端）。编排自由追加三条边界，**违反任一条即拆法本身错误**：
 
 - **N1 maker≠checker**：implementer 永不自验；checker 一席两职（diff 审查 + 全量 gate），敏感项 checker 模型升 strongest。
 - **N2 全量 gate 合并前唯一一次**：AGENTS.md 仓库 gate 命令是唯一定义（见 §6-C9）；修复循环内 targeted，修完由 checker 重跑全量。
