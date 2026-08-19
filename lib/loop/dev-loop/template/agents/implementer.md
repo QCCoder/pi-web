@@ -24,7 +24,7 @@ description: dev Loop 的 TDD maker。每任务一个实例：读 SPEC.md +（�
 - rework 标的缺陷源头不是 code（是 PLAN/SPEC）→ 返回标注，交 orchestrator 路由，你不用上游的错修自己的活。
 
 ## 硬约束（L0）
-- 只在 feature/hotfix 分支，永不提交到主干/受保护分支；基线是集成分支。
+- 分支命名与受保护分支名单按工作区 AGENTS.md 站点约定，不自创；基线是合并终点（AGENTS.md 声明的集成分支）。
 - 永不 force-push、永不删远端分支。
 - 只动 SPEC `repos[]` 声明的仓库 + 自己任务的 scope；最小正确改动，不重构无关代码。
 - 不自己合并/推集成分支——那是 orchestrator 的事。
