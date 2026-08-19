@@ -80,7 +80,7 @@ cxin（workspace-c）已跑 12 个 run（4 merged / 6 blocked-parked / 2 竞态�
 
 ### 2.2 硬不变式（②层）
 
-L0 现有八条全部保留，但按职责重划归属（设计原则：站点 git 政策的权威是工作区 AGENTS.md，LOOP.md 不复述——L0 只保留 loop 自身纪律：git 政策引用（未声明合并终点→泊车不猜）、基线=合并终点、写范围限制、每仓至多一条分支、gate 纪律、可观测、自治代理安全底线（永不 force-push/删远端）。编排自由追加三条边界，**违反任一条即拆法本身错误**：
+L0 现有八条全部保留，但按职责重划归属（设计原则：站点 git 政策的权威是工作区 AGENTS.md，LOOP.md 不复述——L0 只保留 loop 自身纪律：git 政策引用（未声明合并终点→泊车不猜）、单一基线（= AGENTS.md 通用流程声明的切分支基线，交付前对齐合并终点）、写范围限制、每仓至多一条分支、gate 纪律、可观测、自治代理安全底线（永不 force-push/删远端）。编排自由追加三条边界，**违反任一条即拆法本身错误**：
 
 - **N1 maker≠checker**：implementer 永不自验；checker 一席两职（diff 审查 + 全量 gate），敏感项 checker 模型升 strongest。
 - **N2 全量 gate 合并前唯一一次**：AGENTS.md 仓库 gate 命令是唯一定义（见 §6-C9）；修复循环内 targeted，修完由 checker 重跑全量。
@@ -126,7 +126,7 @@ L0 现有八条全部保留，但按职责重划归属（设计原则：站点 g
 | **selector** | 吸收 orient：活性/收养判定、idle 裁决；输出**证据包 + 模型档**（跨层吗/敏感吗/几个落点/耦合在哪/有无 gate），不再定“流程档”；`predictedConf` 定稿为**选中后不可变**的选品预测（校准数据源）；`repos` 初判仅作 claim 占位（权威归 brainstorm 的 SPEC） |
 | **brainstorm** | SPEC 增加"任务拆解"节（DAG + 耦合点分析）；frontmatter `repos[]` 为仓集合权威；`tracedConf` 取代原 predictedConf 覆盖写；gate 否决后由它重派改稿（带人的意见）；plan gate 否决拆法后由它重拆 |
 | **writing-plans** | 合同为“任务内步骤 + 测试计划”；上不上由派发计划定（默认仅多任务耦合/敏感/多仓时进计划）；跨任务顺序归 SPEC DAG；可被 rework 重派（PLAN 缺陷路由，共享总预算） |
-| **implementer** | 每任务一个实例（任务 id + 范围传入）；无独立 writing-plans 步时在 IMPLEMENTATION.md 自带计划节；基线统一为集成分支（§6-C8）；并行实例各管各的分支/worktree |
+| **implementer** | 每任务一个实例（任务 id + 范围传入）；无独立 writing-plans 步时在 IMPLEMENTATION.md 自带计划节；单一基线按 AGENTS.md（§6-C8）；并行实例各管各的分支/worktree |
 | **checker**（新，默认形态合并 reviewer+verifier，可拆回分席） | join 点：全任务盖戳才派。两职：**先审后跑**——审全量 diff（SPEC 合规 / README 原始验收点 / 质量），过审后跑全量 gate（AGENTS.md 命令 + PLAN 接线测试核对）。敏感大项可自清拆回 reviewer+verifier 两席（独立视角，orchestrator 按证据组合）。verdict worst-wins；rework 清单 `<taskId> <file>:<line> <问题> <期望>` + 缺陷源头标注（code/plan/spec）。跨仓逐仓跑、按仓分节出 VERDICT.md |
 | **learner** | 从"归档员"改为"整备员"（§4） |
 
@@ -203,7 +203,7 @@ loop.adopted{prevRunId,dispatchResumed}
 | B5 | 打回一律塞给 implementer，PLAN/SPEC 缺陷无路由 | 按源头路由：code→implementer；plan→重派 writing-plans；spec→A2 路径。共享 5 轮总预算，orchestrator 到顶裁决 |
 | B6 | 跨仓 N 份裁决聚合未定义 | checker worst-wins 聚合；VERDICT.md 按仓分节；里程碑存 per-repo map |
 | B7 | gate 否决后改 SPEC 的执行者未指定 | 重派 brainstorm（skip 路径重派 selector）带人的意见改稿；orchestrator 永不亲手改产物 |
-| C8 | "主干"vs"集成分支"混用，diff 基线被 develop 领先 master 的分叉污染 | 全线统一基线=集成分支：worktree 从 `origin/<集成分支>` 建；diff 一律 `<集成分支>...HEAD` |
+| C8 | "主干"vs"集成分支"混用，diff 基线被 develop 领先 master 的分叉污染 | 单一基线 = AGENTS.md 通用流程声明的切分支基线（cxin=`origin/master`）：worktree 起点与 diff 同源；交付前对齐合并终点（集成分支-ready）；checker 对齐带入的他人改动按 filesChanged 剔除 |
 | C9 | targeted/全量/"单个测试"三档靠自觉；verifier 两个命令来源优先级不明 | 全量 gate 唯一定义=AGENTS.md 仓库 gate 命令；targeted=文件/模块级；checker 先审后跑；PLAN 只选 targeted 套餐+必须引用 gate 命令 |
 | C10 | writing-plans"任务排序"与新 DAG 撞车 | 跨任务顺序=SPEC DAG（brainstorm）；PLAN 只排任务内步骤 |
 
