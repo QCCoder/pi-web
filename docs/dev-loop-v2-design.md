@@ -40,29 +40,43 @@ cxin（workspace-c）已跑 12 个 run（4 merged / 6 blocked-parked / 2 竞态�
 ├ ② 硬不变式（全程约束，非步骤序列）───────────────┤
 │ L0 八条保留 + 编排自由的三条边界（§2.2）           │
 ├ ③ 拆解策略（指引）──────────────────────────────┤
-│ ceremony 定流程档位 · SPEC 含任务 DAG · 拓扑序派发 │
+│ 证据→派发计划 · SPEC 含任务 DAG · 拓扑序派发 │
 └ ④ 恢复契约（按最成熟产物定位断点）────────────────┘
    里程碑盖戳 + DAG 缺口续跑（收养归 selector）
 ```
 
-### 2.1 流程全景
+### 2.1 流程形态：角色菜单 + 组合规则（非预设路径）
+
+**v2 没有内置“快路/全路”两套工作流。** 流程骨架由 orchestrator 每个 run 现场组合：角色菜单 + 启用证据 + 硬不变式，输出一份**派发计划**（显式产物，见 2.4）。动态性不限于 implementer 段的 DAG——包括“审”与“跑”要不要分席、要不要独立 writing-plans，全部由证据决定。
+
+**角色菜单（合同制）：**
+
+| 角色 | 必须上的证据 | 可选条件 | 永远 |
+|---|---|---|---|
+| selector | — | — | ✔（入口：选活 + 活性/收养 + 证据包） |
+| brainstorm | 数据流跨层（FE↔BE）/ selector 拿不准 | — | — |
+| writing-plans | 多任务耦合 / 敏感 / 多仓 | 单任务且 implementer 档位够 | — |
+| implementer | — | — | ✔（maker，可 ×N 并行） |
+| checker | — | — | ✔（唯一 checker 席，敏感升 strongest） |
+| reviewer/verifier 分立 | — | checker 判断“审”与“跑”需独立视角（如敏感大项） | — |
+| learner | 有教训候选 | — | — |
+
+**组合规则：**
+
+1. 必须项由**证据**触发，不是 orchestrator 心情——“跨层了就必须 brainstorm”是硬规则；跳过必须项仅当证据明确不支持（如 selector 数据流快筛判零跨层、零查询跳）。
+2. L0 + N1-N3 对**任何**计划形状成立——安全性不依赖流程长什么样，这是组合自由的全部边界。
+3. “必须”与“永远”之外的一切（writing-plans 上不上、checker 拆不拆、implementer 模型档、并行粒度）由 orchestrator 据证据包自定，落在派发计划里可审计。
+4. 不合法计划（违 N1-N3/L0）在执行前判无效 → 有界重规划（≤2 次）；再挂泊车。
+5. 反自欺表（§7 交付的 LOOP.md 内保留并扩充）是“合理化跳步”的对冲——“该想没想”的风险由证据触发 + 计划落产物事后校准两头压。
+
+**典型形态（仅举例，非定义）：**
 
 ```
-selector（入口：选活 + 活性/收养判定 + ceremony）
-   ├─ trace==skip ∧ 全绿（小项）→ 薄 SPEC（无 DAG，单任务）
-   │     → implementer（自带薄计划）→ checker → finishing → learn
-   │     （trace==skip 但非全绿——如敏感——仍走 plan gate，人审薄 SPEC）
-   └─ trace==needed
-         → brainstorm（trace+反证 → SPEC：合同 + 任务 DAG）
-         → plan gate（非全绿才停；人可否决拆法）
-         → 按拓扑序派 implementer（跨仓并行；耦合落点不切分）
-         → checker（join：全部任务盖戳才派；审 diff + 跑全量 gate，
-         │           worst-wins，rework 按缺陷源头路由到 task id）
-         → finishing（按仓合并 + final-verify gate）
-         → learn（终态：LEARN/<runId>.md 档案 + learner 整备）
+纯展示小项（零跨层证据）：selector(薄SPEC) → implementer → checker          （3 步）
+中项（跨层单仓）：selector → brainstorm(SPEC+DAG) → implementer → checker   （4 步）
+大项（跨3仓3落点）：selector → brainstorm → writing-plans → implementer×3并行 → checker（join）（5-7 步）
+敏感大项：同上 + checker 拆回 reviewer+verifier 分席 + strongest
 ```
-
-writing-plans 只在 ceremony 判 `plan: standalone` 时跑（大项/多落点/敏感）；中小项 `plan: merged`（implementer 在 IMPLEMENTATION.md 里自带计划节）。
 
 ### 2.2 硬不变式（②层）
 
@@ -80,14 +94,15 @@ L0 现有八条全部保留（含：永不自动合并主干、每仓至多一�
 | final-verify | 合并后 | 去哪验 + 怎么操作 + 期望结果 |
 | 合同修正 gate（新增，罕见） | gate 批过的 SPEC 被 checker 判误读 README | 三个选项：A 改 SPEC+rework / B 否决 checker 照走 / C 泊车。**这是 L0"只许两 gate"的唯一例外口子**，必须 terse |
 
-### 2.4 任务 DAG
+### 2.4 派发计划（显式产物，自主性的审计落点）
 
-- **落点**：SPEC.md 的"任务拆解"节（brainstorm 产出），每任务 `{id, scope, repos[], deps[], 验收引用}`。
-- **切分依据**：trace 后的耦合点分析——跨仓/链路无交集 → 可并行任务；有耦合 → 合并或串行依赖。
-- **执行**：orchestrator 按拓扑序派发；`deps` 全部 `impl_ready` 盖戳的任务可并行（subagent parallel 模式）。
-- **join**：全部任务盖戳才派 checker；checker 的 rework 清单带 task id。
-- **运行中发现未声明依赖**：报回 orchestrator，**有界重拆 ≤2 次**（milestone `loop.resplit{round}`），不算失败；到顶泊车。
-- **人可否决拆法**：plan gate 时人对 DAG 说"别拆/拆错了" → brainstorm 重拆一次（计入重拆预算）。
+- **证据包**：selector/brainstorm 返回的是**证据**而非档位（跨层吗/敏感吗/几个落点/耦合在哪/有无 gate）——ceremony 从“流程档位”降为证据包 + 模型档。
+- **派发计划**：orchestrator 据证据组合本次 run 的执行计划（步骤、并行结构、每步模型、每步派发对象），作为产物盖戳：`loop.dispatch{steps[]}`。plan gate 时人看得见并可否决（“别拆/拆错了/这个不需要独立 plan”）。两个作用：
+  - **安全**：不合法计划（违 N1-N3/L0）执行前判无效，有界重规划；
+  - **恢复**：run 挂了，收养读 dispatch 计划 + 盖戳缺口——任意形状的流程都能续，与“按最成熟产物定位断点”自洽（比固定序列更自洽）。
+- **任务 DAG**（brainstorm 产出，SPEC 的“任务拆解”节）：每任务 `{id, scope, repos[], deps[], 验收引用}`；切分依据 = trace 后的耦合点分析（跨仓/链路无交集 → 可并行；有耦合 → 合并或串行）；join 在 checker（全部任务盖戳才派）；checker rework 清单带 task id。
+- **运行中发现未声明依赖**：报回 orchestrator，**有界重拆/重规划合计 ≤2 次**（milestone `loop.resplit{round,reason}`），不算失败；到顶泊车。
+- **人可否决**：plan gate 对 DAG 或整个派发计划说“拆错了/这个组合不对” → brainstorm/orchestrator 重排一次（计入重规划预算）。
 
 ### 2.5 恢复契约（④层）
 
@@ -99,8 +114,8 @@ L0 现有八条全部保留（含：永不自动合并主干、每仓至多一�
 
 | 场景 | 现状 | v2 |
 |---|---|---|
-| 纯展示小项 | 6 次 | **3**（selector/implementer/checker） |
-| 中项（trace 需要、单仓） | 6 次 | **4**（selector/brainstorm/implementer/checker，plan: merged） |
+| 纯展示小项 | 6 次 | **3**（典型组合：selector/implementer/checker） |
+| 中项（跨层单仓） | 6 次 | **4**（selector/brainstorm/implementer/checker 的典型组合） |
 | 大项（跨 3 仓 3 落点） | 6 次串行 | **5-7 但并行**（implementer×3 并行后 checker join） |
 | 每次 rework | 2 席可能各冷启动 | 1 席 |
 
@@ -108,19 +123,18 @@ L0 现有八条全部保留（含：永不自动合并主干、每仓至多一�
 
 | 角色 | 变更 |
 |---|---|
-| **selector** | 吸收 orient：活性/收养判定、idle 裁决；ceremony 扩权为"流程档位 + 模型档位"（见下）；`predictedConf` 定稿为**选中后不可变**的选品预测（校准数据源）；`repos` 初判仅作 claim 占位（权威归 brainstorm 的 SPEC） |
+| **selector** | 吸收 orient：活性/收养判定、idle 裁决；输出**证据包 + 模型档**（跨层吗/敏感吗/几个落点/耦合在哪/有无 gate），不再定“流程档”；`predictedConf` 定稿为**选中后不可变**的选品预测（校准数据源）；`repos` 初判仅作 claim 占位（权威归 brainstorm 的 SPEC） |
 | **brainstorm** | SPEC 增加"任务拆解"节（DAG + 耦合点分析）；frontmatter `repos[]` 为仓集合权威；`tracedConf` 取代原 predictedConf 覆盖写；gate 否决后由它重派改稿（带人的意见）；plan gate 否决拆法后由它重拆 |
-| **writing-plans** | 只在 `plan: standalone` 时被派；"任务排序"缩限为**任务内步骤**（跨任务顺序归 SPEC DAG）；可被 rework 重派（PLAN 缺陷路由，共享总预算） |
-| **implementer** | 每任务一个实例（任务 id + 范围传入）；`plan: merged` 时在 IMPLEMENTATION.md 自带计划节；基线统一为集成分支（§6-C8）；并行实例各管各的分支/worktree |
-| **checker**（新，合并 reviewer+verifier） | join 点：全任务盖戳才派。两职：先审全量 diff（SPEC 合规 / README 原始验收点 / 质量），过审后跑全量 gate（AGENTS.md 命令 + PLAN 接线测试核对）。verdict worst-wins；rework 清单 `<taskId> <file>:<line> <问题> <期望>` + 缺陷源头标注（code/plan/spec）。跨仓逐仓跑、按仓分节出 VERDICT.md |
+| **writing-plans** | 合同为“任务内步骤 + 测试计划”；上不上由派发计划定（默认仅多任务耦合/敏感/多仓时进计划）；跨任务顺序归 SPEC DAG；可被 rework 重派（PLAN 缺陷路由，共享总预算） |
+| **implementer** | 每任务一个实例（任务 id + 范围传入）；无独立 writing-plans 步时在 IMPLEMENTATION.md 自带计划节；基线统一为集成分支（§6-C8）；并行实例各管各的分支/worktree |
+| **checker**（新，默认形态合并 reviewer+verifier，可拆回分席） | join 点：全任务盖戳才派。两职：**先审后跑**——审全量 diff（SPEC 合规 / README 原始验收点 / 质量），过审后跑全量 gate（AGENTS.md 命令 + PLAN 接线测试核对）。敏感大项可自清拆回 reviewer+verifier 两席（独立视角，orchestrator 按证据组合）。verdict worst-wins；rework 清单 `<taskId> <file>:<line> <问题> <期望>` + 缺陷源头标注（code/plan/spec）。跨仓逐仓跑、按仓分节出 VERDICT.md |
 | **learner** | 从"归档员"改为"整备员"（§4） |
 
-ceremony 形态：
+ceremony 形态（证据包 + 模型档；流程组合不再由 selector 定，由 orchestrator 据证据组合）：
 ```
 ceremony: {
-  trace: needed|skip,
-  plan: standalone|merged,
-  brainstormModel: strongest,
+  evidence: {crossLayer: bool, sensitive: bool, touchpoints: N, couplings: [...], hasGate: bool},
+  brainstormModel: strongest,          // 上 brainstorm 时永远 strongest
   planModel: cheap|standard,
   implementerModel: cheap|standard,
   checkerModel: cheap|standard|strongest(敏感),
@@ -165,14 +179,15 @@ ceremony: {
 
 ```
 loop.started{runId,repo,module}
+loop.dispatch{steps[]}                  ← 新（显式派发计划，含 DAG/并行结构/模型档）
 loop.spec_ready{specPath,tracedConf,scope,repos[],tasks[]}
-loop.resplit{round,reason}                 ← 新（有界重拆）
-loop.plan_ready{planPath}                  ← 仅 plan: standalone
-loop.impl_ready{taskId,branch,worktree}    ← 改为 per-task
-loop.check{verdict,perRepo{}}              ← 合并原 review+verdict
-loop.rework{round,source,taskId}           ← source: code|plan|spec
+loop.resplit{round,reason}              ← 新（有界重规划）
+loop.plan_ready{planPath}               ← 仅当派发计划含 writing-plans 步
+loop.impl_ready{taskId,branch,worktree} ← per-task
+loop.check{verdict,perRepo{}}           ← 合并原 review+verdict
+loop.rework{round,source,taskId}        ← source: code|plan|spec
 loop.merged{branches,mergeCommits}
-loop.adopted{prevRunId}
+loop.adopted{prevRunId,dispatchResumed}
 ```
 
 结构化信号（ceremony / tracedConf / verdict / DAG / branch / worktree / 修复轮次）一律以文件 frontmatter / 里程碑 data 为准，subagent 返回文本只作即时定位——**这条不变，它是收养与断点恢复的全部依据**。
@@ -200,7 +215,7 @@ loop.adopted{prevRunId}
 | `template/agents/selector.md` | 改：吸收活性/收养判定、ceremony 扩权、predictedConf 定稿 |
 | `template/agents/brainstorm.md` | 改：DAG 节、repos 权威、tracedConf、改稿重派 |
 | `template/agents/writing-plans.md` | 改：任务内排序缩限、可被重派 |
-| `template/agents/implementer.md` | 改：per-task、plan:merged、集成分支基线 |
+| `template/agents/implementer.md` | 改：per-task、无独立 plan 步时自带计划节、集成分支基线 |
 | `template/agents/checker.md` | 新（合并 reviewer.md + verifier.md，两文件删除） |
 | `template/agents/learner.md` | 重写：整备员流程 + hash 机制 + 单归宿 |
 | `~/.pi/workspaces/workspace-c/loops/dev-loop/` | 同步新基线（部署版与模板归一）；`LEARN.jsonl` 冻结，建 `LEARN/` 目录 |
