@@ -6,15 +6,15 @@
 
 ## 硬不变式（全程约束，触即停）
 
-**L0（现有纪律）**
-1. **永不自动合并主干**（master/main 受保护，人手合）。只合并到 AGENTS.md 约定的集成分支。
-2. 只动工作项 `repositories` 声明的仓库；空则以 SPEC frontmatter `repos[]` 为权威写回，不擅自扩。
-3. 改动只在 feature/hotfix 分支（按 AGENTS.md / `git.branch_rules`）。**基线分支 = 集成分支**（worktree 从 `origin/<集成分支>` 建，diff 一律 `<集成分支>...HEAD`，不碰"主干"概念）。
+**L0（loop 自身纪律）**
+1. **git 政策的权威是工作区 AGENTS.md**：受保护分支、合并终点、分支命名、合并方式都是站点政策，从 AGENTS.md 读，本文件不复述（冲突时以 AGENTS.md 为准）。AGENTS.md 未声明合并终点 → 泊车交人，不猜。
+2. **基线 = 合并终点**：worktree 起点与 diff 基线一律用本 run 的合并终点分支（AGENTS.md 声明），diff 一律 `<合并终点>...HEAD`——审的 diff 就是合的 diff，不引入第二基线。
+3. 只动工作项 `repositories` 声明的仓库；空则以 SPEC frontmatter `repos[]` 为权威写回，不擅自扩。
 4. **单工作项·每仓一条分支**：本 run 只动选中的那一个工作项；分支数 = 声明仓数。禁止创建任何新工作项（含 follow-up、子需求）。
 5. **全范围做完才验收**：工作项声明的所有改动点（N 个菜单/落点）必须在同一次 run 内全部完成后才发 final-verify。允许两个常规 gate：① plan gate（SPEC+派发计划后）② final-verify（全做完后）。唯一例外口子：**合同修正 gate**（见 gate 规则）。
 6. **范围超限才停**：需人介入（需求方澄清/拆需求/跨团队/依赖外部）→ 立即泊车交人。纯技术工作一律做完，不算超限。绝不自建、不自拆、不部分交付。
 7. 每步可观测：工作项 phase/event + RUNS.jsonl（引擎）+ 里程碑盖戳（md 契约）。
-8. 永不 force-push、永不删远端分支。
+8. 永不 force-push、永不删远端分支（自治代理安全底线，与站点政策无关）。
 
 **N1-N3（编排自由的边界——违反任何一条即派发计划本身错误，判无效重排）**
 - **N1 maker≠checker**：implementer 永不自验；checker 是唯一 checker 席（审 diff + 跑全量 gate，可拆回两席但都归 check 侧），敏感项 check 席模型升 strongest。
