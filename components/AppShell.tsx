@@ -34,7 +34,7 @@ import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
-import type { LoopDefinition, LoopRun } from "@/lib/loop/types";
+import type { LoopDefinition, LoopRun, LoopRunMeta } from "@/lib/loop/types";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -44,6 +44,9 @@ type AutoNameStatus =
   | { kind: "error"; message: string };
 
 type WorkspaceView = "overview" | "settings" | "work-items" | "loops" | "chat";
+
+/** Loop run terminal statuses (shared by the run polling effect). */
+const LOOP_TERMINAL = new Set(["succeeded", "failed"]);
 
 /**
  * One open workspace tab. All per-tab view state (selected session, file tabs,
@@ -552,10 +555,25 @@ export function AppShell() {
   // sessionId 一出现就接上实时流；run 状态/plan/gate 也由这里维护，状态条挂在
   // chat 顶部，L2 的人工确认不用切回 Loops 视图。
   const [loopRun, setLoopRun] = useState<LoopRun | null>(null);
+  // 轮询目标（显式状态而非派生：setLoopRun 每秒写新对象，若作 effect 依赖会把
+  // 轮询重置成 300ms 一发）。autoOpen=触发流：sessionId 一出现就自动切到编排会话。
+  const [loopPollTarget, setLoopPollTarget] = useState<{ workspaceId: string; runId: string; autoOpen: boolean } | null>(null);
+  // ChatWindow 报上来的编排会话 run meta（state 探针）：把不是本 tab 触发流的
+  // run（从 Loop 运行记录 / 会话列表打开的编排会话）给接进 LoopStatusBar /
+  // gate 答复条。meta 为 null 不清理——bar 的生命周期归轮询/关闭钮，避免切换
+  // 会话时把进行中的 run 状态条弄丢。
+  const handleLoopRunMeta = useCallback((meta: LoopRunMeta | null) => {
+    if (!meta) return;
+    setLoopRun((current) => (current && current.id === meta.run.id ? current : meta.run));
+    // 非终态（运行中 / 等待裁决）的 run 接上轮询，直到终态——gate 答复后状态条
+    // 才能继续走到终态。终态 run 只展示，不需要轮询。
+    if (!LOOP_TERMINAL.has(meta.run.status)) {
+      setLoopPollTarget({ workspaceId: meta.workspaceId, runId: meta.run.id, autoOpen: false });
+    }
+  }, []);
   // 记录已经"自动打开过实时流"的编排会话 id，每个编排会话只自动切一次：
   // 避免 loop 运行期间用户切到别的会话后，每秒轮询又把焦点抢回 loop 编排会话。
   const loopSessionAutoOpenedRef = useRef<string | null>(null);
-  const activeLoopPending = activeTab?.loopPending ?? null;
 
   const handleLoopTriggered = useCallback((loop: LoopDefinition) => {
     if (!activeTabId) return;
@@ -578,9 +596,11 @@ export function AppShell() {
         if (!res.ok) throw new Error(`触发失败 (HTTP ${res.status})`);
         const receipt = await res.json() as { runId: string };
         updateTab(workspaceId, (tab) => (tab.loopPending ? { loopPending: { ...tab.loopPending, runId: receipt.runId } } : {}));
+        setLoopPollTarget({ workspaceId, runId: receipt.runId, autoOpen: true });
       } catch (error) {
         setLoopRun((cur) => (cur ? { ...cur, status: "failed", error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() } : cur));
         updateTab(workspaceId, { loopPending: undefined });
+        setLoopPollTarget(null);
       }
     })();
   }, [activeTabId, updateTab, navigateUrl]);
@@ -607,31 +627,30 @@ export function AppShell() {
     } catch { /* 下一次轮询会修正状态 */ }
   }, [loopRun]);
 
+  // 唯一的 run 轮询：loopPollTarget 存在（触发流或 meta 流写入）且 run 未终态时
+  // 每 1s 拉一次快照。autoOpen 仅触发流生效（sessionId 一出现自动切到编排会话，
+  // ref 去重防抢焦点）；从运行记录打开的会话本来就是用户选中的。
   useEffect(() => {
-    if (!activeLoopPending) { setLoopRun(null); return; }
-    const runId = activeLoopPending.runId;
-    const workspaceId = activeLoopPending.workspaceId;
-    if (!runId) return; // trigger POST 还没返回 runId，暂不轮询；runId 写入后本 effect 重跑
-    const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/loop`;
-    const TERMINAL = new Set(["succeeded", "failed"]);
+    const target = loopPollTarget;
+    if (!target) return;
+    const base = `/api/workspaces/${encodeURIComponent(target.workspaceId)}/loop`;
     let stopped = false;
     const poll = async () => {
       if (stopped) return;
       try {
-        const res = await fetch(`${base}/runs/${encodeURIComponent(runId)}`);
+        const res = await fetch(`${base}/runs/${encodeURIComponent(target.runId)}`);
         if (!res.ok) { if (!stopped) setTimeout(poll, 2000); return; }
         const { run } = await res.json() as { run: LoopRun };
         if (stopped) return;
         setLoopRun(run);
-        // 编排会话一存在就接上实时流——但每个编排会话只自动切换一次。
-        // 之后用户若主动切到别的会话，不再被抢回（loopSessionAutoOpenedRef 去重）。
-        if (run.sessionId && loopSessionAutoOpenedRef.current !== run.sessionId) {
+        if (target.autoOpen && run.sessionId && loopSessionAutoOpenedRef.current !== run.sessionId) {
           loopSessionAutoOpenedRef.current = run.sessionId;
           handleOpenLoopSession(run.sessionId);
         }
-        if (TERMINAL.has(run.status)) {
-          // 保留终态状态供查看；清掉 pending 让轮询停止。
-          updateTab(workspaceId, { loopPending: undefined });
+        if (LOOP_TERMINAL.has(run.status)) {
+          // 保留终态状态供查看（状态条显示 verdict）；清掉轮询与触发占位。
+          setLoopPollTarget(null);
+          if (target.autoOpen) updateTab(target.workspaceId, { loopPending: undefined });
         } else {
           setTimeout(poll, 1000);
         }
@@ -643,7 +662,7 @@ export function AppShell() {
     return () => { stopped = true; clearTimeout(timer); };
   // 注意：不把 selectedSession 放进依赖——自动切换只靠 ref 去重，与当前选中会话无关，
   // 否则用户切换会话会触发 effect 重跑并重新抢回焦点。
-  }, [activeLoopPending, handleOpenLoopSession, updateTab]);
+  }, [loopPollTarget, handleOpenLoopSession, updateTab]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
     const id = ensureTab(workspace);
@@ -890,6 +909,65 @@ export function AppShell() {
         window.clearInterval(timer);
       }
     }, 50);
+  }, [ensureTab, updateTab, activateTab, navigateUrl]);
+
+  /** dev-loop v3「按合同执行」：POST run-contract → daemon deterministic seeder
+   *  (guard + `/skill:` prompt + bookkeeping), then open the seeded execution
+   *  session as this workspace's chat tab (gate answers happen in its composer).
+   *  Returns the guard's refusal reason when seeding was blocked, or null on
+   *  success; throws on transport errors so the caller can surface them. */
+  const handleRunContract = useCallback(async (
+    workspace: WorkspaceSummary,
+    item: WorkItemRecord,
+    mode: "execute" | "adopt",
+  ): Promise<string | null> => {
+    const response = await fetch(
+      `/api/workspaces/${encodeURIComponent(workspace.id)}/work-items/${encodeURIComponent(item.key)}/run-contract`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      },
+    );
+    const data = await response.json().catch(() => ({})) as {
+      seeded?: boolean;
+      sessionId?: string;
+      reason?: string;
+      error?: string;
+    };
+    if (!response.ok || !data.seeded) {
+      return data.reason ?? data.error ?? `HTTP ${response.status}`;
+    }
+    const sessionId = data.sessionId!;
+    // Resolve the freshly seeded daemon session via locate (probe-first — the
+    // .jsonl may not be flushed into the 30s-cached session list yet).
+    let info: SessionInfo | undefined;
+    try {
+      const locate = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
+      if (locate.ok) {
+        info = ((await locate.json()) as { session?: SessionInfo }).session;
+      }
+    } catch { /* fall through with a minimal info */ }
+    ensureTab(workspace);
+    updateTab(workspace.id, {
+      view: "chat",
+      session: info ?? {
+        id: sessionId,
+        path: sessionId,
+        cwd: workspace.path,
+        name: `${item.key} ${item.title}`,
+        created: new Date().toISOString(),
+        modified: new Date().toISOString(),
+        messageCount: 0,
+        firstMessage: `${item.key} ${item.title}`,
+      },
+      newSessionCwd: null,
+    });
+    activateTab(workspace.id);
+    setSessionKey((key) => key + 1);
+    setSystemPrompt(null);
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(sessionId)}`);
+    return null;
   }, [ensureTab, updateTab, activateTab, navigateUrl]);
 
   const handleAgentEnd = useCallback(() => {
@@ -1160,6 +1238,8 @@ export function AppShell() {
         if (isMobile) setSidebarOpen(false);
       }}
       loopsActive={workspaceView === "loops"}
+      onOpenLoopSession={handleOpenLoopSession}
+      onTriggerLoop={handleLoopTriggered}
       onAddRepository={() => {
         navigateWorkspaceView("settings");
         setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
@@ -1983,7 +2063,7 @@ export function AppShell() {
           ) : activeWorkspace
             && workspaceView === "loops" ? (
             <div style={{ height: "100%", overflowY: "auto", padding: 20 }}>
-              <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onTriggered={handleLoopTriggered} onOpenSession={handleOpenLoopSession} />
+              <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onTriggered={handleLoopTriggered} />
             </div>
           ) : activeWorkspace
             && (workspaceView === "settings" || workspaceView === "work-items") ? (
@@ -1998,6 +2078,8 @@ export function AppShell() {
               onClose={() => navigateWorkspaceView("overview")}
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
+              onRunContract={handleRunContract}
+              onOpenConversation={handleOpenLoopSession}
               onWorkspaceDeleted={handleWorkspaceDeleted}
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
               onWorkspaceChanged={() => void loadWorkspaces()}
@@ -2030,6 +2112,7 @@ export function AppShell() {
                     onAgentEnd={handleAgentEnd}
                     onSessionCreated={handleSessionCreated}
                     onSessionForked={handleSessionForked}
+                    onLoopRunMeta={handleLoopRunMeta}
                     modelsRefreshKey={modelsRefreshKey}
                     chatInputRef={chatInputRef}
                     onBranchDataChange={handleBranchDataChange}

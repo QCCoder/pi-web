@@ -50,6 +50,17 @@ interface Props {
   onClose: () => void;
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
+  /** dev-loop v3: seed a contract execution session for a work item (POST
+   *  run-contract on the daemon). Returns the guard refusal reason, or null on
+   *  success (AppShell opens the session). Throws on transport errors. */
+  onRunContract?: (
+    workspace: WorkspaceSummary,
+    item: WorkItemRecord,
+    mode: "execute" | "adopt",
+  ) => Promise<string | null>;
+  /** Open one of the item's linked conversation sessions by id (locate
+   *  pipeline) — renders the `conversations` list as clickable entries. */
+  onOpenConversation?: (sessionId: string) => void;
   onWorkspaceDeleted?: (workspace: WorkspaceSummary) => void;
   onWorkItemsChanged?: () => void;
   onWorkspaceChanged?: () => void;
@@ -166,6 +177,8 @@ export function WorkspaceManager({
   onClose,
   onOpenWorkspace,
   onOpenWorkItemConversation,
+  onRunContract,
+  onOpenConversation,
   onWorkspaceDeleted,
   onWorkItemsChanged,
   onWorkspaceChanged,
@@ -567,6 +580,38 @@ export function WorkspaceManager({
     workItemType,
     onWorkItemsChanged,
   ]);
+
+  /** dev-loop v3「按合同执行」/「收养续跑」：daemon deterministic seeder. On
+   *  guard refusal the reason is surfaced via the banner (the run is NOT
+   *  started); on success AppShell has already opened the session — just
+   *  refresh the detail so the new conversation + loop.started show up. */
+  const runContract = useCallback(async (mode: "execute" | "adopt") => {
+    if (!selectedWorkspace || !selectedWorkItem || !onRunContract) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const refusal = await onRunContract(selectedWorkspace, selectedWorkItem.item, mode);
+      if (refusal) {
+        setError(`未播种：${refusal}`);
+        return;
+      }
+      if (selectedWorkspaceId) {
+        const detail = await responseJson<WorkItemDetail>(
+          await fetch(
+            `/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/work-items/${encodeURIComponent(selectedWorkItem.item.key)}`,
+          ),
+        );
+        setSelectedWorkItem(detail);
+        setContentDraft(detail.content);
+        await loadWorkItems(selectedWorkspaceId);
+        onWorkItemsChanged?.();
+      }
+    } catch (contractError) {
+      setError(contractError instanceof Error ? contractError.message : String(contractError));
+    } finally {
+      setSaving(false);
+    }
+  }, [loadWorkItems, onRunContract, onWorkItemsChanged, selectedWorkspace, selectedWorkspaceId, selectedWorkItem]);
 
   const patchWorkItem = useCallback(async (
     patch: Partial<Pick<WorkItemRecord, "status" | "phase" | "priority" | "title" | "repositories">>
@@ -1381,6 +1426,28 @@ export function WorkspaceManager({
                     >
                       {selectedWorkItem.item.conversations.length > 0 ? "继续会话" : "开始会话"}
                     </button>
+                    {onRunContract && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && (
+                      <>
+                        <button
+                          className="workspace-action"
+                          disabled={saving}
+                          onClick={() => void runContract("execute")}
+                          title="以 dev-loop 合同种子一个执行会话（开场判定→SPEC→maker/checker→合并→验证）"
+                        >
+                          按合同执行
+                        </button>
+                        {selectedWorkItem.events.some((event) => event.type === "loop.started") && (
+                          <button
+                            className="workspace-action"
+                            disabled={saving}
+                            onClick={() => void runContract("adopt")}
+                            title="从派发计划+里程碑缺口续跑（不重做开场判定）"
+                          >
+                            收养续跑
+                          </button>
+                        )}
+                      </>
+                    )}
                     <button
                       className="workspace-action"
                       onClick={() => setContentEditing((value) => !value)}
@@ -1395,6 +1462,21 @@ export function WorkspaceManager({
                       {selectedWorkItem.item.archivedAt ? "取消归档" : "归档"}
                     </button>
                   </div>
+                  {onOpenConversation && selectedWorkItem.item.conversations.length > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                      <span style={{ fontSize: 12, color: "var(--text-dim)", flexShrink: 0 }}>关联会话：</span>
+                      {selectedWorkItem.item.conversations.map((conversationId) => (
+                        <button
+                          key={conversationId}
+                          className="workspace-action"
+                          onClick={() => onOpenConversation(conversationId)}
+                          title={conversationId}
+                        >
+                          {(conversationId.slice(0, 8))}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="work-item-fields">
                     <SelectField
                       label="状态"

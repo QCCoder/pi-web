@@ -10,10 +10,11 @@ import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./sto
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { findWorkItemByConversation } from "../work-items/service.ts";
+import { seedExecutionSession } from "./seed.ts";
 import { getRpcSession, getRunningRpcSessionIds, getLiveRpcSessionInfos, hasBusyRpcSessionForCwd, startRpcSession, subscribeRunningSessions, destroyRpcSessionsForCwd, type AgentSessionWrapper } from "../rpc-manager.ts";
 import { resolveSessionPath } from "../session-reader.ts";
 import { generateSessionTitle } from "../session-title.ts";
-import type { TriggerCommand } from "./types.ts";
+import type { LoopRunMeta, TriggerCommand } from "./types.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 30142;
@@ -193,6 +194,7 @@ export function createLoopHost() {
           modelId?: string;
           toolNames?: string[];
           thinkingLevel?: string;
+          extraAgentDirs?: string[];
           command?: { type: string; [key: string]: unknown };
         };
         if (!input.cwd || typeof input.cwd !== "string") {
@@ -204,7 +206,9 @@ export function createLoopHost() {
         // One-time key so startRpcSession's start-lock never coalesces two
         // concurrent creates onto one session (mirrors /api/agent/new).
         const tempKey = `__new__${randomUUID()}`;
-        const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, input.toolNames);
+        const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, input.toolNames, {
+          extraAgentDirs: input.extraAgentDirs,
+        });
         if (input.provider && input.modelId) {
           await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
         }
@@ -212,7 +216,12 @@ export function createLoopHost() {
           await session.send({ type: "set_thinking_level", level: input.thinkingLevel });
         }
         const data = input.command ? await session.send(input.command) : null;
-        return json(response, 200, { success: true, sessionId: realSessionId, cwd: session.cwd, data });
+        // sessionFile lets the web process seed its id→path cache: the .jsonl is
+        // created lazily (first append), so a disk scan right after creation
+        // would miss the file and 404 — with the path seeded, GET /api/sessions/:id
+        // resolves without a scan and can answer "empty but valid" until the
+        // first append lands.
+        return json(response, 200, { success: true, sessionId: realSessionId, cwd: session.cwd, sessionFile: session.sessionFile, data });
       }
       const sessionCommand = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/commands$/);
       if (request.method === "POST" && sessionCommand) {
@@ -254,11 +263,26 @@ export function createLoopHost() {
       if (request.method === "GET" && sessionProbe) {
         const sid = decodeURIComponent(sessionProbe[1]);
         const session = findLiveSession(sid);
-        if (!session) return json(response, 404, { error: "session not live in loop host" });
+        // Orchestrator run meta (any state, incl. gate-paused) rides along on the
+        // probe so the web state route can surface a gate answer where the user
+        // already is — the chat tab of the orchestrator session.
+        let loop: LoopRunMeta | undefined;
+        try { loop = await runtime.findBySessionId(sid); } catch { /* best effort */ }
+        if (!session) {
+          // Cold orchestrator (host restarted while a gate is paused — the
+          // wrapper expired; the run is recoverable on the next gate answer).
+          // Answer the probe anyway so the web layer pins the session and shows
+          // the gate bar instead of enabling a composer that would 409 (or
+          // worse, bypass answerGate into an untracked prompt).
+          if (loop && (loop.run.status === "waiting_for_gate" || loop.run.status === "running")) {
+            return json(response, 200, { id: sid, running: false, state: undefined, loop });
+          }
+          return json(response, 404, { error: "session not live in loop host" });
+        }
         let state: unknown;
         try { state = await session.send({ type: "get_state" }); }
         catch { state = undefined; /* session not ready yet */ }
-        return json(response, 200, { ...liveMeta(session), state });
+        return json(response, 200, { ...liveMeta(session), state, ...(loop ? { loop } : {}) });
       }
       // Session event stream: Pi Web proxies this SSE so the browser can watch
       // a Loop orchestrator — or its running subagent child — live, exactly
@@ -351,6 +375,38 @@ export function createLoopHost() {
       if (request.method === "POST" && importerSync) {
         const summary = await syncImporterForWorkspace(decodeURIComponent(importerSync[1]));
         return json(response, 200, { summary });
+      }
+      // v3 seeding: the work-item "按合同执行" button. Same deterministic
+      // seeder the engine uses after a selection round (guard + skill prompt +
+      // bookkeeping), exposed so the human entry path is byte-identical to the
+      // cron path. skillId defaults to the workspace's first enabled loop id
+      // (convention: loop id === skill name).
+      const seedRoute = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/seed$/);
+      if (request.method === "POST" && seedRoute) {
+        const workspaceId = decodeURIComponent(seedRoute[1]);
+        const input = await body(request) as { key?: string; mode?: string; skillId?: string };
+        if (!input.key || !/^(?:REQ|BUG)-\d+$/i.test(input.key)) {
+          return json(response, 400, { error: "key must look like REQ-0001 or BUG-0001" });
+        }
+        if (input.mode !== undefined && input.mode !== "execute" && input.mode !== "adopt") {
+          return json(response, 400, { error: "mode must be execute or adopt" });
+        }
+        const workspace = await workspaces.get(workspaceId);
+        let skillId = input.skillId;
+        if (!skillId) {
+          const loops = await runtime.listLoops(workspaceId);
+          const enabled = loops.find((loop) => loop.enabled);
+          if (!enabled) return json(response, 409, { error: "workspace has no enabled loop to seed from" });
+          skillId = enabled.id;
+        }
+        const result = await seedExecutionSession({
+          workspaceId,
+          workspacePath: workspace.path,
+          skillId,
+          key: input.key.toUpperCase(),
+          mode: input.mode,
+        });
+        return json(response, 200, { seed: result });
       }
       return json(response, 404, { error: "route not found" });
     } catch (error) {

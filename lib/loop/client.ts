@@ -1,4 +1,4 @@
-import type { GateAnswer, LoopDefinition, LoopRun, TriggerCommand, TriggerReceipt } from "./types.ts";
+import type { GateAnswer, LoopDefinition, LoopRun, LoopRunMeta, TriggerCommand, TriggerReceipt } from "./types.ts";
 import type { ImporterRunSummary } from "../importers/runner.ts";
 
 const baseUrl = () => (process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
@@ -11,6 +11,9 @@ export interface CreateSessionInput {
   modelId?: string;
   toolNames?: string[];
   thinkingLevel?: string;
+  /** Trusted subagent source dirs (e.g. the workspace's `.pi/agents/`) injected
+   *  without the per-dispatch project-agent confirmation gate. */
+  extraAgentDirs?: string[];
   command?: { type: string; [key: string]: unknown };
 }
 
@@ -29,10 +32,15 @@ const PROBE_TIMEOUT_MS = 2_000;
  *  Loop Host for the same file). */
 export interface LoopSessionMeta {
   id: string;
-  cwd: string;
-  sessionFile: string;
+  /** Absent on the cold-orchestrator probe (host restarted while a gate was
+   *  paused — no live wrapper, only the run meta is authoritative). */
+  cwd?: string;
+  sessionFile?: string;
   running: boolean;
   state?: unknown;
+  /** Present when this session is some run's orchestrator: carries the latest
+   *  run snapshot so the web layer can render the gate answer UI. */
+  loop?: LoopRunMeta;
 }
 
 /** Error thrown for non-2xx daemon responses. Carries the daemon's HTTP
@@ -63,7 +71,7 @@ export const loopHostClient = {
   /** Session-daemon surface (C2 Phase 1): create a new session in the daemon
    *  process. Response carries the real pi session id plus the session cwd so
    *  the web proxy can sync its file-access allow-list. */
-  createSession: (input: CreateSessionInput) => request<{ success: boolean; sessionId: string; cwd: string; data: unknown }>("/v1/sessions", {
+  createSession: (input: CreateSessionInput) => request<{ success: boolean; sessionId: string; cwd: string; sessionFile?: string; data: unknown }>("/v1/sessions", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
   }),
   /** Session-daemon surface: send any command to a session the daemon owns
@@ -125,6 +133,15 @@ export const loopHostClient = {
     `/v1/workspaces/${encodeURIComponent(workspaceId)}/runs/${encodeURIComponent(runId)}/abort`,
     { method: "POST" },
   ),
+  /** v3 seeding: deterministically seed an execution session for a work item
+   *  (guard + `/skill:<loopId>` prompt + conversations/milestone bookkeeping).
+   *  `seeded: false` carries the guard's refusal reason; HTTP errors mean the
+   *  daemon is down or the work item does not exist. */
+  seedExecution: (workspaceId: string, key: string, mode?: "execute" | "adopt") =>
+    request<{ seed: { seeded: boolean; sessionId?: string; reason: string } }>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/seed`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, mode }) },
+    ),
   /** Ask the Loop Host whether it owns a given pi session id. Returns null
    *  when the host is unreachable OR does not own the session, so callers can
    *  fall back to the normal local .jsonl path without distinguishing the two. */

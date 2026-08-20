@@ -1,4 +1,5 @@
 import { createUlid } from "../workspaces/id.ts";
+import { resolveSessionPath } from "../session-reader.ts";
 import {
   appendRunSnapshot,
   listLoopDefinitions,
@@ -10,6 +11,7 @@ import {
 import type {
   GateAnswer,
   LoopRun,
+  LoopRunMeta,
   LoopRuntime,
   RoundExecutionBackend,
   RoundResult,
@@ -37,6 +39,11 @@ export class DefaultLoopRuntime implements LoopRuntime {
   private readonly active = new Map<string, Promise<void>>();
   private readonly aborted = new Set<string>();
   private readonly triggerLocks = new Map<string, Promise<TriggerReceipt>>();
+  /** Per-run serializer for RUNS.jsonl appends. A fire-and-forget heartbeat
+   *  emitted during a long round must not overtake the terminal snapshot
+   *  written after the round resolves — `listRunSnapshots` keeps the last line
+   *  per id, so write order IS the visible run state. */
+  private readonly snapshotChains = new Map<string, Promise<void>>();
 
   constructor(
     private readonly workspaces: WorkspaceResolver,
@@ -86,6 +93,15 @@ export class DefaultLoopRuntime implements LoopRuntime {
     return run;
   }
 
+  async findBySessionId(sessionId: string): Promise<LoopRunMeta | undefined> {
+    for (const workspace of await this.workspaces.list()) {
+      for (const run of await listRunSnapshots(workspace)) {
+        if (run.sessionId === sessionId) return { workspaceId: workspace.id, run };
+      }
+    }
+    return undefined;
+  }
+
   async answerGate(command: GateAnswer): Promise<LoopRun> {
     const workspace = await this.workspaces.get(command.workspaceId);
     const run = await this.getRun(command.workspaceId, command.runId);
@@ -131,6 +147,11 @@ export class DefaultLoopRuntime implements LoopRuntime {
         // `current` in sync so the terminal snapshot (settle) carries it too.
         current = this.patch(current, { sessionId });
         await appendRunSnapshot(workspace, current);
+      }, (info) => {
+        // Heartbeat: a long round (subagent trace, slow model) sits in
+        // `running` with no status transition for many minutes. Bump updatedAt +
+        // progress so the run card reflects activity instead of looking frozen.
+        this.heartbeat(workspace, current, info.detail);
       });
       // Abort may have destroyed the session and written a failed snapshot
       // while startRound was finishing; do not overwrite it with settle.
@@ -155,7 +176,9 @@ export class DefaultLoopRuntime implements LoopRuntime {
     message: string,
   ): Promise<void> {
     try {
-      const result = await this.execution.resumeRound(run, message);
+      const result = await this.execution.resumeRound(run, message, (info) => {
+        this.heartbeat(workspace, run, info.detail);
+      });
       // Abort may have destroyed the session and written a failed snapshot
       // while resumeRound was finishing; do not overwrite it with settle.
       if (this.aborted.has(run.id)) return;
@@ -172,22 +195,63 @@ export class DefaultLoopRuntime implements LoopRuntime {
   /** Apply a round result: pause at a gate, or mark succeeded (terminal). */
   private async settle(workspace: WorkspaceLocation, run: LoopRun, result: RoundResult): Promise<void> {
     if (result.gateRequest) {
-      await appendRunSnapshot(workspace, this.patch(run, {
+      await this.writeSnapshot(workspace, this.patch(run, {
         status: "waiting_for_gate", output: result.output, gateRequest: result.gateRequest,
       }));
       return;
     }
-    await appendRunSnapshot(workspace, this.patch(run, {
+    await this.writeSnapshot(workspace, this.patch(run, {
       status: "succeeded", output: result.output, verdict: result.verdict, gateRequest: undefined,
-      finishedAt: new Date().toISOString(),
+      progress: undefined, finishedAt: new Date().toISOString(),
+      ...(result.seed ? { seededSessionId: result.seed.sessionId } : {}),
     }));
   }
 
   private async fail(workspace: WorkspaceLocation, run: LoopRun, error: unknown) {
-    await appendRunSnapshot(workspace, this.patch(run, {
+    await this.writeSnapshot(workspace, this.patch(run, {
       status: "failed", error: error instanceof Error ? error.message : String(error),
-      finishedAt: new Date().toISOString(),
+      progress: undefined, finishedAt: new Date().toISOString(),
     }));
+  }
+
+  /** Serialize RUNS.jsonl appends per run (see `snapshotChains`). */
+  private writeSnapshot(workspace: WorkspaceLocation, run: LoopRun): Promise<void> {
+    const prev = this.snapshotChains.get(run.id) ?? Promise.resolve();
+    const next = prev.then(
+      () => appendRunSnapshot(workspace, run),
+      () => appendRunSnapshot(workspace, run),
+    );
+    this.snapshotChains.set(run.id, next.catch(() => {}));
+    return next;
+  }
+
+  /** Append a heartbeat snapshot (bumped updatedAt + progress) without a status
+   *  change. Fire-and-forget; serialized via `writeSnapshot` so it cannot
+   *  overtake the terminal snapshot. */
+  private heartbeat(workspace: WorkspaceLocation, run: LoopRun, detail: string): void {
+    void this.writeSnapshot(workspace, this.patch(run, { progress: detail }));
+  }
+
+  /** Mark every `waiting_for_gate` run whose orchestrator `.jsonl` is gone from
+   *  the live sessions dir (archived or removed) as `failed`. Runs whose file is
+   *  still live are left alone — they rehydrate on the next gate answer. */
+  async reapOrphanedGates(): Promise<number> {
+    let reaped = 0;
+    for (const workspace of await this.workspaces.list()) {
+      for (const run of await listRunSnapshots(workspace)) {
+        if (run.status !== "waiting_for_gate" || !run.sessionId) continue;
+        const live = await resolveSessionPath(run.sessionId);
+        if (live) continue;
+        await this.writeSnapshot(workspace, this.patch(run, {
+          status: "failed",
+          error: "orchestrator session expired (archived or removed); gate could not be resumed",
+          progress: undefined,
+          finishedAt: new Date().toISOString(),
+        }));
+        reaped += 1;
+      }
+    }
+    return reaped;
   }
 
   private patch(run: LoopRun, patch: Partial<LoopRun>): LoopRun {
