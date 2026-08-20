@@ -83,7 +83,7 @@ export function WorkspaceOverview({
     return sessions
       .filter((session) =>
         !session.subagentChild
-        && !(session.loopOrchestrator && !session.loopWorkItem)
+        && !session.loopOrchestrator
         && (
           session.cwd === path
           || session.cwd.startsWith(prefix)

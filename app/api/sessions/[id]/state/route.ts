@@ -15,8 +15,8 @@ export async function GET(
     // Pure proxy over the session daemon (C2): it owns every live session, so
     // it is the only place to ask. `loopOwned: true` here means "live in the
     // daemon" (orchestrator, subagent child, or interactive session) — the
-    // client pins such a viewed session so a gate-paused orchestrator's event
-    // stream survives the running-set sweep.
+    // client pins such a viewed session so its event stream survives the
+    // running-set sweep even while it is idle-warm between turns.
     const client = await daemonProxy();
     const meta = await client.probeSession(id);
     if (meta) {
@@ -24,7 +24,6 @@ export async function GET(
         running: meta.running,
         loopOwned: true,
         state: meta.state ?? undefined,
-        loop: meta.loop ?? undefined,
       });
     }
     return NextResponse.json({ running: false });

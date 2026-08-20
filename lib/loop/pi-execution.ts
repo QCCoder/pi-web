@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentEvent, AgentSessionWrapper } from "../rpc-manager.ts";
 import { startRpcSession } from "../rpc-manager.ts";
-import { resolveSessionPath } from "../session-reader.ts";
 import type {
   LoopDefinition,
   LoopRun,
@@ -96,13 +95,6 @@ function verdictFrom(output: string): string | undefined {
   return match?.[1]?.trim() || undefined;
 }
 
-/** `LOOP_GATE:` carries the free-text decision the orchestrator wants a human
- *  to make. Returns the trimmed payload, or undefined when the orchestrator did
- *  not pause. */
-function gateFrom(output: string): string | undefined {
-  return output.match(/LOOP_GATE\s*:\s*(.+)/i)?.[1]?.trim() || undefined;
-}
-
 /** The domain-agnostic first prompt handed to every Loop orchestrator. Embeds
  *  the run id and the orchestrator's own session id so the loop can cite them
  *  (LEARN records, work-item conversations). Mentions NO project facts — all of
@@ -113,20 +105,18 @@ function buildFirstPrompt(run: LoopRun, realSessionId: string, instructions: str
     `- 本轮 run id：${run.id}（写 LEARN / 产物时引用它）。`,
     `- 你的会话 id（sessionId）：${realSessionId}（如需关联到工作项的 conversations 字段，用这个值）。`,
     "- 你的 cwd 就是工作区根目录；LOOP.md 里提到的仓库相对路径都相对这里解析。",
-    "- 需要人判断时，输出一行 `LOOP_GATE: <需要人决定的事>` 然后停下，不要自己越过。",
-    "- 本轮完成时输出 `LOOP_VERDICT: <结论>`（或直接自然结束）。",
-    "- 本 loop 的子代理已在其 agents/ 目录注册，按 LOOP.md 指引用 subagent 调用。",
+    "- 本轮完成时输出 `LOOP_VERDICT: <结论>`（或直接自然结束）；若 LOOP.md 要求播种，最后一行精确输出 `LOOP_SEED: <KEY>`。",
+    "- 本 loop 的子代理（若有）已在其 agents/ 目录注册，按 LOOP.md 指引用 subagent 调用。",
     "",
     "# LOOP.md",
     instructions,
   ].join("\n");
 }
 
-/** Pi owns reasoning; this adapter only preserves the same orchestrator session
- *  across gates. A session is kept alive between `startRound` and a later
- *  `resumeRound` until it reaches a terminal result (no `gateRequest`) or is
- *  aborted — at which point it is destroyed. This fixes the old bug where
- *  `execute` deleted the session unconditionally, breaking gate2 resume. */
+/** Pi owns reasoning; this adapter runs ONE short selection round per run.
+ *  v3: the orchestrator session is destroyed on the round's result — there is
+ *  no cross-gate retention (execution happens in normal seeded sessions; see
+ *  seed.ts and docs/dev-loop-v3-design.md). */
 export class PiRoundExecutionBackend implements RoundExecutionBackend {
   /** run.id -> orchestrator wrapper. */
   private readonly sessions = new Map<string, AgentSessionWrapper>();
@@ -139,20 +129,6 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
    *  startRound, retained across a gate pause, cleared on terminal finish or
    *  cleanup. */
   private readonly runWorkspaces = new Map<string, string>();
-  /** run.id -> extraAgentDirs for this loop. Retained across a gate pause so a
-   *  rehydrated orchestrator (after idle-timeout/host-restart) re-registers the
-   *  same loop-scoped worker agents; cleared alongside `runWorkspaces`. */
-  private readonly runAgentDirs = new Map<string, string[] | undefined>();
-  /** Optional seam the host uses to rename an orchestrator session after the
-   *  round settles (e.g. name it after the requirement a dev-loop run picked,
-   *  so Loop sessions no longer all share an identical title). The engine stays
-   *  domain-agnostic: it just calls this with the workspace path + session id
-   *  and applies the returned name when the session is still unnamed. */
-  private readonly sessionNamer?: (workspacePath: string, sessionId: string) => Promise<string | undefined>;
-
-  constructor(sessionNamer?: (workspacePath: string, sessionId: string) => Promise<string | undefined>) {
-    this.sessionNamer = sessionNamer;
-  }
 
   async startRound(
     definition: LoopDefinition,
@@ -169,7 +145,6 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     // a trusted, loop-scoped source (no project-agent confirmation gate).
     const agentsDir = join(definition.directory, "agents");
     const extraAgentDirs = existsSync(agentsDir) ? [agentsDir] : undefined;
-    this.runAgentDirs.set(run.id, extraAgentDirs);
     const { session, realSessionId } = await startRpcSession(
       `__loop_host__${run.id}`,
       "",
@@ -182,10 +157,6 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
 
     try {
       const output = await capturePrompt(session, buildFirstPrompt(run, realSessionId, instructions), onProgress);
-      // The first round is where a dev-loop orchestrator picks its work item and
-      // links itself to it. Name the session after that requirement so Loop runs
-      // don't all share the same generic title. No-op when no item was selected.
-      await this.applySessionName(session, definition.workspacePath, realSessionId);
       // v3: a selection round may end with `LOOP_SEED: <KEY>` — deterministically
       // seed the execution session (normal session + loop skill + guard +
       // bookkeeping) here in the engine, then hand the result back so the runtime
@@ -209,61 +180,6 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     }
   }
 
-  async resumeRound(
-    run: LoopRun,
-    message: string,
-    onProgress?: (info: RoundProgress) => void,
-  ): Promise<RoundResult> {
-    let session = this.sessions.get(run.id);
-    if (!session) {
-      // The in-memory orchestrator wrapper expired (idle timeout) or the host
-      // restarted while the run was paused at a gate. The conversation is
-      // file-backed: rehydrate it from its .jsonl so the gate answer continues
-      // transparently. Only an archived/missing file is unrecoverable.
-      session = await this.rehydrateSession(run);
-    }
-    // The free-text gate answer is used verbatim as the next prompt — the loop's
-    // LOOP.md defines what each answer means.
-    try {
-      const output = await capturePrompt(session, message, onProgress);
-      return await this.finishRound(run.id, output);
-    } catch (error) {
-      await this.cleanupRunProcesses(run.id);
-      this.sessions.get(run.id)?.destroy();
-      throw error;
-    }
-  }
-
-  /** Re-open a paused orchestrator session from its `.jsonl` after the
-   *  in-memory wrapper expired (10-min idle timeout) or the host restarted.
-   *  pi sessions are file-backed, so the gate answer continues seamlessly.
-   *  Throws when the file is archived or missing — the only unrecoverable case. */
-  private async rehydrateSession(run: LoopRun): Promise<AgentSessionWrapper> {
-    if (!run.sessionId) {
-      throw new Error("orchestrator session expired: run has no sessionId to rehydrate");
-    }
-    const sessionFile = await resolveSessionPath(run.sessionId);
-    if (!sessionFile) {
-      throw new Error(
-        "orchestrator session expired: the paused gate can no longer be resumed " +
-        "(session was archived or removed). Abort the run and re-trigger.",
-      );
-    }
-    const workspacePath = this.runWorkspaces.get(run.id);
-    if (!workspacePath) {
-      throw new Error("orchestrator session expired: workspace scope lost for run");
-    }
-    const { session, realSessionId } = await startRpcSession(
-      run.sessionId,
-      sessionFile,
-      workspacePath,
-      undefined,
-      { extraAgentDirs: this.runAgentDirs.get(run.id) },
-    );
-    this.register(run.id, realSessionId, session);
-    return session;
-  }
-
   async abortRound(run: LoopRun): Promise<void> {
     const session = this.sessions.get(run.id);
     if (session) session.destroy();
@@ -274,24 +190,16 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     await this.cleanupRunProcesses(run.id);
   }
 
-  /** Parse the assistant output for a gate/verdict, and destroy the orchestrator
-   *  session when the result is terminal (no `gateRequest`). A gate result keeps
-   *  the session alive for a later `resumeRound`. */
+  /** Parse the assistant output for a verdict, destroy the orchestrator session
+   *  (the round is terminal by construction), and attach the seed result. */
   private async finishRound(runId: string, output: string, seed?: { key: string; sessionId: string }): Promise<RoundResult> {
-    const gateRequest = gateFrom(output);
-    if (!gateRequest) {
-      const session = this.sessions.get(runId);
-      session?.destroy();
-      // Terminal: no reaping needed (the round's bash finished naturally) —
-      // just drop the workspace scope. A gate result keeps it so a later
-      // abort/timeout can still scope orphan cleanup.
-      this.runWorkspaces.delete(runId);
-      this.runAgentDirs.delete(runId);
-    }
+    this.sessions.get(runId)?.destroy();
+    // No reaping needed (the round's bash finished naturally) — just drop the
+    // workspace scope.
+    this.runWorkspaces.delete(runId);
     const result: RoundResult = { output: output.slice(0, 32_000) };
     const verdict = verdictFrom(output);
     if (verdict) result.verdict = verdict;
-    if (gateRequest) result.gateRequest = gateRequest;
     if (seed) result.seed = seed;
     return result;
   }
@@ -333,7 +241,6 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
   private async cleanupRunProcesses(runId: string): Promise<void> {
     const workspacePath = this.runWorkspaces.get(runId);
     this.runWorkspaces.delete(runId);
-    this.runAgentDirs.delete(runId);
     if (!workspacePath) return;
     try {
       const result = await reapOrphanedRoundProcesses(workspacePath);
@@ -345,25 +252,6 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
       }
     } catch (error) {
       console.error(`[pi-loop] process cleanup failed for run ${runId}:`, error);
-    }
-  }
-
-  /** Ask the host-provided namer for a title and apply it to a still-unnamed
-   *  orchestrator session. Never clobbers an existing name (set by a user or a
-   *  prior round) and never throws — naming is cosmetic and must not break the
-   *  round flow. */
-  private async applySessionName(
-    session: AgentSessionWrapper,
-    workspacePath: string,
-    sessionId: string,
-  ): Promise<void> {
-    if (!this.sessionNamer) return;
-    try {
-      if (session.inner.sessionManager.getSessionName()) return;
-      const name = await this.sessionNamer(workspacePath, sessionId);
-      if (name) session.inner.setSessionName(name);
-    } catch (error) {
-      console.error("[pi-loop] session naming failed:", error);
     }
   }
 

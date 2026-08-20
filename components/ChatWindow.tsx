@@ -48,7 +48,7 @@ interface Props {
    *  run meta (from the state probe), so AppShell can pin the LoopStatusBar —
    * the gate answer channel — onto this chat tab even when the run was NOT
    * triggered from here (e.g. opened from the sidebar run records). */
-  onLoopRunMeta?: (meta: import("@/lib/loop/types").LoopRunMeta | null) => void;
+
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -182,7 +182,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { mes
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, onLoopRunMeta }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -210,7 +210,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
-    loopOwned, loopRunMeta, answerLoopGate,
+    loopOwned,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -230,11 +230,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
-  // Report orchestrator run meta up to the shell (AppShell pins the
-  // LoopStatusBar / gate answer bar onto this tab from it).
-  useEffect(() => {
-    onLoopRunMeta?.(loopRunMeta);
-  }, [loopRunMeta, onLoopRunMeta]);
 
   const sessionBusy = agentRunning || bashRunning;
 
@@ -408,18 +403,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   }, [session?.id]);
   const toggleChangedFiles = useCallback(() => setChangedFilesOpen((v) => !v), []);
 
-  // Loop 编排会话等 gate 时，composer 的发送就是 gate 答复（走 pin 住的 SSE
-  // 流落回 transcript）；其余状态照常走 handleSend。
-  const gateWaiting = loopOwned && loopRunMeta?.run.status === "waiting_for_gate";
-  const sendOrAnswerGate = useCallback((message: string, images?: AttachedImage[]) => {
-    if (gateWaiting && !images?.length) return answerLoopGate(message);
-    return handleSend(message, images);
-  }, [gateWaiting, answerLoopGate, handleSend]);
-
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
-      onSend={sendOrAnswerGate}
+      onSend={handleSend}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}

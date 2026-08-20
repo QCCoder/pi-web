@@ -10,7 +10,7 @@ import type { SessionInfo } from "@/lib/types";
 import type { GitFileStatus } from "@/lib/git-types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
-import type { CronTriggerDefinition, LoopDefinition, LoopRunWithWorkItem } from "@/lib/loop/types";
+import type { CronTriggerDefinition, LoopDefinition, LoopRun } from "@/lib/loop/types";
 import { joinFilePath } from "@/lib/file-paths";
 
 interface Props {
@@ -255,7 +255,7 @@ export function WorkspaceSidebar({
       // stay listed like any development session.
       return owner?.id === activeWorkspace.id
         && !session.subagentChild
-        && !(session.loopOrchestrator && !session.loopWorkItem);
+        && !session.loopOrchestrator;
     });
   }, [allSessions, activeWorkspace, workspaces]);
   const [archivedCount, setArchivedCount] = useState(0);
@@ -264,7 +264,7 @@ export function WorkspaceSidebar({
   // Loop 视图：定义列表 + 展开中的 loop 运行记录（run records 直读 RUNS.jsonl）。
   const [loops, setLoops] = useState<LoopDefinition[]>([]);
   const [expandedLoopId, setExpandedLoopId] = useState<string | null>(null);
-  const [loopRuns, setLoopRuns] = useState<Record<string, LoopRunWithWorkItem[]>>({});
+  const [loopRuns, setLoopRuns] = useState<Record<string, LoopRun[]>>({});
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [requirementsOpen, setRequirementsOpen] = useState(true);
@@ -362,7 +362,7 @@ export function WorkspaceSidebar({
         `/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/loop/runs?loopId=${encodeURIComponent(loopId)}`,
       );
       if (!response.ok) return;
-      const data = await response.json() as { runs?: LoopRunWithWorkItem[] };
+      const data = await response.json() as { runs?: LoopRun[] };
       setLoopRuns((current) => ({ ...current, [loopId]: data.runs ?? [] }));
     } catch { /* 下轮重试 */ }
   }, [activeWorkspace]);
@@ -376,8 +376,8 @@ export function WorkspaceSidebar({
   }, [loadLoopRuns]);
 
   const expandedLoopRuns = expandedLoopId ? loopRuns[expandedLoopId] : undefined;
-  const hasActiveLoopRun = Boolean(expandedLoopRuns?.some(({ run }) =>
-    run.status === "queued" || run.status === "running" || run.status === "waiting_for_gate"));
+  const hasActiveLoopRun = Boolean(expandedLoopRuns?.some((run) =>
+    run.status === "queued" || run.status === "running"));
   useEffect(() => {
     if (!expandedLoopId || !hasActiveLoopRun) return;
     const timer = setTimeout(() => void loadLoopRuns(expandedLoopId), 5000);
@@ -720,34 +720,32 @@ export function WorkspaceSidebar({
                         <div style={{ padding: "4px 22px 8px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>加载中…</div>
                       ) : runs.length === 0 ? (
                         <div style={{ padding: "4px 22px 8px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>暂无运行记录</div>
-                      ) : runs.map(({ run, workItem }) => {
-                        const waiting = run.status === "waiting_for_gate";
+                      ) : runs.map((run) => {
                         const dotColor = run.status === "failed" ? "#e5484d"
-                          : waiting ? "#f59e0b"
                           : run.status === "running" || run.status === "queued" ? "#22c55e"
                           : "#16a34a";
                         const started = new Date(run.startedAt);
                         const time = `${String(started.getMonth() + 1).padStart(2, "0")}-${String(started.getDate()).padStart(2, "0")} ${String(started.getHours()).padStart(2, "0")}:${String(started.getMinutes()).padStart(2, "0")}`;
+                        // v3: a seeded run opens its EXECUTION session (the
+                        // contract run — where gates/answers live); only
+                        // unseeded runs open the selection orchestrator.
+                        const openTarget = run.seededSessionId ?? run.sessionId;
                         return (
                           <button
                             key={run.id}
-                            onClick={() => run.sessionId && onOpenLoopSession(run.sessionId)}
-                            disabled={!run.sessionId}
-                            title={run.sessionId ? "打开编排会话" : "会话尚未创建"}
-                            style={{ ...rowStyle(false), padding: "5px 10px 5px 30px", cursor: run.sessionId ? "pointer" : "default", opacity: run.sessionId ? 1 : 0.55 }}
+                            onClick={() => openTarget && onOpenLoopSession(openTarget)}
+                            disabled={!openTarget}
+                            title={openTarget ? (run.seededSessionId ? "打开执行会话" : "打开选品会话") : "会话尚未创建"}
+                            style={{ ...rowStyle(false), padding: "5px 10px 5px 30px", cursor: openTarget ? "pointer" : "default", opacity: openTarget ? 1 : 0.55 }}
                           >
                             <span style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, flexShrink: 0, boxShadow: run.status === "running" ? "0 0 0 3px rgba(34,197,94,0.18)" : "none" }} />
                             <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>{time}</span>
-                            {waiting && (
-                              <span style={{ padding: "1px 6px", borderRadius: 5, background: "rgba(245,158,11,0.15)", color: "#b45309", fontSize: "var(--pi-sidebar-fs-meta)", fontWeight: 700, flexShrink: 0 }}>待裁决</span>
+                            {run.seededSessionId && (
+                              <span style={{ padding: "1px 6px", borderRadius: 5, border: "1px solid var(--border)", color: "var(--accent)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>已播种</span>
                             )}
-                            {workItem ? (
-                              <span style={{ padding: "1px 6px", borderRadius: 5, border: "1px solid var(--border)", color: "var(--accent)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>{workItem.key}</span>
-                            ) : (
-                              <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-                                {run.verdict || run.progress || "—"}
-                              </span>
-                            )}
+                            <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+                              {run.verdict || run.progress || "—"}
+                            </span>
                           </button>
                         );
                       })}

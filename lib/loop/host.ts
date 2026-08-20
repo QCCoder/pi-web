@@ -9,12 +9,11 @@ import { PiWorkspaceResolver } from "./workspace-resolver.ts";
 import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./store.ts";
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
-import { findWorkItemByConversation } from "../work-items/service.ts";
 import { seedExecutionSession } from "./seed.ts";
 import { getRpcSession, getRunningRpcSessionIds, getLiveRpcSessionInfos, hasBusyRpcSessionForCwd, startRpcSession, subscribeRunningSessions, destroyRpcSessionsForCwd, type AgentSessionWrapper } from "../rpc-manager.ts";
 import { resolveSessionPath } from "../session-reader.ts";
 import { generateSessionTitle } from "../session-title.ts";
-import type { LoopRunMeta, TriggerCommand } from "./types.ts";
+import type { TriggerCommand } from "./types.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 30142;
@@ -104,15 +103,10 @@ function serveRunningSse(request: IncomingMessage, response: ServerResponse): vo
 
 export function createLoopHost() {
   const workspaces = new PiWorkspaceResolver();
-  // Name an orchestrator session after the requirement its run picked: the
-  // orchestrator links itself to a work item by appending its session id to the
-  // item's `conversations` (per the dev-loop LOOP.md), so we resolve the title
-  // from that linkage. Returns undefined for runs that picked nothing (idle /
-  // park-all) -> those keep their default title.
-  const execution = new PiRoundExecutionBackend(async (workspacePath, sessionId) => {
-    const item = await findWorkItemByConversation(workspacePath, sessionId);
-    return item ? `(Loop) ${item.title}` : undefined;
-  });
+  // v3: the backend runs one short selection round per run — no sessionNamer
+  // seam (selection orchestrators keep their default title; seeded execution
+  // sessions get a deterministic name from the seeder).
+  const execution = new PiRoundExecutionBackend();
   /** Any live pi session in THIS host process: Loop orchestrators first
    *  (authoritative, indexed by real session id), then the ordinary rpc
    *  registry — which is where the subagent children an orchestrator spawns
@@ -230,8 +224,9 @@ export function createLoopHost() {
         if (typeof command?.type !== "string") {
           return json(response, 400, { error: "command.type is required" });
         }
-        // Loop orchestrators are driven exclusively through gate answers —
-        // reject direct commands exactly like the web route does today.
+        // Selection-round orchestrators are engine-driven mid-round — reject
+        // direct commands so a stray composer message cannot steer a selection.
+        // (v3 execution sessions are normal sessions and are NOT intercepted.)
         if (execution.getBySessionId(sid)) {
           return json(response, 409, {
             error: "This session is owned by the Loop Host. Interact via the Loop run gate, not direct messages.",
@@ -257,32 +252,20 @@ export function createLoopHost() {
       }
       // Session probe: Pi Web asks "do you own this session?" before falling
       // back to loading the .jsonl itself. Returns metadata + live state.
-      // Covers orchestrators AND their running subagent children (both live in
-      // this process).
+      // Covers selection orchestrators AND their running subagent children
+      // (both live in this process). v3: no run-meta payload — gates are chat
+      // turns in normal execution sessions, nothing loop-owned to surface.
       const sessionProbe = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
       if (request.method === "GET" && sessionProbe) {
         const sid = decodeURIComponent(sessionProbe[1]);
         const session = findLiveSession(sid);
-        // Orchestrator run meta (any state, incl. gate-paused) rides along on the
-        // probe so the web state route can surface a gate answer where the user
-        // already is — the chat tab of the orchestrator session.
-        let loop: LoopRunMeta | undefined;
-        try { loop = await runtime.findBySessionId(sid); } catch { /* best effort */ }
         if (!session) {
-          // Cold orchestrator (host restarted while a gate is paused — the
-          // wrapper expired; the run is recoverable on the next gate answer).
-          // Answer the probe anyway so the web layer pins the session and shows
-          // the gate bar instead of enabling a composer that would 409 (or
-          // worse, bypass answerGate into an untracked prompt).
-          if (loop && (loop.run.status === "waiting_for_gate" || loop.run.status === "running")) {
-            return json(response, 200, { id: sid, running: false, state: undefined, loop });
-          }
           return json(response, 404, { error: "session not live in loop host" });
         }
         let state: unknown;
         try { state = await session.send({ type: "get_state" }); }
         catch { state = undefined; /* session not ready yet */ }
-        return json(response, 200, { ...liveMeta(session), state, ...(loop ? { loop } : {}) });
+        return json(response, 200, { ...liveMeta(session), state });
       }
       // Session event stream: Pi Web proxies this SSE so the browser can watch
       // a Loop orchestrator — or its running subagent child — live, exactly
@@ -330,9 +313,8 @@ export function createLoopHost() {
       }
       // Best-effort wrapper teardown before the web layer deletes/archives the
       // session file: destroy the live wrapper so it stops appending to a file
-      // that is about to move/disappear. Loop orchestrators are skipped — their
-      // lifecycle belongs to the loop engine (a mid-run file loss is handled by
-      // the orphan-gate reaper, not by destroying the round).
+      // that is about to move/disappear. Selection orchestrators are skipped —
+      // their lifecycle belongs to the loop engine.
       // NOTE: must run BEFORE the GET probe below — same path pattern.
       if (request.method === "DELETE") {
         const sessionTeardown = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
@@ -350,19 +332,8 @@ export function createLoopHost() {
           run: await runtime.getRun(decodeURIComponent(run[1]), decodeURIComponent(run[2])),
         });
       }
-      const gate = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/runs\/([^/]+)\/gate$/);
-      if (request.method === "POST" && gate) {
-        const input = await body(request) as { message?: string };
-        return json(response, 200, {
-          run: await runtime.answerGate({
-            message: typeof input.message === "string" ? input.message : "",
-            workspaceId: decodeURIComponent(gate[1]),
-            runId: decodeURIComponent(gate[2]),
-          }),
-        });
-      }
       // Independent abort: destroy the orchestrator session and mark the run
-      // failed. Works whether the run is running or paused at a gate.
+      // failed.
       const abort = url.pathname.match(/^\/v1\/workspaces\/([^/]+)\/runs\/([^/]+)\/abort$/);
       if (request.method === "POST" && abort) {
         return json(response, 200, {
@@ -430,16 +401,6 @@ export async function startLoopHost(options: { host?: string; port?: number } = 
   });
   app.scheduler.start();
   app.importerScheduler.start();
-  // Reap ghost gates: runs paused at a gate whose orchestrator `.jsonl` was
-  // archived/removed (e.g. an idle-timed-out session whose file later got
-  // archived) can never be resumed. Mark them failed so the UI stops offering a
-  // dead gate. Runs whose file is still live are left for transparent rehydrate.
-  try {
-    const reaped = await app.runtime.reapOrphanedGates();
-    if (reaped > 0) console.log(`[pi-loop] reaped ${reaped} orphaned gate run(s)`);
-  } catch (error) {
-    console.error("[pi-loop] orphan-gate reap failed:", error);
-  }
   console.log(`[pi-loop] listening on http://${host}:${port}`);
   const stop = () => {
     app.scheduler.stop();

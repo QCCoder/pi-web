@@ -65,7 +65,7 @@ export async function GET(req: Request) {
     if (loopTags.size > 0) {
       sessionsWithFlags = sessionsWithFlags.map((session) => {
         const tag = loopTags.get(session.id);
-        return tag ? { ...session, loopOrchestrator: true, ...(tag.workItemKey ? { loopWorkItem: tag.workItemKey } : {}) } : session;
+        return tag ? { ...session, loopOrchestrator: true } : session;
       });
     }
 

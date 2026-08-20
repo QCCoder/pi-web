@@ -18,7 +18,6 @@ export type LoopTriggerSource = "cron" | "manual" | "message" | "webhook";
 export type LoopRunStatus =
   | "queued"
   | "running"
-  | "waiting_for_gate"
   | "succeeded"
   | "failed";
 
@@ -81,9 +80,6 @@ export interface LoopRun {
   updatedAt: string;
   finishedAt?: string;
   sessionId?: string;
-  /** Free-text payload of the last `LOOP_GATE:` line the orchestrator emitted.
-   *  Set when the run pauses on a gate; cleared when it resumes. */
-  gateRequest?: string;
   /** Free-text payload of the `LOOP_VERDICT:` line (any conclusion, not a fixed
    *  enum). Undefined when the run ended without an explicit verdict. */
   verdict?: string;
@@ -100,15 +96,6 @@ export interface LoopRun {
   seededSessionId?: string;
 }
 
-/** A free-text answer to a paused `LOOP_GATE:`. The engine forwards `message`
- *  verbatim as the orchestrator's next prompt — its meaning is defined by each
- *  loop's LOOP.md. */
-export interface GateAnswer {
-  workspaceId: string;
-  runId: string;
-  message: string;
-}
-
 /** Sidebar-facing projection of a run: the latest snapshot plus the work item
  *  its orchestrator session is linked to (via `item.conversations` — the same
  *  chain the loop sessionNamer uses, so naming and routing always agree). */
@@ -117,32 +104,17 @@ export interface LoopRunWithWorkItem {
   workItem?: { key: string; title: string };
 }
 
-/** Host probe payload for a session that is some run's orchestrator: lets the
- *  web state route surface a gate answer without a separate lookup. */
-export interface LoopRunMeta {
-  workspaceId: string;
-  run: LoopRun;
-}
-
-/** The deliberately small interface consumed by every adapter. */
+/** The deliberately small interface consumed by every adapter. v3: runs are
+ *  thin selection rounds — no gate answering, no run-meta lookup, no
+ *  orphan-gate reaping (execution sessions are normal sessions; gates are chat
+ *  turns + `loop.gate` milestone stamps — see docs/dev-loop-v3-design.md). */
 export interface LoopRuntime {
   listLoops(workspaceId: string): Promise<LoopDefinition[]>;
   trigger(command: TriggerCommand): Promise<TriggerReceipt>;
   getRun(workspaceId: string, runId: string): Promise<LoopRun>;
-  /** Latest run whose orchestrator session is `sessionId`, across all known
-   *  workspaces (disk scan of RUNS.jsonl snapshots). Powers the host probe's
-   *  `loop` payload so the web layer can offer a gate answer for an
-   *  orchestrator the user opened directly. */
-  findBySessionId(sessionId: string): Promise<LoopRunMeta | undefined>;
-  answerGate(command: GateAnswer): Promise<LoopRun>;
-  /** Destroy the orchestrator session and mark the run failed. Independent of
-   *  gate answering; works while the run is running or paused at a gate. */
+  /** Destroy the orchestrator session and mark the run failed. Works while
+   *  the selection round is running. */
   abortRun(workspaceId: string, runId: string): Promise<LoopRun>;
-  /** Mark every `waiting_for_gate` run whose orchestrator `.jsonl` no longer
-   *  exists in the live sessions dir (archived or removed) as `failed`. Runs
-   *  whose session file is still live are left alone — they are recoverable on
-   *  the next gate answer (rehydrated from the file). Returns the count reaped. */
-  reapOrphanedGates(): Promise<number>;
 }
 
 export interface WorkspaceLocation {
@@ -164,13 +136,11 @@ export interface RoundProgress {
   detail: string;
 }
 
-/** A round outcome shared by `startRound` and `resumeRound`. */
+/** A round outcome. */
 export interface RoundResult {
   output: string;
   /** The orchestrator's `LOOP_VERDICT:` text (any conclusion), if emitted. */
   verdict?: string;
-  /** The orchestrator's `LOOP_GATE:` payload, if it paused for a human. */
-  gateRequest?: string;
   /** Present when a selection round seeded an execution session (v3): the
    *  work item key and the new session id. The runtime records it on the
    * terminal run snapshot as `seededSessionId`. */
@@ -178,12 +148,10 @@ export interface RoundResult {
 }
 
 /** Adapter seam between the domain-agnostic runtime and the orchestrator host
- *  (pi, in-process). One orchestrator session is kept alive across gates;
- *  it is only destroyed on a terminal result or an abort. */
+ *  (pi, in-process). v3: the orchestrator runs a single short selection
+ *  round and is destroyed on its result or an abort — no cross-gate retention. */
 export interface RoundExecutionBackend {
-  /** Start the orchestrator session and run its first prompt. The session is
-   *  registered and kept alive (for a later `resumeRound`) unless this returns
-   *  a terminal result (no `gateRequest`), in which case it is destroyed. */
+  /** Start the orchestrator session and run its single round. */
   startRound(
     definition: LoopDefinition,
     run: LoopRun,
@@ -192,17 +160,6 @@ export interface RoundExecutionBackend {
     onSessionReady?: (sessionId: string) => void,
     /** Throttled mid-round activity hint; the runtime turns each call into a
      *  heartbeat snapshot so a long round does not look frozen. */
-    onProgress?: (info: RoundProgress) => void,
-  ): Promise<RoundResult>;
-  /** Continue an existing (paused) orchestrator session with a free-text
-   *  message — the gate answer, used verbatim as the next prompt. The session
-   *  is kept alive unless this returns a terminal result. If the in-memory
-   *  orchestrator wrapper has expired (idle timeout / host restart), the
-   *  adapter rehydrates it from its `.jsonl`; only an archived/missing file is
-   *  unrecoverable. */
-  resumeRound(
-    run: LoopRun,
-    message: string,
     onProgress?: (info: RoundProgress) => void,
   ): Promise<RoundResult>;
   /** Destroy the orchestrator session backing `run`, if any. Must not throw

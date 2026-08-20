@@ -14,7 +14,7 @@ import { WorkspaceManager } from "./WorkspaceManager";
 import { WorkspaceOverview } from "./WorkspaceOverview";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { LoopConfig } from "./LoopConfig";
-import { LoopLaunchingPlaceholder, LoopStatusBar } from "./LoopLaunchOverlay";
+import { LoopLaunchingPlaceholder } from "./LoopLaunchOverlay";
 import { HomeLanding } from "./HomeLanding";
 import { WorkspaceTabBar } from "./WorkspaceTabBar";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -34,7 +34,7 @@ import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
-import type { LoopDefinition, LoopRun, LoopRunMeta } from "@/lib/loop/types";
+import type { LoopDefinition, LoopRun } from "@/lib/loop/types";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -549,31 +549,16 @@ export function AppShell() {
       .catch(() => {});
   }, [handleSelectSession]);
 
-  // ---- Loop 乐观启动 -----------------------------------------------------------
+  // ---- Loop 手动触发（v3：选品回合）-------------------------------------------
   // 点击“运行一轮”时立即把当前 tab 切到 chat 并显示启动占位，不等 Loop Host 把
-  // 编排会话创建好（那要起 AgentSession + 加载 skills，好几秒）。这里轮询 run，
-  // sessionId 一出现就接上实时流；run 状态/plan/gate 也由这里维护，状态条挂在
-  // chat 顶部，L2 的人工确认不用切回 Loops 视图。
+  // 编排会话创建好。后台轮询 run；v3 的终态处理：seededSessionId 出现 → 自动打开
+  // 播种的执行会话（合同执行的入口）；无 seed（idle/park-all）→ 清占位，结果看
+  // Loop 视图的 run 记录（verdict 就在那里）。
   const [loopRun, setLoopRun] = useState<LoopRun | null>(null);
   // 轮询目标（显式状态而非派生：setLoopRun 每秒写新对象，若作 effect 依赖会把
-  // 轮询重置成 300ms 一发）。autoOpen=触发流：sessionId 一出现就自动切到编排会话。
-  const [loopPollTarget, setLoopPollTarget] = useState<{ workspaceId: string; runId: string; autoOpen: boolean } | null>(null);
-  // ChatWindow 报上来的编排会话 run meta（state 探针）：把不是本 tab 触发流的
-  // run（从 Loop 运行记录 / 会话列表打开的编排会话）给接进 LoopStatusBar /
-  // gate 答复条。meta 为 null 不清理——bar 的生命周期归轮询/关闭钮，避免切换
-  // 会话时把进行中的 run 状态条弄丢。
-  const handleLoopRunMeta = useCallback((meta: LoopRunMeta | null) => {
-    if (!meta) return;
-    setLoopRun((current) => (current && current.id === meta.run.id ? current : meta.run));
-    // 非终态（运行中 / 等待裁决）的 run 接上轮询，直到终态——gate 答复后状态条
-    // 才能继续走到终态。终态 run 只展示，不需要轮询。
-    if (!LOOP_TERMINAL.has(meta.run.status)) {
-      setLoopPollTarget({ workspaceId: meta.workspaceId, runId: meta.run.id, autoOpen: false });
-    }
-  }, []);
-  // 记录已经"自动打开过实时流"的编排会话 id，每个编排会话只自动切一次：
-  // 避免 loop 运行期间用户切到别的会话后，每秒轮询又把焦点抢回 loop 编排会话。
-  const loopSessionAutoOpenedRef = useRef<string | null>(null);
+  // 轮询重置成 300ms 一发）。autoOpen=触发流：seed 一出现就自动切到执行会话。
+  const [loopPollTarget, setLoopPollTarget] = useState<{ workspaceId: string; runId: string } | null>(null);
+  const loopSeedAutoOpenedRef = useRef<string | null>(null);
 
   const handleLoopTriggered = useCallback((loop: LoopDefinition) => {
     if (!activeTabId) return;
@@ -596,7 +581,7 @@ export function AppShell() {
         if (!res.ok) throw new Error(`触发失败 (HTTP ${res.status})`);
         const receipt = await res.json() as { runId: string };
         updateTab(workspaceId, (tab) => (tab.loopPending ? { loopPending: { ...tab.loopPending, runId: receipt.runId } } : {}));
-        setLoopPollTarget({ workspaceId, runId: receipt.runId, autoOpen: true });
+        setLoopPollTarget({ workspaceId, runId: receipt.runId });
       } catch (error) {
         setLoopRun((cur) => (cur ? { ...cur, status: "failed", error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() } : cur));
         updateTab(workspaceId, { loopPending: undefined });
@@ -605,31 +590,9 @@ export function AppShell() {
     })();
   }, [activeTabId, updateTab, navigateUrl]);
 
-  const handleLoopAnswer = useCallback(async (message: string) => {
-    const run = loopRun;
-    if (!run) return;
-    try {
-      const res = await fetch(`/api/workspaces/${encodeURIComponent(run.workspaceId)}/loop/runs/${encodeURIComponent(run.id)}/gate`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }),
-      });
-      const value = await res.json() as { run: LoopRun };
-      setLoopRun(value.run);
-    } catch { /* 下一次轮询会修正状态 */ }
-  }, [loopRun]);
-
-  const handleLoopAbort = useCallback(async () => {
-    const run = loopRun;
-    if (!run) return;
-    try {
-      const res = await fetch(`/api/workspaces/${encodeURIComponent(run.workspaceId)}/loop/runs/${encodeURIComponent(run.id)}/abort`, { method: "POST" });
-      const value = await res.json() as { run: LoopRun };
-      setLoopRun(value.run);
-    } catch { /* 下一次轮询会修正状态 */ }
-  }, [loopRun]);
-
-  // 唯一的 run 轮询：loopPollTarget 存在（触发流或 meta 流写入）且 run 未终态时
-  // 每 1s 拉一次快照。autoOpen 仅触发流生效（sessionId 一出现自动切到编排会话，
-  // ref 去重防抢焦点）；从运行记录打开的会话本来就是用户选中的。
+  // 唯一的 run 轮询：loopPollTarget 存在且 run 未终态时每 1s 拉一次快照。终态时：
+  // 有 seededSessionId → 打开执行会话（ref 去重防抢焦点）；无 → 只清占位（verdict
+  // 在 Loop 视图 run 记录里看）。
   useEffect(() => {
     const target = loopPollTarget;
     if (!target) return;
@@ -643,14 +606,19 @@ export function AppShell() {
         const { run } = await res.json() as { run: LoopRun };
         if (stopped) return;
         setLoopRun(run);
-        if (target.autoOpen && run.sessionId && loopSessionAutoOpenedRef.current !== run.sessionId) {
-          loopSessionAutoOpenedRef.current = run.sessionId;
-          handleOpenLoopSession(run.sessionId);
-        }
         if (LOOP_TERMINAL.has(run.status)) {
-          // 保留终态状态供查看（状态条显示 verdict）；清掉轮询与触发占位。
           setLoopPollTarget(null);
-          if (target.autoOpen) updateTab(target.workspaceId, { loopPending: undefined });
+          updateTab(target.workspaceId, { loopPending: undefined });
+          if (run.seededSessionId && loopSeedAutoOpenedRef.current !== run.seededSessionId) {
+            loopSeedAutoOpenedRef.current = run.seededSessionId;
+            handleOpenLoopSession(run.seededSessionId);
+          }
+        } else if (run.seededSessionId && loopSeedAutoOpenedRef.current !== run.seededSessionId) {
+          // Seed happens at round settle — effectively terminal for UX purposes.
+          loopSeedAutoOpenedRef.current = run.seededSessionId;
+          setLoopPollTarget(null);
+          updateTab(target.workspaceId, { loopPending: undefined });
+          handleOpenLoopSession(run.seededSessionId);
         } else {
           setTimeout(poll, 1000);
         }
@@ -660,8 +628,6 @@ export function AppShell() {
     };
     const timer = setTimeout(poll, 300);
     return () => { stopped = true; clearTimeout(timer); };
-  // 注意：不把 selectedSession 放进依赖——自动切换只靠 ref 去重，与当前选中会话无关，
-  // 否则用户切换会话会触发 effect 重跑并重新抢回焦点。
   }, [loopPollTarget, handleOpenLoopSession, updateTab]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
@@ -2100,7 +2066,6 @@ export function AppShell() {
             />
           ) : showChat ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              {loopRun && <LoopStatusBar run={loopRun} onAnswer={handleLoopAnswer} onAbort={handleLoopAbort} onClose={() => setLoopRun(null)} />}
               <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                 {activeTab?.loopPending && !selectedSession ? (
                   <LoopLaunchingPlaceholder name={activeTab.loopPending.loopName} status={loopRun?.status} error={loopRun?.error} />
@@ -2112,7 +2077,6 @@ export function AppShell() {
                     onAgentEnd={handleAgentEnd}
                     onSessionCreated={handleSessionCreated}
                     onSessionForked={handleSessionForked}
-                    onLoopRunMeta={handleLoopRunMeta}
                     modelsRefreshKey={modelsRefreshKey}
                     chatInputRef={chatInputRef}
                     onBranchDataChange={handleBranchDataChange}

@@ -1,5 +1,4 @@
 import { createUlid } from "../workspaces/id.ts";
-import { resolveSessionPath } from "../session-reader.ts";
 import {
   appendRunSnapshot,
   listLoopDefinitions,
@@ -9,9 +8,7 @@ import {
   readLoopDefinition,
 } from "./store.ts";
 import type {
-  GateAnswer,
   LoopRun,
-  LoopRunMeta,
   LoopRuntime,
   RoundExecutionBackend,
   RoundResult,
@@ -24,11 +21,11 @@ import type {
 /** Orchestrates lifecycle only; domain work remains in LOOP.md and the
  *  orchestrator session.
  *
- *  Lifecycle: `queued → running ↔ waiting_for_gate → succeeded | failed`.
- *  There is no infer phase, no plan confirmation, no approve/reject. A run is
- *  driven entirely by `startRound` (on trigger) and `resumeRound` (on a free-text
- *  gate answer), plus an independent `abortRun` that destroys the in-flight
- *  session and marks the run failed.
+ *  Lifecycle: `queued → running → succeeded | failed`. A run is a thin
+ *  SELECTION round driven entirely by `startRound` (on trigger), plus an
+ *  independent `abortRun` that destroys the in-flight session and marks the run
+ *  failed. A round that ends with `LOOP_SEED: <KEY>` additionally seeds a
+ *  normal execution session (see seed.ts) — recorded as `seededSessionId`.
  *
  *  Concurrency guard for abort: `abortRun` adds the run id to `aborted` BEFORE
  *  destroying the session, then writes the failed snapshot. The in-flight
@@ -93,32 +90,10 @@ export class DefaultLoopRuntime implements LoopRuntime {
     return run;
   }
 
-  async findBySessionId(sessionId: string): Promise<LoopRunMeta | undefined> {
-    for (const workspace of await this.workspaces.list()) {
-      for (const run of await listRunSnapshots(workspace)) {
-        if (run.sessionId === sessionId) return { workspaceId: workspace.id, run };
-      }
-    }
-    return undefined;
-  }
-
-  async answerGate(command: GateAnswer): Promise<LoopRun> {
-    const workspace = await this.workspaces.get(command.workspaceId);
-    const run = await this.getRun(command.workspaceId, command.runId);
-    if (run.status !== "waiting_for_gate") {
-      throw new LoopConflictError(`run ${run.id} is not waiting for a gate`);
-    }
-    const definition = await readLoopDefinition(workspace, run.loopId);
-    const running = this.patch(run, { status: "running", gateRequest: undefined });
-    await appendRunSnapshot(workspace, running);
-    this.active.set(run.id, this.resume(workspace, definition, running, command.message));
-    return running;
-  }
-
   async abortRun(workspaceId: string, runId: string): Promise<LoopRun> {
     const workspace = await this.workspaces.get(workspaceId);
     const run = await this.getRun(workspaceId, runId);
-    if (run.status !== "running" && run.status !== "waiting_for_gate") {
+    if (run.status !== "running" && run.status !== "queued") {
       throw new LoopConflictError(`run ${run.id} cannot be aborted in status ${run.status}`);
     }
     // Guard FIRST: any in-flight start/resume whose session we destroy below must
@@ -168,40 +143,10 @@ export class DefaultLoopRuntime implements LoopRuntime {
     }
   }
 
-  /** Continue a paused orchestrator session with a free-text gate answer. */
-  private async resume(
-    workspace: WorkspaceLocation,
-    definition: Awaited<ReturnType<typeof readLoopDefinition>>,
-    run: LoopRun,
-    message: string,
-  ): Promise<void> {
-    try {
-      const result = await this.execution.resumeRound(run, message, (info) => {
-        this.heartbeat(workspace, run, info.detail);
-      });
-      // Abort may have destroyed the session and written a failed snapshot
-      // while resumeRound was finishing; do not overwrite it with settle.
-      if (this.aborted.has(run.id)) return;
-      await this.settle(workspace, run, result);
-    } catch (error) {
-      if (this.aborted.has(run.id)) return;
-      await this.fail(workspace, run, error);
-    } finally {
-      this.active.delete(run.id);
-      this.aborted.delete(run.id);
-    }
-  }
-
-  /** Apply a round result: pause at a gate, or mark succeeded (terminal). */
+  /** Apply a round result: mark succeeded (terminal). */
   private async settle(workspace: WorkspaceLocation, run: LoopRun, result: RoundResult): Promise<void> {
-    if (result.gateRequest) {
-      await this.writeSnapshot(workspace, this.patch(run, {
-        status: "waiting_for_gate", output: result.output, gateRequest: result.gateRequest,
-      }));
-      return;
-    }
     await this.writeSnapshot(workspace, this.patch(run, {
-      status: "succeeded", output: result.output, verdict: result.verdict, gateRequest: undefined,
+      status: "succeeded", output: result.output, verdict: result.verdict,
       progress: undefined, finishedAt: new Date().toISOString(),
       ...(result.seed ? { seededSessionId: result.seed.sessionId } : {}),
     }));
@@ -230,28 +175,6 @@ export class DefaultLoopRuntime implements LoopRuntime {
    *  overtake the terminal snapshot. */
   private heartbeat(workspace: WorkspaceLocation, run: LoopRun, detail: string): void {
     void this.writeSnapshot(workspace, this.patch(run, { progress: detail }));
-  }
-
-  /** Mark every `waiting_for_gate` run whose orchestrator `.jsonl` is gone from
-   *  the live sessions dir (archived or removed) as `failed`. Runs whose file is
-   *  still live are left alone — they rehydrate on the next gate answer. */
-  async reapOrphanedGates(): Promise<number> {
-    let reaped = 0;
-    for (const workspace of await this.workspaces.list()) {
-      for (const run of await listRunSnapshots(workspace)) {
-        if (run.status !== "waiting_for_gate" || !run.sessionId) continue;
-        const live = await resolveSessionPath(run.sessionId);
-        if (live) continue;
-        await this.writeSnapshot(workspace, this.patch(run, {
-          status: "failed",
-          error: "orchestrator session expired (archived or removed); gate could not be resumed",
-          progress: undefined,
-          finishedAt: new Date().toISOString(),
-        }));
-        reaped += 1;
-      }
-    }
-    return reaped;
   }
 
   private patch(run: LoopRun, patch: Partial<LoopRun>): LoopRun {

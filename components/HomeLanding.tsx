@@ -71,7 +71,7 @@ export function HomeLanding({
     return sessions
       .filter((session) =>
         !session.subagentChild
-        && !(session.loopOrchestrator && !session.loopWorkItem)
+        && !session.loopOrchestrator
         && workspaceForSession(session, workspaces))
       .sort((left, right) => right.modified.localeCompare(left.modified))
       .slice(0, 5);

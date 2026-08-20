@@ -1,4 +1,4 @@
-import type { GateAnswer, LoopDefinition, LoopRun, LoopRunMeta, TriggerCommand, TriggerReceipt } from "./types.ts";
+import type { LoopDefinition, LoopRun, TriggerCommand, TriggerReceipt } from "./types.ts";
 import type { ImporterRunSummary } from "../importers/runner.ts";
 
 const baseUrl = () => (process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
@@ -38,9 +38,6 @@ export interface LoopSessionMeta {
   sessionFile?: string;
   running: boolean;
   state?: unknown;
-  /** Present when this session is some run's orchestrator: carries the latest
-   *  run snapshot so the web layer can render the gate answer UI. */
-  loop?: LoopRunMeta;
 }
 
 /** Error thrown for non-2xx daemon responses. Carries the daemon's HTTP
@@ -124,10 +121,6 @@ export const loopHostClient = {
   }),
   getRun: (workspaceId: string, runId: string) => request<{ run: LoopRun }>(
     `/v1/workspaces/${encodeURIComponent(workspaceId)}/runs/${encodeURIComponent(runId)}`,
-  ),
-  answerGate: (command: GateAnswer) => request<{ run: LoopRun }>(
-    `/v1/workspaces/${encodeURIComponent(command.workspaceId)}/runs/${encodeURIComponent(command.runId)}/gate`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: command.message }) },
   ),
   abortRun: (workspaceId: string, runId: string) => request<{ run: LoopRun }>(
     `/v1/workspaces/${encodeURIComponent(workspaceId)}/runs/${encodeURIComponent(runId)}/abort`,

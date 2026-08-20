@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { listRunSnapshots } from "@/lib/loop/store";
-import { orchestratorWorkItemIndex } from "@/lib/loop/session-tags";
-import type { LoopRunWithWorkItem } from "@/lib/loop/types";
+import type { LoopRun } from "@/lib/loop/types";
 import { getWorkspace } from "@/lib/workspaces/service";
 
 /** Sidebar Loop run records: web-process direct read of RUNS.jsonl (deduped
- *  latest snapshot per run — see listRunSnapshots) joined with the work item
- *  each run's orchestrator session picked. The loop host is NOT involved: it
- *  owns the runtime (trigger/gate/abort), while authoring and reads stay in
- *  the web process (same split as loop authoring).
+ *  latest snapshot per run — see listRunSnapshots). v3: runs are thin SELECTION
+ *  rounds — there is no work-item join anymore (the run's `seededSessionId`,
+ *  when present, opens the execution session directly; execution sessions are
+ *  linked to their work item via `item.conversations` like any conversation).
  *
  *  Snapshots are surfaced as recorded — a `running` snapshot whose session
  *  file has since vanished is shown as-is (no read-time "correction"): some of
@@ -22,15 +21,8 @@ export async function GET(
     const loopId = new URL(request.url).searchParams.get("loopId") ?? undefined;
     const { path, manifest } = await getWorkspace(id);
     const workspace = { id: manifest.id, name: manifest.name, path };
-    const runs = await listRunSnapshots(workspace, loopId);
-    const items = await orchestratorWorkItemIndex(workspace);
-    const withItems: LoopRunWithWorkItem[] = runs.map((run) => ({
-      run,
-      ...(run.sessionId && items.has(run.sessionId)
-        ? { workItem: items.get(run.sessionId) }
-        : {}),
-    }));
-    return NextResponse.json({ runs: withItems });
+    const runs: LoopRun[] = await listRunSnapshots(workspace, loopId);
+    return NextResponse.json({ runs });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }

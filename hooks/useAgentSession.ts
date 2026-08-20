@@ -17,7 +17,7 @@ import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedMode
 import { useStoreSlice } from "@/lib/stores/create-map-store";
 import { sessionRuntimeStore, setSessionRuntime, updateSessionRuntime, getSessionRuntime, createDefaultSessionRuntimeState, EMPTY_RUNTIME, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
 import { globalAgentEvents } from "@/lib/sse/global-agent-events";
-import type { LoopRun, LoopRunMeta } from "@/lib/loop/types";
+
 
 export interface SessionData {
   sessionId: string;
@@ -340,14 +340,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
-  /** Loop 元信息（来自 state 路由探针）：loopOwned=会话由 Loop Host 持有
-   *  （orchestrator / subagent child），loopRunMeta=本会话是某个 run 的
-   *  orchestrator（携带最新快照，供 ChatWindow 顶部渲染 gate 答复条）。 */
+  /** 会话是否由 session daemon 持有（selection orchestrator / subagent
+   *  child / interactive）。drives pin 语义：被查看但未在跑的 daemon 会话
+   *  不被 running-set 清扫断流（见挂载 effect 的 loopOwned 处理）。 */
   const [loopOwned, setLoopOwned] = useState(false);
-  const [loopRunMeta, setLoopRunMeta] = useState<LoopRunMeta | null>(null);
-  /** 最新探针 meta 的稳定引用：gate 答复回调从这读，不吃闭包旧值。 */
-  const loopRunMetaRef = useRef<LoopRunMeta | null>(null);
-  useEffect(() => { loopRunMetaRef.current = loopRunMeta; }, [loopRunMeta]);
 
   // data / messages / entryIds 订阅 SessionMessagesCache（阶段 B4a）：后台 session 的
   // message_end 写 cache 也能反映到前台；切回已缓存 session 无空窗。
@@ -496,9 +492,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadSessionAbortRef.current?.abort();
     const ac = new AbortController();
     loadSessionAbortRef.current = ac;
-    // 切换/重载时先清 Loop 元信息，避免上一会话的 gate 条残留。
+    // 切换/重载时先清 pin 语义标记。
     setLoopOwned(false);
-    setLoopRunMeta(null);
     try {
       // SWR (REQ-0001 决策 2/3): 缓存命中则立即填充 UI 消除空窗；再发条件请求，
       // 304 复用缓存、200 覆盖更新。
@@ -560,7 +555,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal: ac.signal });
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; loopOwned?: boolean; loop?: LoopRunMeta };
+        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; loopOwned?: boolean };
         if (sessionIdRef.current !== sid) return null;
 
         const liveState = agentState.state;
@@ -577,7 +572,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           patchRuntime({ queuedMessages: { steering: [], followUp: [] } });
         }
         setLoopOwned(Boolean(agentState.loopOwned));
-        setLoopRunMeta(agentState.loop ?? null);
         return agentState;
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return null;
@@ -878,26 +872,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const status = await globalAgentEvents.ensureConnected(sid);
     if (status !== "connected") throw new EventStreamConnectionError(status);
   }, []);
-
-  /** 在用户所在的 chat tab 直接答复 gate（host 探针契约：答复原文转给编排
-   *  会话作为下一条 prompt，经 pin 住的 SSE 流落回 transcript，不做乐观
-   *  追加）。成功后刷新 meta，让 LoopStatusBar 跟着进入 running。 */
-  const answerLoopGate = useCallback(async (message: string) => {
-    const trimmed = message.trim();
-    if (!trimmed) return;
-    const meta = loopRunMetaRef.current;
-    if (!meta || meta.run.status !== "waiting_for_gate") return;
-    try {
-      const res = await fetch(`/api/workspaces/${encodeURIComponent(meta.workspaceId)}/loop/runs/${encodeURIComponent(meta.run.id)}/gate`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: trimmed }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const value = await res.json() as { run: LoopRun };
-      setLoopRunMeta({ workspaceId: meta.workspaceId, run: value.run });
-    } catch (e) {
-      addNotice({ type: "error", message: `Gate 答复发送失败：${e instanceof Error ? e.message : String(e)}` });
-    }
-  }, [addNotice]);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
@@ -1536,7 +1510,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    loopOwned, loopRunMeta, answerLoopGate,
+    loopOwned,
     agentRunning, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
