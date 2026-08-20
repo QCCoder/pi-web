@@ -1,59 +1,58 @@
-# Loop Runtime
+# Loop Runtime（v3）
 
-`pi-loop` 是独立于 Pi Web 的本地常驻进程。Workspace 拥有 Loop 定义；Host 只负责触发、去重、Round 状态、Pi 会话和证据落盘。
+`pi-loop` 是独立于 Pi Web 的本地常驻进程（同时是 THE session daemon，见根 AGENTS.md「session daemon」节）。v3 起 Loop 的职责收窄为**选品 + 播种**：一轮 run 就是一次短的选品回合；真正的执行是挂在**工作项上的普通会话**，装载该工作区自己的 dev-loop skill 合同（`docs/dev-loop-v3-design.md`）。
 
 ## 启动
 
 ```bash
-npm run loop
+npm run loop    # 或由 npm run dev 以 sidecar 自动拉起
 ```
 
-默认监听 `127.0.0.1:30142`。可通过 `PI_LOOP_HOST`、`PI_LOOP_PORT` 修改监听地址，通过 Pi Web 的 `PI_LOOP_URL` 指向它。Loop Host 目前假设运行在与 Workspace 同一台受信任机器上，不应直接暴露到不受信任网络。
+默认监听 `127.0.0.1:30142`（`PI_LOOP_HOST`/`PI_LOOP_PORT`/`PI_LOOP_URL`）。Loop Host 假设运行在与 Workspace 同一台受信任机器上，不应直接暴露到不受信任网络。
 
-## Workspace 契约
+## Workspace 契约（v3）
 
 ```text
 workspace/
-  AGENTS.md
+  AGENTS.md                          # 站点政策：分支纪律、gate 命令、敏感清单（L0 引用的单一权威）
+  .agents/skills/<loopId>/SKILL.md   # 执行合同（原 LOOP.md 的策略部分；开场判定+SPEC+maker/checker+gate 语义）
+  .pi/agents/*.md                    # 角色文件（subagent 按名发现；播种时经 extraAgentDirs 免审批注入）
   loops/<loop-id>/
-    loop.yaml       # 身份、启用状态、Autonomy Level、触发源
-    LOOP.md         # 目标、Maker/Checker、验证标准、Gate、Improve 边界
-    RUNS.jsonl      # Host 追加的 Round 状态与证据快照
-    agents/         # 可选的任务专用 worker instructions
-    audit/          # Improve 和人工审计材料
+    loop.yaml       # 身份、启用状态、触发源
+    LOOP.md         # 薄选品合同（~15 行）：活性判定 + 泊车关键词 + 挑 KEY → LOOP_SEED
+    RUNS.jsonl      # Host 追加的选品回合快照（dedupe 最新一条 per run）
+    LEARN/          # 每 run 的学习档案（纯人翻，无流程读它做决策）
+    audit/          # 审计材料
 ```
 
-`loop.yaml` 的最小例子：
+约定：**loop id === skill 名**（`dev-loop` → `/skill:dev-loop`），skill 必须同时列进 manifest `skills:`（workspace 会话按 manifest 过滤 skills，`/skill:` 展开同样走这套过滤）。
 
-```yaml
-schema_version: 1
-id: daily-check
-name: Daily Check
-enabled: true
-autonomy: L1
-triggers:
-  - id: daily
-    type: cron
-    expression: "0 9 * * *"
-    timezone: Asia/Shanghai
-    enabled: true
-  - id: manual
-    type: manual
-    enabled: true
-```
+## 一轮选品（run 生命周期）
 
-Cron 使用标准五字段（minute hour day-of-month month day-of-week）；支持 `*`、逗号、范围和步长。
+`queued → running → succeeded | failed`（没有 gate 状态了）：
 
-## 一轮交互
+1. Trigger（cron/manual）带稳定 `eventId` 提交；重复 id 返回原 run（30 分钟 cron 由 `LoopHostScheduler` 每分钟槽去重）。
+2. Host 起一个编排会话（`__loop_host__<runId>`），薄 LOOP.md 作为首条 prompt。30 分钟超时只管这一回合。
+3. 回合落定，引擎（确定性代码，非 LLM）解析输出：
+   - `LOOP_SEED: <KEY>` → **播种**（`lib/loop/seed.ts`）：守卫 → 建普通执行会话（种子 prompt `/skill:<loopId> 执行 <KEY>`，`.pi/agents` 注入）→ 写 `conversations` + 盖 `loop.started`/`loop.active_session` → 撒手。run 快照记 `seededSessionId`。
+   - `LOOP_VERDICT: idle` / `park-all` → 终态，verdict 落快照（idle 附 待人工验证 + 疑似中断 清单）。
+4. 之后引擎不再跟踪执行——执行会话是普通会话，gate 是对话里的一句话（发问前必盖 `loop.gate` 里程碑戳，UI 靠它渲染「待裁决」徽章），人随时可插话。
 
-1. 任意 Trigger Source 向统一入口提交稳定 `eventId`；重复 id 返回原 Round。
-2. Host 创建 Pi Orchestrator Conversation，把 `LOOP.md` 作为首条 prompt 注入，只推断执行结构。
-3. Round 进入 `waiting_for_confirmation`；Pi Web 展示 Maker、Checker、Gate 和 Improve。
-4. 创建者确认后，Host 在同一个 Pi 主会话继续执行；拒绝则 Round 结束为 cancelled。Maker/Checker 作为**隔离子 agent 会话**运行——编排器用 `subagent` 工具派生，每个子会话可独立查看（侧边栏里挂在编排器会话下，跑完持久化在磁盘）。
-5. 每次状态变化追加到 `RUNS.jsonl`。执行状态和业务 verdict 分开记录。
+## 播种与双开守卫（`lib/loop/seed.ts`）
 
-### 子 agent 依赖
+两个入口共用同一份确定性播种代码：cron 选品后引擎自动播种；工作项详情「按合同执行/收养续跑」按钮（`POST /api/workspaces/:id/work-items/:key/run-contract` → daemon `POST /v1/workspaces/:id/seed`）人工播种。
 
-`subagent` 是全局能力：每个会话（含 Loop 编排器会话）都自带 `subagent` 工具，无需 workspace 开关。Loop 的 worker 角色定义放在该 loop 自己的 `loops/<loopId>/agents/*.md`（YAML frontmatter：`name`/`description`/`tools`，正文是角色 prompt）；Loop Runtime 建编排器会话时把这个目录作为可信的「loop」源注入（`StartSessionOptions.extraAgentDirs`），优先级高于 user/project，且不触发 project-agent 确认。于是编排器能按名（如 `scanner`/`analyst`/`checker`，或 seed 的 `maker`/`checker`）派生子会话；子会话是真实可查看的 child AgentSession，挂在编排器会话下并持久化。`execute()` 仍会先探测工具是否存在作为兜底：探测不到则回退到编排器自行执行（保持 producer/verifier 分离）。
+守卫 = `loop.active_session` 戳 + 会话存活探测 + 工作项终态 三者的确定性组合：
+无戳 → 放行；工作项已终态 → 放行（陈旧戳永远无害，无需清理）；戳的会话 wrapper 活着 → 拒绝（「已有会话在跑」）；idle 但 2h 内有活动 → 拒绝（gate 暂停中/人驱动）；idle 超 2h 或文件已没了 → 放行（僵尸 → 收养）。
 
-当前骨架已经留出消息/webhook Trigger 与 Round Gate 的统一接口；首个跑通的 Adapter 是 cron 和手动触发。Host 重启后可读取证据，但不会续接尚未确认或尚未完成的 Pi 会话，这属于下一阶段的恢复策略。
+僵尸不自动重启（决策：提醒不重启）——选品回合 idle 报告列「疑似中断」，人决定是否点收养。
+
+## 子 agent 依赖
+
+`subagent` 是全局能力。角色文件住 `.pi/agents/`：普通会话按 project 源发现（首次带审批弹窗）；播种的执行会话经 `StartSessionOptions.extraAgentDirs` 注入（可信源，免审批）。编排选品回合仍会注入 `loops/<loopId>/agents/`（如存在）——薄选品回合一般用不到角色。
+
+## 已退役（v3 一刀切）
+
+gate 状态机（`waiting_for_gate`/`answerGate`/`resumeRound` 重水化）、孤儿 gate 回收、host probe 的 `loop` 载荷、`sessionNamer` 注入、web 端 LoopStatusBar 与 gate 答复拦截、session-tags 的 conversations 反扫 join（`loopWorkItem`）。选品编排会话继续打 `loopOrchestrator` 标记并从会话列表隐藏——唯一入口是 Loop 视图 run 记录（优先打开 `seededSessionId` 指向的执行会话）。
+
+已知取舍：用户强杀一个正在跑的执行会话可能遗留孤儿构建进程树——与今天任何普通会话被杀的暴露面一致；缓解 = 疑似中断报告 + 人工清理。

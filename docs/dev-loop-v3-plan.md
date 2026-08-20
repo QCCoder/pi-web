@@ -1,5 +1,7 @@
 # dev Loop v3 实施计划
 
+> **状态：已实施**（workspace-c commit `4b5d302`；pi-web commits `d2fdb7b` Phase B / `8eea0ca` Phase C / 后续 Phase D 文档）。
+> 与计划的偏差：① Phase C 因类型耦合合并为单一 commit（仍保持全绿）；② C7 孤儿回收器**未**挂执行会话 destroy——挂上会让每次 idle 过期都触发 pgrep/lsof 扫描，且收益与普通会话被杀的既有暴露面相同，改为保留选品回合清理 + 疑似中断报告（见 commit message）；③ 手动触发的终态无 seed 时不再显示状态条——verdict 在 Loop 视图 run 记录查看。
 > 依据：`docs/dev-loop-v3-design.md`（已确认）。本计划把它切成可独立验证的 commit。
 > 规则：每个 commit 过 `node_modules/.bin/tsc --noEmit` + 相关单测；Phase C 结束跑全量 `npm test`；**全程不跑 `next build`**。TDD 用在预先约定的纯函数缝上（标 ★）。
 

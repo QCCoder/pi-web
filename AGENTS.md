@@ -168,7 +168,7 @@ Per-view content (data still comes from `loadWorkspaceData` — only the render 
   **L0 access is always built-in** — `read`/`ls`/`grep` need no tool. The view has an "open index.md" hint as the L0
   entry point. Ranked retrieval augmentation (`kb_search`) is **opt-in**: the tool is mounted automatically when the
   `knowledge` capability is on, and searches across all active bundles (see "kb_search" below).
-- **Loop** — the loop list itself (no longer a "管理 Loops" button): each loop row shows name + trigger summary with ▶ manual-trigger and ⚙ edit (opens the center `LoopConfig` definition editor); clicking a loop expands its **run records** in place (`GET /api/workspaces/[id]/loop/runs?loopId=` — web-process read of `RUNS.jsonl`, deduped latest snapshot per run, joined with the work item each run's orchestrator picked). A run row opens the orchestrator session as a chat tab (locate pipeline). Non-terminal runs poll every 5s while expanded; `waiting_for_gate` shows a 待裁决 badge.
+- **Loop** — the loop list itself (no longer a "管理 Loops" button): each loop row shows name + trigger summary with ▶ manual-trigger and ⚙ edit (opens the center `LoopConfig` definition editor); clicking a loop expands its **run records** in place (`GET /api/workspaces/[id]/loop/runs?loopId=` — web-process read of `RUNS.jsonl`, deduped latest snapshot per run). v3: runs are thin **selection rounds** — a run row with `seededSessionId` opens the seeded **execution session** (badge 已播种); unseeded runs open the selection orchestrator. Non-terminal runs poll every 5s while expanded.
 - **工作项** — the requirements/bugs groups.
 
 Mobile: the Activity Bar becomes a **bottom tab bar** (`variant="horizontal"`); desktop is a left icon strip
@@ -205,73 +205,21 @@ Key behavior:
 
 ### Loop (`lib/loop/`)
 
-The generic **maker/checker automation engine**. **It runs as a separate process** — `npm run loop` →
-`bin/pi-loop.js` → `startLoopHost()` (`host.ts`), listening on `127.0.0.1:30142` (`PI_LOOP_HOST`/`PI_LOOP_PORT`). The
-**web server never owns Loop timers** (`instrumentation.ts` explicitly does not start it); it is only a management
-adapter + SSE proxy.
+**v3 (`docs/dev-loop-v3-design.md`): the loop is a thin selector+seeder.** A run is one short **selection round**; execution is a **normal session** anchored to a work item, running the workspace's own skill contract. Gates are chat turns backed by `loop.gate` milestone stamps — the dedicated gate machinery (state machine, rehydration, LoopStatusBar, 409-for-executors) is retired.
 
-Per-loop files under `<workspace>/loops/<loopId>/`: `loop.yaml` (definition: triggers, autonomy `L1|L2|L3`),
-`LOOP.md` (task contract), `RUNS.jsonl` (**append-only** run snapshots),
-`agents/*.md` (loop-scoped worker subagents), `audit/`.
+Per-loop files under `<workspace>/loops/<loopId>/`: `loop.yaml` (triggers), thin `LOOP.md` (~15 lines: liveness + park keywords + pick KEY → `LOOP_SEED: <KEY>` / `LOOP_VERDICT: idle|no candidate`), `RUNS.jsonl` (append-only run snapshots; a seeded run records `seededSessionId`), `LEARN/` archive. The **contract** lives in `<workspace>/.agents/skills/<loopId>/SKILL.md` (loop id === skill name; must also be listed in `manifest.skills` — the workspace `skillsOverride` filter gates `/skill:` expansion too). **Roles** live in `<workspace>/.pi/agents/*.md` (subagent discovery; the seeder injects them via `extraAgentDirs`, no approval gate).
 
-Round lifecycle (`runtime.ts` + `pi-execution.ts`):
-1. **trigger** (`host.ts`) — dedups by `(workspace, loop, eventId)`; cron triggers fire from `LoopHostScheduler`
-   (30s tick, per-minute slot dedup).
-2. **startRound** (`pi-execution.ts`) — starts an orchestrator AgentSession (rpc key `__loop_host__${run.id}`), injects
-   the loop's own `agents/` dir as trusted subagent source, runs `LOOP.md` as the first prompt. The whole turn (many
-   tool/LLM round-trips, incl. subagent delegation) is one `capturePrompt`, bounded by a **30-min timeout**
-   (`RUN_TIMEOUT_MS`, `unref`'d) that rejects → run `failed`. Mid-turn the orchestrator emits `LOOP_GATE: <payload>`
-   to pause for a human, or `LOOP_VERDICT: <conclusion>` (free text) to end.
-3. **gate** — `LOOP_GATE:` → run `waiting_for_gate` (orchestrator session kept alive in-memory across the pause). A
-   free-text answer (`answerGate`) resumes the same session via `resumeRound`. The session is **file-backed**: if the
-   in-memory wrapper expired (rpc-manager's 10-min idle timeout) or the host restarted while paused, `resumeRound`
-   **rehydrates** it from its `.jsonl` (`resolveSessionPath` + `startRpcSession`) so the gate continues transparently.
-   Only an archived/missing file is unrecoverable (→ run `failed`).
-4. **heartbeat** — a long round sits in `running` with no status transition for many minutes (subagent trace, slow
-   model), which looks frozen in the UI. `capturePrompt` emits a throttled (60s) `onProgress` hint; the runtime turns
-   each into a `progress`-field snapshot (`LoopRun.progress`, e.g. `tool: bash` / `subagent: brainstorm`) so the run
-   card's `updatedAt` advances. Snapshot appends are **serialized per run** (`runtime.writeSnapshot`) so a
-   fire-and-forget heartbeat cannot overtake the terminal snapshot. `progress` is cleared on terminal.
-5. **reap orphaned gates** (`runtime.reapOrphanedGates`, called at host startup) — every `waiting_for_gate` run whose
-   orchestrator `.jsonl` is gone from the live sessions dir (archived/removed) is marked `failed`; runs whose file is
-   still live are left alone (they rehydrate on the next answer). This is the only recovery for a gate whose session
-   was archived out from under it (e.g. archive-cascade on a linked work item).
+Round lifecycle (`runtime.ts` + `pi-execution.ts` + `seed.ts`):
+1. **trigger** (`host.ts`) — dedups by `(workspace, loop, eventId)`; cron from `LoopHostScheduler` (30s tick, per-minute slot dedup).
+2. **startRound** (`pi-execution.ts`) — starts a selection orchestrator AgentSession (rpc key `__loop_host__${run.id}`), runs the thin LOOP.md as the first prompt, bounded by a **30-min timeout** (`RUN_TIMEOUT_MS`) that rejects → run `failed`; a throttled 60s `onProgress` heartbeat keeps the run card alive.
+3. **seed** (`seed.ts`) — on settle, the engine (deterministic code, never an LLM) regex-parses `LOOP_SEED: <KEY>` and calls `seedExecutionSession`: **double-open guard** (last `loop.active_session` stamp + wrapper-liveness probe + item terminality — live wrapper or idle-but-active-≤2h blocks; stale stamps are always harmless, no cleanup exists) → create a normal session (one-time key, cwd=workspace root, `extraAgentDirs=[<ws>/.pi/agents]`, deterministic name `<KEY> <title>`) → seed prompt `/skill:<loopId> 执行 <KEY>` (pi's input expansion mechanically injects the contract — `/skill:` is expanded by the SDK `AgentSession`, so the daemon-side send path gets it for free) → link `conversations` + stamp `loop.started`/`loop.active_session` → **hands off**. Guard refusals/errors are logged, never fail the selection run. Zombie finding is remind-only: the idle verdict lists 疑似中断 items (non-terminal phase + events quiet >2h); humans adopt via the work-item button.
+4. **abort/timeout** — `session.destroy()` (aborts the in-flight prompt) + `reapOrphanedRoundProcesses` (SIGTERM→SIGKILL bash/npm/mvn trees still scoped by workspace cwd — kept for selection rounds; a user-killed *execution* session has the same orphan exposure as any normal session kill, surfaced by the zombie report).
 
-The web layer: `/api/workspaces/[id]/loop/**` calls `loopHostClient` (`lib/loop/client.ts`, `PI_LOOP_URL`) for
-list/trigger/run/gate, and `lib/loop/authoring.ts` for create/update/delete (which writes `loop.yaml`/`LOOP.md`/agents
-**directly in the web process**), plus one **web-process read path**: `GET /api/workspaces/[id]/loop/runs?loopId=`
-reads `RUNS.jsonl` directly (deduped latest snapshot per run) and joins each run's work item via
-`orchestratorWorkItemIndex` (`lib/loop/session-tags.ts` - the same `findWorkItemByConversation` chain the host
-sessionNamer uses). The web server also **probes** the loop host for live orchestrator sessions
-(`/v1/sessions/:id`) and **proxies their SSE** so a Loop run can be watched in the browser even though the session
-lives in the loop process.
+The web layer: `/api/workspaces/[id]/loop/**` calls `loopHostClient` (`lib/loop/client.ts`) for list/trigger/run/abort + `POST /v1/workspaces/:id/seed` (the work-item 「按合同执行/收养续跑」 button uses `POST .../work-items/[key]/run-contract`, forwarding to the same deterministic seeder — both entry points share one guard, one prompt shape, one bookkeeping path). `lib/loop/authoring.ts` writes `loop.yaml`/`LOOP.md` directly in the web process; the runs route is a plain web-process read of `RUNS.jsonl`.
 
-**Run records are sessions with a different entry point.** The sidebar Loop view lists runs; clicking a run opens
-the orchestrator session as a chat tab. Gate answering happens **in that chat tab**: the daemon's session probe
-(`GET /v1/sessions/:id`) carries a `loop: { workspaceId, run }` payload whenever the probed session is some run's
-orchestrator (`DefaultLoopRuntime.findBySessionId` - a disk scan of RUNS.jsonl), including the **cold** case (host
-restarted while a gate was paused: probe answers 200 with run meta even without a live wrapper, so the web layer
-pins the session and shows the gate bar instead of a composer that would 409). The web state route passes `loop`
-through; `useAgentSession` exposes `loopOwned`/`loopRunMeta`; AppShell pins the `LoopStatusBar` (gate answer input
-+ abort) above ChatWindow from either the trigger flow or the meta, and polls the run to terminal via an explicit
-`loopPollTarget` state. For orchestrator sessions the composer is disabled (`ChatInput.disabledNotice`) - the
-gate bar is their only input channel.
+**Execution sessions are first-class normal sessions.** They appear in the sidebar, hang off their work item via `conversations` (the item detail renders them as clickable links), accept steering messages at any time, and ask gates as ordinary turns — the SKILL.md contract requires stamping `loop.gate{kind,question}` (via `workspace_record_milestone`) *before* asking, which is also the UI's 待-decision audit signal. Manual trigger UX (`AppShell.handleLoopTriggered`): optimistic placeholder → poll the selection round → auto-open the seeded execution session when `seededSessionId` lands.
 
-**Session-list routing of orchestrators (`lib/loop/session-tags.ts`).** `/api/sessions` tags every orchestrator
-session `loopOrchestrator: true` + `loopWorkItem?: key` (30s-cached join over `RUNS.jsonl` x work-item
-`conversations`; `?refresh` invalidates it alongside the list cache). Idle runs (no work-item link) are hidden
-from workspace session lists (`WorkspaceSidebar`/`WorkspaceOverview`/`HomeLanding` filter) - their only entry is
-the Loop run record; runs that picked a work item stay listed, and the work-item detail renders its
-`conversations` as clickable session links (`WorkspaceManager.onOpenConversation`). Snapshots are surfaced
-as-recorded - a stale `running` snapshot is NOT corrected at read time (some are user-driven self-checks).
-
-**Orchestrator session titles.** Every orchestrator session is seeded with the same generic bootstrap prompt, so
-without intervention they all share an identical title. The host fixes this with an injected `sessionNamer` seam:
-after a round settles, `PiRoundExecutionBackend` asks the namer for a title and renames a still-unnamed session. The
-host's namer (`findWorkItemByConversation`) resolves the requirement a dev-loop run picked by scanning work items
-whose `conversations` includes the orchestrator's session id (the dev-loop LOOP.md appends it on selection) and
-returns `(Loop) <title>`. Runs that pick nothing (idle / park-all) keep their default title. The engine stays
-domain-agnostic — it just calls the host-provided callback and never imports work-items code itself.
+**Session-list routing of orchestrators (`lib/loop/session-tags.ts`).** `/api/sessions` tags every selection orchestrator `loopOrchestrator: true` (30s-cached RUNS.jsonl scan; no work-item join anymore) and the sidebar/home lists hide them — their only entry is the Loop view's run record (which opens `seededSessionId` first). Execution sessions are NOT tagged — they surface via their work item like any conversation.
 
 ### Subagent (`lib/subagent/`)
 
@@ -324,11 +272,11 @@ Only streamed status + final result return to the parent; the full child run is 
 
 **Loops are per-workspace custom definitions — pi-web ships no loop templates.** The generic engine (`runtime`/`pi-execution`/`store`/`scheduler`/`authoring`) is domain-agnostic; every loop's behavior lives in its workspace (`loops/<loopId>/LOOP.md` + `agents/*.md` + `loop.yaml`), authored/edited via the generic loop surface (`LoopConfig` / `lib/loop/authoring.ts`). There is **no dev-loop code path in pi-web** (the former `lib/loop/dev-loop/` template + `install.ts` + `POST /api/workspaces/[id]/dev-loop` route are retired — a loop is created like any other loop definition).
 
-The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), v2 (design: `docs/dev-loop-v2-design.md`). It uses **only existing tools** (work-item tools, bash, edit, subagent, kb_search); no new tools injected. Its contracts are worth documenting because other workspaces can copy the pattern:
+The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), **v3** (design: `docs/dev-loop-v3-design.md`; v2 history: `docs/dev-loop-v2-design.md`). v3 shape: thin selection round → deterministic seed → normal execution session running the **skill contract** (`.agents/skills/dev-loop/SKILL.md`). It uses **only existing tools** (work-item tools, bash, edit, subagent, kb_search); no new tools injected. Its contracts are worth documenting because other workspaces can copy the pattern:
 
-- **Four-layer LOOP.md**: ① role menu (contracts: must-run **evidence** / optional / always) ② hard invariants — L0 branch/merge discipline plus orchestration bounds **N1 maker≠checker, N2 full gate exactly once before merge, N3 never split across coupling points** ③ composition rules + the **dispatch plan** as an explicit artifact (`loop.dispatch{steps[]}` milestone; illegal plans are re-composed, bounded ≤2; the plan gate can veto the composition) ④ recovery contract (adoption via selector, resume from dispatch plan + milestone gaps — "most mature artifact", not sequence position).
-- **Roles** (template `agents/*.md`, all subagents): **selector** (the single entry point — absorbs the old orient round: liveness/adoption/idle verdicts + 选品三重判定 + 数据流快筛; outputs an **evidence pack** `{crossLayer, sensitive, touchpoints, couplings, hasGate}` + per-role model tiers, NOT a flow tier; `predictedConf` is immutable once emitted — the calibration data source; writes the thin SPEC itself for pure-display items); **brainstorm** (全链路 trace UI→SQL + 反证, strongest model, produces `SPEC.md` = what-contract **+ task DAG** — coupling analysis decides split lines; `repos[]` is the repo-set authority; emits `tracedConf`, never overwrites `predictedConf`); **writing-plans** (optional plan step — only in the dispatch plan when multi-task/sensitive/multi-repo; produces `PLAN.md` = in-task steps + test plan w/ wiring coverage; cross-task ordering belongs to the SPEC DAG, never re-ordered here; re-dispatchable on plan-defect rework); **implementer** (TDD maker, **one instance per task** with per-task branch/worktree; single baseline per workspace AGENTS.md — worktrees and diffs from the declared cut baseline (cxin: `origin/master`), merge-target alignment before delivery (integration-ready); self-contained plan section when no standalone plan step; bounded fix loop, 5-round shared budget); **checker** (v2 merge of reviewer+verifier — the **single check seat**, join point after all tasks `impl_ready`; **review-then-run**: audits the full diff three ways (SPEC compliance / README 原始验收点 vs spec misreads / quality) before spending the single full gate; verdict worst-wins per-repo; rework list carries `<taskId> <file>:<line> <问题> <期望> <source: code|plan|spec>` — the orchestrator routes by source: code→implementer, plan→writing-plans, spec→contract-correction path; may be split back into reviewer+verifier seats for sensitive large items); **learner** (knowledge **consolidator**, see Learn below).
-- **Gates (three kinds, all terse)**: plan gate (non-all-green only — human reviews SPEC **+ dispatch plan**, may veto the split/composition; one-shot all-clarifications); final-verify (post-merge); **contract-correction gate** (the only L0 exception slot, rare: a gate-approved SPEC judged to misread the README by checker goes back to the human with 3 terse options instead of a silent rework — skip-gate SPECs just get fixed against README, no extra gate).
+- **Four-layer SKILL.md** (moved from LOOP.md in v3): ① role menu (contracts: must-run **evidence** / optional / always) ② hard invariants — L0 branch/merge discipline plus orchestration bounds **N1 maker≠checker, N2 full gate exactly once before merge, N3 never split across coupling points** ③ composition rules + the **dispatch plan** as an explicit artifact (`loop.dispatch{steps[]}` milestone; illegal plans are re-composed, bounded ≤2; the plan gate can veto the composition) ④ recovery contract (adoption = the 收养 seed verb, resume from dispatch plan + milestone gaps — "most mature artifact", not sequence position). Plus an **opening step** (absorbed from the retired selector): triple judgment (predictedConf immutable / verifiable / riskTier) + data-flow quick screen + evidence pack + thin-SPEC write-through for pure-display items — identical for both entry points (cron seed & 按合同执行 button).
+- **Roles** (`.pi/agents/*.md`, all subagents; selector retired in v3 — selection lives in the thin LOOP.md, judgment in the SKILL opening): **brainstorm** (全链路 trace UI→SQL + 反证, strongest model, produces `SPEC.md` = what-contract **+ task DAG** — coupling analysis decides split lines; `repos[]` is the repo-set authority; emits `tracedConf`, never overwrites `predictedConf`); **writing-plans** (optional plan step — only in the dispatch plan when multi-task/sensitive/multi-repo; produces `PLAN.md` = in-task steps + test plan w/ wiring coverage; cross-task ordering belongs to the SPEC DAG, never re-ordered here; re-dispatchable on plan-defect rework); **implementer** (TDD maker, **one instance per task** with per-task branch/worktree; single baseline per workspace AGENTS.md — worktrees and diffs from the declared cut baseline (cxin: `origin/master`), merge-target alignment before delivery (integration-ready); self-contained plan section when no standalone plan step; bounded fix loop, 5-round shared budget); **checker** (v2 merge of reviewer+verifier — the **single check seat**, join point after all tasks `impl_ready`; **review-then-run**: audits the full diff three ways (SPEC compliance / README 原始验收点 vs spec misreads / quality) before spending the single full gate; verdict worst-wins per-repo; rework list carries `<taskId> <file>:<line> <问题> <期望> <source: code|plan|spec>` — the orchestrator routes by source: code→implementer, plan→writing-plans, spec→contract-correction path; may be split back into reviewer+verifier seats for sensitive large items); **learner** (knowledge **consolidator**, see Learn below).
+- **Gates (three kinds, all terse)**: plan gate (non-all-green only — human reviews SPEC **+ dispatch plan**, may veto the split/composition; one-shot all-clarifications); final-verify (post-merge); **contract-correction gate** (the only L0 exception slot, rare: a gate-approved SPEC judged to misread the README by checker goes back to the human with 3 terse options instead of a silent rework — skip-gate SPECs just get fixed against README, no extra gate). v3 semantics: a gate = **stamp `loop.gate{kind,question}` then ask tersely and end the turn** — the human answers in the composer like any message; no protocol machinery.
 - **Install/authoring**: none special — the loop is a plain loop definition created via the generic loop authoring surface; its files are edited directly in the workspace (old copies in workspace-c keep `.bak` siblings).
 - **No `checkers.ts`**: checker commands live in the workspace's own AGENTS.md; the full gate's only definition is the AGENTS.md repo gate command (targeted = file/module-level, used inside fix loops).
 - **Phase mapping** (unchanged): 待开发=`intake` → 待计划评审=`plan_approval` → `implementation` → 待评审=`verification` → `complete`+`done`; 受阻=`blocked`.
@@ -342,10 +290,10 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), v2 (des
 - **Learn step** (terminal; idle runs excluded): the orchestrator ① writes `LEARN/<runId>.md` — a human-browsable archive (lesson candidate, learner's disposition, index fields incl. **both** `predictedConf` and `tracedConf` so the calibration chain closes; idempotent replace) and ② dispatches the **`learner`** only if a candidate exists. **`LEARN.jsonl` is retired/frozen** in place (its old `humanDecision` narrative was the "summarizing the run" failure mode).
 - **learner = consolidator**: two-question generalization test — (1) is it still a rule with specifics deleted? (2) is it an instance of an existing rule (`kb_search`)? Then: merge-and-sharpen into an existing loop-owned note (abstraction lift **allowed but must stay instance-anchored**; trigger scenario inlined into the note's instance section) OR open a new file referencing near-kin. **`contentHash`** frontmatter guards against overwriting human edits — mismatch ⇒ the note is human-authoritative, degrade to new-file+reference.
 - **Single home**: everything loop-written goes to `learnings/` (module traps too, with strong module tags); `standards/*` is **purely human-maintained** (the old "loop append" clause is gone — it had no executor). One note touched/created per run max.
-- **Three artifacts, three purposes**: KB `learnings/*.md` = consolidated generalizable rules (loop-maintained via hash guard); `standards/*` = human-maintained; `LEARN/<runId>.md` = per-run archive (nothing parses it; selector may `ls -t` it for calibration).
+- **Three artifacts, three purposes**: KB `learnings/*.md` = consolidated generalizable rules (loop-maintained via hash guard); `standards/*` = human-maintained; `LEARN/<KEY>-<date>.md` = per-execution archive (nothing parses it; the SKILL opening may `ls -t` it for calibration).
 ### cxin reference (研发 Loop target workspace)
 
-- **dev Loop instance**: `~/.pi/workspaces/workspace-c/loops/dev-loop/` (manual + weekday cron triggers; deployed at v2 — old copies kept as `LOOP.v1.md.bak`/`agents.v1.bak/` siblings; `LEARN.jsonl` frozen, `LEARN/` archive dir created). Sensitive module list + module→repo map: `cargo-knowledge/standards/dev-loop-modules.md`. Consolidated process lessons in `cargo-knowledge/learnings/` (5 notes incl. the v2 backfill merge "trace 覆盖不可见层", all contentHash'd).
+- **dev Loop instance**: `~/.pi/workspaces/workspace-c/` at **v3** — thin selection `loops/dev-loop/LOOP.md` (v1/v2 baks kept as siblings), contract in `.agents/skills/dev-loop/SKILL.md` (+`dev-loop` in manifest `skills:`), five roles in `.pi/agents/` (selector retired; baks `agents.v2.bak/`). `LEARN.jsonl` frozen, `LEARN/` archive dir live. Seeded execution sessions carry `loop.gate`-stamped gate turns + `loop.active_session` double-open stamps. Sensitive module list + module→repo map: `cargo-knowledge/standards/dev-loop-modules.md`. Consolidated process lessons in `cargo-knowledge/learnings/` (5 notes incl. the v2 backfill merge "trace 覆盖不可见层", all contentHash'd).
 - **Host wiring**: `createLoopHost()` starts **one** sibling non-Loop timer — `ImporterScheduler` — alongside `LoopHostScheduler`. None runs in the web server (`instrumentation.ts` untouched).
 
 ### Workspace directory layout (reference)
@@ -400,11 +348,11 @@ app/api/
   workspaces/[id]/loop/loops/[loopId]/trigger/route.ts  POST manual trigger
   workspaces/[id]/loop/runs/route.ts             GET ?loopId= — sidebar run records (RUNS.jsonl latest snapshot + work-item join)
   workspaces/[id]/loop/runs/[runId]/route.ts     GET a run
-  workspaces/[id]/loop/runs/[runId]/gate/route.ts  POST approve/reject gate
+  workspaces/[id]/work-items/[key]/run-contract/route.ts  POST 按合同执行/收养续跑 (daemon seeder proxy)
   workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
   workspaces/[id]/importers/test/route.ts        POST test chandao connection (listAssigned)
   workspaces/[id]/importers/sync/route.ts        POST manual importer sync (forward to host / in-process fallback)
-  workspaces/[id]/loop/**                 generic loop mgmt/trigger/gate (no dev-loop-specific routes)
+  workspaces/[id]/loop/**                 generic loop mgmt/trigger/run (no dev-loop-specific routes; gate route retired in v3)
   git/status/route.ts                    GET ?cwd= — per-repo changed files + totals
   git/diff/route.ts                      GET ?cwd=&path= — unified patch for one file
   auth/all-providers|providers/route.ts  GET provider lists (OAuth)
@@ -444,15 +392,16 @@ lib/
     extension.ts            pi extension: list/get/create/update/record-milestone tools
     web.ts                  error → HTTP mapping
   loop/
-    types.ts                LoopDefinition / LoopRun / LoopRuntime / RoundExecutionBackend
-    host.ts                 pi-loop HTTP host (createLoopHost/startLoopHost) — wires the Importer sibling timer; injects the orchestrator sessionNamer
-    runtime.ts              DefaultLoopRuntime — lifecycle only (infer/execute/gate/fail)
-    pi-execution.ts         PiRoundExecutionBackend — drives the orchestrator session + subagent delegation; abort/timeout reaps orphaned round processes; optional host sessionNamer renames the orchestrator after a round
+    types.ts                LoopDefinition / LoopRun / LoopRuntime / RoundExecutionBackend (v3: no gate types)
+    host.ts                 pi-loop HTTP host (createLoopHost/startLoopHost) — wires the Importer sibling timer; POST /v1/workspaces/:id/seed (manual seeding entry)
+    runtime.ts              DefaultLoopRuntime — lifecycle only (queued→running→succeeded|failed; records seededSessionId)
+    seed.ts                 v3 deterministic seeder: parseLoopSeed/buildSeedPrompt/evaluateSeedGuard (pure, tested) + seedExecutionSession (guard → normal session + /skill:<loopId> prompt + conversations/loop.started/loop.active_session stamps) — one code path for cron seeding and the work-item button
+    pi-execution.ts         PiRoundExecutionBackend — drives the single selection round + engine-side seeding on LOOP_SEED; abort/timeout reaps orphaned round processes
     process-cleanup.ts      reapOrphanedRoundProcesses — SIGTERM→SIGKILL bash/npm/mvn trees a destroyed session leaves behind (scoped by workspace cwd)
     store.ts                loop.yaml / RUNS.jsonl read+append, validation
     authoring.ts            create/update/delete loop definitions (writes files in the web process)
     scheduler.ts            cron evaluation + per-minute dedup (runs in the loop host only)
-    client.ts               loopHostClient — HTTP client to the loop host / session daemon (PI_LOOP_URL): loop mgmt + session-daemon surface (createSession/sendSessionCommand/runningSessionIds)
+    client.ts               loopHostClient — HTTP client to the loop host / session daemon (PI_LOOP_URL): loop mgmt + seedExecution + session-daemon surface (createSession incl. extraAgentDirs/sendSessionCommand/runningSessionIds)
   session-daemon/                   sidecar lifecycle for the session daemon (C2)
     sidecar.ts               ensureSessionDaemonStarted (probe→attach / spawn detached) + pure guards (decideSidecarAction, spawnableDaemonUrl, sidecarSpawnEnv)
     workspace-resolver.ts   PiWorkspaceResolver (lists loop-capable workspaces)
@@ -506,7 +455,7 @@ components/
   FileExplorer.tsx          file tree inside sidebar
   FileViewer.tsx            file content in a tab
   CapabilityToggle.tsx      the capability on/off switch used in settings panels
-  LoopConfig.tsx            loop definition editor + create wizard (run panel/gate form retired - runs live in the sidebar Loop view, gates in the chat tab's LoopStatusBar)
+  LoopConfig.tsx            loop definition editor + create wizard (runs live in the sidebar Loop view; gate bar retired in v3 — gates are chat turns in execution sessions)
   ImporterConfig.tsx        requirement-sources (chandao importer) credential + test panel
   ChatWindow.tsx            chat composition + completion sound wrapper
   SessionChangedFiles.tsx   "本会话改动 N 个文件" toolbar button (right of the sound toggle in ChatInput) + slide-in drawer (desktop) / full-screen list (mobile); entries open the file via the openFile/file-tab pipeline
@@ -617,11 +566,11 @@ The loop host process (`npm run loop` → `bin/pi-loop.js` → `lib/loop/host.ts
 **Sidecar lifecycle (`lib/session-daemon/sidecar.ts`)**: `ensureSessionDaemonStarted()` — probe `/health` (attach if healthy), else spawn `node bin/pi-loop.js` detached+unref'd and wait (≤15s) for health. Wired fire-and-forget from `instrumentation.ts` (`PI_SESSION_DAEMON_DISABLED=1` opts out). In-flight guard on `globalThis` dedupes concurrent callers and retries after failure. Guards: `spawnableDaemonUrl` refuses to spawn for non-local `PI_LOOP_URL` (a remote URL means the daemon is managed elsewhere); `sidecarSpawnEnv` translates `PI_LOOP_URL` → the child's `PI_LOOP_HOST`/`PI_LOOP_PORT` (explicit env wins) — without this a URL-only config spawns a daemon on the default port while the web polls the URL's port forever. Spawn races resolve quietly: the EADDRINUSE loser exits 0 (`bin/pi-loop.js`). The "web owns no unattended timers" rule is preserved — daemon timers live in the daemon process and survive web restarts; the web only ever re-attaches by port probe.
 
 ### Loop runs in its own process; the web server only manages + proxies
-`npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/gate are thin proxies over `loopHostClient`; only authoring writes files directly. A loop orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live. The host also runs **one sibling non-Loop system timer** alongside `LoopHostScheduler`: `ImporterScheduler` (inbound). None of these touches the engine core or runs in the web server.
+`npm run loop` starts `pi-loop` (`lib/loop/host.ts`). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/abort/seed are thin proxies over `loopHostClient`; only authoring writes files directly. A selection orchestrator session physically lives in the loop process — the web server probes the loop host and proxies its SSE so it can be opened live. v3 execution sessions are normal daemon sessions (interactive registry), indistinguishable from user chats. The host also runs **one sibling non-Loop system timer** alongside `LoopHostScheduler`: `ImporterScheduler` (inbound). None of these touches the engine core or runs in the web server.
 
 **Watching a live session (any session — interactive, subagent child, or orchestrator) is one mechanism now (C2).** The daemon owns every session; `/api/agent/[id]/events` is a pure pipe onto `/v1/sessions/:id/events`, which resolves via `findLiveSession` (orchestrator index first, then the ordinary registry where subagent children live) and cold-starts idle sessions for viewing. Two subtleties remain:
 
-1. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — a **gate-paused orchestrator is alive but not running** (no prompt in flight), so it appears in NO running set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (so a resumed round's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `loopOwned` (= "live in the daemon") and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the daemon no longer holds it).
+1. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — a daemon session that is **alive but idle** (between turns, e.g. a gate-paused v3 execution session or any warm idle session) appears in NO running set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (so a resumed turn's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `loopOwned` (= "live in the daemon") and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the daemon no longer holds it).
 2. The event reducer promotes `agentPhase` to `running_tools` on a `tool_execution_update` partial even without a prior `tool_execution_start` — a viewer joining mid-subagent-run never saw the start event, and the subagent worker's streamed partials are the only proof the tool is running. Without this the phase sits on `waiting_model` (「思考中」) for the whole multi-minute run.
 
 **Opening a subagent child by click goes through `/api/sessions/[id]/locate`, never the cached `/api/sessions` list.** `handleOpenSessionViewer` resolves the child id via locate (Loop-Host probe first — now hitting for children too — then a forced disk scan that bypasses the 30s list cache). The old list lookup silently no-op'd for a freshly spawned running child (it isn't in the cached list yet), which felt like "you must wait for the subagent to finish before you can open it". Locate also enriches a loop-hit from disk (real firstMessage/stats for the tab label, keeping the probe's authoritative path/cwd).
