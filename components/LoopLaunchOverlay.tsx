@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-import type { LoopRun } from "@/lib/loop/types";
 
 const STATUS_LABEL: Record<string, string> = {
   queued: "排队中",
@@ -19,18 +17,6 @@ const btnBase: React.CSSProperties = {
   cursor: "pointer",
   background: "var(--bg)",
   color: "var(--text)",
-};
-const btnPrimary: React.CSSProperties = { ...btnBase, background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" };
-const gateInput: React.CSSProperties = {
-  flex: 1,
-  minWidth: 120,
-  border: "1px solid var(--border)",
-  borderRadius: 6,
-  padding: "3px 8px",
-  fontSize: 12,
-  background: "var(--bg)",
-  color: "var(--text)",
-  outline: "none",
 };
 
 /** Full-area placeholder shown the instant a Loop is triggered, before the

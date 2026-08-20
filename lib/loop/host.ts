@@ -10,6 +10,8 @@ import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./sto
 import { ImporterScheduler } from "../importers/scheduler.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { seedExecutionSession } from "./seed.ts";
+import { WorkItemNotFoundError } from "../work-items/service.ts";
+import { WorkspaceNotFoundError } from "../workspaces/service.ts";
 import { getRpcSession, getRunningRpcSessionIds, getLiveRpcSessionInfos, hasBusyRpcSessionForCwd, startRpcSession, subscribeRunningSessions, destroyRpcSessionsForCwd, type AgentSessionWrapper } from "../rpc-manager.ts";
 import { resolveSessionPath } from "../session-reader.ts";
 import { generateSessionTitle } from "../session-title.ts";
@@ -62,6 +64,8 @@ function serveSessionSse(request: IncomingMessage, response: ServerResponse, ses
 }
 
 function errorStatus(error: unknown): number {
+  if (error instanceof WorkItemNotFoundError) return 404;
+  if (error instanceof WorkspaceNotFoundError) return 404;
   if (error instanceof LoopNotFoundError) return 404;
   if (error instanceof LoopValidationError) return 400;
   if (error instanceof LoopConflictError) return 409;
