@@ -833,25 +833,28 @@ export function AppShell() {
     workspace: WorkspaceSummary,
     item: WorkItemRecord,
   ) => {
-    const primaryConversationId = item.conversations[0];
-    if (primaryConversationId) {
+    // Latest conversation first: a loop-seeded execution session is APPENDED to
+    // `conversations`, so the most recent entry is the live/latest contract
+    // run. Resolve via /locate (daemon probe + forced disk scan) — never the
+    // 30s-cached /api/sessions list, which misses freshly seeded sessions.
+    for (let index = item.conversations.length - 1; index >= 0; index -= 1) {
+      const conversationId = item.conversations[index];
       try {
-        const response = await fetch("/api/sessions");
+        const response = await fetch(`/api/sessions/${encodeURIComponent(conversationId)}/locate`);
         if (response.ok) {
-          const data = await response.json() as { sessions: SessionInfo[] };
-          const existing = data.sessions.find((session) => session.id === primaryConversationId);
-          if (existing) {
+          const data = await response.json() as { session?: SessionInfo };
+          if (data.session) {
             ensureTab(workspace);
-            updateTab(workspace.id, { view: "chat", session: existing, newSessionCwd: null });
+            updateTab(workspace.id, { view: "chat", session: data.session, newSessionCwd: null });
             activateTab(workspace.id);
             setSessionKey((k) => k + 1);
             setSystemPrompt(null);
-            navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(existing.id)}`);
+            navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(data.session.id)}`);
             return;
           }
         }
       } catch {
-        // A missing local Conversation falls through to a new Workspace session.
+        // Unresolvable conversation (archived/removed) — try the next older one.
       }
     }
 

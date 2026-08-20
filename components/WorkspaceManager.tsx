@@ -1428,34 +1428,47 @@ export function WorkspaceManager({
                         待裁决
                       </span>
                     )}
-                    <button
-                      className="workspace-action"
-                      style={{ marginLeft: "auto" }}
-                      onClick={() => onOpenWorkItemConversation(selectedWorkspace, selectedWorkItem.item)}
-                    >
-                      {selectedWorkItem.item.conversations.length > 0 ? "继续会话" : "开始会话"}
-                    </button>
-                    {onRunContract && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && (
-                      <>
+                    {onRunContract && selectedWorkspace.capabilities.includes("loop") && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" ? (
+                      selectedWorkItem.item.conversations.length === 0 ? (
                         <button
                           className="workspace-action"
+                          style={{ marginLeft: "auto" }}
                           disabled={saving}
                           onClick={() => void runContract("execute")}
-                          title="以 dev-loop 合同种子一个执行会话（开场判定→SPEC→maker/checker→合并→验证）"
+                          title="以 dev-loop skill 合同种子一个执行会话（开场判定→SPEC→maker/checker→合并→验证）"
                         >
-                          按合同执行
+                          开始对话
                         </button>
-                        {selectedWorkItem.events.some((event) => event.type === "loop.started") && (
+                      ) : (
+                        <>
                           <button
                             className="workspace-action"
-                            disabled={saving}
-                            onClick={() => void runContract("adopt")}
-                            title="从派发计划+里程碑缺口续跑（不重做开场判定）"
+                            style={{ marginLeft: "auto" }}
+                            onClick={() => onOpenWorkItemConversation(selectedWorkspace, selectedWorkItem.item)}
+                            title="打开最新的合同执行会话（skill 已在其上下文中，直接继续聊/gate 答复）"
                           >
-                            收养续跑
+                            继续对话
                           </button>
-                        )}
-                      </>
+                          {selectedWorkItem.events.some((event) => event.type === "loop.started") && (
+                            <button
+                              className="workspace-action"
+                              disabled={saving}
+                              onClick={() => void runContract("adopt")}
+                              title="新会话从派发计划+里程碑缺口续跑（不重做开场判定）——旧会话僵死/重开时用"
+                            >
+                              收养续跑
+                            </button>
+                          )}
+                        </>
+                      )
+                    ) : (
+                      <button
+                        className="workspace-action"
+                        style={{ marginLeft: "auto" }}
+                        onClick={() => onOpenWorkItemConversation(selectedWorkspace, selectedWorkItem.item)}
+                      >
+                        {selectedWorkItem.item.conversations.length > 0 ? "继续会话" : "开始会话"}
+                      </button>
                     )}
                     <button
                       className="workspace-action"
