@@ -57,10 +57,10 @@ export async function GET(req: Request) {
       ? merged.map((session) => (subagentChildIds.has(session.id) ? { ...session, subagentChild: true } : session))
       : merged;
 
-    // Tag Loop orchestrator sessions: idle runs (no work-item link) are hidden
-    // from session lists — their entry point is the Loop run record — while
-    // runs that picked a work item stay listed. Same join the loop
-    // sessionNamer uses, so routing and naming always agree.
+    // Tag Loop selection orchestrators: hidden from session lists — their only
+    // entry point is the Loop view's run record (which opens the seeded
+    // execution session first). v3 execution sessions are NOT tagged; they
+    // surface via their work item's conversations like any conversation.
     const loopTags = await loopSessionTags().catch(() => new Map());
     if (loopTags.size > 0) {
       sessionsWithFlags = sessionsWithFlags.map((session) => {

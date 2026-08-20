@@ -346,7 +346,7 @@ app/api/
   workspaces/[id]/loop/loops/route.ts            GET list | POST author a loop definition
   workspaces/[id]/loop/loops/[loopId]/route.ts   GET | PATCH | DELETE a loop
   workspaces/[id]/loop/loops/[loopId]/trigger/route.ts  POST manual trigger
-  workspaces/[id]/loop/runs/route.ts             GET ?loopId= — sidebar run records (RUNS.jsonl latest snapshot + work-item join)
+  workspaces/[id]/loop/runs/route.ts             GET ?loopId= — sidebar run records (RUNS.jsonl latest snapshot per run; v3: plain runs, no join)
   workspaces/[id]/loop/runs/[runId]/route.ts     GET a run
   workspaces/[id]/work-items/[key]/run-contract/route.ts  POST 按合同执行/收养续跑 (daemon seeder proxy)
   workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
@@ -388,7 +388,7 @@ lib/
     id.ts                   ULID generator
   work-items/
     types.ts                WorkItemRecord / phases / events
-    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation; findWorkItemByConversation (loop session naming)
+    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation
     extension.ts            pi extension: list/get/create/update/record-milestone tools
     web.ts                  error → HTTP mapping
   loop/

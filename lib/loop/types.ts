@@ -94,15 +94,12 @@ export interface LoopRun {
    *  successfully seeded an execution session for it. The Loop view uses this
    *  to open the run's execution session directly (design v3 §7). */
   seededSessionId?: string;
+  /** Set when a seed was REFUSED by the double-open guard (an execution
+   *  session is already live/recent for that work item) — carries the guard's
+   *  reason so the run record explains why nothing was seeded. */
+  seedRefused?: string;
 }
 
-/** Sidebar-facing projection of a run: the latest snapshot plus the work item
- *  its orchestrator session is linked to (via `item.conversations` — the same
- *  chain the loop sessionNamer uses, so naming and routing always agree). */
-export interface LoopRunWithWorkItem {
-  run: LoopRun;
-  workItem?: { key: string; title: string };
-}
 
 /** The deliberately small interface consumed by every adapter. v3: runs are
  *  thin selection rounds — no gate answering, no run-meta lookup, no
@@ -145,6 +142,8 @@ export interface RoundResult {
    *  work item key and the new session id. The runtime records it on the
    * terminal run snapshot as `seededSessionId`. */
   seed?: { key: string; sessionId: string };
+  /** Present when the double-open guard refused the seed (design v3 §5). */
+  seedRefused?: string;
 }
 
 /** Adapter seam between the domain-agnostic runtime and the orchestrator host

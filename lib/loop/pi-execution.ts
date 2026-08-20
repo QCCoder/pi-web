@@ -164,7 +164,7 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
       // logged, never thrown: the selection round itself succeeded, and the
       // output still shows the marker for a human to see.
       const seed = await this.seedFromSelection(run, definition, output);
-      return await this.finishRound(run.id, output, seed);
+      return await this.finishRound(run.id, output, seed?.seed, seed?.refused);
     } catch (error) {
       // Abort or 30min timeout: the bash subprocesses the round spawned (an
       // `npm install` / `mvn` delegated to a subagent) are NOT killed by
@@ -192,7 +192,12 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
 
   /** Parse the assistant output for a verdict, destroy the orchestrator session
    *  (the round is terminal by construction), and attach the seed result. */
-  private async finishRound(runId: string, output: string, seed?: { key: string; sessionId: string }): Promise<RoundResult> {
+  private async finishRound(
+    runId: string,
+    output: string,
+    seed?: { key: string; sessionId: string },
+    seedRefused?: string,
+  ): Promise<RoundResult> {
     this.sessions.get(runId)?.destroy();
     // No reaping needed (the round's bash finished naturally) — just drop the
     // workspace scope.
@@ -201,17 +206,19 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     const verdict = verdictFrom(output);
     if (verdict) result.verdict = verdict;
     if (seed) result.seed = seed;
+    if (seedRefused) result.seedRefused = seedRefused;
     return result;
   }
 
   /** Seed an execution session when the selection round emitted
-   *  `LOOP_SEED: <KEY>`. Best-effort: guard refusals and errors are logged and
-   *  return undefined (the run still succeeds — its job was selection). */
+   *  `LOOP_SEED: <KEY>`. Best-effort: errors are logged and return undefined
+   *  (the run still succeeds — its job was selection); a guard refusal returns
+   *  `refused` so the runtime records it on the run snapshot (design §5). */
   private async seedFromSelection(
     run: LoopRun,
     definition: LoopDefinition,
     output: string,
-  ): Promise<{ key: string; sessionId: string } | undefined> {
+  ): Promise<{ seed?: { key: string; sessionId: string }; refused?: string } | undefined> {
     const key = parseLoopSeed(output);
     if (!key) return undefined;
     try {
@@ -223,9 +230,9 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
       });
       if (!result.seeded || !result.sessionId) {
         console.warn(`[pi-loop] seed for ${key} refused: ${result.reason}`);
-        return undefined;
+        return { refused: result.reason };
       }
-      return { key, sessionId: result.sessionId };
+      return { seed: { key, sessionId: result.sessionId } };
     } catch (error) {
       console.error(`[pi-loop] seed for ${key} failed:`, error);
       return undefined;

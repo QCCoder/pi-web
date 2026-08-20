@@ -149,6 +149,7 @@ export class DefaultLoopRuntime implements LoopRuntime {
       status: "succeeded", output: result.output, verdict: result.verdict,
       progress: undefined, finishedAt: new Date().toISOString(),
       ...(result.seed ? { seededSessionId: result.seed.sessionId } : {}),
+      ...(result.seedRefused ? { seedRefused: result.seedRefused } : {}),
     }));
   }
 

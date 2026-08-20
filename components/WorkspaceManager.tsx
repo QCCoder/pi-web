@@ -1419,6 +1419,15 @@ export function WorkspaceManager({
                       <div className="work-item-key">{selectedWorkItem.item.key}</div>
                       <h2>{selectedWorkItem.item.title}</h2>
                     </div>
+                    {selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.events.length > 0
+                      && [...selectedWorkItem.events].reverse().find((event) => event.type === "loop.gate" || event.type.startsWith("loop."))?.type === "loop.gate" && (
+                      <span
+                        style={{ padding: "2px 8px", borderRadius: 5, background: "rgba(245,158,11,0.15)", color: "#b45309", fontSize: 12, fontWeight: 700, alignSelf: "center" }}
+                        title="执行会话已提问并等待答复——去关联会话里回答即可继续"
+                      >
+                        待裁决
+                      </span>
+                    )}
                     <button
                       className="workspace-action"
                       style={{ marginLeft: "auto" }}
