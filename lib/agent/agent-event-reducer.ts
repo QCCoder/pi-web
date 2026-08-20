@@ -33,7 +33,7 @@ import type {
   ExtensionUiDialogRequest,
   NoticeType,
 } from "./agent-types";
-import { readCompactResult, userMessageKey } from "./agent-event-helpers";
+import { readCompactResult, userMessageKey, findToolNameById } from "./agent-event-helpers";
 
 export interface AgentEventCtx {
   sessionId: string;
@@ -189,6 +189,18 @@ export function applyAgentEvent(
             (c) => c && c.type === "text" && typeof c.text === "string",
           )
         : [];
+      // A partial proves the tool is executing. A viewer that joined mid-run
+      // (Loop orchestrator streamed by the Loop Host) never saw the tool's
+      // tool_execution_start — without this promotion the phase would sit on
+      // waiting_model (「思考中」) for the whole multi-minute subagent run.
+      // tool_execution_end 仍会正常把它收回到 waiting_model。
+      if (runtime.agentPhase?.kind !== "running_tools") {
+        const name = findToolNameById(ctx.messages, id) ?? "tool";
+        runtime = {
+          ...runtime,
+          agentPhase: { kind: "running_tools", tools: [{ id, name }] },
+        };
+      }
       runtime = {
         ...runtime,
         toolExecutionUpdates: {

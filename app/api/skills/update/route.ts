@@ -44,8 +44,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "This skill cannot be updated automatically" }, { status: 400 });
     }
 
+    // Update re-clones the source repo (see install route): allow 5 minutes.
     const { stdout, stderr } = await runNpx(buildSkillUpdateArgs(skill.install), {
-      timeout: 60_000,
+      timeout: 300_000,
       cwd: scope === "project" ? effectiveCwd : undefined,
       env: { ...process.env, FORCE_COLOR: "0" },
     });

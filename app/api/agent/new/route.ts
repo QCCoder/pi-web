@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { allowFileRoot } from "@/lib/file-access";
-import { invalidateSessionListCache } from "@/lib/session-reader";
+import { invalidateSessionListCache, cacheSessionPath } from "@/lib/session-reader";
 import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
 
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
@@ -41,6 +41,13 @@ export async function POST(req: Request) {
     // immediately readable via /api/files (the allow-list lives in the web
     // process — the daemon only tells us where the session landed).
     allowFileRoot(result.cwd || body.cwd);
+    // Seed the id→path cache: the daemon creates the .jsonl lazily (first
+    // append), so without this the client's immediate GET /api/sessions/:id
+    // would scan the disk, miss the file, and poison the 30s session-list
+    // cache with a 404 — exactly the "new session reply invisible until you
+    // switch away and back" bug. With the path seeded the GET resolves from
+    // cache and answers "empty but valid" until the first append lands.
+    if (result.sessionFile) cacheSessionPath(result.sessionId, result.sessionFile);
     invalidateSessionListCache();
 
     return NextResponse.json({ success: true, sessionId: result.sessionId, data: result.data });

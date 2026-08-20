@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CronTriggerDefinition, LoopDefinition, LoopRun } from "@/lib/loop/types";
+import type { CronTriggerDefinition, LoopDefinition } from "@/lib/loop/types";
 import type { WorkspaceCapability, WorkspaceSummary } from "@/lib/workspaces/types";
 import { CapabilityToggle } from "./CapabilityToggle";
 import styles from "./LoopConfig.module.css";
@@ -15,36 +15,7 @@ interface EditLoopForm {
   agents: AgentEntry[];
 }
 
-/** Inline free-text gate answer + independent abort, shown in a run panel
- *  while a run is paused at a LOOP_GATE. Holds its own input state so the
- *  surrounding .map() stays stateless. */
-function RunGateForm({ onAnswer, onAbort }: { onAnswer: (message: string) => void; onAbort: () => void }) {
-  const [message, setMessage] = useState("");
-  const trimmed = message.trim();
-  const canSend = trimmed.length > 0;
-  const send = () => {
-    if (!canSend) return;
-    onAnswer(trimmed);
-    setMessage("");
-  };
-  return (
-    <div className={styles.actions}>
-      <input
-        type="text"
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); send(); } }}
-        placeholder="回复这一轮…"
-        style={{ flex: "1 1 auto", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", background: "var(--bg)", color: "var(--text)", font: "inherit", outline: "none" }}
-      />
-      <button className={styles.primaryButton} disabled={!canSend} onClick={send}>回复</button>
-      <button className={styles.secondaryButton} onClick={onAbort}>终止</button>
-    </div>
-  );
-}
-
 const LOOP_CAPABILITY: WorkspaceCapability = "loop";
-const TERMINAL = new Set(["succeeded", "failed"]);
 const STEPS = ["基本信息", "触发方式", "执行契约"] as const;
 
 interface CreateLoopForm {
@@ -68,21 +39,19 @@ async function responseJson<T>(response: Response): Promise<T> {
   return value;
 }
 
-export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", onOpenLoops, onOpenSession, onTriggered }: {
+export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", onOpenLoops, onTriggered }: {
   workspace: WorkspaceSummary;
   onWorkspaceChanged: () => void;
   mode?: "dashboard" | "settings";
   onOpenLoops?: () => void;
-  onOpenSession?: (sessionId: string) => void;
-  /** Optimistic open: fired the moment a run is accepted, so the parent can
-   *  switch to the chat placeholder immediately instead of waiting for the
-   *  Loop Host to create the orchestrator session. */
+  /** Fired when the user clicks 运行一轮： the parent (AppShell) opens the chat
+   *  tab + LoopStatusBar and takes over polling — run state no longer lives
+   *  in this component. */
   onTriggered?: (loop: LoopDefinition) => void;
 }) {
   const enabled = workspace.capabilities.includes(LOOP_CAPABILITY);
   const base = `/api/workspaces/${encodeURIComponent(workspace.id)}/loop`;
   const [loops, setLoops] = useState<LoopDefinition[]>([]);
-  const [runs, setRuns] = useState<Record<string, LoopRun>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState(false);
@@ -96,9 +65,6 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const mounted = useRef(true);
-
-  useEffect(() => () => { mounted.current = false; }, []);
   useEffect(() => {
     if (!createOpen) return;
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !creating) setCreateOpen(false); };
@@ -124,59 +90,12 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
   }, [base, enabled]);
   useEffect(() => { void load(); }, [load]);
 
-  const pollRun = useCallback((loopId: string, runId: string, onSession?: (sessionId: string) => void) => {
-    let sessionHandled = false;
-    const poll = async () => {
-      if (!mounted.current) return;
-      try {
-        const { run } = await responseJson<{ run: LoopRun }>(await fetch(`${base}/runs/${encodeURIComponent(runId)}`));
-        if (!mounted.current) return;
-        setRuns((current) => ({ ...current, [loopId]: run }));
-        if (onSession && !sessionHandled && run.sessionId) {
-          sessionHandled = true;
-          onSession(run.sessionId);
-        }
-        if (!TERMINAL.has(run.status) && run.status !== "waiting_for_gate") {
-          setTimeout(() => void poll(), 1500);
-        }
-      } catch (pollError) { setError(pollError instanceof Error ? pollError.message : String(pollError)); }
-    };
-    setTimeout(() => void poll(), 500);
-  }, [base]);
-
+  // Manual trigger is delegated to the parent (AppShell opens the chat tab +
+  // LoopStatusBar and takes over polling) — run state no longer lives here.
   const trigger = useCallback((loop: LoopDefinition) => {
     setError(null);
-    // 乐观打开：点击瞬间同步交给父组件切到 chat 占位，不等 trigger POST。
-    // POST 和后续轮询都由 AppShell 接管。
-    if (onTriggered) { onTriggered(loop); return; }
-    // fallback：没有 onTriggered 时（非 dashboard 场景）自行触发并轮询。
-    void (async () => {
-      try {
-        const receipt = await responseJson<{ runId: string }>(await fetch(`${base}/loops/${encodeURIComponent(loop.id)}/trigger`, { method: "POST" }));
-        pollRun(loop.id, receipt.runId, onOpenSession);
-      } catch (triggerError) { setError(triggerError instanceof Error ? triggerError.message : String(triggerError)); }
-    })();
-  }, [base, pollRun, onOpenSession, onTriggered]);
-
-  const answer = useCallback(async (loopId: string, runId: string, message: string) => {
-    setError(null);
-    try {
-      const { run } = await responseJson<{ run: LoopRun }>(await fetch(`${base}/runs/${encodeURIComponent(runId)}/gate`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }),
-      }));
-      setRuns((current) => ({ ...current, [loopId]: run }));
-      // 回复后会继续跑，保持轮询直到终态。
-      pollRun(loopId, runId);
-    } catch (answerError) { setError(answerError instanceof Error ? answerError.message : String(answerError)); }
-  }, [base, pollRun]);
-
-  const abort = useCallback(async (loopId: string, runId: string) => {
-    setError(null);
-    try {
-      const { run } = await responseJson<{ run: LoopRun }>(await fetch(`${base}/runs/${encodeURIComponent(runId)}/abort`, { method: "POST" }));
-      setRuns((current) => ({ ...current, [loopId]: run }));
-    } catch (abortError) { setError(abortError instanceof Error ? abortError.message : String(abortError)); }
-  }, [base]);
+    onTriggered?.(loop);
+  }, [onTriggered]);
 
   const toggle = useCallback(async (next: boolean) => {
     setToggling(true); setError(null);
@@ -327,33 +246,21 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
     {!enabled ? <div className={styles.empty}><strong>Loop 尚未启用</strong>请先到工作区设置中启用 Loop Runtime。</div>
       : loops.length === 0 && !loading ? <div className={styles.empty}><strong>还没有 Loop</strong>点击右上角“新建 Loop”，创建第一个可手动或定时运行的任务。</div>
       : <div className={styles.loopList}>{loops.map((loop) => {
-        const run = runs[loop.id];
         return <article key={loop.id} className={`${styles.loopCard} ${loop.enabled ? "" : styles.loopCardDisabled}`}>
           <div className={styles.loopTop}>
             <div><div className={styles.loopName}>{loop.name}</div><div className={styles.loopMeta}>{loop.id} · {loop.description || "无说明"}</div></div>
-            <button className={styles.secondaryButton} disabled={!loop.enabled || Boolean(run && !TERMINAL.has(run.status))} onClick={() => void trigger(loop)}>运行一轮</button>
+            <button className={styles.secondaryButton} disabled={!loop.enabled} onClick={() => trigger(loop)}>运行一轮</button>
           </div>
           <div className={styles.triggers}>{loop.triggers.map((item) => <span className={styles.tag} key={item.id}>{item.type === "cron" ? `◷ ${item.expression} · ${item.timezone}` : `▶ ${item.type}`}</span>)}</div>
           <div className={styles.loopCardActions}>
             <button className={styles.ghostButton} onClick={() => void openEdit(loop)} disabled={editLoading}>编辑</button>
             <button className={styles.ghostButton} onClick={() => void toggleEnabled(loop, !loop.enabled)}>{loop.enabled ? "停用" : "启用"}</button>
             {confirmDelete === loop.id ? (<>
-              <span className={styles.confirmText}>删除整个 Loop 目录（含 STATE.md / agents/ / audit/）？</span>
+              <span className={styles.confirmText}>删除整个 Loop 目录（含 agents/ / audit/）？</span>
               <button className={styles.dangerButton} disabled={deleting} onClick={() => void removeLoop(loop)}>{deleting ? "删除中…" : "确认删除"}</button>
               <button className={styles.ghostButton} onClick={() => setConfirmDelete(null)}>取消</button>
             </>) : (<button className={styles.dangerButton} onClick={() => setConfirmDelete(loop.id)}>删除</button>)}
           </div>
-          {run && <div className={styles.runPanel}>
-            <div className={styles.runMetaRow}>
-              <span className={styles.runMeta}>ROUND {run.id} · {run.status}{run.verdict ? ` · ${run.verdict}` : ""}</span>
-              {run.sessionId && onOpenSession && (
-                <button className={styles.ghostButton} onClick={() => { if (run.sessionId) onOpenSession(run.sessionId); }}>查看会话</button>
-              )}
-            </div>
-            {run.gateRequest && <div className={styles.gate}>需要决定：{run.gateRequest}</div>}
-            {run.status === "waiting_for_gate" && <RunGateForm onAnswer={(message) => void answer(loop.id, run.id, message)} onAbort={() => void abort(loop.id, run.id)} />}
-            {run.error && <div className={styles.error}>{run.error}</div>}
-          </div>}
         </article>;
       })}</div>}
 
@@ -389,7 +296,7 @@ export function LoopConfig({ workspace, onWorkspaceChanged, mode = "dashboard", 
     </div>, document.body)}
     {editing && editForm && createPortal(<div className={styles.backdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeEdit(); }}>
       <div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="edit-loop-title">
-        <header className={styles.dialogHeader}><div><h2 id="edit-loop-title">编辑 Loop</h2><p>改身份、触发器和 LOOP.md 契约；STATE.md 与 agents/ 不受影响。</p></div><button className={styles.closeButton} onClick={closeEdit} aria-label="关闭">×</button></header>
+        <header className={styles.dialogHeader}><div><h2 id="edit-loop-title">编辑 Loop</h2><p>改身份、触发器和 LOOP.md 契约；agents/ 不受影响。</p></div><button className={styles.closeButton} onClick={closeEdit} aria-label="关闭">×</button></header>
         <div className={styles.dialogBody}>
           <h3 className={styles.sectionTitle}>基本设置</h3>
           <div className={styles.formGrid}>

@@ -168,7 +168,7 @@ Per-view content (data still comes from `loadWorkspaceData` — only the render 
   **L0 access is always built-in** — `read`/`ls`/`grep` need no tool. The view has an "open index.md" hint as the L0
   entry point. Ranked retrieval augmentation (`kb_search`) is **opt-in**: the tool is mounted automatically when the
   `knowledge` capability is on, and searches across all active bundles (see "kb_search" below).
-- **Loop** — a "管理 Loops" entry that opens the center `LoopConfig` view (the icon also highlights when the center shows loops).
+- **Loop** — the loop list itself (no longer a "管理 Loops" button): each loop row shows name + trigger summary with ▶ manual-trigger and ⚙ edit (opens the center `LoopConfig` definition editor); clicking a loop expands its **run records** in place (`GET /api/workspaces/[id]/loop/runs?loopId=` — web-process read of `RUNS.jsonl`, deduped latest snapshot per run, joined with the work item each run's orchestrator picked). A run row opens the orchestrator session as a chat tab (locate pipeline). Non-terminal runs poll every 5s while expanded; `waiting_for_gate` shows a 待裁决 badge.
 - **工作项** — the requirements/bugs groups.
 
 Mobile: the Activity Bar becomes a **bottom tab bar** (`variant="horizontal"`); desktop is a left icon strip
@@ -237,11 +237,33 @@ Round lifecycle (`runtime.ts` + `pi-execution.ts`):
    still live are left alone (they rehydrate on the next answer). This is the only recovery for a gate whose session
    was archived out from under it (e.g. archive-cascade on a linked work item).
 
-The web layer: `/api/workspaces/[id]/loop/**` calls `loopHostClient` (`loop/client.ts`, `PI_LOOP_URL`) for
+The web layer: `/api/workspaces/[id]/loop/**` calls `loopHostClient` (`lib/loop/client.ts`, `PI_LOOP_URL`) for
 list/trigger/run/gate, and `lib/loop/authoring.ts` for create/update/delete (which writes `loop.yaml`/`LOOP.md`/agents
-**directly in the web process**). The web server also **probes** the loop host for live orchestrator sessions
+**directly in the web process**), plus one **web-process read path**: `GET /api/workspaces/[id]/loop/runs?loopId=`
+reads `RUNS.jsonl` directly (deduped latest snapshot per run) and joins each run's work item via
+`orchestratorWorkItemIndex` (`lib/loop/session-tags.ts` - the same `findWorkItemByConversation` chain the host
+sessionNamer uses). The web server also **probes** the loop host for live orchestrator sessions
 (`/v1/sessions/:id`) and **proxies their SSE** so a Loop run can be watched in the browser even though the session
 lives in the loop process.
+
+**Run records are sessions with a different entry point.** The sidebar Loop view lists runs; clicking a run opens
+the orchestrator session as a chat tab. Gate answering happens **in that chat tab**: the daemon's session probe
+(`GET /v1/sessions/:id`) carries a `loop: { workspaceId, run }` payload whenever the probed session is some run's
+orchestrator (`DefaultLoopRuntime.findBySessionId` - a disk scan of RUNS.jsonl), including the **cold** case (host
+restarted while a gate was paused: probe answers 200 with run meta even without a live wrapper, so the web layer
+pins the session and shows the gate bar instead of a composer that would 409). The web state route passes `loop`
+through; `useAgentSession` exposes `loopOwned`/`loopRunMeta`; AppShell pins the `LoopStatusBar` (gate answer input
++ abort) above ChatWindow from either the trigger flow or the meta, and polls the run to terminal via an explicit
+`loopPollTarget` state. For orchestrator sessions the composer is disabled (`ChatInput.disabledNotice`) - the
+gate bar is their only input channel.
+
+**Session-list routing of orchestrators (`lib/loop/session-tags.ts`).** `/api/sessions` tags every orchestrator
+session `loopOrchestrator: true` + `loopWorkItem?: key` (30s-cached join over `RUNS.jsonl` x work-item
+`conversations`; `?refresh` invalidates it alongside the list cache). Idle runs (no work-item link) are hidden
+from workspace session lists (`WorkspaceSidebar`/`WorkspaceOverview`/`HomeLanding` filter) - their only entry is
+the Loop run record; runs that picked a work item stay listed, and the work-item detail renders its
+`conversations` as clickable session links (`WorkspaceManager.onOpenConversation`). Snapshots are surfaced
+as-recorded - a stale `running` snapshot is NOT corrected at read time (some are user-driven self-checks).
 
 **Orchestrator session titles.** Every orchestrator session is seeded with the same generic bootstrap prompt, so
 without intervention they all share an identical title. The host fixes this with an injected `sessionNamer` seam:
@@ -376,6 +398,7 @@ app/api/
   workspaces/[id]/loop/loops/route.ts            GET list | POST author a loop definition
   workspaces/[id]/loop/loops/[loopId]/route.ts   GET | PATCH | DELETE a loop
   workspaces/[id]/loop/loops/[loopId]/trigger/route.ts  POST manual trigger
+  workspaces/[id]/loop/runs/route.ts             GET ?loopId= — sidebar run records (RUNS.jsonl latest snapshot + work-item join)
   workspaces/[id]/loop/runs/[runId]/route.ts     GET a run
   workspaces/[id]/loop/runs/[runId]/gate/route.ts  POST approve/reject gate
   workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
@@ -483,7 +506,7 @@ components/
   FileExplorer.tsx          file tree inside sidebar
   FileViewer.tsx            file content in a tab
   CapabilityToggle.tsx      the capability on/off switch used in settings panels
-  LoopConfig.tsx            loop author/run/gate UI (+ LoopLaunchOverlay)
+  LoopConfig.tsx            loop definition editor + create wizard (run panel/gate form retired - runs live in the sidebar Loop view, gates in the chat tab's LoopStatusBar)
   ImporterConfig.tsx        requirement-sources (chandao importer) credential + test panel
   ChatWindow.tsx            chat composition + completion sound wrapper
   SessionChangedFiles.tsx   "本会话改动 N 个文件" toolbar button (right of the sound toggle in ChatInput) + slide-in drawer (desktop) / full-screen list (mobile); entries open the file via the openFile/file-tab pipeline

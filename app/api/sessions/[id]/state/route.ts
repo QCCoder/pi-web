@@ -20,7 +20,12 @@ export async function GET(
     const client = await daemonProxy();
     const meta = await client.probeSession(id);
     if (meta) {
-      return NextResponse.json({ running: meta.running, loopOwned: true, state: meta.state ?? undefined });
+      return NextResponse.json({
+        running: meta.running,
+        loopOwned: true,
+        state: meta.state ?? undefined,
+        loop: meta.loop ?? undefined,
+      });
     }
     return NextResponse.json({ running: false });
   } catch (error) {

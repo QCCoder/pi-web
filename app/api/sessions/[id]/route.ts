@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
@@ -124,6 +124,23 @@ export async function GET(
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
+
+    // Daemon-created session whose .jsonl hasn't been written yet (pi creates
+    // the file lazily on the first append). The path is known (seeded by
+    // /api/agent/new), so this is not a 404 — answer an empty-but-valid session:
+    // the UI renders live SSE events on top of it, and the next reload after the
+    // first append picks up the real file.
+    if (!existsSync(filePath)) {
+      return NextResponse.json({
+        sessionId: id,
+        filePath,
+        info: null,
+        leafId: null,
+        tree: [],
+        context: { messages: [], entryIds: [], thinkingLevel: "", model: null },
+        revision: undefined,
+      });
     }
 
     // ETag/revision conditional GET (REQ-0001 决策 3): 切回 session 时客户端带上

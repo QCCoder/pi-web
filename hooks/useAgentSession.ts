@@ -12,11 +12,12 @@ import type {
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
-import { getCachedSession, setCachedSession, dropCachedSession, sessionMessagesCache, updateCachedSessionData } from "@/lib/stores/session-messages-cache";
+import { getCachedSession, setCachedSession, dropCachedSession, sessionMessagesCache, updateCachedSessionData, makeMinimalSessionData } from "@/lib/stores/session-messages-cache";
 import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
 import { useStoreSlice } from "@/lib/stores/create-map-store";
 import { sessionRuntimeStore, setSessionRuntime, updateSessionRuntime, getSessionRuntime, createDefaultSessionRuntimeState, EMPTY_RUNTIME, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
 import { globalAgentEvents } from "@/lib/sse/global-agent-events";
+import type { LoopRun, LoopRunMeta } from "@/lib/loop/types";
 
 export interface SessionData {
   sessionId: string;
@@ -316,16 +317,6 @@ const EMPTY_MESSAGES: AgentMessage[] = [];
 const EMPTY_ENTRY_IDS: string[] = [];
 
 /** 新会话乐观消息的最小 SessionData 占位（promote 后被 loadSession 的文件数据覆盖）。 */
-function makeMinimalSessionData(messages: AgentMessage[]): SessionData {
-  return {
-    sessionId: "",
-    filePath: "",
-    tree: [],
-    leafId: null,
-    context: { messages, entryIds: [], thinkingLevel: "", model: null },
-  };
-}
-
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
@@ -349,6 +340,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
+  /** Loop 元信息（来自 state 路由探针）：loopOwned=会话由 Loop Host 持有
+   *  （orchestrator / subagent child），loopRunMeta=本会话是某个 run 的
+   *  orchestrator（携带最新快照，供 ChatWindow 顶部渲染 gate 答复条）。 */
+  const [loopOwned, setLoopOwned] = useState(false);
+  const [loopRunMeta, setLoopRunMeta] = useState<LoopRunMeta | null>(null);
+  /** 最新探针 meta 的稳定引用：gate 答复回调从这读，不吃闭包旧值。 */
+  const loopRunMetaRef = useRef<LoopRunMeta | null>(null);
+  useEffect(() => { loopRunMetaRef.current = loopRunMeta; }, [loopRunMeta]);
 
   // data / messages / entryIds 订阅 SessionMessagesCache（阶段 B4a）：后台 session 的
   // message_end 写 cache 也能反映到前台；切回已缓存 session 无空窗。
@@ -369,6 +368,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   } = runtime;
 
   const loadSessionAbortRef = useRef<AbortController | null>(null);
+  /** 当前被 pin 住的 Loop-Host 会话 id（见挂载 effect 的 loopOwned 处理）。 */
+  const pinnedLoopSidRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const bashRecoveryIdRef = useRef(0);
   const initialScrollDoneRef = useRef(false);
@@ -495,6 +496,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadSessionAbortRef.current?.abort();
     const ac = new AbortController();
     loadSessionAbortRef.current = ac;
+    // 切换/重载时先清 Loop 元信息，避免上一会话的 gate 条残留。
+    setLoopOwned(false);
+    setLoopRunMeta(null);
     try {
       // SWR (REQ-0001 决策 2/3): 缓存命中则立即填充 UI 消除空窗；再发条件请求，
       // 304 复用缓存、200 覆盖更新。
@@ -534,10 +538,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const revision = res.headers.get("etag") ?? undefined;
           const d = await res.json() as SessionData;
           if (sessionIdRef.current !== sid) return null;
-          applySessionData(d);
-          setCachedSession(sid, d, revision);
-          messagesLoaded = true;
-          if (showLoading) setLoading(false);
+          // Daemon-created session whose .jsonl hasn't been written yet answers
+          // an empty-but-valid placeholder (no revision). Live SSE events may
+          // already have appended messages to the cache slice — don't let the
+          // placeholder clobber them; the first real append brings a revision
+          // and overwrites cleanly.
+          if (!revision && d.context.messages.length === 0 && getCachedSession(sid)) {
+            if (showLoading) setLoading(false);
+          } else {
+            applySessionData(d);
+            setCachedSession(sid, d, revision);
+            messagesLoaded = true;
+            if (showLoading) setLoading(false);
+          }
         }
       } else if (showLoading) {
         setLoading(false);
@@ -547,7 +560,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal: ac.signal });
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
+        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; loopOwned?: boolean; loop?: LoopRunMeta };
         if (sessionIdRef.current !== sid) return null;
 
         const liveState = agentState.state;
@@ -563,6 +576,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         } else if (!agentState.running) {
           patchRuntime({ queuedMessages: { steering: [], followUp: [] } });
         }
+        setLoopOwned(Boolean(agentState.loopOwned));
+        setLoopRunMeta(agentState.loop ?? null);
         return agentState;
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return null;
@@ -863,6 +878,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const status = await globalAgentEvents.ensureConnected(sid);
     if (status !== "connected") throw new EventStreamConnectionError(status);
   }, []);
+
+  /** 在用户所在的 chat tab 直接答复 gate（host 探针契约：答复原文转给编排
+   *  会话作为下一条 prompt，经 pin 住的 SSE 流落回 transcript，不做乐观
+   *  追加）。成功后刷新 meta，让 LoopStatusBar 跟着进入 running。 */
+  const answerLoopGate = useCallback(async (message: string) => {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    const meta = loopRunMetaRef.current;
+    if (!meta || meta.run.status !== "waiting_for_gate") return;
+    try {
+      const res = await fetch(`/api/workspaces/${encodeURIComponent(meta.workspaceId)}/loop/runs/${encodeURIComponent(meta.run.id)}/gate`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: trimmed }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const value = await res.json() as { run: LoopRun };
+      setLoopRunMeta({ workspaceId: meta.workspaceId, run: value.run });
+    } catch (e) {
+      addNotice({ type: "error", message: `Gate 答复发送失败：${e instanceof Error ? e.message : String(e)}` });
+    }
+  }, [addNotice]);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
@@ -1303,15 +1338,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Load session whenever the active session id or reloadSignal changes. ChatWindow is
   // now session-stable (no key remount), so this effect drives loading on switch.
   useEffect(() => {
-    // Reset transient run-state from the previous session so it does not bleed
-    // into the new one before loadSession applies fresh data.
-    patchRuntime({ agentRunning: false, bashRunning: false, pendingBash: null, forkingEntryId: null, retryInfo: null });
-    dispatch({ type: "reset" });
+    // Same-session re-run (promote: the new-session key resolved to this real
+    // id while its first prompt is already streaming, or reloadSignal refresh):
+    // the run state in the store belongs to THIS session — resetting it here
+    // would clobber agentRunning mid-run and make the event reducer drop every
+    // subsequent SSE event (no streaming bubble, no message_end append, no
+    // agent_end reload). Only a genuine session switch needs the bleed guard.
+    const sameSession = session != null && sessionIdRef.current === session.id;
+    if (!sameSession) {
+      // Reset transient run-state from the previous session so it does not bleed
+      // into the new one before loadSession applies fresh data.
+      patchRuntime({ agentRunning: false, bashRunning: false, pendingBash: null, forkingEntryId: null, retryInfo: null });
+      dispatch({ type: "reset" });
+    }
     initialScrollDoneRef.current = false;
+
+    // 解除上一个会话的 Loop pin（切走的会话不再需要专属事件流）。
+    const prevPinned = pinnedLoopSidRef.current;
+    if (prevPinned && prevPinned !== session?.id) {
+      pinnedLoopSidRef.current = null;
+      globalAgentEvents.unpinSession(prevPinned);
+    }
 
     if (session) {
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
+        // Loop-Host 拥有的会话（orchestrator / subagent child）不在 web 进程的
+        // running 集里，syncRunningIds 会把它们的 SSE 拆掉。pin 住：观看期间事件流
+        // 一直连着（包括 gate 暂停期间，resume 后 agent_start 直接从这条流到达）。
+        if (agentState?.loopOwned) {
+          pinnedLoopSidRef.current = session.id;
+          globalAgentEvents.pinSession(session.id);
+        }
         if (agentState?.running) {
           loadTools(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
@@ -1321,6 +1379,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
               void waitForPromptSettlement(session.id);
             }
+          } else if (agentState.loopOwned) {
+            // Host 说 running 但 state 快照不可用（会话还在起动）。agent_start
+            // 可能已经发过，不会再来了 —— 直接置 running，靠后续事件推进。
+            patchRuntime({ agentRunning: true, agentPhase: { kind: "waiting_model" } });
+            dispatch({ type: "start" });
           }
           if (agentState.state?.isBashRunning) {
             patchRuntime({ bashRunning: true });
@@ -1353,6 +1416,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, reloadSignal]);
+
+  // 组件卸载时解除 Loop pin（切换到别的 workspace / 关闭 tab 等）。
+  useEffect(() => {
+    return () => {
+      const pinned = pinnedLoopSidRef.current;
+      if (pinned) globalAgentEvents.unpinSession(pinned);
+    };
+  }, []);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -1465,6 +1536,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
+    loopOwned, loopRunMeta, answerLoopGate,
     agentRunning, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,

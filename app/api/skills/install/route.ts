@@ -40,8 +40,11 @@ export async function POST(req: Request) {
     if (isGlobal) args.push("-g");
 
     console.log(`[skills/install] running: npx ${args.join(" ")}`);
+    // Skill installs clone whole repos (anthropics/skills ≈ 15MB) — 60s is not
+    // enough even on a healthy network, and the spinner output is all the user
+    // sees while it works. Allow 5 minutes.
     const { stdout, stderr } = await runNpx(args, {
-      timeout: 60000,
+      timeout: 300_000,
       cwd: !isGlobal && cwd ? cwd : undefined,
       env: { ...process.env, FORCE_COLOR: "0" },
     });

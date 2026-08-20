@@ -18,7 +18,6 @@ workspace/
   loops/<loop-id>/
     loop.yaml       # 身份、启用状态、Autonomy Level、触发源
     LOOP.md         # 目标、Maker/Checker、验证标准、Gate、Improve 边界
-    STATE.md        # 只保存已经验证且下轮需要的状态
     RUNS.jsonl      # Host 追加的 Round 状态与证据快照
     agents/         # 可选的任务专用 worker instructions
     audit/          # Improve 和人工审计材料
@@ -48,7 +47,7 @@ Cron 使用标准五字段（minute hour day-of-month month day-of-week）；支
 ## 一轮交互
 
 1. 任意 Trigger Source 向统一入口提交稳定 `eventId`；重复 id 返回原 Round。
-2. Host 创建 Pi Orchestrator Conversation，让 AI 读取 `LOOP.md` 和 `STATE.md`，只推断执行结构。
+2. Host 创建 Pi Orchestrator Conversation，把 `LOOP.md` 作为首条 prompt 注入，只推断执行结构。
 3. Round 进入 `waiting_for_confirmation`；Pi Web 展示 Maker、Checker、Gate 和 Improve。
 4. 创建者确认后，Host 在同一个 Pi 主会话继续执行；拒绝则 Round 结束为 cancelled。Maker/Checker 作为**隔离子 agent 会话**运行——编排器用 `subagent` 工具派生，每个子会话可独立查看（侧边栏里挂在编排器会话下，跑完持久化在磁盘）。
 5. 每次状态变化追加到 `RUNS.jsonl`。执行状态和业务 verdict 分开记录。

@@ -128,6 +128,51 @@ describe("applyAgentEvent — run lifecycle", () => {
     ({ rt } = step(rt, [], { type: "tool_execution_start", toolCallId: "b", toolName: "rb" }));
     assert.deepEqual(rt.agentPhase, { kind: "running_tools", tools: [{ id: "b", name: "rb" }] });
   });
+
+  it("tool_execution_update without a prior start promotes phase to running_tools (mid-run joiner)", () => {
+    // Loop orchestrator 会话在 subagent 运行中途被打开：观看者没看到
+    // tool_execution_start，只收到 worker 流出的 partial —— 据此升级 phase，
+    // 否则整个 subagent 运行期间 phase 停在 waiting_model（「思考中」）。
+    const withToolCall: AgentMessage = {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "sub1", toolName: "subagent", input: { agent: "brainstorm" } }],
+      model: "m",
+      provider: "p",
+    };
+    const res = applyAgentEvent(
+      runningPrev(),
+      { type: "tool_execution_update", toolCallId: "sub1", partialResult: { content: [{ type: "text", text: "running" }] } },
+      ctx([withToolCall]),
+    );
+    assert.deepEqual(res.runtime.agentPhase, { kind: "running_tools", tools: [{ id: "sub1", name: "subagent" }] });
+    assert.deepEqual(res.runtime.toolExecutionUpdates["sub1"], {
+      toolCallId: "sub1",
+      content: [{ type: "text", text: "running" }],
+      details: undefined,
+    });
+    // 后续的 tool_execution_end 正常收回 waiting_model。
+    const res2 = applyAgentEvent(res.runtime, { type: "tool_execution_end", toolCallId: "sub1" }, ctx([withToolCall]));
+    assert.deepEqual(res2.runtime.agentPhase, { kind: "waiting_model" });
+  });
+
+  it("tool_execution_update keeps an existing running_tools phase untouched (no dup)", () => {
+    const prev = runningPrev({ agentPhase: { kind: "running_tools", tools: [{ id: "t9", name: "bash" }] } });
+    const res = applyAgentEvent(
+      prev,
+      { type: "tool_execution_update", toolCallId: "t9", partialResult: { content: [{ type: "text", text: "x" }] } },
+      ctx(),
+    );
+    assert.deepEqual(res.runtime.agentPhase, { kind: "running_tools", tools: [{ id: "t9", name: "bash" }] });
+  });
+
+  it("tool_execution_update with unknown toolCallId falls back to generic name", () => {
+    const res = applyAgentEvent(
+      runningPrev(),
+      { type: "tool_execution_update", toolCallId: "ghost", partialResult: { content: [{ type: "text", text: "x" }] } },
+      ctx(),
+    );
+    assert.deepEqual(res.runtime.agentPhase, { kind: "running_tools", tools: [{ id: "ghost", name: "tool" }] });
+  });
 });
 
 describe("applyAgentEvent — late-event guards & reference stability", () => {

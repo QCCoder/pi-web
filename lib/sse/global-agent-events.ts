@@ -15,7 +15,7 @@
 
 import { applyAgentEvent, type AgentEventEffect } from "@/lib/agent/agent-event-reducer";
 import { ensureSessionRuntime, sessionRuntimeStore, setSessionRuntime, type SessionRuntimeState } from "@/lib/stores/session-runtime-store";
-import { getCachedSession, setCachedSession, updateCachedSessionData } from "@/lib/stores/session-messages-cache";
+import { getCachedSession, setCachedSession, updateCachedSessionData, makeMinimalSessionData } from "@/lib/stores/session-messages-cache";
 import { normalizeQueuedMessages } from "@/lib/agent/agent-event-helpers";
 import { type AgentEvent, type AgentStateResponse, type ExtensionUiCustomRequest, type ExtensionUiDialogRequest } from "@/lib/agent/agent-types";
 import type { SessionData } from "@/hooks/useAgentSession";
@@ -174,7 +174,15 @@ class GlobalAgentEventManager {
     }
     if (result.messages) {
       const next = result.messages;
-      updateCachedSessionData(sid, (sd) => ({ ...sd, context: { ...sd.context, messages: next } }));
+      // A session that was never loadSession'd (brand-new: created via
+      // /api/agent/new and streamed straight away) has no cache entry yet —
+      // updateCachedSessionData would no-op and the streamed message_end
+      // appends would be lost. Seed a minimal entry so live messages stick.
+      if (!getCachedSession(sid)) {
+        setCachedSession(sid, makeMinimalSessionData(next), undefined);
+      } else {
+        updateCachedSessionData(sid, (sd) => ({ ...sd, context: { ...sd.context, messages: next } }));
+      }
     }
     for (const effect of result.effects) this.runEffect(sid, effect);
   }

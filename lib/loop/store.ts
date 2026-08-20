@@ -99,7 +99,6 @@ export async function readLoopDefinition(
     workspacePath: workspace.path,
     directory,
     instructionsPath,
-    statePath: join(directory, "STATE.md"),
     triggers: parseTriggers(record.triggers),
   };
 }

@@ -9,6 +9,7 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { parseSkillMessage, skillCommandText } from "@/lib/skill-message";
+import { isEditToolName } from "@/lib/session-changed-files";
 import type {
   AgentMessage,
   UserMessage,
@@ -1243,16 +1244,6 @@ function getResultDiff(result: ToolResultMessage): ResultDiff | null {
   if (diff) return { text: diff };
 
   return null;
-}
-
-function isEditToolName(toolName: string): boolean {
-  const name = toolName.toLowerCase();
-  return name === "edit" ||
-    name.startsWith("edit_") ||
-    name.endsWith(".edit") ||
-    name.endsWith("_edit") ||
-    name.includes("str_replace") ||
-    name.includes("replace_editor");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

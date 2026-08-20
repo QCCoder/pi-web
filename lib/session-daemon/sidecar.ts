@@ -58,12 +58,6 @@ export function sidecarSpawnEnv(
   };
 }
 
-/** Locate bin/pi-loop.js. `import.meta.url` may point into a bundled .next
- *  chunk (Next dev), so fall back to the server's cwd — `npm run dev` /
- *  `npm start` always run from the package root. */
-function resolveDaemonEntry(candidates: string[]): string | undefined {
-  return candidates.find((candidate) => existsSync(candidate));
-}
 
 async function probeHealth(baseUrl: string, timeoutMs: number): Promise<boolean> {
   try {
@@ -93,12 +87,12 @@ async function startOnce(): Promise<StartState> {
     );
   }
 
-  const here = new URL(".", import.meta.url).pathname;
-  const entry = resolveDaemonEntry([
-    join(here, "..", "..", "..", "bin", "pi-loop.js"),
-    join(process.cwd(), "bin", "pi-loop.js"),
-  ]);
-  if (!entry) {
+  // The web server always runs from the package root (`npm run dev` /
+  // `npm start`), so resolve the daemon entry from cwd. Deliberately no
+  // `import.meta.url`: this module is webpack-bundled into an app route, and
+  // `new URL(".", import.meta.url)` fails that build ("Can't resolve '.'").
+  const entry = join(process.cwd(), "bin", "pi-loop.js");
+  if (!existsSync(entry)) {
     throw new Error("bin/pi-loop.js not found — cannot spawn the session daemon sidecar");
   }
 

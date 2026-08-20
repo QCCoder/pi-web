@@ -3,6 +3,7 @@ import { invalidateSessionListCache, listAllSessions } from "@/lib/session-reade
 import { listArchivedSessions } from "@/lib/session-archive";
 import { loadSubagentChildIds } from "@/lib/subagent/registry";
 import { daemonProxy } from "@/lib/agent-proxy";
+import { invalidateLoopSessionTags, loopSessionTags } from "@/lib/loop/session-tags";
 import type { SessionInfo } from "@/lib/types";
 
 export async function GET(req: Request) {
@@ -15,7 +16,10 @@ export async function GET(req: Request) {
     // A freshly triggered Loop round writes its .jsonl from the Loop Host
     // process; the disk scan below is cached 30s, so without an explicit
     // invalidate the new session would be invisible until the cache expires.
-    if (url.searchParams.has("refresh")) invalidateSessionListCache();
+    if (url.searchParams.has("refresh")) {
+      invalidateSessionListCache();
+      invalidateLoopSessionTags();
+    }
     const sessions = await listAllSessions();
 
     // Merge live daemon sessions that are not yet on disk. A brand-new session
@@ -49,9 +53,21 @@ export async function GET(req: Request) {
     // Tag subagent worker sessions so the sidebar hides them. They stay in the
     // response so the parent's "open child" action can still resolve by id.
     const subagentChildIds = loadSubagentChildIds();
-    const sessionsWithFlags = subagentChildIds.size > 0
+    let sessionsWithFlags = subagentChildIds.size > 0
       ? merged.map((session) => (subagentChildIds.has(session.id) ? { ...session, subagentChild: true } : session))
       : merged;
+
+    // Tag Loop orchestrator sessions: idle runs (no work-item link) are hidden
+    // from session lists — their entry point is the Loop run record — while
+    // runs that picked a work item stay listed. Same join the loop
+    // sessionNamer uses, so routing and naming always agree.
+    const loopTags = await loopSessionTags().catch(() => new Map());
+    if (loopTags.size > 0) {
+      sessionsWithFlags = sessionsWithFlags.map((session) => {
+        const tag = loopTags.get(session.id);
+        return tag ? { ...session, loopOrchestrator: true, ...(tag.workItemKey ? { loopWorkItem: tag.workItemKey } : {}) } : session;
+      });
+    }
 
     return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: runningIds.ids });
   } catch (error) {

@@ -17,7 +17,7 @@ async function responseJson<T>(response: Response): Promise<T> {
  * requirement-sources settings panel: toggle the capability, edit the Chandao
  * (禅道) importer credentials (REST token API), and test the connection.
  * Embedded in the Workspace settings view (WorkspaceManager), so it reuses the
- * workspace-* classes scoped there. Mirrors FeishuConfig.tsx.
+ * workspace-* classes scoped there. Mirrors the per-channel cards in NotifyConfig.tsx.
  */
 export function ImporterConfig({
   workspace,

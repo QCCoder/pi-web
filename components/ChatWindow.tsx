@@ -6,7 +6,8 @@ import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { MessageView } from "./MessageView";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, type AttachedImage, type ChatInputHandle } from "./ChatInput";
+import { SessionChangedFilesDrawer } from "./SessionChangedFiles";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
@@ -14,6 +15,7 @@ import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAg
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { deriveSessionChangedFiles } from "@/lib/session-changed-files";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
   captureScrollDistance,
@@ -42,6 +44,11 @@ interface Props {
   /** When true, renders as a compact view-oriented viewer (no input bar or
    *  minimap) — used when embedded in the right split pane. */
   embedded?: boolean;
+  /** Notifies the shell when the current session is a Loop orchestrator with
+   *  run meta (from the state probe), so AppShell can pin the LoopStatusBar —
+   * the gate answer channel — onto this chat tab even when the run was NOT
+   * triggered from here (e.g. opened from the sidebar run records). */
+  onLoopRunMeta?: (meta: import("@/lib/loop/types").LoopRunMeta | null) => void;
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -175,7 +182,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { mes
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, onLoopRunMeta }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -203,6 +210,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+    loopOwned, loopRunMeta, answerLoopGate,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -222,6 +230,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
+  // Report orchestrator run meta up to the shell (AppShell pins the
+  // LoopStatusBar / gate answer bar onto this tab from it).
+  useEffect(() => {
+    onLoopRunMeta?.(loopRunMeta);
+  }, [loopRunMeta, onLoopRunMeta]);
+
   const sessionBusy = agentRunning || bashRunning;
 
   // Register the abort handler for the global Esc shortcut
@@ -372,10 +386,40 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     return map;
   }, [toolExecutionUpdates]);
 
+  // Files written/edited in this session — derived purely from the message
+  // stream (incl. the streaming message + live subagent partials) so the count
+  // updates in real time. Full-session scope: `messages` is the complete list,
+  // not the lazy-load `visibleCount` slice.
+  const changedFiles = useMemo(
+    () => deriveSessionChangedFiles(messages, {
+      streamingMessage: streamState.streamingMessage,
+      partialResults: Array.from(streamingToolResults.values()),
+      cwd: messageCwd,
+    }),
+    [messages, streamState.streamingMessage, streamingToolResults, messageCwd],
+  );
+
+  // Drawer open state for the changed-files quick access — lifted here because
+  // the entry button lives in ChatInput while the drawer overlay renders at
+  // ChatWindow level. Not persisted; switching sessions closes it (agreed).
+  const [changedFilesOpen, setChangedFilesOpen] = useState(false);
+  useEffect(() => {
+    setChangedFilesOpen(false);
+  }, [session?.id]);
+  const toggleChangedFiles = useCallback(() => setChangedFilesOpen((v) => !v), []);
+
+  // Loop 编排会话等 gate 时，composer 的发送就是 gate 答复（走 pin 住的 SSE
+  // 流落回 transcript）；其余状态照常走 handleSend。
+  const gateWaiting = loopOwned && loopRunMeta?.run.status === "waiting_for_gate";
+  const sendOrAnswerGate = useCallback((message: string, images?: AttachedImage[]) => {
+    if (gateWaiting && !images?.length) return answerLoopGate(message);
+    return handleSend(message, images);
+  }, [gateWaiting, answerLoopGate, handleSend]);
+
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
-      onSend={handleSend}
+      onSend={sendOrAnswerGate}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
@@ -409,6 +453,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
+      changedFiles={!embedded && onOpenFile ? { count: changedFiles.length, open: changedFilesOpen, onToggle: toggleChangedFiles } : undefined}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
     />
@@ -748,7 +793,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             )}
 
             {agentRunning && !streamState.streamingMessage && (
-              <div className="py-2 text-[13px] text-text-muted">
+              <div className="py-2 text-[13px] text-text-muted" data-dbg-running>
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
               </div>
             )}
@@ -798,6 +843,16 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
           </div>
         </div>
         {chatInputElement}
+        {!embedded && onOpenFile ? (
+          <SessionChangedFilesDrawer
+            files={changedFiles}
+            open={changedFilesOpen}
+            onClose={() => setChangedFilesOpen(false)}
+            cwd={messageCwd}
+            onOpenFile={onOpenFile}
+            variant={isMobile ? "mobile" : "desktop"}
+          />
+        ) : null}
         <ExtensionStatusBar statuses={extensionStatuses} />
       </div>
       )}

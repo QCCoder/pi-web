@@ -10,6 +10,7 @@ import type { SessionInfo } from "@/lib/types";
 import type { GitFileStatus } from "@/lib/git-types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
+import type { CronTriggerDefinition, LoopDefinition, LoopRunWithWorkItem } from "@/lib/loop/types";
 import { joinFilePath } from "@/lib/file-paths";
 
 interface Props {
@@ -28,6 +29,11 @@ interface Props {
   onOpenWorkspaceSettings: () => void;
   onOpenLoops: () => void;
   loopsActive: boolean;
+  /** Open a Loop orchestrator (or any) session by id via the locate pipeline
+   *  — used by the sidebar run records. */
+  onOpenLoopSession: (sessionId: string) => void;
+  /** Manual-trigger a loop definition (AppShell opens the chat tab + status bar). */
+  onTriggerLoop: (loop: LoopDefinition) => void;
   onAddRepository: () => void;
   onNewSession: () => void;
   onSelectSession: (session: SessionInfo) => void;
@@ -216,6 +222,8 @@ export function WorkspaceSidebar({
   onOpenWorkspaceSettings,
   onOpenLoops,
   loopsActive,
+  onOpenLoopSession,
+  onTriggerLoop,
   onAddRepository,
   onNewSession,
   onSelectSession,
@@ -242,12 +250,21 @@ export function WorkspaceSidebar({
         .sort((left, right) => right.path.length - left.path.length)[0];
       // Hide subagent worker sessions — they stay openable from the parent's
       // subagent result card, but must not clutter the workspace session list.
-      return owner?.id === activeWorkspace.id && !session.subagentChild;
+      // Loop orchestrators of IDLE runs (no work-item link) are hidden too —
+      // their entry point is the Loop run record; runs that picked an item
+      // stay listed like any development session.
+      return owner?.id === activeWorkspace.id
+        && !session.subagentChild
+        && !(session.loopOrchestrator && !session.loopWorkItem);
     });
   }, [allSessions, activeWorkspace, workspaces]);
   const [archivedCount, setArchivedCount] = useState(0);
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
+  // Loop 视图：定义列表 + 展开中的 loop 运行记录（run records 直读 RUNS.jsonl）。
+  const [loops, setLoops] = useState<LoopDefinition[]>([]);
+  const [expandedLoopId, setExpandedLoopId] = useState<string | null>(null);
+  const [loopRuns, setLoopRuns] = useState<Record<string, LoopRunWithWorkItem[]>>({});
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [requirementsOpen, setRequirementsOpen] = useState(true);
@@ -284,10 +301,11 @@ export function WorkspaceSidebar({
     if (!activeWorkspace) {
       setWorkItems([]);
       setRepositories([]);
+      setLoops([]);
       setArchivedCount(0);
       return;
     }
-    const [itemsResponse, repositoriesResponse, archivedSessionsResponse, archivedItemsResponse] = await Promise.all([
+    const [itemsResponse, repositoriesResponse, archivedSessionsResponse, archivedItemsResponse, loopsResponse] = await Promise.all([
       hasCapability("work-items")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items`)
         : null,
@@ -297,6 +315,9 @@ export function WorkspaceSidebar({
       fetch("/api/sessions?archived"),
       hasCapability("work-items")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items?archived`)
+        : null,
+      hasCapability("loop")
+        ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/loop/loops`)
         : null,
     ]);
     const itemsData = itemsResponse?.ok
@@ -311,12 +332,16 @@ export function WorkspaceSidebar({
     const archivedItemsData = archivedItemsResponse?.ok
       ? await archivedItemsResponse.json() as { items?: unknown[] }
       : { items: [] };
+    const loopsData = loopsResponse?.ok
+      ? await loopsResponse.json() as { loops?: LoopDefinition[] }
+      : {};
     const wsPrefix = `${activeWorkspace.path.replace(/\/+$/, "")}/`;
     const archivedSessionsInWs = (archivedSessionsData.sessions ?? []).filter((session) =>
       session.cwd === activeWorkspace.path || session.cwd.startsWith(wsPrefix));
     setArchivedCount(archivedSessionsInWs.length + (archivedItemsData.items ?? []).length);
     setWorkItems(itemsData.items ?? []);
     setRepositories(repositoriesData.repositories ?? []);
+    setLoops(loopsData.loops ?? []);
   }, [activeWorkspace, hasCapability]);
 
   const archiveWorkItem = useCallback(async (item: WorkItemRecord) => {
@@ -328,6 +353,41 @@ export function WorkspaceSidebar({
     });
     await loadWorkspaceData();
   }, [activeWorkspace, loadWorkspaceData]);
+
+  // 运行记录：展开某 loop 时拉取一次；有非终态 run 时每 5s 轮询刷新，全部终态即停。
+  const loadLoopRuns = useCallback(async (loopId: string) => {
+    if (!activeWorkspace) return;
+    try {
+      const response = await fetch(
+        `/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/loop/runs?loopId=${encodeURIComponent(loopId)}`,
+      );
+      if (!response.ok) return;
+      const data = await response.json() as { runs?: LoopRunWithWorkItem[] };
+      setLoopRuns((current) => ({ ...current, [loopId]: data.runs ?? [] }));
+    } catch { /* 下轮重试 */ }
+  }, [activeWorkspace]);
+
+  const toggleLoopExpanded = useCallback((loopId: string) => {
+    setExpandedLoopId((current) => {
+      const next = current === loopId ? null : loopId;
+      if (next) void loadLoopRuns(next);
+      return next;
+    });
+  }, [loadLoopRuns]);
+
+  const expandedLoopRuns = expandedLoopId ? loopRuns[expandedLoopId] : undefined;
+  const hasActiveLoopRun = Boolean(expandedLoopRuns?.some(({ run }) =>
+    run.status === "queued" || run.status === "running" || run.status === "waiting_for_gate"));
+  useEffect(() => {
+    if (!expandedLoopId || !hasActiveLoopRun) return;
+    const timer = setTimeout(() => void loadLoopRuns(expandedLoopId), 5000);
+    return () => clearTimeout(timer);
+  }, [expandedLoopId, hasActiveLoopRun, loopRuns, loadLoopRuns]);
+
+  // 切换工作区时收起运行记录，避免上个工作区的记录残留在新 loop 下。
+  useEffect(() => {
+    setExpandedLoopId(null);
+  }, [activeWorkspace?.id]);
 
   useEffect(() => {
     void loadWorkspaceData();
@@ -608,28 +668,94 @@ export function WorkspaceSidebar({
       case "loop":
         return (
           <div>
-            <ViewHeader label="Loop" />
-            <div style={{ padding: "12px" }}>
-              <button
-                onClick={onOpenLoops}
-                style={{
-                  width: "100%",
-                  padding: "var(--pi-sidebar-section-py) 10px",
-                  border: "1px solid var(--border)",
-                  borderRadius: 7,
-                  background: loopsActive ? "var(--bg-selected)" : "var(--bg)",
-                  color: loopsActive ? "var(--text)" : "var(--text-muted)",
-                  cursor: "pointer",
-                  fontWeight: 700,
-                  fontSize: "var(--pi-sidebar-fs)",
-                }}
-              >
-                管理 Loops
-              </button>
-              <div style={{ marginTop: 8, color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", lineHeight: 1.6 }}>
-                自动化 maker/checker 运行编排。点击上方按钮在主区配置、触发或审批一轮。
+            <ViewHeader label="Loop" action={onOpenLoops} actionLabel="新建 / 管理 Loop" />
+            {loops.length === 0 ? (
+              <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
+                暂无 Loop。点击右上角 + 新建。
               </div>
-            </div>
+            ) : loops.map((loop) => {
+              const expanded = expandedLoopId === loop.id;
+              const runs = loopRuns[loop.id];
+              const cron = loop.triggers.find((trigger): trigger is CronTriggerDefinition => trigger.type === "cron" && trigger.enabled);
+              const summary = !loop.enabled
+                ? "已停用"
+                : cron ? cron.expression
+                : loop.triggers.some((trigger) => trigger.type === "manual" && trigger.enabled) ? "手动"
+                : "—";
+              return (
+                <div key={loop.id}>
+                  <div style={{ display: "flex", alignItems: "center", padding: "4px 12px 4px 10px" }}>
+                    <button
+                      onClick={() => toggleLoopExpanded(loop.id)}
+                      title={expanded ? "收起运行记录" : "展开运行记录"}
+                      style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", width: 18, fontSize: 10, padding: 0, flexShrink: 0, transition: "transform 0.15s", transform: expanded ? "rotate(90deg)" : "none" }}
+                    >
+                      ▶
+                    </button>
+                    <button
+                      onClick={() => toggleLoopExpanded(loop.id)}
+                      style={{ ...rowStyle(), padding: "6px 4px", flex: 1, minWidth: 0 }}
+                    >
+                      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: loop.enabled ? "var(--text)" : "var(--text-dim)" }}>{loop.name}</span>
+                      <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>{summary}</span>
+                    </button>
+                    <button
+                      onClick={() => onTriggerLoop(loop)}
+                      title="手动触发一轮"
+                      style={{ border: 0, background: "transparent", color: "var(--accent)", cursor: "pointer", width: 22, fontSize: 12, padding: 0, flexShrink: 0 }}
+                    >
+                      ▶
+                    </button>
+                    <button
+                      onClick={onOpenLoops}
+                      title="配置 / 编辑定义"
+                      style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", width: 22, fontSize: 12, padding: 0, flexShrink: 0 }}
+                    >
+                      ⚙
+                    </button>
+                  </div>
+                  {expanded && (
+                    <div>
+                      {!runs ? (
+                        <div style={{ padding: "4px 22px 8px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>加载中…</div>
+                      ) : runs.length === 0 ? (
+                        <div style={{ padding: "4px 22px 8px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>暂无运行记录</div>
+                      ) : runs.map(({ run, workItem }) => {
+                        const waiting = run.status === "waiting_for_gate";
+                        const dotColor = run.status === "failed" ? "#e5484d"
+                          : waiting ? "#f59e0b"
+                          : run.status === "running" || run.status === "queued" ? "#22c55e"
+                          : "#16a34a";
+                        const started = new Date(run.startedAt);
+                        const time = `${String(started.getMonth() + 1).padStart(2, "0")}-${String(started.getDate()).padStart(2, "0")} ${String(started.getHours()).padStart(2, "0")}:${String(started.getMinutes()).padStart(2, "0")}`;
+                        return (
+                          <button
+                            key={run.id}
+                            onClick={() => run.sessionId && onOpenLoopSession(run.sessionId)}
+                            disabled={!run.sessionId}
+                            title={run.sessionId ? "打开编排会话" : "会话尚未创建"}
+                            style={{ ...rowStyle(false), padding: "5px 10px 5px 30px", cursor: run.sessionId ? "pointer" : "default", opacity: run.sessionId ? 1 : 0.55 }}
+                          >
+                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, flexShrink: 0, boxShadow: run.status === "running" ? "0 0 0 3px rgba(34,197,94,0.18)" : "none" }} />
+                            <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>{time}</span>
+                            {waiting && (
+                              <span style={{ padding: "1px 6px", borderRadius: 5, background: "rgba(245,158,11,0.15)", color: "#b45309", fontSize: "var(--pi-sidebar-fs-meta)", fontWeight: 700, flexShrink: 0 }}>待裁决</span>
+                            )}
+                            {workItem ? (
+                              <span style={{ padding: "1px 6px", borderRadius: 5, border: "1px solid var(--border)", color: "var(--accent)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>{workItem.key}</span>
+                            ) : (
+                              <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+                                {run.verdict || run.progress || "—"}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         );
 

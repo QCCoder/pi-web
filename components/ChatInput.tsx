@@ -14,6 +14,7 @@ import {
 } from "@/lib/file-fuzzy";
 import { abbreviateFilePathParts } from "@/lib/file-paths";
 import { FolderIcon, getFileIcon } from "./FileIcons";
+import { SessionChangedFilesButton } from "./SessionChangedFiles";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 
@@ -63,6 +64,9 @@ interface Props {
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
+  /** Session changed-files quick access — compact button rendered at the end of
+   *  the controls row (right of the sound toggle) when count > 0. */
+  changedFiles?: { count: number; open: boolean; onToggle: () => void };
   onAudioUnlock?: () => void;
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
@@ -265,7 +269,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
-  soundEnabled, onSoundToggle, onAudioUnlock,
+  soundEnabled, onSoundToggle, onAudioUnlock, changedFiles,
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
@@ -2227,6 +2231,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   </svg>
                 )}
               </button>
+            )}
+            {changedFiles && changedFiles.count > 0 && (
+              <SessionChangedFilesButton
+                count={changedFiles.count}
+                open={changedFiles.open}
+                onToggle={changedFiles.onToggle}
+              />
             )}
             {isMobile && controlsMenuOpen && (
               <button

@@ -385,6 +385,41 @@ export async function listWorkItems(
   return { items, invalid };
 }
 
+/** Find the work item a session is linked to via its `conversations` field.
+ *  Used by the Loop host to name an orchestrator session after the requirement
+ *  it picked (so Loop runs don't all share an identical title). Returns the
+ *  first match's `{ key, title }` or undefined. Reads only `item.yaml` (no
+ *  README/events) so it stays cheap enough to run at every round boundary. */
+export async function findWorkItemByConversation(
+  workspacePath: string,
+  sessionId: string,
+): Promise<{ key: string; title: string } | undefined> {
+  for (const [directory, prefix] of [["requirements", "REQ-"], ["bugs", "BUG-"]] as const) {
+    const root = join(workspacePath, directory);
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+      const key = workItemKeyFromDirectoryName(entry.name);
+      if (!key) continue;
+      try {
+        const raw = await readFile(join(root, entry.name, "item.yaml"), "utf8");
+        const item = parseWorkItem(parse(raw));
+        if (Array.isArray(item.conversations) && item.conversations.includes(sessionId)) {
+          return { key, title: item.title };
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  return undefined;
+}
+
 export async function createWorkItem(
   workspaceId: string,
   input: CreateWorkItemInput,

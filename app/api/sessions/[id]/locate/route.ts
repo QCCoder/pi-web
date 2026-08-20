@@ -24,23 +24,36 @@ export async function GET(
     const meta = await loopHostClient.probeSession(id);
     if (meta) {
       const session: SessionInfo = {
-        path: meta.sessionFile || "",
+        path: meta.sessionFile ?? "",
         id: meta.id,
-        cwd: meta.cwd,
+        cwd: meta.cwd ?? "",
         created: new Date().toISOString(),
         modified: new Date().toISOString(),
         messageCount: 0,
         firstMessage: "(loop session)",
-        projectRoot: meta.cwd,
+        projectRoot: meta.cwd ?? "",
       };
       // Best-effort enrich from disk: the probe carries no firstMessage/stats,
       // and the .jsonl (orchestrator or running subagent child) usually exists
       // already — real stats make the tab label meaningful. Keep the probe's
-      // authoritative path/cwd even when the scan hasn't caught up yet.
+      // authoritative path/cwd when it has them (live wrapper); a COLD
+      // orchestrator probe (gate-paused after a host restart) has neither —
+      // then the disk scan's values are the authority.
       invalidateSessionListCache();
       const onDisk = (await listAllSessions()).find((s) => s.id === id);
       if (onDisk) {
-        return NextResponse.json({ session: { ...onDisk, path: session.path, cwd: session.cwd, projectRoot: session.projectRoot }, source: "loop" });
+        return NextResponse.json({
+          session: {
+            ...onDisk,
+            ...(meta.sessionFile ? { path: meta.sessionFile } : {}),
+            ...(meta.cwd ? { cwd: meta.cwd, projectRoot: meta.cwd } : {}),
+          },
+          source: "loop",
+        });
+      }
+      // Cold probe without a disk hit: the .jsonl is gone — nothing to open.
+      if (!meta.sessionFile) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
       }
       return NextResponse.json({ session, source: "loop" });
     }

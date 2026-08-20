@@ -851,7 +851,8 @@ span.linenumber {
   to   { stroke-dashoffset: 0;  opacity: 1; }
 }
 
-/* Desktop sidebar: animate width */
+/* Desktop sidebar: animate width. Width is a CSS var so the user can drag
+   the resize handle (see AppShell `sidebarWidth`); 260px is the default. */
 @media (min-width: 641px) {
   .sidebar-overlay-backdrop {
     display: none !important;
@@ -862,19 +863,62 @@ span.linenumber {
     transition: width 0.2s ease, min-width 0.2s ease;
   }
   .sidebar-container.sidebar-open {
-    width: 260px;
-    min-width: 260px;
+    width: var(--pi-sidebar-width, 260px);
+    min-width: var(--pi-sidebar-width, 260px);
   }
   .sidebar-container.sidebar-closed {
     width: 0;
     min-width: 0;
     border-right: none !important;
   }
-  /* keep inner content at fixed width so it doesn't reflow during animation */
+  /* keep inner content at the sidebar width so it doesn't reflow during the
+     open/close animation or while dragging the resize handle */
   .sidebar-container > * {
-    width: 260px;
-    min-width: 260px;
+    width: var(--pi-sidebar-width, 260px);
+    min-width: var(--pi-sidebar-width, 260px);
   }
+  /* while actively dragging, jump instantly instead of animating each move */
+  .sidebar-container.sidebar-resizing {
+    transition: none !important;
+  }
+}
+
+/* Desktop sidebar resize handle (rendered only when open + non-mobile). A thin
+   strip between the sidebar and the center column. ::before is an invisible
+   wide hit zone (easy to grab); ::after is the always-visible 1px guide line
+   that brightens on hover/drag so the edge is discoverable. */
+.sidebar-resize-handle {
+  flex-shrink: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 210;
+}
+.sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  inset: 0 -5px;            /* 16px grab zone straddling the sidebar border */
+}
+.sidebar-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--border);
+  transition: background 0.12s ease, width 0.12s ease, opacity 0.12s ease;
+  opacity: 0.7;
+}
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:active::after,
+.sidebar-container.sidebar-resizing + .sidebar-resize-handle::after {
+  background: var(--accent);
+  width: 2px;
+  margin-left: -1px;
+  opacity: 1;
 }
 
 
@@ -960,4 +1004,15 @@ span.linenumber {
     flex-wrap: wrap;
     padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
   }
+}
+
+/* Session changed-files drawer (components/SessionChangedFiles.tsx) — slides
+   in from the right; mobile uses the same class at full width. */
+@keyframes scf-drawer-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.scf-drawer {
+  animation: scf-drawer-in 0.16s ease-out;
 }

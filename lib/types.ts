@@ -301,6 +301,14 @@ export interface SessionInfo {
   /** True for subagent worker sessions — hidden from the sidebar session list,
    *  but still openable by id from the parent's subagent result card. */
   subagentChild?: boolean;
+  /** True for Loop orchestrator sessions. Idle runs (no linked work item,
+   *  `loopWorkItem` absent) are hidden from session lists — they stay
+   *  reachable from the Loop run records; runs that picked a work item are
+   *  listed like any other session. */
+  loopOrchestrator?: boolean;
+  /** The `REQ-/BUG-####` key of the work item this orchestrator run picked
+   *  (present only when `loopOrchestrator` and the run joined an item). */
+  loopWorkItem?: string;
 }
 
 export interface SessionContext {

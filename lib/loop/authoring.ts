@@ -119,7 +119,6 @@ export async function createLoopDefinition(
     await Promise.all([
       writeFile(join(directory, "loop.yaml"), yaml, { encoding: "utf8", flag: "wx" }),
       writeFile(join(directory, "LOOP.md"), renderInstructions(input), { encoding: "utf8", flag: "wx" }),
-      writeFile(join(directory, "STATE.md"), "# State\n\n## Accepted baseline\n\n尚无。\n\n## Last audited improvement\n\n尚无。\n", { encoding: "utf8", flag: "wx" }),
       mkdir(join(directory, "agents")),
       mkdir(join(directory, "audit")),
     ]);
@@ -139,7 +138,7 @@ export interface UpdateLoopInput {
   cronEnabled?: boolean;
   cronExpression?: string;
   timezone?: string;
-  /** 原始 LOOP.md 内容；提供则覆盖写入 LOOP.md，不触碰 STATE.md / agents/。 */
+  /** 原始 LOOP.md 内容；提供则覆盖写入 LOOP.md，不触碰 agents/。 */
   instructions?: string;
   /** agents/*.md 文件映射：string=写入/覆盖，null=删除。 */
   agents?: Record<string, string | null>;
@@ -166,7 +165,7 @@ async function writeAgentFiles(workspace: WorkspaceLocation, loopId: string, age
   }
 }
 
-/** PATCH：只重写 loop.yaml（以及可选的 LOOP.md / agents/），绝不删目录、不动 STATE.md。 */
+/** PATCH：只重写 loop.yaml（以及可选的 LOOP.md / agents/），绝不删目录。 */
 export async function updateLoopDefinition(
   workspace: WorkspaceLocation,
   loopId: string,
@@ -226,7 +225,7 @@ export async function updateLoopDefinition(
   return readLoopDefinition(workspace, id);
 }
 
-/** DELETE：移除整个 loop 目录（loop.yaml / LOOP.md / STATE.md / agents/ / audit/）。 */
+/** DELETE：移除整个 loop 目录（loop.yaml / LOOP.md / agents/ / audit/）。 */
 export async function deleteLoopDefinition(workspace: WorkspaceLocation, loopId: string): Promise<void> {
   const id = validateLoopId(loopId);
   const loopsRoot = resolve(workspace.path, "loops");

@@ -56,6 +56,18 @@ export function dropCachedSession(sessionId: string): void {
   sessionMessagesCache.delete(sessionId);
 }
 
+/** 最小占位 SessionData：尚未从磁盘加载过的会话（新建会话首发消息、后台流式
+ *  message_end 落地）需要先有个条目，后续 updateCachedSessionData 才不是 no-op。 */
+export function makeMinimalSessionData(messages: SessionData["context"]["messages"]): SessionData {
+  return {
+    sessionId: "",
+    filePath: "",
+    tree: [],
+    leafId: null,
+    context: { messages, entryIds: [], thinkingLevel: "", model: null },
+  };
+}
+
 /** 不可变更新某 session 的 SessionData（message_end 追加 / loadContext 分支切换等用）。
  *  无缓存条目时 no-op（后台 session 未访问过则等下次 loadSession 再建）。 */
 export function updateCachedSessionData(
