@@ -9,15 +9,6 @@ const STATUS_LABEL: Record<string, string> = {
   failed: "失败",
 };
 
-const btnBase: React.CSSProperties = {
-  border: "1px solid var(--border)",
-  borderRadius: 6,
-  padding: "3px 10px",
-  fontSize: 12,
-  cursor: "pointer",
-  background: "var(--bg)",
-  color: "var(--text)",
-};
 
 /** Full-area placeholder shown the instant a Loop is triggered, before the
  *  orchestrator session even exists. Replaced by the live ChatWindow as soon as
