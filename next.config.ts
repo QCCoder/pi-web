@@ -10,6 +10,9 @@ try {
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
+  // Disable the Next.js dev tools indicator (the black "N" badge in the
+  // corner during dev) — it overlapped the mobile bottom tab bar.
+  devIndicators: false,
   serverExternalPackages: [
     "undici",
     "@earendil-works/pi-coding-agent",
