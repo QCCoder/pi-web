@@ -142,7 +142,7 @@ export const RAIL_GLOBAL_VIEWS: SidebarView[] = [
 /** App-scoped views that follow the module group (archive), plus the
  *  bottom-pinned settings entry. Archive needs an active workspace — callers
  *  pass `hasWorkspace` to gate it. */
-const ARCHIVE_VIEW: ActivityViewDef = {
+export const ARCHIVE_VIEW: ActivityViewDef = {
   view: "archive",
   capability: null,
   label: "归档",
@@ -207,7 +207,7 @@ const PLUGINS_VIEW: ActivityViewDef = {
   ),
 };
 
-const SETTINGS_VIEW: ActivityViewDef = {
+export const SETTINGS_VIEW: ActivityViewDef = {
   view: "settings",
   capability: null,
   label: "设置",
