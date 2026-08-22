@@ -28,9 +28,9 @@ import type { WorkspaceCapability } from "@/lib/workspaces/types";
  * live on a per-tab stack with a ‹返回 header (Q6); the settings and
  * work-items panels manage their own in-panel subpage navigation.
  */
-type MobileTab = "workbench" | "chat" | "knowledge" | "loop" | "work-items" | "settings";
+type MobileTab = "chat" | "workbench" | "knowledge" | "loop" | "work-items" | "settings";
 
-const TAB_ORDER: MobileTab[] = ["workbench", "chat", "knowledge", "loop", "work-items", "settings"];
+const TAB_ORDER: MobileTab[] = ["chat", "workbench", "knowledge", "loop", "work-items", "settings"];
 
 /** Capability gating for the module tabs (workbench/chat/settings are always on). */
 const TAB_CAPABILITY: Partial<Record<MobileTab, WorkspaceCapability>> = {
@@ -71,13 +71,13 @@ function tabIcon(tab: MobileTab) {
   return ACTIVITY_VIEW_ORDER.find((item) => item.view === (tab as SidebarView))?.icon ?? null;
 }
 
-/** Per-workspace tab persistence (falls back to workbench on stale values). */
+/** Per-workspace tab persistence (falls back to 会话 — the landing tab — on stale values). */
 function readStoredTab(workspaceId: string, capabilities: WorkspaceCapability[]): MobileTab {
   try {
     const raw = localStorage.getItem(`pi-mobile-tab:${workspaceId}`) as MobileTab | null;
     if (raw && availableTabs(capabilities).includes(raw)) return raw;
   } catch { /* ignore */ }
-  return "workbench";
+  return "chat";
 }
 
 /**
@@ -87,6 +87,11 @@ function readStoredTab(workspaceId: string, capabilities: WorkspaceCapability[])
  * drawer at all (Q10 — the drawer CSS/state is gone). Home renders without
  * the tab bar (Q7). The 36px tool strip stays at the top, minus the ☰
  * button (Q15); token usage remains in it.
+ *
+ * Tab order is 会话 first (the landing tab — user feedback round 1), 工作台
+ * second. The 会话 tab always renders the chat itself: an open session, or
+ * the fresh-session composer when none is open (never a pre-created
+ * session — pi creates the .jsonl only when the first message is sent).
  */
 export function MobileShell() {
   const s = useShell();
@@ -157,7 +162,7 @@ export function MobileShell() {
   // ---- Active tab -------------------------------------------------------------
   const capabilities = activeWorkspace?.capabilities ?? [];
   const tabsAvailable = availableTabs(capabilities);
-  const [tab, setTab] = useState<MobileTab>("workbench");
+  const [tab, setTab] = useState<MobileTab>("chat");
   // Per-workspace restore: on workspace switch, read the stored tab; a
   // deep-linked session (view=chat with a live chat) lands on the 会话 tab.
   useEffect(() => {
@@ -389,37 +394,17 @@ export function MobileShell() {
   };
 
   const renderChatTab = () => {
-    if (!showChat) {
-      // Empty state (Q9): honest CTA, never a pre-created session.
-      return (
-        <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 24, textAlign: "center" }}>
-          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-          <div style={{ fontSize: 14, color: "var(--text-muted)" }}>当前没有打开的对话</div>
-          <button
-            type="button"
-            onClick={handleWorkspaceNewSession}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              height: 40, padding: "0 20px", borderRadius: 8,
-              background: "var(--accent)", border: "none",
-              color: "#fff", fontSize: 14, fontWeight: 500, cursor: "pointer",
-            }}
-          >
-            ＋ 新建会话
-          </button>
-        </div>
-      );
-    }
     if (activeTab?.loopPending && !selectedSession) {
       return <LoopLaunchingPlaceholder name={activeTab.loopPending.loopName} status={loopRun?.status} error={loopRun?.error} />;
     }
+    // No open session → render the fresh-session composer directly (user
+    // feedback round 1: no placeholder page). ChatWindow only creates the
+    // .jsonl when the first message is sent, so this never litters sessions.
     return (
       <ChatWindow
         reloadSignal={sessionKey}
         session={selectedSession}
-        newSessionCwd={effectiveNewSessionCwd}
+        newSessionCwd={effectiveNewSessionCwd ?? activeWorkspace?.path ?? null}
         onAgentEnd={handleAgentEnd}
         onSessionCreated={handleSessionCreated}
         onSessionForked={handleSessionForked}

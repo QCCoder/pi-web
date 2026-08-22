@@ -1048,7 +1048,10 @@ export function WorkspaceManager({
           .workspace-page-header h2 { font-size: 17px; }
           .workspace-page-header { flex-wrap: wrap; }
           .work-item-toolbar { flex-wrap: wrap; }
-          .workspace-search { max-width: none; order: 3; margin-left: 0; }
+          .work-item-filter { flex: 1 1 auto; min-width: 0; }
+          .work-item-filter .workspace-manager-tab { flex: 0 0 auto; }
+          .work-item-toolbar > .workspace-action { flex: 0 0 auto; }
+          .workspace-search { max-width: none; order: 3; margin-left: 0; flex: 1 1 100%; }
           .work-item-row {
             grid-template-columns: auto 1fr auto;
             gap: 7px;

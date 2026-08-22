@@ -595,7 +595,8 @@ export function WorkspaceSidebar({
   const renderActiveView = (): ReactNode => {
     switch (activeView) {
       case "workbench":
-        // 工作台：会话（上，≤≈40% 内部滚动）+ 文件（下，占余下空间）两个可折叠分段。
+        // 工作台：会话（上，固定 40% 占比内部滚动——不随内容伸缩，保证两段高度稳定）
+        // + 文件（下，占余下 60%）两个可折叠分段。
         return (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <WorkbenchSectionHeader
@@ -605,7 +606,7 @@ export function WorkspaceSidebar({
               onToggle={() => toggleWorkbenchSection("sessions", workbenchSections.sessions)}
             />
             {workbenchSections.sessions && (
-              <div style={{ flex: "0 1 auto", maxHeight: "40%", minHeight: 0, overflowY: "auto" }}>
+              <div style={{ flex: "0 0 40%", minHeight: 0, overflowY: "auto" }}>
                 {sessions.map((session) => (
                   <SessionRow
                     key={session.id}
