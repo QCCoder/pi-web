@@ -4,7 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
+import type { LoopDefinition, LoopRun } from "@/lib/loop/types";
+import { STATUS_LABELS } from "./WorkspaceManager";
 import { useIsMobile } from "@/hooks/useIsMobile";
+
+/** A run merged across loops, carrying its owning loop's display name. */
+type LoopRunWithName = LoopRun & { loopName: string };
 
 interface Props {
   workspace: WorkspaceSummary;
@@ -13,6 +18,16 @@ interface Props {
   onOpenWorkItems: () => void;
   onCreateWorkItem: (type: WorkItemType) => void;
   onSelectSession: (session: SessionInfo) => void;
+  /** Open the Loop management view (center panel). */
+  onOpenLoops: () => void;
+  /** Manual-trigger a loop definition (AppShell's handleLoopTriggered). */
+  onTriggerLoop: (loop: LoopDefinition) => void;
+  /** Open a Loop orchestrator / seeded execution session by id (locate pipeline). */
+  onOpenLoopSession: (sessionId: string) => void;
+  /** Navigate the sidebar's focused Activity Bar view (仓库 rows → 工作台文件区, 知识库 row). */
+  onSwitchSidebarView: (view: "workbench" | "knowledge") => void;
+  /** Open the workspace settings' add-repository form (AppShell wires it). */
+  onAddRepository: () => void;
   onSessionDeleted?: (id: string) => void;
 }
 
@@ -29,6 +44,65 @@ function formatRelativeTime(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString();
 }
 
+function formatRunTime(dateStr: string): string {
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "—";
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+const sectionStyle: React.CSSProperties = { marginTop: 26 };
+
+const sectionHeaderStyle: React.CSSProperties = {
+  margin: "0 0 10px",
+  fontSize: 15,
+  color: "var(--text)",
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const sectionHeaderLinkStyle: React.CSSProperties = {
+  border: 0,
+  background: "transparent",
+  color: "var(--accent)",
+  cursor: "pointer",
+  padding: 0,
+  fontSize: 12,
+  fontWeight: 500,
+};
+
+const cardRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  padding: "10px 12px",
+  marginBottom: 8,
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  background: "var(--bg-panel)",
+  color: "var(--text)",
+  cursor: "pointer",
+  textAlign: "left",
+  width: "100%",
+  transition: "background 0.12s",
+};
+
+const emptyHintStyle: React.CSSProperties = {
+  padding: "22px 16px",
+  textAlign: "center",
+  color: "var(--text-dim)",
+  fontSize: 13,
+  border: "1px dashed var(--border)",
+  borderRadius: 10,
+};
+
+/** Loop run rows reuse the sidebar's run-record dot colors. */
+function loopRunDotColor(status: LoopRun["status"]): string {
+  return status === "failed" ? "#e5484d"
+    : status === "running" || status === "queued" ? "#22c55e"
+    : "#16a34a";
+}
+
 export function WorkspaceOverview({
   workspace,
   onNewSession,
@@ -36,29 +110,46 @@ export function WorkspaceOverview({
   onOpenWorkItems,
   onCreateWorkItem,
   onSelectSession,
+  onOpenLoops,
+  onTriggerLoop,
+  onOpenLoopSession,
+  onSwitchSidebarView,
+  onAddRepository,
   onSessionDeleted,
 }: Props) {
   const isMobile = useIsMobile();
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  // Loop 动态：先拉定义，再按启用中的 loop（按名称取前 3 个）拉运行记录。
+  const [loops, setLoops] = useState<LoopDefinition[]>([]);
+  const [loopRuns, setLoopRuns] = useState<LoopRunWithName[]>([]);
+
+  const hasWorkItems = workspace.capabilities.includes("work-items");
+  const hasRepositories = workspace.capabilities.includes("repositories");
+  const hasKnowledge = workspace.capabilities.includes("knowledge");
+  const hasLoop = workspace.capabilities.includes("loop");
 
   useEffect(() => {
     const controller = new AbortController();
     void Promise.all([
-      fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/work-items`, {
-        signal: controller.signal,
-      }),
-      fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/repositories`, {
-        signal: controller.signal,
-      }),
+      hasWorkItems
+        ? fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/work-items`, {
+          signal: controller.signal,
+        })
+        : null,
+      hasRepositories || hasKnowledge
+        ? fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/repositories`, {
+          signal: controller.signal,
+        })
+        : null,
       fetch("/api/sessions", { signal: controller.signal }),
     ]).then(async ([itemsResponse, repositoriesResponse, sessionsResponse]) => {
-      if (itemsResponse.ok) {
+      if (itemsResponse?.ok) {
         const data = await itemsResponse.json() as { items?: WorkItemRecord[] };
         setWorkItems(data.items ?? []);
       }
-      if (repositoriesResponse.ok) {
+      if (repositoriesResponse?.ok) {
         const data = await repositoriesResponse.json() as {
           repositories?: WorkspaceRepositoryState[];
         };
@@ -74,7 +165,61 @@ export function WorkspaceOverview({
       }
     });
     return () => controller.abort();
-  }, [workspace.id]);
+  }, [workspace.id, hasWorkItems, hasRepositories, hasKnowledge]);
+
+  useEffect(() => {
+    if (!hasLoop) {
+      setLoops([]);
+      setLoopRuns([]);
+      return;
+    }
+    const controller = new AbortController();
+    void fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loop/loops`, {
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) return [];
+        const data = await response.json() as { loops?: LoopDefinition[] };
+        return data.loops ?? [];
+      })
+      .then((definitions) => setLoops(definitions))
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          console.error("Failed to load workspace loops:", error);
+        }
+      });
+    return () => controller.abort();
+  }, [workspace.id, hasLoop]);
+
+  // Runs: fetch only for ENABLED loops, capped at the first 3 by name; merge all
+  // runs sorted by startedAt desc and keep the top 5.
+  useEffect(() => {
+    const enabled = loops
+      .filter((loop) => loop.enabled)
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .slice(0, 3);
+    if (enabled.length === 0) {
+      setLoopRuns([]);
+      return;
+    }
+    const controller = new AbortController();
+    void Promise.all(enabled.map((loop) =>
+      fetch(
+        `/api/workspaces/${encodeURIComponent(workspace.id)}/loop/runs?loopId=${encodeURIComponent(loop.id)}`,
+        { signal: controller.signal },
+      )
+        .then((response) => (response.ok ? response.json() as Promise<{ runs?: LoopRun[] }> : { runs: [] }))
+        .catch(() => ({ runs: [] as LoopRun[] })),
+    )).then((all) => {
+      const nameById = new Map(loops.map((loop) => [loop.id, loop.name]));
+      const merged: LoopRunWithName[] = all
+        .flatMap((payload) => payload.runs ?? [])
+        .map((run) => ({ ...run, loopName: nameById.get(run.loopId) ?? run.loopId }));
+      merged.sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+      setLoopRuns(merged.slice(0, 5));
+    }).catch(() => { /* keep whatever was loaded */ });
+    return () => controller.abort();
+  }, [loops, workspace.id]);
 
   const wsPath = workspace.path.replace(/\/+$/, "");
   const recentSessions = useMemo(() => {
@@ -94,11 +239,35 @@ export function WorkspaceOverview({
       .slice(0, 5);
   }, [sessions, wsPath, workspace.path]);
 
-  const activeWorkItems = workItems.filter((item) => !item.archivedAt);
-  const openItems = activeWorkItems.filter(
-    (item) => item.status !== "done" && item.status !== "cancelled",
+  // 活跃工作项：非终态（status 非 done/cancelled、未归档），按 updatedAt 倒序取前 5。
+  const activeWorkItems = useMemo(
+    () => workItems
+      .filter((item) =>
+        !item.archivedAt
+        && item.status !== "done"
+        && item.status !== "cancelled")
+      .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""))
+      .slice(0, 5),
+    [workItems],
   );
-  const activeRepositories = repositories.filter((repository) => repository.status === "active");
+
+  const activeCodeRepositories = useMemo(
+    () => repositories.filter((repository) =>
+      repository.kind === "code" && repository.status === "active"),
+    [repositories],
+  );
+  const knowledgeBundleCount = useMemo(
+    () => repositories.filter((repository) =>
+      repository.kind === "knowledge" && repository.status === "active").length,
+    [repositories],
+  );
+
+  // Quick action — Loop: exactly one enabled loop → direct trigger; more →
+  // manage; none → nothing.
+  const enabledLoops = useMemo(
+    () => loops.filter((loop) => loop.enabled),
+    [loops],
+  );
 
   return (
     <main
@@ -116,46 +285,17 @@ export function WorkspaceOverview({
           <button className="workspace-action" onClick={onOpenSettings}>工作区设置</button>
         </div>
 
-        {/* Compact stat strip */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: 8,
-            marginTop: 22,
-          }}
-        >
-          <StatCard
-            label="待处理工作项"
-            value={String(openItems.length)}
-            detail={`${activeWorkItems.filter((item) => item.type === "requirement").length} 需求 · ${activeWorkItems.filter((item) => item.type === "bug").length} Bug`}
-            onClick={onOpenWorkItems}
-          />
-          <StatCard
-            label="Repositories"
-            value={String(activeRepositories.length)}
-            detail={`${activeRepositories.filter((repository) => repository.kind === "code").length} code · ${activeRepositories.filter((repository) => repository.kind === "knowledge").length} knowledge`}
-            onClick={onOpenSettings}
-          />
-          <StatCard
-            label="Skills"
-            value={String(workspace.skills.length)}
-            detail={workspace.skills.length > 0 ? workspace.skills.join(" · ") : "尚未选择技能"}
-            onClick={onOpenSettings}
-          />
-        </div>
-
         {/* Quick actions */}
-        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 20, flexWrap: "wrap" }}>
           <button
             onClick={onNewSession}
             style={{
-              flex: 1,
+              flex: "1 1 160px",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               gap: 8,
-              padding: "14px 16px",
+              padding: "13px 16px",
               border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))",
               borderRadius: 10,
               background: "color-mix(in srgb, var(--accent) 10%, transparent)",
@@ -171,15 +311,15 @@ export function WorkspaceOverview({
             </svg>
             新建会话
           </button>
-          {workspace.capabilities.includes("work-items") && (
+          {hasWorkItems && (
             <button
               onClick={() => onCreateWorkItem("requirement")}
               style={{
-                flex: "0 0 auto",
+                flex: "0 1 auto",
                 display: "flex",
                 alignItems: "center",
                 gap: 6,
-                padding: "14px 16px",
+                padding: "13px 16px",
                 border: "1px solid var(--border)",
                 borderRadius: 10,
                 background: "var(--bg-panel)",
@@ -196,22 +336,306 @@ export function WorkspaceOverview({
               新建工作项
             </button>
           )}
-        </div>
-
-        {/* Recent sessions */}
-        <section style={{ marginTop: 28 }}>
-          <h2 style={{ margin: "0 0 12px", fontSize: 15, color: "var(--text)" }}>最近会话</h2>
-          {recentSessions.length === 0 ? (
-            <div
+          {hasLoop && enabledLoops.length === 1 && (
+            <button
+              onClick={() => onTriggerLoop(enabledLoops[0])}
+              title={`手动触发一轮 ${enabledLoops[0].name}`}
               style={{
-                padding: "28px 16px",
-                textAlign: "center",
-                color: "var(--text-dim)",
-                fontSize: 13,
-                border: "1px dashed var(--border)",
+                flex: "0 1 auto",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "13px 16px",
+                border: "1px solid var(--border)",
                 borderRadius: 10,
+                background: "var(--bg-panel)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 14,
               }}
             >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="6 3 20 12 6 21 6 3" />
+              </svg>
+              触发 Loop
+            </button>
+          )}
+          {hasLoop && enabledLoops.length > 1 && (
+            <button
+              onClick={onOpenLoops}
+              style={{
+                flex: "0 1 auto",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "13px 16px",
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                background: "var(--bg-panel)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 14,
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="17 1 21 5 17 9" />
+                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                <polyline points="7 23 3 19 7 15" />
+                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+              </svg>
+              管理 Loop
+            </button>
+          )}
+        </div>
+
+        {/* Active work items */}
+        {hasWorkItems && (
+          <section style={sectionStyle}>
+            <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px" }}>
+              活跃工作项
+              <span style={{ color: "var(--text-dim)", fontSize: 12, fontWeight: 400 }}>{activeWorkItems.length}</span>
+              <span style={{ flex: 1 }} />
+              <button
+                onClick={() => onCreateWorkItem("requirement")}
+                style={{
+                  ...sectionHeaderLinkStyle,
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  padding: "2px 8px",
+                }}
+              >
+                ＋ 新建工作项
+              </button>
+            </h2>
+            {activeWorkItems.length === 0 ? (
+              <div style={emptyHintStyle}>暂无活跃工作项</div>
+            ) : (
+              activeWorkItems.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={onOpenWorkItems}
+                  title={`${item.key} ${item.title}`}
+                  style={cardRowStyle}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+                >
+                  <span
+                    style={{
+                      flexShrink: 0,
+                      color: "var(--text-dim)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 11,
+                    }}
+                  >
+                    {item.key}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      fontSize: 13,
+                    }}
+                  >
+                    {item.title}
+                  </span>
+                  <span
+                    style={{
+                      flexShrink: 0,
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      borderRadius: 8,
+                      border: "1px solid var(--border)",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    {STATUS_LABELS[item.status]}
+                  </span>
+                </button>
+              ))
+            )}
+          </section>
+        )}
+
+        {/* Loop activity */}
+        {hasLoop && (
+          <section style={sectionStyle}>
+            <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px" }}>
+              Loop 动态
+              <span style={{ flex: 1 }} />
+              <button onClick={onOpenLoops} style={sectionHeaderLinkStyle}>管理</button>
+            </h2>
+            {loopRuns.length === 0 ? (
+              <div style={emptyHintStyle}>暂无 Loop 运行记录</div>
+            ) : (
+              loopRuns.map((run) => {
+                const openTarget = run.seededSessionId ?? run.sessionId;
+                return (
+                  <button
+                    key={run.id}
+                    onClick={() => openTarget && onOpenLoopSession(openTarget)}
+                    disabled={!openTarget}
+                    title={openTarget ? (run.seededSessionId ? "打开执行会话" : "打开选品会话") : "会话尚未创建"}
+                    style={{
+                      ...cardRowStyle,
+                      cursor: openTarget ? "pointer" : "default",
+                      opacity: openTarget ? 1 : 0.6,
+                    }}
+                    onMouseEnter={(e) => { if (openTarget) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        background: loopRunDotColor(run.status),
+                        flexShrink: 0,
+                        boxShadow: run.status === "running" || run.status === "queued"
+                          ? "0 0 0 3px rgba(34,197,94,0.18)"
+                          : "none",
+                      }}
+                    />
+                    <span
+                      style={{
+                        flexShrink: 0,
+                        maxWidth: 180,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: 13,
+                      }}
+                    >
+                      {run.loopName}
+                    </span>
+                    <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+                      {formatRunTime(run.startedAt)}
+                    </span>
+                    {run.seededSessionId && (
+                      <span
+                        style={{
+                          flexShrink: 0,
+                          padding: "1px 6px",
+                          borderRadius: 5,
+                          border: "1px solid var(--border)",
+                          color: "var(--accent)",
+                          fontSize: 11,
+                        }}
+                      >
+                        已播种
+                      </span>
+                    )}
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: 11,
+                        color: "var(--text-dim)",
+                        textAlign: "right",
+                      }}
+                    >
+                      {run.seedRefused ? `播种被拒：${run.seedRefused}` : (run.verdict || run.progress || "—")}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </section>
+        )}
+
+        {/* Repositories / knowledge */}
+        {(hasRepositories || hasKnowledge) && (
+          <section style={sectionStyle}>
+            <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px", display: "flex", alignItems: "baseline", gap: 10 }}>
+              <span>仓库 / 知识库</span>
+              {hasRepositories && (
+                <button onClick={onAddRepository} style={sectionHeaderLinkStyle}>＋ 添加仓库</button>
+              )}
+            </h2>
+            {hasRepositories && activeCodeRepositories.length === 0 && !hasKnowledge && (
+              <div style={emptyHintStyle}>暂无代码仓库</div>
+            )}
+            {hasRepositories && activeCodeRepositories.map((repository) => (
+              <button
+                key={repository.id}
+                onClick={() => onSwitchSidebarView("workbench")}
+                title="在工作台文件区中浏览"
+                style={cardRowStyle}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+              >
+                <span
+                  style={{
+                    flexShrink: 0,
+                    maxWidth: 220,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontSize: 13,
+                  }}
+                >
+                  {repository.name}
+                </span>
+                <span style={{ flex: 1 }} />
+                <span
+                  style={{
+                    flexShrink: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontSize: 11,
+                    color: "var(--text-dim)",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
+                  {repository.branch || "—"}
+                  {repository.dirty && (
+                    <span
+                      title="有未提交改动"
+                      aria-label="有未提交改动"
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        background: "#d6a84b",
+                        display: "inline-block",
+                      }}
+                    />
+                  )}
+                </span>
+              </button>
+            ))}
+            {hasKnowledge && (
+              <button
+                onClick={() => onSwitchSidebarView("knowledge")}
+                title="在侧边栏知识库视图中查看"
+                style={cardRowStyle}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+              >
+                <span style={{ flexShrink: 0, fontSize: 13 }}>知识库</span>
+                <span style={{ flex: 1 }} />
+                <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)" }}>
+                  {knowledgeBundleCount > 0 ? `${knowledgeBundleCount} 个知识库` : "尚未配置"}
+                </span>
+              </button>
+            )}
+          </section>
+        )}
+
+        {/* Recent sessions */}
+        <section style={sectionStyle}>
+          <h2 style={{ ...sectionHeaderStyle, margin: "0 0 12px" }}>最近会话</h2>
+          {recentSessions.length === 0 ? (
+            <div style={emptyHintStyle}>
               还没有会话。点击上方「新建会话」开始。
             </div>
           ) : (
@@ -231,50 +655,6 @@ export function WorkspaceOverview({
         </section>
       </div>
     </main>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  detail,
-  onClick,
-}: {
-  label: string;
-  value: string;
-  detail: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 3,
-        padding: "10px 12px",
-        border: "1px solid var(--border)",
-        borderRadius: 10,
-        background: "var(--bg-panel)",
-        color: "var(--text)",
-        cursor: "pointer",
-        textAlign: "left",
-      }}
-    >
-      <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{label}</span>
-      <strong style={{ fontSize: 18, lineHeight: 1.1 }}>{value}</strong>
-      <span
-        style={{
-          color: "var(--text-dim)",
-          fontSize: 10,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {detail}
-      </span>
-    </button>
   );
 }
 

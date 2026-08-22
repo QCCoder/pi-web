@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
@@ -1643,7 +1644,16 @@ function AddProviderPicker({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose }: { onClose: () => void }) {
+export function ModelsConfig({ onClose, embedded, onSaved, split }: {
+  onClose?: () => void;
+  embedded?: boolean;
+  onSaved?: () => void;
+  /** Split (three-column) mode: the provider/model tree renders inline (the
+   *  middle column) while the detail pane + save footer portal into the right
+   *  column's config area (`portalTarget` = AppShell's config portal node).
+   *  Modal/embedded modes are unchanged. */
+  split?: { portalTarget: HTMLElement | null };
+}) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
@@ -1784,13 +1794,13 @@ export function ModelsConfig({ onClose }: { onClose: () => void }) {
       });
       const d = await res.json() as { success?: boolean; error?: string };
       if (!res.ok || d.error) setSaveError(d.error ?? `HTTP ${res.status}`);
-      else { setSavedOk(true); setTimeout(() => setSavedOk(false), 2000); }
+      else { setSavedOk(true); setTimeout(() => setSavedOk(false), 2000); onSaved?.(); }
     } catch (e) {
       setSaveError(String(e));
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, onSaved]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
@@ -1839,32 +1849,22 @@ export function ModelsConfig({ onClose }: { onClose: () => void }) {
     );
   })();
 
-  return (
-    <>
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center" }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.18)", overflow: "hidden" }}>
+  const splitMode = split != null;
+  const portalTarget = split?.portalTarget ?? null;
 
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-             <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{t("common.models")}</span>
-            <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>~/.pi/agent/models.json</code>
-          </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "2px 6px" }}>×</button>
-        </div>
-
-        {/* Body */}
-        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
-
-          {/* Left: tree */}
-          <div style={{
-            width: isMobile ? "100%" : 210,
-            maxHeight: isMobile ? "40vh" : undefined,
-            borderRight: isMobile ? "none" : "1px solid var(--border)",
-            borderBottom: isMobile ? "1px solid var(--border)" : "none",
-            display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)",
-          }}>
+  // Left: provider/model tree — shared by every mode. In split mode it fills
+  // the middle column (width 100%); in modal/embedded mode it is the
+  // fixed-width left pane of the internal two-pane body.
+  const listPane = (
+    <div style={splitMode
+      ? { width: "100%", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)" }
+      : {
+          width: isMobile ? "100%" : embedded ? 160 : 210,
+          maxHeight: isMobile ? "40vh" : undefined,
+          borderRight: isMobile ? "none" : "1px solid var(--border)",
+          borderBottom: isMobile ? "1px solid var(--border)" : "none",
+          display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)",
+        }}>
             <div style={{ flex: 1, overflowY: "auto", padding: "8px 6px" }}>
               {/* Active OAuth subscriptions */}
               {activeOAuth.map((p) => {
@@ -1980,20 +1980,26 @@ export function ModelsConfig({ onClose }: { onClose: () => void }) {
                  + {t("i18n.addProvider")}
               </button>
             </div>
-          </div>
+    </div>
+  );
 
-          {/* Right: detail */}
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-            {loading ? null : detailContent ?? (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
-                 {t("i18n.selectProviderModel")}
-              </div>
-            )}
-          </div>
+  // Right: detail — shared by every mode (portaled into the right column in
+  // split mode).
+  const detailPane = (
+    <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+      {loading ? null : detailContent ?? (
+        <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
+           {t("i18n.selectProviderModel")}
         </div>
+      )}
+    </div>
+  );
 
-        {/* Footer */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+  // Footer — save/cancel for the models.json draft. Stays with the detail
+  // pane: embedded renders it in-panel, split portals it into the right
+  // column.
+  const footerPane = (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
           {saveError && <span style={{ fontSize: 12, color: "#f87171", flex: 1 }}>{saveError}</span>}
           <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
              {t("i18n.cancel")}
@@ -2019,6 +2025,74 @@ export function ModelsConfig({ onClose }: { onClose: () => void }) {
              <span>{savedOk ? t("i18n.saved") : saving ? t("i18n.saving") : t("i18n.save")}</span>
           </button>
         </div>
+  );
+
+  if (splitMode) {
+    // Split (three-column) mode: the tree renders inline (middle column, under
+    // AppShell's PanelHeader) while the detail + footer portal into the right
+    // column's config area. One component instance keeps every bit of state —
+    // selection, drafts, save flow — no lifting needed.
+    return (
+      <>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }}>
+          {listPane}
+        </div>
+        {portalTarget
+          ? createPortal(
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
+                {detailPane}
+                {footerPane}
+              </div>,
+              portalTarget,
+            )
+          : null}
+        {pickerOpen && (
+          <AddProviderPicker
+            oauthProviders={oauthProviders}
+            apiKeyProviders={apiKeyProviders}
+            onSelectOAuth={(id) => setSelection({ type: "oauth", providerId: id })}
+            onSelectApiKey={(id) => setSelection({ type: "apikey", providerId: id })}
+            onAddCustom={addCustomProvider}
+            onClose={() => setPickerOpen(false)}
+          />
+        )}
+      </>
+    );
+  }
+
+  return (
+    <>
+    <div
+      style={embedded
+        ? { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }
+        : { position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={embedded ? undefined : (e) => { if (e.target === e.currentTarget) onClose?.(); }}>
+      <div style={embedded
+        ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }
+        : { width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.18)", overflow: "hidden" }}>
+
+        {/* Header (suppressed in embedded mode — the panel header carries it) */}
+        {!embedded && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{t("common.models")}</span>
+              <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>~/.pi/agent/models.json</code>
+            </div>
+            <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "2px 6px" }}>×</button>
+          </div>
+        )}
+
+        {/* Body */}
+        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
+          {/* Left: tree */}
+          {listPane}
+
+          {/* Right: detail */}
+          {detailPane}
+        </div>
+
+        {/* Footer */}
+        {footerPane}
       </div>
     </div>
     {pickerOpen && (

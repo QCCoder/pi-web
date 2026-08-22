@@ -12,6 +12,10 @@ interface Props {
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCloseWorkspace: (workspaceId: string) => void;
   onReorder: (tabIds: string[]) => void;
+  /** ＋ at the tab strip's right end — open the create-workspace wizard.
+   *  (Mobile top-bar consensus: 切换/增加工作区 live here now that the
+   *  sidebar header no longer carries a workspace switcher.) */
+  onCreateWorkspace?: () => void;
 }
 
 function shortestUniqueLabels(workspaces: WorkspaceSummary[]): Map<string, string> {
@@ -50,6 +54,7 @@ export function WorkspaceTabBar({
   onSelectWorkspace,
   onCloseWorkspace,
   onReorder,
+  onCreateWorkspace,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
@@ -176,6 +181,34 @@ export function WorkspaceTabBar({
           </div>
         );
       })}
+      {onCreateWorkspace && (
+        <button
+          type="button"
+          title="新建 Workspace"
+          aria-label="新建 Workspace"
+          onClick={onCreateWorkspace}
+          style={{
+            width: 36,
+            height: 36,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            padding: 0,
+            border: 0,
+            borderLeft: "1px solid var(--border)",
+            background: "transparent",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            fontSize: 16,
+            lineHeight: 1,
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+        >
+          ＋
+        </button>
+      )}
     </div>
   );
 }

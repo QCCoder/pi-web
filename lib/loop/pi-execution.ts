@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentEvent, AgentSessionWrapper } from "../rpc-manager.ts";
 import { startRpcSession } from "../rpc-manager.ts";
+import { creationTimeoutSignal } from "../abort-race";
 import type {
   LoopDefinition,
   LoopRun,
@@ -14,6 +15,10 @@ import { reapOrphanedRoundProcesses } from "./process-cleanup.ts";
 import { parseLoopSeed, seedExecutionSession } from "./seed.ts";
 
 const RUN_TIMEOUT_MS = 30 * 60 * 1000;
+/** Upper bound on orchestrator-session CREATION. The 30-min round timeout only
+ *  arms AFTER the session exists, so a creation hang used to pin the run in
+ *  "running" forever with nothing to abort — the wrapper did not exist yet. */
+const SESSION_START_TIMEOUT_MS = 5 * 60 * 1000;
 /** Mid-round heartbeats are throttled so a long (subagent-heavy) round does
  *  not bloat RUNS.jsonl while still proving the orchestrator is alive. */
 const HEARTBEAT_INTERVAL_MS = 60 * 1000;
@@ -145,13 +150,29 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     // a trusted, loop-scoped source (no project-agent confirmation gate).
     const agentsDir = join(definition.directory, "agents");
     const extraAgentDirs = existsSync(agentsDir) ? [agentsDir] : undefined;
-    const { session, realSessionId } = await startRpcSession(
-      `__loop_host__${run.id}`,
-      "",
-      definition.workspacePath,
-      undefined,
-      { extraAgentDirs },
+    const { signal: startSignal, dispose: disposeStartTimer } = creationTimeoutSignal(
+      SESSION_START_TIMEOUT_MS,
+      "orchestrator session creation timed out",
     );
+    let session: AgentSessionWrapper;
+    let realSessionId: string;
+    try {
+      ({ session, realSessionId } = await startRpcSession(
+        `__loop_host__${run.id}`,
+        "",
+        definition.workspacePath,
+        undefined,
+        { extraAgentDirs, signal: startSignal },
+      ));
+    } catch (error) {
+      // Creation failed/timed out/aborted: there is no session to destroy, but
+      // the workspace scope recorded above must still be dropped (same cleanup
+      // as a failed round).
+      await this.cleanupRunProcesses(run.id);
+      throw error;
+    } finally {
+      disposeStartTimer();
+    }
     this.register(run.id, realSessionId, session);
     onSessionReady?.(realSessionId);
 

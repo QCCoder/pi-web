@@ -19,9 +19,10 @@ export const DEFAULT_GIT_SETTINGS: WorkspaceGitSettings = {
 export const MANDATORY_CAPABILITIES = ["sessions", "explorer"] as const;
 
 /** The capabilities offered as toggleable checkboxes when creating a workspace.
- *  Per redesign §6.2 this intentionally excludes `overview`, `subagent`, and
- *  `workflows` — those exist as legal capabilities (and stay toggleable via
- *  PATCH), but are not surfaced in the init checklist. */
+ *  Per redesign §6.2 this intentionally excludes `subagent` and `workflows` —
+ *  those exist as legal capabilities (and stay toggleable via PATCH), but are
+ *  not surfaced in the init checklist. (The former `overview` capability is
+ *  retired entirely — the overview dashboard is the unconditional landing view.) */
 export const INIT_CAPABILITY_CHECKLIST: readonly WorkspaceCapability[] = [
   "repositories",
   "knowledge",

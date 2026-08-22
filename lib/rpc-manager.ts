@@ -2,7 +2,7 @@ import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
-import { resolve } from "path";
+import { join, resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
@@ -13,6 +13,8 @@ import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } fro
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
 import { buildWorkspaceExtensions } from "./workspaces/extensions";
 import { createSubagentExtension } from "./subagent/extension";
+import { raceAbort } from "./abort-race";
+import { buildStalledSnapshot, classifyStall, HEARTBEAT_TICK_MS, stallInterruptMessage, type StalledSessionInfo } from "./session-heartbeat";
 import { findWorkspaceForPath } from "./workspaces/service";
 
 // ============================================================================
@@ -136,6 +138,12 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallbacks: Array<() => void> = [];
   private _alive = true;
+  /** Heartbeat: last time this session showed life — any agent event (streaming
+   *  delta, tool-execution partial, message boundary) or inbound command. The
+   *  heartbeat monitor (see startSessionHeartbeatMonitor) interrupts a session
+   *  that claims `running` but has been silent past STALL_KILL_MS — the
+   *  4-hour-zombie class nothing else notices. */
+  private lastActivityAt = Date.now();
 
   constructor(public readonly inner: AgentSessionLike) {}
 
@@ -162,6 +170,7 @@ export class AgentSessionWrapper {
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
+      this.lastActivityAt = Date.now();
       if (event.type === "agent_end") {
         invalidateSessionListCache();
       }
@@ -326,6 +335,7 @@ export class AgentSessionWrapper {
 
   async send(command: Record<string, unknown>): Promise<unknown> {
     this.resetIdleTimer();
+    this.lastActivityAt = Date.now();
     const type = command.type as string;
     if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
 
@@ -384,6 +394,10 @@ export class AgentSessionWrapper {
           model: model ? { id: model.id, provider: model.provider } : undefined,
           messageCount: 0,
           pendingMessageCount: this.inner.pendingMessageCount,
+          /** Heartbeat: ms since the last agent event / command while running
+           *  (null when idle). >= STALL_WARN_MS means 疑似无响应. */
+          stalledMs: this.isRunning() ? this.activityIdleMs() : null,
+          /** >= STALL_WARN_MS (5 min) means 疑似无响应. */
           queuedMessages: {
             steering: [...this.inner.getSteeringMessages()],
             followUp: [...this.inner.getFollowUpMessages()],
@@ -631,6 +645,28 @@ export class AgentSessionWrapper {
       default:
         throw new Error(`Unsupported command: ${type}`);
     }
+  }
+
+  /** ms since the last sign of life (see lastActivityAt). */
+  activityIdleMs(): number {
+    return Date.now() - this.lastActivityAt;
+  }
+
+  /** Emit a synthetic prompt_error to live viewers WITHOUT persisting it — used
+   *  by the heartbeat monitor so a watching human sees WHY an auto-interrupt
+   *  happened (the .jsonl cannot record it: the hung turn never settles). */
+  emitSyntheticError(errorMessage: string): void {
+    this.emit({ type: "prompt_error", errorMessage });
+  }
+
+  /** True while an extension UI request (confirm/select/input/editor/custom)
+   *  awaits a human response. Such a session is human-paused, not hung — the
+   *  heartbeat monitor must not auto-interrupt it (a human-wait can last
+   *  arbitrarily long, same reasoning as gate-paused sessions). Fire-and-forget
+   *  UI methods (notify/setStatus/setWidget) never enter the map; only requests
+   *  that block a tool on a response do. */
+  hasPendingUiRequests(): boolean {
+    return this.pendingUiRequests.size > 0;
   }
 
   destroy(): void {
@@ -1013,6 +1049,7 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
     process.once("SIGTERM", cleanup);
+    startSessionHeartbeatMonitor();
   }
   return globalThis.__piSessions;
 }
@@ -1074,6 +1111,60 @@ export function getRunningRpcSessionIds(): string[] {
     if (session.isRunning()) ids.add(session.sessionId || sessionId);
   }
   return [...ids];
+}
+
+/** Stalled snapshot of currently-RUNNING sessions (see lib/session-heartbeat.ts):
+ *  sessions silent past STALL_WARN_MS, classified and sorted longest-idle first.
+ *  Exposed via the daemon's running endpoints for surfacing (badge/tooltip) —
+ *  additive data, existing consumers that only read `ids` are unaffected. */
+export function getStalledSessionSnapshot(): StalledSessionInfo[] {
+  const running = Array.from(getRegistry().values())
+    .filter((session) => session.isRunning())
+    .map((session) => ({ id: session.sessionId, idleMs: session.activityIdleMs() }));
+  return buildStalledSnapshot(running);
+}
+
+// ----------------------------------------------------------------------------
+// Heartbeat monitor — the zombie-session safety net
+//
+// A session can claim `running` forever while being hung (stuck network call,
+// an extension awaiting something that never comes, a tool ignoring its abort
+// signal) — every surface keeps showing the spinner, the file stops growing,
+// and nothing ever notices (REQ-0026: 4 silent hours). The monitor interrupts
+// such sessions automatically once they cross STALL_KILL_MS: a synthetic
+// prompt_error tells live viewers why, then destroy() aborts the in-flight
+// prompt and drops the wrapper — badges clear, the human resends to resume.
+// Daemon-process only (this module never loads in the web server); the
+// interval is unref'd so it never keeps the process alive. Gate-paused
+// sessions are NOT running and are never touched; sessions with a pending
+// extension UI request (confirm/select/…) are running but human-paused —
+// likewise exempt (AgentSessionWrapper.hasPendingUiRequests); creation-phase
+// hangs are bounded separately by StartSessionOptions.signal / raceAbort.
+// ----------------------------------------------------------------------------
+
+function startSessionHeartbeatMonitor(): void {
+  const g = globalThis as { __piHeartbeatMonitor?: ReturnType<typeof setInterval> };
+  if (g.__piHeartbeatMonitor) return;
+  const timer = setInterval(() => {
+    for (const [key, session] of getRegistry()) {
+      if (!session.isRunning()) continue;
+      // Awaiting a human answer on an extension dialog — not a zombie. The
+      // pending request is replayed to any (re)connecting viewer (see the
+      // subscribe path), so it stays answerable however long the wait is.
+      if (session.hasPendingUiRequests()) continue;
+      const idleMs = session.activityIdleMs();
+      if (classifyStall(idleMs) !== "kill") continue;
+      const sid = session.sessionId || key;
+      const minutes = Math.round(idleMs / 60_000);
+      console.error(
+        `[pi-web] session ${sid} still running but silent for ${minutes}min — auto-interrupting (heartbeat monitor); resend to resume`,
+      );
+      session.emitSyntheticError(stallInterruptMessage(idleMs));
+      session.destroy();
+    }
+  }, HEARTBEAT_TICK_MS);
+  timer.unref?.();
+  g.__piHeartbeatMonitor = timer;
 }
 
 export interface LiveRpcSessionInfo {
@@ -1155,6 +1246,14 @@ export interface StartSessionOptions {
    *  `subagent` tool (e.g. a Loop's own `agents/`). Loaded as a "loop" source
    *  with highest precedence, bypassing the project-agent confirmation gate. */
   extraAgentDirs?: string[];
+  /** Abort session creation. The returned promise rejects promptly when the
+   *  signal fires — including while creation is hung on something internal
+   *  (e.g. a stuck network call during model resolution) that no timeout of
+   *  its own exists for. JS promises cannot be cancelled, so creation keeps
+   *  running in the background; if it eventually completes anyway, the
+   *  wrapper is destroyed immediately so no live zombie stays in the
+   *  registry (see raceAbort's onLateSettle). */
+  signal?: AbortSignal;
 }
 
 export async function startRpcSession(
@@ -1167,10 +1266,19 @@ export async function startRpcSession(
   const registry = getRegistry();
   const locks = getLocks();
 
+  // Never even start on an already-aborted signal — the caller has moved on.
+  if (options?.signal?.aborted) throw new Error("aborted");
+
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
 
-  const inflight = locks.get(sessionId);
+  // New sessions are requested with sessionId "" — key the start-lock by a
+  // fresh one-time id instead. Keying by "" itself made concurrent creations
+  // (e.g. parallel subagent workers) coalesce onto the FIRST session: the
+  // second caller silently received the first caller's promise, so multiple
+  // workers wrote into one shared child session.
+  const lockKey = sessionId || `__new__${randomUUID()}`;
+  const inflight = locks.get(lockKey);
   if (inflight) return inflight;
 
   const finishStartingSession = trackStartingSession(cwd);
@@ -1212,7 +1320,19 @@ export async function startRpcSession(
     // of workspace or capability toggles. Use the session cwd so project agents
     // (.pi/agents) resolve against the real working directory. Callers (e.g. the
     // Loop runtime) may inject extra trusted agent dirs via StartSessionOptions.
-    const extensionFactories = [createSubagentExtension("global", cwd, options?.extraAgentDirs)];
+    // A cold rebuild (idle eviction + revival from the .jsonl) has no caller to
+    // re-pass them — without re-derivation the workspace's own roles fall back
+    // to project discovery (.pi/agents under the project root) and EVERY
+    // dispatch trips the project-agent confirmation gate, hanging unattended
+    // loop runs on a dialog nobody answers (REQ-0027). The workspace's agents
+    // dir is user-owned (~/.pi/workspaces/**), not repo-controlled, so
+    // re-deriving it as loop-sourced (gate-exempt) is safe.
+    let extraAgentDirs = options?.extraAgentDirs;
+    if (!extraAgentDirs && workspace) {
+      const workspaceAgentsDir = join(workspace.path, ".pi", "agents");
+      if (existsSync(workspaceAgentsDir)) extraAgentDirs = [workspaceAgentsDir];
+    }
+    const extensionFactories = [createSubagentExtension("global", cwd, extraAgentDirs)];
     const resourceLoaderOptions: Record<string, unknown> = workspace
       ? {
           extensionFactories: [...extensionFactories, ...buildWorkspaceExtensions(workspace.manifest, workspace.path)],
@@ -1274,11 +1394,25 @@ export async function startRpcSession(
     wrapper.beginExtensionBinding({ forceEmptySystemPrompt: toolNames?.length === 0 });
 
     return { session: wrapper, realSessionId };
-  })().finally(() => {
-    locks.delete(sessionId);
-    finishStartingSession();
-  });
+  })();
 
-  locks.set(sessionId, starting);
-  return starting;
+  // Abortable creation: stop waiting the moment the signal fires. A creation
+  // that completes afterwards registers a live wrapper nobody owns anymore —
+  // destroy it on arrival so it cannot linger in the registry (idle timer,
+  // running badge, reopenable by id) as a zombie.
+  const result = options?.signal
+    ? raceAbort(starting, options.signal, { onLateSettle: (value) => value.session.destroy() })
+    : starting;
+
+  // Lock cleanup follows the *raced* promise: on abort it settles long before
+  // (possibly instead of) the underlying creation, and the lock must not leak
+  // in that case. The no-op handlers keep the rejection handled by this chain.
+  const cleanup = (): void => {
+    locks.delete(lockKey);
+    finishStartingSession();
+  };
+  result.then(cleanup, cleanup);
+
+  locks.set(lockKey, result);
+  return result;
 }

@@ -54,9 +54,10 @@ export async function runImporterForWorkspace(
   const lastSyncedAt = now.toISOString();
   const { path: workspacePath } = await getWorkspace(workspaceId);
 
-  // Dedup index from existing work items.
-  const { items } = await listWorkItems(workspacePath);
-  const index = buildExternalIndex(items);
+  // Dedup index from existing work items — archived included, so an archived
+  // item is never re-created from a source that still lists it.
+  const { items, archivedItems } = await listWorkItems(workspacePath);
+  const index = buildExternalIndex([...items, ...archivedItems]);
 
   const sourceItems = await importer.listAssigned({});
 

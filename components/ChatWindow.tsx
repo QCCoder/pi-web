@@ -217,6 +217,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     isAutoModelSelection,
     agentPhase,
     toolExecutionUpdates,
+    hasEarlierMessages, loadingEarlier, loadEarlier,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
@@ -251,7 +252,9 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   }, [session?.id, reloadSignal]);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
-  // When it becomes visible, load the next page of older messages.
+  // When it becomes visible: grow the local render window first; when the
+  // whole loaded window is already rendered and the server has older messages
+  // (L3 tail-first loading), fetch the next earlier page instead.
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
@@ -261,14 +264,45 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         if (entries[0]?.isIntersecting) {
           // Save distance from top before prepending to restore scroll later
           prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          setVisibleCount((prev) => getNextVisibleCount(prev));
+          if (visibleCount < messages.length) {
+            setVisibleCount((prev) => getNextVisibleCount(prev));
+          } else if (hasEarlierMessages && !loadingEarlier) {
+            void loadEarlier();
+          }
         }
       },
       { root: container, threshold: 0 }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [visibleCount, messages.length, scrollContainerRef]);
+  }, [visibleCount, messages.length, hasEarlierMessages, loadingEarlier, loadEarlier, scrollContainerRef]);
+
+  // Prepend detection (L3): when older messages arrive at the FRONT of the
+  // list, grow the render window by the same amount so the top of the freshly
+  // loaded page is visible (not re-clipped back to the tail). A replacement
+  // whose head doesn't match the previous head at the expected offset is a
+  // branch/context swap — reset the window instead.
+  const prevWindowHeadRef = useRef<{ head: string | undefined; length: number }>({ head: undefined, length: 0 });
+  useEffect(() => {
+    const prev = prevWindowHeadRef.current;
+    const head = entryIds[0];
+    if (prev.head !== undefined && entryIds.length > prev.length) {
+      const delta = entryIds.length - prev.length;
+      if (entryIds[delta - 1] === prev.head || entryIds[delta] === prev.head) {
+        // true prepend (entry inserted before the old head)
+        setVisibleCount((count) => count + delta);
+        prevWindowHeadRef.current = { head, length: entryIds.length };
+        return;
+      }
+      if (head !== prev.head) {
+        // different head entirely — new context window (branch switch / reload)
+        setVisibleCount(VISIBLE_PAGE_SIZE);
+        prevWindowHeadRef.current = { head, length: entryIds.length };
+        return;
+      }
+    }
+    prevWindowHeadRef.current = { head, length: entryIds.length };
+  }, [entryIds]);
 
   // After visibleCount increases (more messages prepended), restore the
   // scroll position so the viewport doesn't jump.
@@ -763,9 +797,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               const { startIndex, hasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
               const nodes = (
                 <>
-                  {hasMore && (
+                  {(hasMore || hasEarlierMessages) && (
                      <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                       {t("chat.loadEarlier", { count: startIndex })}
+                      {loadingEarlier
+                        ? t("chat.loading")
+                        : hasMore
+                          ? t("chat.loadEarlier", { count: startIndex })
+                          : t("chat.loadEarlierCount", { count: 100 })}
                     </div>
                   )}
                   {rendered.slice(startIndex)}

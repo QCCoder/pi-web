@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { deleteLoopDefinition, updateLoopDefinition, type UpdateLoopInput } from "@/lib/loop/authoring";
 import { readLoopDefinition } from "@/lib/loop/store";
 import { loopErrorResponse } from "@/lib/loop/web";
-import { effectiveCapabilities, getWorkspace } from "@/lib/workspaces/service";
+import { getWorkspace } from "@/lib/workspaces/service";
 
 type Params = { params: Promise<{ id: string; loopId: string }> };
 
@@ -13,7 +13,7 @@ export async function GET(_request: Request, { params }: Params) {
   try {
     const { id, loopId } = await params;
     const { path, manifest } = await getWorkspace(id);
-    if (!effectiveCapabilities(manifest).includes("loop")) {
+    if (!manifest.capabilities.includes("loop")) {
       return NextResponse.json({ error: "loop capability is not enabled" }, { status: 409 });
     }
     const loop = await readLoopDefinition({ id: manifest.id, name: manifest.name, path }, loopId);
@@ -38,7 +38,7 @@ export async function PATCH(request: Request, { params }: Params) {
   try {
     const { id, loopId } = await params;
     const { path, manifest } = await getWorkspace(id);
-    if (!effectiveCapabilities(manifest).includes("loop")) {
+    if (!manifest.capabilities.includes("loop")) {
       return NextResponse.json({ error: "loop capability is not enabled" }, { status: 409 });
     }
     const loop = await updateLoopDefinition(
@@ -57,7 +57,7 @@ export async function DELETE(_request: Request, { params }: Params) {
   try {
     const { id, loopId } = await params;
     const { path, manifest } = await getWorkspace(id);
-    if (!effectiveCapabilities(manifest).includes("loop")) {
+    if (!manifest.capabilities.includes("loop")) {
       return NextResponse.json({ error: "loop capability is not enabled" }, { status: 409 });
     }
     await deleteLoopDefinition({ id: manifest.id, name: manifest.name, path }, loopId);

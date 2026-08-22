@@ -33,6 +33,7 @@ import {
   type WorkspaceCapability,
   type WorkspaceManifest,
   type WorkspaceIndex,
+  type WorkspaceIndexV1,
   type WorkspaceIndexEntry,
   type WorkspaceRepository,
   type WorkspaceRepositoryKind,
@@ -43,7 +44,10 @@ import {
 const execFileAsync = promisify(execFile);
 const WORKSPACE_DIRECTORY_RE = /^workspace-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 const WORKSPACE_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const WORKSPACE_INDEX_SCHEMA_VERSION = 1 as const;
+const WORKSPACE_INDEX_SCHEMA_VERSION = 2 as const;
+/** Schema versions an on-disk index may carry. v1 indexes are migrated in place
+ *  on first read (see `migrateIndexV2`); anything older/newer is rejected. */
+const ACCEPTED_INDEX_SCHEMA_VERSIONS = new Set([1, 2]);
 
 export class WorkspaceValidationError extends Error {}
 export class WorkspaceConflictError extends Error {}
@@ -131,22 +135,18 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "work-items",
   "repositories",
   "knowledge",
-  "overview",
   "workflows",
   // Module capabilities (toggled per-workspace, not surfaced in the init checklist):
   "requirement-sources",
   "loop",
 ];
 
-/** Capabilities that have been retired (their module was removed). Legacy
- *  manifests on disk may still carry them; they are silently stripped when a
- *  manifest is read or a PATCH submits a full stale list — never a validation
- *  error, so old workspaces keep loading and self-heal on the next save. */
-const RETIRED_CAPABILITIES: ReadonlySet<string> = new Set([
-  "feishu-transport",
-  "feishu-channel",
-  "wecom-channel",
-]);
+/** Retired capability values that legacy manifests may still carry. They are
+ *  stripped on read (BEFORE parseCapabilities validation) so old manifests keep
+ *  parsing; NEW writes are rejected by parseCapabilities because the values are
+ *  no longer in ALL_WORKSPACE_CAPABILITIES. The overview dashboard became the
+ *  unconditional landing view, so `overview` no longer gates anything. */
+const LEGACY_READ_CAPABILITIES = new Set(["overview"]);
 
 export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   if (!Array.isArray(value)) {
@@ -155,12 +155,10 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   const result: WorkspaceCapability[] = [];
   const seen = new Set<string>();
   for (const item of value) {
-    if (typeof item !== "string") {
-      throw new WorkspaceValidationError(`Unknown capability: ${String(item)}`);
-    }
-    // Retired capabilities are dropped, not rejected.
-    if (RETIRED_CAPABILITIES.has(item)) continue;
-    if (!ALL_WORKSPACE_CAPABILITIES.includes(item as WorkspaceCapability)) {
+    if (
+      typeof item !== "string"
+      || !ALL_WORKSPACE_CAPABILITIES.includes(item as WorkspaceCapability)
+    ) {
       throw new WorkspaceValidationError(`Unknown capability: ${String(item)}`);
     }
     if (seen.has(item)) continue;
@@ -168,12 +166,6 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
     result.push(item as WorkspaceCapability);
   }
   return result;
-}
-
-/** Capabilities currently in effect for a workspace: the cached snapshot, else
- *  the bare mandatory minimum (`sessions` + `explorer`). */
-export function effectiveCapabilities(manifest: WorkspaceManifest): WorkspaceCapability[] {
-  return manifest.capabilities ?? (["sessions", "explorer"] as WorkspaceCapability[]);
 }
 
 export function validateWorkspaceSlug(slug: string): string {
@@ -262,8 +254,13 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     throw new WorkspaceValidationError("agent must be an object");
   }
   const agentRecord = agent as Record<string, unknown>;
-  const capabilities =
-    record.capabilities === undefined ? undefined : parseCapabilities(record.capabilities);
+  const capabilities = record.capabilities === undefined
+    ? (() => { throw new WorkspaceValidationError("capabilities is required"); })()
+    : parseCapabilities(
+      Array.isArray(record.capabilities)
+        ? record.capabilities.filter((item) => !LEGACY_READ_CAPABILITIES.has(item as string))
+        : record.capabilities,
+    );
   const gitValue = record.git;
   let git: WorkspaceManifest["git"];
   if (gitValue !== undefined) {
@@ -308,7 +305,7 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
         ? { thinkingLevel: optionalString(agentRecord.thinking_level, "agent.thinking_level") }
         : {}),
     },
-    ...(capabilities ? { capabilities } : {}),
+    capabilities,
     ...(git ? { git } : {}),
     workItems: {
       nextRequirementNumber: parsePositiveInteger(
@@ -344,7 +341,7 @@ export function serializeWorkspaceManifest(manifest: WorkspaceManifest): string 
       ...(manifest.agent.defaultModel ? { default_model: manifest.agent.defaultModel } : {}),
       ...(manifest.agent.thinkingLevel ? { thinking_level: manifest.agent.thinkingLevel } : {}),
     },
-    ...(manifest.capabilities ? { capabilities: manifest.capabilities } : {}),
+    capabilities: manifest.capabilities,
     ...(manifest.git
       ? {
           git: {
@@ -417,7 +414,7 @@ export function workspaceSummary(workspacePath: string, manifest: WorkspaceManif
     slug: manifest.slug,
     name: manifest.name,
     path: workspacePath,
-    capabilities: [...effectiveCapabilities(manifest)],
+    capabilities: [...manifest.capabilities],
     available: true,
     configStatus: "ready",
     skills: [...manifest.skills],
@@ -455,9 +452,7 @@ async function ensureGitIdentity(repositoryPath: string): Promise<void> {
 export async function commitWorkspaceChanges(
   workspacePath: string,
   message: string,
-  manifestValue?: WorkspaceManifest,
 ): Promise<void> {
-  const manifest = manifestValue ?? await readWorkspaceManifest(workspacePath);
   // Auto-commit only when the workspace is an actual git repository.
   try {
     await gitOutput(workspacePath, ["rev-parse", "--is-inside-work-tree"]);
@@ -483,7 +478,7 @@ async function updateManagedRepositoryInstructions(
   // a segment whose markers are absent is left untouched (never created here). This
   // mirrors the historical repositories-only behavior and never fuzzy-matches user
   // content outside the markers (redesign decision 9, high-risk trap).
-  const capabilities = effectiveCapabilities(manifest);
+  const capabilities = manifest.capabilities;
   const hasRepositories = capabilities.includes("repositories");
   const hasKnowledge = capabilities.includes("knowledge");
   if (!hasRepositories && !hasKnowledge) return;
@@ -642,7 +637,7 @@ export async function addWorkspaceRepository(
     manifest.updatedAt = new Date().toISOString();
     await writeWorkspaceManifest(workspace.path, manifest);
     await updateManagedRepositoryInstructions(workspace.path, manifest);
-    await commitWorkspaceChanges(workspace.path, `workspace: add ${kind} repository ${alias}`, manifest);
+    await commitWorkspaceChanges(workspace.path, `workspace: add ${kind} repository ${alias}`);
     return repository;
   });
 }
@@ -667,7 +662,6 @@ export async function removeWorkspaceRepository(
     await commitWorkspaceChanges(
       workspace.path,
       `workspace: remove ${repository.kind} repository ${repository.alias}`,
-      manifest,
     );
     return { repository };
   });
@@ -692,18 +686,17 @@ export async function restoreWorkspaceRepository(
     await commitWorkspaceChanges(
       workspace.path,
       `workspace: restore ${repository.kind} repository ${repository.alias}`,
-      manifest,
     );
     return { repository };
   });
 }
 
-function parseWorkspaceIndex(value: unknown): WorkspaceIndex {
+function parseWorkspaceIndex(value: unknown): WorkspaceIndex | WorkspaceIndexV1 {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new WorkspaceValidationError("Global Workspace index must be an object");
   }
   const record = value as Record<string, unknown>;
-  if (record.schema_version !== WORKSPACE_INDEX_SCHEMA_VERSION) {
+  if (typeof record.schema_version !== "number" || !ACCEPTED_INDEX_SCHEMA_VERSIONS.has(record.schema_version)) {
     throw new WorkspaceValidationError(
       `Unsupported global Workspace index schema: ${String(record.schema_version)}`,
     );
@@ -735,10 +728,16 @@ function parseWorkspaceIndex(value: unknown): WorkspaceIndex {
       ),
     };
   });
-  return { schemaVersion: WORKSPACE_INDEX_SCHEMA_VERSION, workspaces };
+  // v1 indexes are upgraded in place by `migrateIndexV2` (see below); parse
+  // leniently here and carry the on-disk version through so the migration knows
+  // to run.
+  return { schemaVersion: record.schema_version as 1 | 2, workspaces };
 }
+/** Index objects before/after the in-place v1→v2 migration. Every write path
+ *  normalizes to v2 first (see `migrateIndexV2`). */
+type MutableWorkspaceIndex = Omit<WorkspaceIndex, "schemaVersion"> & { schemaVersion: 1 | 2 };
 
-function serializeWorkspaceIndex(index: WorkspaceIndex): string {
+function serializeWorkspaceIndex(index: MutableWorkspaceIndex): string {
   return stringify({
     schema_version: index.schemaVersion,
     workspaces: index.workspaces.map((workspace) => ({
@@ -752,7 +751,7 @@ function serializeWorkspaceIndex(index: WorkspaceIndex): string {
 }
 
 async function readWorkspaceIndex(root?: string): Promise<{
-  index: WorkspaceIndex;
+  index: WorkspaceIndex | WorkspaceIndexV1;
   exists: boolean;
 }> {
   try {
@@ -769,7 +768,7 @@ async function readWorkspaceIndex(root?: string): Promise<{
   }
 }
 
-async function writeWorkspaceIndex(index: WorkspaceIndex, root?: string): Promise<void> {
+async function writeWorkspaceIndex(index: MutableWorkspaceIndex, root?: string): Promise<void> {
   await writeFileAtomic(getWorkspaceIndexPath(root), serializeWorkspaceIndex(index));
 }
 
@@ -780,7 +779,8 @@ async function updateWorkspaceIndex(
   const indexPath = getWorkspaceIndexPath(root);
   await withWorkspaceWriteLock(indexPath, async () => {
     const { index } = await readWorkspaceIndex(root);
-    operation(index);
+    if (index.schemaVersion === 1) await migrateIndexV2(index, root);
+    operation(index as WorkspaceIndex);
     await writeWorkspaceIndex(index, root);
   });
 }
@@ -809,6 +809,7 @@ async function registerWorkspacePath(
   const indexPath = getWorkspaceIndexPath(root);
   await withWorkspaceWriteLock(indexPath, async () => {
     const { index } = await readWorkspaceIndex(root);
+    if (index.schemaVersion === 1) await migrateIndexV2(index, root);
     const pathIndex = index.workspaces.findIndex((entry) => entry.path === workspacePath);
     const idIndex = index.workspaces.findIndex((entry) => entry.id === manifest.id);
     if (idIndex >= 0 && idIndex !== pathIndex) {
@@ -877,13 +878,83 @@ async function migrateManagedWorkspaces(root: string, indexRoot?: string): Promi
   return index;
 }
 
+/** One-shot v1 → v2 index migration (the "一刀切" cut): every registered
+ *  workspace's manifest is rewritten so `capabilities` is explicit and clean —
+ *  materialized as the mandatory minimum when absent, legacy retired values
+ *  (feishu-transport / feishu-channel / wecom-channel) stripped. After this runs
+ *  the reader is strict: a manifest without `capabilities` is config-invalid,
+ *  and `parseCapabilities` rejects retired values instead of silently dropping
+ *  them. Per-workspace failures never abort the migration — the workspace just
+ *  surfaces as config-invalid afterwards. */
+const MIGRATION_RETIRED_CAPABILITIES = new Set([
+  "feishu-transport",
+  "feishu-channel",
+  "wecom-channel",
+]);
+
+async function migrateManifestFile(workspacePath: string): Promise<boolean> {
+  const filePath = join(workspacePath, ".pi", "workspace.yaml");
+  let raw: unknown;
+  try {
+    raw = parse(await readFile(filePath, "utf8"));
+  } catch {
+    return false; // unreadable/corrupt — surfaces as config-invalid on read
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const record = raw as Record<string, unknown>;
+  let changed = false;
+  let capabilities: string[];
+  if (Array.isArray(record.capabilities)) {
+    const filtered = record.capabilities.filter(
+      (item) => typeof item === "string" && !MIGRATION_RETIRED_CAPABILITIES.has(item),
+    );
+    if (filtered.length !== record.capabilities.length) {
+      record.capabilities = filtered;
+      changed = true;
+    }
+    capabilities = filtered;
+  } else {
+    capabilities = ["sessions", "explorer"];
+    record.capabilities = capabilities;
+    changed = true;
+  }
+  if (capabilities.length === 0) {
+    record.capabilities = ["sessions", "explorer"];
+    changed = true;
+  }
+  if (!changed) return false;
+  let manifest: WorkspaceManifest;
+  try {
+    manifest = parseWorkspaceManifest(record);
+  } catch {
+    return false; // other validation errors — leave for the config-invalid path
+  }
+  await writeWorkspaceManifest(workspacePath, manifest);
+  return true;
+}
+
+async function migrateIndexV2(
+  index: Omit<WorkspaceIndexV1, "schemaVersion"> & { schemaVersion: 1 | 2 },
+  root?: string,
+): Promise<void> {
+  for (const entry of index.workspaces) {
+    try {
+      await migrateManifestFile(entry.path);
+    } catch {
+      // Best-effort per workspace; strict parsing surfaces real problems.
+    }
+  }
+  index.schemaVersion = 2;
+  await writeWorkspaceIndex(index, root);
+}
+
 export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummary[]> {
   const workspaceRoot = root ?? getWorkspaceRoot();
   const stored = await readWorkspaceIndex(root);
   const index = stored.exists
     ? stored.index
     : await migrateManagedWorkspaces(workspaceRoot, root);
-  const summaries: Array<{ summary: WorkspaceSummary; lastOpenedAt: string }> = [];
+  if (index.schemaVersion === 1) await migrateIndexV2(index, root);  const summaries: Array<{ summary: WorkspaceSummary; lastOpenedAt: string }> = [];
   let snapshotsChanged = false;
   for (const entry of index.workspaces) {
     try {
@@ -1006,7 +1077,7 @@ export async function createWorkspace(
     if (needsGitRepo) {
       await writeFile(join(temporaryPath, ".gitignore"), SOFTWARE_DEVELOPMENT_GITIGNORE, "utf8");
       await execFileAsync("git", ["init", "--initial-branch=main"], { cwd: temporaryPath });
-      await commitWorkspaceChanges(temporaryPath, "workspace: initialize", manifest);
+      await commitWorkspaceChanges(temporaryPath, "workspace: initialize");
     }
     await rename(temporaryPath, workspacePath);
   } catch (error) {
@@ -1061,7 +1132,7 @@ export async function updateWorkspace(
     }
     latest.updatedAt = new Date().toISOString();
     await writeWorkspaceManifest(current.path, latest);
-    await commitWorkspaceChanges(current.path, "workspace: update settings", latest);
+    await commitWorkspaceChanges(current.path, "workspace: update settings");
     await registerWorkspacePath(current.path, latest, root, false);
     return workspaceSummary(current.path, latest);
   });
@@ -1124,7 +1195,13 @@ export async function importWorkspace(
   try {
     manifest = await readWorkspaceManifest(workspacePath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      // Boundary normalization (the same one-shot v2 migration the index runs):
+      // an unregistered directory whose manifest predates explicit capabilities
+      // is upgraded in place; anything still invalid after that rethrows.
+      await migrateManifestFile(workspacePath);
+      manifest = await readWorkspaceManifest(workspacePath);
+    } else {
     const now = new Date().toISOString();
     manifest = {
       schemaVersion: WORKSPACE_SCHEMA_VERSION,
@@ -1145,6 +1222,7 @@ export async function importWorkspace(
       updatedAt: now,
     };
     await writeWorkspaceManifest(workspacePath, manifest);
+    }
   }
   if (asCopy) {
     const now = new Date().toISOString();

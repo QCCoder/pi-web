@@ -31,21 +31,24 @@ export function createWorkspaceWorkItemExtension(
       pi.registerTool({
         name: "workspace_list_work_items",
         label: "List Workspace Work Items",
-        description: "List Requirements and Bugs in the current Pi Workspace.",
+        description: "List Requirements and Bugs in the current Pi Workspace. Archived items are excluded unless archived=true.",
         promptSnippet: "List file-backed Requirements and Bugs for this Workspace",
         parameters: Type.Object({
           type: Type.Optional(Type.Union([
             Type.Literal("requirement"),
             Type.Literal("bug"),
           ])),
+          archived: Type.Optional(Type.Boolean({
+            description: "Return archived items instead of active ones. Default false.",
+          })),
         }),
         execute: async (_callId, params) => {
           const data = await listWorkItems(workspacePath);
+          const source = params.archived ? data.archivedItems : data.items;
           return result({
-            ...data,
             items: params.type
-              ? data.items.filter((item) => item.type === params.type)
-              : data.items,
+              ? source.filter((item) => item.type === params.type)
+              : source,
           });
         },
       });

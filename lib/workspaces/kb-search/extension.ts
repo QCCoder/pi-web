@@ -15,7 +15,6 @@
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-  effectiveCapabilities,
   readWorkspaceManifest,
   workspaceRepositoryPath,
 } from "../service.ts";
@@ -50,7 +49,7 @@ async function resolveActiveKnowledgeRepos(
   } catch {
     return [];
   }
-  if (!effectiveCapabilities(manifest).includes("knowledge")) return [];
+  if (!manifest.capabilities.includes("knowledge")) return [];
   return manifest.repositories
     .filter(isActiveKnowledgeRepo)
     .map((repository) => ({

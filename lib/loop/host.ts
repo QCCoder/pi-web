@@ -12,7 +12,7 @@ import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { seedExecutionSession } from "./seed.ts";
 import { WorkItemNotFoundError } from "../work-items/service.ts";
 import { WorkspaceNotFoundError } from "../workspaces/service.ts";
-import { getRpcSession, getRunningRpcSessionIds, getLiveRpcSessionInfos, hasBusyRpcSessionForCwd, startRpcSession, subscribeRunningSessions, destroyRpcSessionsForCwd, type AgentSessionWrapper } from "../rpc-manager.ts";
+import { getRpcSession, getRunningRpcSessionIds, getLiveRpcSessionInfos, getStalledSessionSnapshot, hasBusyRpcSessionForCwd, startRpcSession, subscribeRunningSessions, destroyRpcSessionsForCwd, type AgentSessionWrapper } from "../rpc-manager.ts";
 import { resolveSessionPath } from "../session-reader.ts";
 import { generateSessionTitle } from "../session-title.ts";
 import type { TriggerCommand } from "./types.ts";
@@ -154,7 +154,10 @@ export function createLoopHost() {
         // sessions, subagent children AND loop orchestrators alike — so this
         // single set is the complete "what is running" answer for the whole
         // process (the web-side loop-badge merge hack becomes unnecessary).
-        return json(response, 200, { ids: getRunningRpcSessionIds() });
+        // `stalled` is additive heartbeat data (sessions running but silent past
+        // STALL_WARN_MS — see lib/session-heartbeat.ts); consumers that only
+        // read `ids` are unaffected.
+        return json(response, 200, { ids: getRunningRpcSessionIds(), stalled: getStalledSessionSnapshot() });
       }
       const runningSse = url.pathname === "/v1/sessions/running/events";
       if (request.method === "GET" && runningSse) {

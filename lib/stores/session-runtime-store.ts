@@ -59,6 +59,12 @@ export interface SessionRuntimeState {
   activeLeafId: string | null;
   forkingEntryId: string | null;
 
+  // --- 尾部窗口（L3 tail-first loading）---
+  /** 服务端还持有更早的消息（当前 messages 是尾部窗口）。 */
+  hasEarlierMessages: boolean;
+  /** 更早页正在加载（顶部哨兵去重）。 */
+  loadingEarlier: boolean;
+
   // --- 流式 tool 执行进度（tool_execution_update）---
   /** toolCallId → partial result，供运行中的 tool call 块实时渲染（如 subagent 进度）。
    *  最终 toolResult 消息落地后由 ChatWindow 以更高优先级覆盖；每个 agent_start 清空。 */
@@ -92,6 +98,8 @@ export const EMPTY_RUNTIME: SessionRuntimeState = {
   activeLeafId: null,
   forkingEntryId: null,
   toolExecutionUpdates: {},
+  hasEarlierMessages: false,
+  loadingEarlier: false,
   scrollPosition: null,
   lastActiveAt: 0,
 };
@@ -119,6 +127,8 @@ export function createDefaultSessionRuntimeState(): SessionRuntimeState {
     activeLeafId: null,
     forkingEntryId: null,
     toolExecutionUpdates: {},
+    hasEarlierMessages: false,
+    loadingEarlier: false,
     scrollPosition: null,
     lastActiveAt: Date.now(),
   };

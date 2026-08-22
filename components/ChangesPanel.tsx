@@ -21,16 +21,20 @@ function repoLabel(root: string, cwd: string): string {
 }
 
 /**
- * The Changes panel body. Renders a flat file list when there is a single
- * repository, and a per-repository collapsible grouping (each defaulting to
- * collapsed) when the cwd spans multiple repositories. Each multi-repo group
- * header shows its own file count and +/- subtotal.
+ * The Changes panel body. Always groups changed files by repository — even
+ * when a single repo is dirty, its header (repo name + count + +/- subtotal)
+ * keeps the boundary visible in workspaces that hold multiple repos. The
+ * cwd-enclosing repo group (first in `groups`) defaults to expanded; nested
+ * repo groups default to collapsed.
  *
  * Grand totals live in the section header (SessionSidebar), not here.
  */
 export function ChangesPanel({ groups, cwd, onOpenFile }: Props) {
   const { t } = useI18n();
-  const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
+  // groups[0] is the cwd-enclosing repo (buildRepoGroups sorts primary
+  // first), so it starts expanded; every other group starts collapsed.
+  const [expandedRepos, setExpandedRepos] = useState<Set<string>>(() =>
+    groups[0] ? new Set([groups[0].repositoryRoot]) : new Set());
 
   const toggleRepo = (root: string) => {
     setExpandedRepos((prev) => {
@@ -45,17 +49,6 @@ export function ChangesPanel({ groups, cwd, onOpenFile }: Props) {
     return (
       <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 11 }}>
         {t("sidebar.noChanges")}
-      </div>
-    );
-  }
-
-  if (groups.length === 1) {
-    const group = groups[0];
-    return (
-      <div style={{ padding: "0 4px 2px" }}>
-        {group.files.map((status) => (
-          <ChangeRow key={status.filePath} status={status} cwd={cwd} onOpenFile={onOpenFile} t={t} />
-        ))}
       </div>
     );
   }

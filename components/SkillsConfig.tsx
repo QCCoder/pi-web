@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type {
@@ -694,6 +695,8 @@ export function SkillsConfig({
   workspace = null,
   onWorkspaceSkillsChange,
   onClose,
+  embedded = false,
+  split,
 }: {
   cwd: string;
   globalOnly?: boolean;
@@ -703,7 +706,14 @@ export function SkillsConfig({
    *  `disable-model-invocation` frontmatter toggle. */
   workspace?: WorkspaceSummary | null;
   onWorkspaceSkillsChange?: (workspace: WorkspaceSummary) => void;
-  onClose: () => void;
+  onClose?: () => void;
+  /** Embedded (middle-column panel) mode: fill container, no overlay/header. */
+  embedded?: boolean;
+  /** Split (three-column) mode: the skill list renders inline (the middle
+   *  column) while the detail/add panel + footer portal into the right
+   *  column's config area (`portalTarget` = AppShell's config portal node).
+   *  Modal/embedded modes are unchanged. */
+  split?: { portalTarget: HTMLElement | null };
 }) {
   const isMobile = useIsMobile();
   const workspaceMode = workspace !== null;
@@ -715,6 +725,16 @@ export function SkillsConfig({
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
+  // 来源分组折叠态：默认展开，仅本会话内存态（不持久化——分组是低频调整）。
+  const [collapsedSkillGroups, setCollapsedSkillGroups] = useState<Set<string>>(new Set());
+  const toggleSkillGroup = useCallback((label: string) => {
+    setCollapsedSkillGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }, []);
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, SkillUpdateResult>>({});
   const [checkingUpdates, setCheckingUpdates] = useState<Set<string>>(new Set());
   const [checkingAll, setCheckingAll] = useState(false);
@@ -934,83 +954,14 @@ export function SkillsConfig({
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 1000,
-        background: "rgba(0,0,0,0.35)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        style={{
-          width: isMobile ? "calc(100vw - 16px)" : 860,
-          maxWidth: "calc(100vw - 16px)",
-          height: isMobile ? "calc(100dvh - 16px)" : "78vh",
-          maxHeight: "calc(100dvh - 16px)",
-          background: "var(--bg)",
-          border: "1px solid var(--border)",
-          borderRadius: 10,
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
-          overflow: "hidden",
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "12px 18px",
-            borderBottom: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <span
-              style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}
-            >
-               {t("common.skills")}
-            </span>
-            <code
-              style={{
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                maxWidth: 320,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {globalOnly ? "全局" : shortenPath(cwd)}
-            </code>
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 20,
-              lineHeight: 1,
-              padding: "2px 6px",
-            }}
-          >
-            ×
-          </button>
-        </div>
+  const splitMode = split != null;
+  const portalTarget = split?.portalTarget ?? null;
 
+  // Context banners (workspace whitelist hint + project-trust notice) — they
+  // explain the detail pane's toggle semantics, so in split mode they travel
+  // with the detail into the right column.
+  const contextBanners = (
+    <>
         {workspaceMode && (
           <div
             style={{
@@ -1040,22 +991,26 @@ export function SkillsConfig({
             {t("trust.skillsNotLoaded")}
           </div>
         )}
+    </>
+  );
 
-        {/* Body */}
-        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
-          {/* Left: skill list */}
-          <div
-            style={{
-              width: isMobile ? "100%" : 210,
-              maxHeight: isMobile ? "40vh" : undefined,
-              borderRight: isMobile ? "none" : "1px solid var(--border)",
-              borderBottom: isMobile ? "1px solid var(--border)" : "none",
-              display: "flex",
-              flexDirection: "column",
-              flexShrink: 0,
-              background: "var(--bg-panel)",
-            }}
-          >
+  // Left: skill list — shared by every mode. In split mode it fills the
+  // middle column (width 100%); in modal/embedded mode it is the fixed-width
+  // left pane of the internal two-pane body.
+  const listPane = (
+    <div style={splitMode
+      ? { width: "100%", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)" }
+      : {
+          width: isMobile ? "100%" : embedded ? 160 : 210,
+          maxHeight: isMobile ? "40vh" : undefined,
+          borderRight: isMobile ? "none" : "1px solid var(--border)",
+          borderBottom: isMobile ? "1px solid var(--border)" : "none",
+          display: "flex",
+          flexDirection: "column",
+          flexShrink: 0,
+          background: "var(--bg-panel)",
+        }}
+    >
             <div style={{ flex: 1, overflowY: "auto", padding: "8px 6px" }}>
               {loading ? (
                 <div
@@ -1125,22 +1080,51 @@ export function SkillsConfig({
                     if (grpSkills.length > 0)
                       groups.push({ label, skills: grpSkills });
                   }
-                  return groups.map(
-                    ({ label: grpLabel, skills: grpSkills }) => (
+                  // 每组内启用的排最前（组结构保留），组头可折叠。
+                  const collapsedGroups = collapsedSkillGroups;
+                  const groupsWithOrder = groups.map(({ label, skills: grpSkills }) => ({
+                    label,
+                    skills: [...grpSkills].sort((a, b) =>
+                      Number(isEnabled(b)) - Number(isEnabled(a))),
+                  }));
+                  return groupsWithOrder.map(
+                    ({ label: grpLabel, skills: grpSkills }) => {
+                      const collapsed = collapsedGroups.has(grpLabel);
+                      return (
                       <div key={grpLabel} style={{ marginBottom: 6 }}>
                         <div
+                          onClick={() => toggleSkillGroup(grpLabel)}
+                          title={collapsed ? "展开" : "收起"}
                           style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 5,
                             padding: "4px 8px 3px",
                             fontSize: 10,
                             fontWeight: 600,
                             color: "var(--text-dim)",
                             textTransform: "uppercase",
                             letterSpacing: "0.06em",
+                            cursor: "pointer",
+                            userSelect: "none",
                           }}
                         >
-                          {grpLabel}
+                          <span
+                            aria-hidden="true"
+                            style={{
+                              fontSize: 8,
+                              lineHeight: 1,
+                              transform: collapsed ? "none" : "rotate(90deg)",
+                              transition: "transform 0.15s",
+                              flexShrink: 0,
+                            }}
+                          >
+                            ▶
+                          </span>
+                          <span>{grpLabel}</span>
+                          <span style={{ fontWeight: 400 }}>{grpSkills.length}</span>
                         </div>
-                        {grpSkills.map((skill) => {
+                        {!collapsed && grpSkills.map((skill) => {
                           const isSelected =
                             !addMode && selected === skill.filePath;
                           const disabled = !isEnabled(skill);
@@ -1226,7 +1210,8 @@ export function SkillsConfig({
                           );
                         })}
                       </div>
-                    ),
+                      );
+                    },
                   );
                 })()
               )}
@@ -1276,10 +1261,13 @@ export function SkillsConfig({
                  {t("i18n.addSkill")}
               </div>
             </div>
-          </div>
+    </div>
+  );
 
-          {/* Right: detail or add panel */}
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+  // Right: detail or add panel — shared by every mode (portaled into the
+  // right column in split mode; addMode replaces the detail).
+  const detailPane = (
+    <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
             {addMode ? (
               <AddSkillPanel
                 cwd={cwd}
@@ -1341,20 +1329,22 @@ export function SkillsConfig({
                  {t("i18n.selectSkill")}
               </div>
             )}
-          </div>
-        </div>
+    </div>
+  );
 
-        {/* Footer */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "10px 18px",
-            borderTop: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
+  // Footer — 检查更新 / close. Stays with the detail pane: embedded renders
+  // it in-panel, split portals it into the right column.
+  const footerPane = (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "10px 18px",
+        borderTop: "1px solid var(--border)",
+        flexShrink: 0,
+      }}
+    >
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {skills.some((skill) => Boolean(skill.install)) && (
               <button
@@ -1408,7 +1398,129 @@ export function SkillsConfig({
           >
              {t("i18n.close")}
           </button>
+    </div>
+  );
+
+  if (splitMode) {
+    // Split (three-column) mode: the skill list renders inline (middle column,
+    // under AppShell's PanelHeader) while the banners + detail/add panel +
+    // footer portal into the right column's config area. One component
+    // instance keeps every bit of state — selection, toggles, add mode.
+    return (
+      <>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }}>
+          {listPane}
         </div>
+        {portalTarget
+          ? createPortal(
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
+                {contextBanners}
+                {detailPane}
+                {footerPane}
+              </div>,
+              portalTarget,
+            )
+          : null}
+      </>
+    );
+  }
+
+  return (
+    <div
+      style={embedded
+        ? { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }
+        : {
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+      onClick={embedded ? undefined : (e) => {
+        if (e.target === e.currentTarget) onClose?.();
+      }}
+    >
+      <div
+        style={embedded
+          ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }
+          : {
+              width: isMobile ? "calc(100vw - 16px)" : 860,
+              maxWidth: "calc(100vw - 16px)",
+              height: isMobile ? "calc(100dvh - 16px)" : "78vh",
+              maxHeight: "calc(100dvh - 16px)",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              display: "flex",
+              flexDirection: "column",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+              overflow: "hidden",
+            }}
+      >
+        {/* Header (suppressed in embedded mode — the panel header carries it) */}
+        {!embedded && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "12px 18px",
+            borderBottom: "1px solid var(--border)",
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+            <span
+              style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}
+            >
+               {t("common.skills")}
+            </span>
+            <code
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                fontFamily: "var(--font-mono)",
+                maxWidth: 320,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {globalOnly ? "全局" : shortenPath(cwd)}
+            </code>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 20,
+              lineHeight: 1,
+              padding: "2px 6px",
+            }}
+          >
+            ×
+          </button>
+        </div>
+        )}
+
+        {contextBanners}
+
+        {/* Body */}
+        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
+          {/* Left: skill list */}
+          {listPane}
+
+          {/* Right: detail or add panel */}
+          {detailPane}
+        </div>
+
+        {/* Footer */}
+        {footerPane}
       </div>
     </div>
   );

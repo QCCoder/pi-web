@@ -2,22 +2,37 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { FileExplorer } from "./FileExplorer";
-import { ActivityBar, visibleActivityViews, type SidebarView } from "./ActivityBar";
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { PanelHeader, PanelHeaderButton } from "./PanelHeader";
+import type { SidebarView } from "./ActivityBar";
 import { useGitStatus } from "@/hooks/useGitStatus";
 import { ChangesPanel } from "./ChangesPanel";
 import type { SessionInfo } from "@/lib/types";
 import type { GitFileStatus } from "@/lib/git-types";
-import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
 import type { CronTriggerDefinition, LoopDefinition, LoopRun } from "@/lib/loop/types";
 import { joinFilePath } from "@/lib/file-paths";
 
+/**
+ * The middle-column panel content for the three-column layout. Renders exactly
+ * ONE module view (workbench / knowledge / loop) under a unified PanelHeader —
+ * the global panels (archive / settings) and the work-items manager panel are
+ * rendered by AppShell directly, and the ActivityBar icon rail lives OUTSIDE
+ * this component (a sibling column). At home (no active workspace) it renders
+ * the workspace-list panel.
+ *
+ * Retired here (moved elsewhere by the three-column redesign): the workspace
+ * switcher header (→ top WorkspaceTabBar), the SettingsBar 模型/Skills/插件
+ * buttons (→ settings panel subpages), the archive footer button (→ rail icon
+ * / settings row), and the simplified work-items grouping view (→ the
+ * full WorkspaceManager work-items panel).
+ */
 interface Props {
   activeWorkspace: WorkspaceSummary | null;
+  /** Which module view to render. Archive/settings never reach this component
+   *  (AppShell intercepts them); at home only the workspace list renders. */
+  activeView: SidebarView;
   workspaces: WorkspaceSummary[];
   selectedSessionId: string | null;
-  selectedWorkItemKey: string | null;
   runningSessionIds: Set<string>;
   completedSessionIds: Set<string>;
   allSessions: SessionInfo[];
@@ -26,24 +41,18 @@ interface Props {
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCreateWorkspace: () => void;
   onImportDirectory: () => void;
-  onOpenWorkspaceSettings: () => void;
+  /** Open the LoopConfig editor as the middle-column content (temporarily
+   *  widened) — the loop panel's ＋/⚙ action. */
   onOpenLoops: () => void;
-  loopsActive: boolean;
-  /** Open a Loop orchestrator (or any) session by id via the locate pipeline
-   *  — used by the sidebar run records. */
+  /** Open a Loop orchestrator/execution session by id (run record rows). */
   onOpenLoopSession: (sessionId: string) => void;
   /** Manual-trigger a loop definition (AppShell opens the chat tab + status bar). */
   onTriggerLoop: (loop: LoopDefinition) => void;
+  /** Knowledge panel ＋ — switches to settings › workspace › repository form. */
   onAddRepository: () => void;
   onNewSession: () => void;
   onSelectSession: (session: SessionInfo) => void;
-  onSelectWorkItem: (item: WorkItemRecord) => void;
-  onCreateWorkItem: (type: WorkItemType) => void;
   onOpenFile: (path: string, name: string) => void;
-  onOpenModels: () => void;
-  onOpenSkills: () => void;
-  onOpenPlugins: () => void;
-  onOpenArchive: () => void;
   onSessionRemoved?: (id: string) => void;
 }
 
@@ -52,6 +61,30 @@ interface Props {
 // internal effects don't re-run every render.
 const EMPTY_GIT_STATUS_BY_PATH = new Map<string, GitFileStatus>();
 const EMPTY_CHANGED_DIRECTORY_PATHS = new Set<string>();
+
+/** Collapse state of the two workbench sections (会话 / 文件). */
+interface WorkbenchSectionState {
+  sessions: boolean;
+  files: boolean;
+}
+
+const WORKBENCH_SECTIONS_DEFAULT: WorkbenchSectionState = { sessions: true, files: true };
+
+/** Read `pi-workbench-sections:<wsId>` defensively: bad JSON or missing keys fall
+ *  back to the per-key default (both sections open). */
+function readWorkbenchSections(workspaceId: string): WorkbenchSectionState {
+  try {
+    const raw = localStorage.getItem(`pi-workbench-sections:${workspaceId}`);
+    if (!raw) return WORKBENCH_SECTIONS_DEFAULT;
+    const parsed = JSON.parse(raw) as Partial<Record<keyof WorkbenchSectionState, unknown>>;
+    return {
+      sessions: typeof parsed.sessions === "boolean" ? parsed.sessions : true,
+      files: typeof parsed.files === "boolean" ? parsed.files : true,
+    };
+  } catch {
+    return WORKBENCH_SECTIONS_DEFAULT;
+  }
+}
 
 function rowStyle(active = false): React.CSSProperties {
   return {
@@ -69,59 +102,10 @@ function rowStyle(active = false): React.CSSProperties {
   };
 }
 
-/** Slim header for a focused view: label + optional add/action button. */
-function ViewHeader({
-  label,
-  meta,
-  action,
-  actionLabel,
-}: {
-  label: string;
-  meta?: ReactNode;
-  action?: () => void;
-  actionLabel?: string;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "8px 10px 6px",
-        borderBottom: "1px solid var(--border)",
-      }}
-    >
-      <strong style={{ flex: 1, fontSize: "var(--pi-sidebar-fs)", color: "var(--text)" }}>{label}</strong>
-      {meta}
-      {action && (
-        <button
-          onClick={action}
-          title={actionLabel}
-          aria-label={actionLabel}
-          style={{
-            width: 24,
-            height: 24,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            border: "1px solid var(--border)",
-            borderRadius: 5,
-            background: "var(--bg)",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            fontSize: 16,
-          }}
-        >
-          +
-        </button>
-      )}
-    </div>
-  );
-}
-
-/** Explorer view internal [ 文件 | 改动(N) ] segmented switch.
- *  Changes is merged into Explorer (decision 8): the changes list follows the
- *  Explorer's current cwd scope. Only rendered inside a git directory. */
+/** Workbench [ 文件 | 改动(N) ] segmented switch. Lives in the 文件 section
+ *  header of the workbench view: the changes list follows the Explorer's
+ *  current cwd scope. Only rendered inside a git directory. Margin is 0 — the
+ *  enclosing section header provides the spacing. */
 function ExplorerSegmentedTabs({
   active,
   changesCount,
@@ -145,6 +129,7 @@ function ExplorerSegmentedTabs({
     cursor: "pointer",
     fontSize: "var(--pi-sidebar-fs-meta)",
     fontWeight: 600,
+    whiteSpace: "nowrap",
   };
   const activeStyle: React.CSSProperties = {
     background: "var(--bg-panel)",
@@ -158,7 +143,6 @@ function ExplorerSegmentedTabs({
       style={{
         display: "flex",
         gap: 3,
-        margin: "6px 8px",
         padding: 3,
         background: "var(--bg-hover)",
         borderRadius: 7,
@@ -206,11 +190,168 @@ function ExplorerSegmentedTabs({
   );
 }
 
+/** Collapsible section header for the workbench view (会话 / 文件).
+ *  Chevron + label + count on the left; `children` (e.g. the segmented
+ *  文件|改动 tabs) fill the remaining header space. */
+/** 工作台头部的工作区切换器：当前工作区名 + ▾，点击弹出同列表（本工作区置顶），
+ *  选即切；不在弹层里提供新建（顶部 WorkspaceTabBar 的 ＋ 是新建入口）。 */
+function WorkspaceSwitcher({
+  workspaces,
+  activeWorkspace,
+  onSelect,
+}: {
+  workspaces: WorkspaceSummary[];
+  activeWorkspace: WorkspaceSummary;
+  onSelect: (workspace: WorkspaceSummary) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const available = workspaces.filter((workspace) => workspace.available);
+  return (
+    <div style={{ position: "relative", flexShrink: 0 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        title="切换工作区"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          maxWidth: 140,
+          padding: "3px 8px",
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          background: open ? "var(--bg-hover)" : "transparent",
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 11,
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {activeWorkspace.name}
+        </span>
+        <span aria-hidden style={{ fontSize: 8, flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            right: 0,
+            zIndex: 30,
+            minWidth: 180,
+            maxHeight: 260,
+            overflowY: "auto",
+            padding: 4,
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg)",
+            boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
+          }}
+        >
+          {available.map((workspace) => (
+            <button
+              key={workspace.id}
+              type="button"
+              onClick={() => { setOpen(false); onSelect(workspace); }}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 8px",
+                border: 0,
+                borderRadius: 6,
+                background: workspace.id === activeWorkspace.id ? "var(--bg-selected)" : "transparent",
+                color: workspace.id === activeWorkspace.id ? "var(--text)" : "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 11,
+                textAlign: "left",
+              }}
+            >
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {workspace.name}
+              </span>
+              {workspace.id === activeWorkspace.id && (
+                <span aria-hidden style={{ color: "var(--accent)", fontSize: 10, flexShrink: 0 }}>✓</span>
+              )}
+            </button>
+          ))}
+          {available.length === 0 && (
+            <div style={{ padding: "6px 8px", color: "var(--text-dim)", fontSize: 11 }}>无可用工作区</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorkbenchSectionHeader({
+  label,
+  count,
+  open,
+  onToggle,
+  collapsible = true,
+  children,
+}: {
+  label: string;
+  count?: number;
+  open: boolean;
+  onToggle: () => void;
+  /** false = fixed-open header (no chevron / no toggle) — e.g. the 文件
+   *  section is always expanded in the workbench. */
+  collapsible?: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 7,
+        padding: "5px 8px 5px 6px",
+        borderBottom: "1px solid var(--border)",
+        flexShrink: 0,
+        ...(collapsible ? undefined : { paddingLeft: 10 }),
+      }}
+    >
+      {collapsible && (
+        <button
+          onClick={onToggle}
+          aria-expanded={open}
+          title={open ? `收起${label}` : `展开${label}`}
+          aria-label={open ? `收起${label}` : `展开${label}`}
+          style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", width: 16, fontSize: 11, padding: 0, flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
+        >
+          ›
+        </button>
+      )}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          color: "var(--text)",
+          fontSize: "var(--pi-sidebar-fs-meta)",
+          fontWeight: 600,
+          flexShrink: 0,
+        }}
+      >
+        {label}
+        {typeof count === "number" && (
+          <span style={{ color: "var(--text-dim)", fontWeight: 500 }}>{count}</span>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 export function WorkspaceSidebar({
   activeWorkspace,
+  activeView,
   workspaces,
   selectedSessionId,
-  selectedWorkItemKey,
   runningSessionIds,
   completedSessionIds,
   allSessions,
@@ -219,21 +360,13 @@ export function WorkspaceSidebar({
   onSelectWorkspace,
   onCreateWorkspace,
   onImportDirectory,
-  onOpenWorkspaceSettings,
   onOpenLoops,
-  loopsActive,
   onOpenLoopSession,
   onTriggerLoop,
   onAddRepository,
   onNewSession,
   onSelectSession,
-  onSelectWorkItem,
-  onCreateWorkItem,
   onOpenFile,
-  onOpenModels,
-  onOpenSkills,
-  onOpenPlugins,
-  onOpenArchive,
   onSessionRemoved,
 }: Props) {
   // sessions 直接从 AppShell 已加载的全局列表派生（useSessionActivity，含 SSE 实时），
@@ -258,19 +391,17 @@ export function WorkspaceSidebar({
         && !session.loopOrchestrator;
     });
   }, [allSessions, activeWorkspace, workspaces]);
-  const [archivedCount, setArchivedCount] = useState(0);
-  const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   // Loop 视图：定义列表 + 展开中的 loop 运行记录（run records 直读 RUNS.jsonl）。
   const [loops, setLoops] = useState<LoopDefinition[]>([]);
   const [expandedLoopId, setExpandedLoopId] = useState<string | null>(null);
   const [loopRuns, setLoopRuns] = useState<Record<string, LoopRun[]>>({});
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const [createMenuOpen, setCreateMenuOpen] = useState(false);
-  const [requirementsOpen, setRequirementsOpen] = useState(true);
-  const [bugsOpen, setBugsOpen] = useState(true);
   const [explorerTab, setExplorerTab] = useState<"files" | "changes">("files");
-  const [activeView, setActiveView] = useState<SidebarView>("sessions");
+  // 工作台分段（会话/文件）折叠状态，按工作区持久化；默认两个都展开。
+  const [workbenchSections, setWorkbenchSections] = useState<WorkbenchSectionState>({
+    sessions: true,
+    files: true,
+  });
   const [selectedKnowledgeRepoId, setSelectedKnowledgeRepoId] = useState<string | null>(null);
 
   const hasCapability = useCallback(
@@ -288,71 +419,29 @@ export function WorkspaceSidebar({
   const effectiveExplorerTab: "files" | "changes" =
     isGitRepo && explorerTab === "changes" ? "changes" : "files";
 
-  const isMobile = useIsMobile();
-
-  // The views available for this workspace, in canonical Activity Bar order
-  // (sessions/explorer always on; rest gated by capability).
-  const visibleViews = useMemo(
-    () => visibleActivityViews(activeWorkspace?.capabilities ?? []),
-    [activeWorkspace],
-  );
-
   const loadWorkspaceData = useCallback(async () => {
     if (!activeWorkspace) {
-      setWorkItems([]);
       setRepositories([]);
       setLoops([]);
-      setArchivedCount(0);
       return;
     }
-    const [itemsResponse, repositoriesResponse, archivedSessionsResponse, archivedItemsResponse, loopsResponse] = await Promise.all([
-      hasCapability("work-items")
-        ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items`)
-        : null,
+    const [repositoriesResponse, loopsResponse] = await Promise.all([
       hasCapability("repositories")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/repositories`)
-        : null,
-      fetch("/api/sessions?archived"),
-      hasCapability("work-items")
-        ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items?archived`)
         : null,
       hasCapability("loop")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/loop/loops`)
         : null,
     ]);
-    const itemsData = itemsResponse?.ok
-      ? await itemsResponse.json() as { items?: WorkItemRecord[] }
-      : {};
     const repositoriesData = repositoriesResponse?.ok
       ? await repositoriesResponse.json() as { repositories?: WorkspaceRepositoryState[] }
       : {};
-    const archivedSessionsData = archivedSessionsResponse?.ok
-      ? await archivedSessionsResponse.json() as { sessions?: { cwd: string }[] }
-      : { sessions: [] };
-    const archivedItemsData = archivedItemsResponse?.ok
-      ? await archivedItemsResponse.json() as { items?: unknown[] }
-      : { items: [] };
     const loopsData = loopsResponse?.ok
       ? await loopsResponse.json() as { loops?: LoopDefinition[] }
       : {};
-    const wsPrefix = `${activeWorkspace.path.replace(/\/+$/, "")}/`;
-    const archivedSessionsInWs = (archivedSessionsData.sessions ?? []).filter((session) =>
-      session.cwd === activeWorkspace.path || session.cwd.startsWith(wsPrefix));
-    setArchivedCount(archivedSessionsInWs.length + (archivedItemsData.items ?? []).length);
-    setWorkItems(itemsData.items ?? []);
     setRepositories(repositoriesData.repositories ?? []);
     setLoops(loopsData.loops ?? []);
   }, [activeWorkspace, hasCapability]);
-
-  const archiveWorkItem = useCallback(async (item: WorkItemRecord) => {
-    if (!activeWorkspace) return;
-    await fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/work-items/${encodeURIComponent(item.key)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedRevision: item.revision, archived: true }),
-    });
-    await loadWorkspaceData();
-  }, [activeWorkspace, loadWorkspaceData]);
 
   // 运行记录：展开某 loop 时拉取一次；有非终态 run 时每 5s 轮询刷新，全部终态即停。
   const loadLoopRuns = useCallback(async (loopId: string) => {
@@ -393,13 +482,6 @@ export function WorkspaceSidebar({
     void loadWorkspaceData();
   }, [loadWorkspaceData, refreshKey]);
 
-  useEffect(() => {
-    if (!activeWorkspace) return;
-    const prefix = `pi-work-item-groups:${activeWorkspace.id}:`;
-    setRequirementsOpen(localStorage.getItem(`${prefix}requirements`) !== "closed");
-    setBugsOpen(localStorage.getItem(`${prefix}bugs`) !== "closed");
-  }, [activeWorkspace]);
-
   // Explorer 内部 [ 文件 | 改动 ] 分段选择，按工作区持久化。
   useEffect(() => {
     if (!activeWorkspace) return;
@@ -407,19 +489,13 @@ export function WorkspaceSidebar({
     setExplorerTab(stored === "changes" ? "changes" : "files");
   }, [activeWorkspace]);
 
-  // Single-focus Activity Bar view, persisted per workspace. On workspace switch
-  // (or capability change) re-derive the stored view, falling back to "sessions".
+  // 工作台分段折叠状态，按工作区持久化（JSON，坏数据防御性回退到默认全展开）。
   useEffect(() => {
-    if (!activeWorkspace) return;
-    const stored = localStorage.getItem(`pi-active-view:${activeWorkspace.id}`);
-    const candidate = stored as SidebarView | null;
-    const valid = candidate && visibleViews.includes(candidate) ? candidate : "sessions";
-    setActiveView(valid);
-  }, [activeWorkspace, visibleViews]);
-
-  const handleSwitchView = useCallback((view: SidebarView) => {
-    setActiveView(view);
-    if (activeWorkspace) localStorage.setItem(`pi-active-view:${activeWorkspace.id}`, view);
+    if (!activeWorkspace) {
+      setWorkbenchSections({ sessions: true, files: true });
+      return;
+    }
+    setWorkbenchSections(readWorkbenchSections(activeWorkspace.id));
   }, [activeWorkspace]);
 
   const handleSelectExplorerTab = useCallback((tab: "files" | "changes") => {
@@ -429,32 +505,23 @@ export function WorkspaceSidebar({
     }
   }, [activeWorkspace]);
 
-  const toggleWorkItemGroup = useCallback((
-    group: "requirements" | "bugs",
+  const toggleWorkbenchSection = useCallback((
+    section: "sessions" | "files",
     current: boolean,
   ) => {
     const next = !current;
     if (activeWorkspace) {
       localStorage.setItem(
-        `pi-work-item-groups:${activeWorkspace.id}:${group}`,
-        next ? "open" : "closed",
+        `pi-workbench-sections:${activeWorkspace.id}`,
+        JSON.stringify({ ...readWorkbenchSections(activeWorkspace.id), [section]: next }),
       );
     }
-    if (group === "requirements") setRequirementsOpen(next);
-    else setBugsOpen(next);
+    setWorkbenchSections((state) => ({ ...state, [section]: next }));
   }, [activeWorkspace]);
 
-  const groupedWorkItems = useMemo(() => ({
-    requirements: workItems.filter((item) => item.type === "requirement" && !item.archivedAt),
-    bugs: workItems.filter((item) => item.type === "bug" && !item.archivedAt),
-  }), [workItems]);
-
-  // Repositories split by kind: "仓库" view shows only code (decision 3),
-  // "知识库" view shows only knowledge (decision 3/4).
-  const codeRepositories = useMemo(
-    () => repositories.filter((repository) => repository.kind === "code" && repository.status === "active"),
-    [repositories],
-  );
+  // Knowledge bundles are the panel-facing repo list — code repos have no
+  // standalone view anymore (browse in the workbench file tree, manage in
+  // settings / dashboard).
   const knowledgeRepositories = useMemo(
     () => repositories.filter((repository) => repository.kind === "knowledge" && repository.status === "active"),
     [repositories],
@@ -466,18 +533,20 @@ export function WorkspaceSidebar({
     [knowledgeRepositories, selectedKnowledgeRepoId],
   );
 
+  // ---- Home panel (no active workspace) ---------------------------------------
   if (!activeWorkspace) {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-        <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ fontSize: "var(--pi-sidebar-fs-title)", fontWeight: 750, color: "var(--text)" }}>Pi Web</div>
-          <div style={{ marginTop: 4, fontSize: "var(--pi-sidebar-fs)", color: "var(--text-dim)" }}>选择工作区后开始协作</div>
-        </div>
+        <PanelHeader
+          title="Pi Web"
+          meta="工作区"
+          actions={
+            <PanelHeaderButton onClick={onCreateWorkspace} title="新建 Workspace" primary>
+              ＋ 新建
+            </PanelHeaderButton>
+          }
+        />
         <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px" }}>
-          <div style={{ display: "flex", alignItems: "center", padding: "2px 4px 8px" }}>
-            <strong style={{ flex: 1, fontSize: "var(--pi-sidebar-fs)", color: "var(--text)" }}>Workspaces</strong>
-            <button className="workspace-action" onClick={onCreateWorkspace}>新建</button>
-          </div>
           {workspaces.map((workspace) => (
             <button
               key={workspace.id}
@@ -518,98 +587,88 @@ export function WorkspaceSidebar({
             ＋ 导入目录…
           </button>
         </div>
-        <SettingsBar
-          scopeLabel="全局"
-          workspaceScoped={false}
-          onOpenModels={onOpenModels}
-          onOpenSkills={onOpenSkills}
-          onOpenPlugins={onOpenPlugins}
-        />
       </div>
     );
   }
 
+  // ---- Module panels ----------------------------------------------------------
   const renderActiveView = (): ReactNode => {
     switch (activeView) {
-      case "sessions":
+      case "workbench":
+        // 工作台：会话（上，≤≈40% 内部滚动）+ 文件（下，占余下空间）两个可折叠分段。
         return (
-          <div>
-            {sessions.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                isSelected={session.id === selectedSessionId}
-                activity={runningSessionIds.has(session.id) ? "running" : completedSessionIds.has(session.id) ? "completed" : undefined}
-                onSelect={() => onSelectSession(session)}
-                onChanged={() => void loadWorkspaceData()}
-                onRemoved={onSessionRemoved}
-              />
-            ))}
-            {sessions.length === 0 && (
-              <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
-                暂无会话
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+            <WorkbenchSectionHeader
+              label="会话"
+              count={sessions.length}
+              open={workbenchSections.sessions}
+              onToggle={() => toggleWorkbenchSection("sessions", workbenchSections.sessions)}
+            />
+            {workbenchSections.sessions && (
+              <div style={{ flex: "0 1 auto", maxHeight: "40%", minHeight: 0, overflowY: "auto" }}>
+                {sessions.map((session) => (
+                  <SessionRow
+                    key={session.id}
+                    session={session}
+                    isSelected={session.id === selectedSessionId}
+                    activity={runningSessionIds.has(session.id) ? "running" : completedSessionIds.has(session.id) ? "completed" : undefined}
+                    onSelect={() => onSelectSession(session)}
+                    onChanged={() => void loadWorkspaceData()}
+                    onRemoved={onSessionRemoved}
+                  />
+                ))}
+                {sessions.length === 0 && (
+                  <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
+                    暂无会话
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        );
-
-      case "explorer":
-        return (
-          <div>
-            {isGitRepo && (
-              <ExplorerSegmentedTabs
-                active={effectiveExplorerTab}
-                changesCount={changesCount}
-                onSelect={handleSelectExplorerTab}
-              />
-            )}
-            {isGitRepo && effectiveExplorerTab === "changes" ? (
-              <ChangesPanel
-                groups={gitStatus?.groups ?? []}
-                cwd={activeWorkspace.path}
-                onOpenFile={onOpenFile}
-              />
-            ) : (
-              <FileExplorer
-                cwd={activeWorkspace.path}
-                onOpenFile={onOpenFile}
-                refreshKey={explorerRefreshKey}
-                gitStatusByPath={gitStatusByPath}
-                changedDirectoryPaths={changedDirectoryPaths}
-              />
-            )}
-          </div>
-        );
-
-      case "repositories":
-        return (
-          <div>
-            <ViewHeader label="仓库" action={onAddRepository} actionLabel="添加仓库" />
-            {codeRepositories.map((repository) => (
-              <button
-                key={repository.id}
-                style={rowStyle()}
-                onClick={() => handleSwitchView("explorer")}
-                title="在 Explorer 中浏览"
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              {/* 文件区不折叠：常驻展开（占比余下 ~60%，会话区上限 40%）。头部仅保留
+                  [ 文件 | 改动 ] 分段。 */}
+              <WorkbenchSectionHeader
+                label="文件"
+                open
+                onToggle={() => {}}
+                collapsible={false}
               >
-                <span style={{ flex: 1 }}>{repository.name}</span>
-                <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
-                  {repository.branch || "—"}{repository.dirty ? " · modified" : ""}
-                </span>
-              </button>
-            ))}
-            {codeRepositories.length === 0 && (
-              <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
-                暂无代码仓库
-              </div>
-            )}
+                {isGitRepo && (
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <ExplorerSegmentedTabs
+                      active={effectiveExplorerTab}
+                      changesCount={changesCount}
+                      onSelect={handleSelectExplorerTab}
+                    />
+                  </div>
+                )}
+              </WorkbenchSectionHeader>
+              {(
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                  {isGitRepo && effectiveExplorerTab === "changes" ? (
+                    <ChangesPanel
+                      groups={gitStatus?.groups ?? []}
+                      cwd={activeWorkspace.path}
+                      onOpenFile={onOpenFile}
+                    />
+                  ) : (
+                    <FileExplorer
+                      cwd={activeWorkspace.path}
+                      onOpenFile={onOpenFile}
+                      refreshKey={explorerRefreshKey}
+                      gitStatusByPath={gitStatusByPath}
+                      changedDirectoryPaths={changedDirectoryPaths}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         );
 
       case "knowledge":
         return (
           <div>
-            <ViewHeader label="知识库" action={onAddRepository} actionLabel="添加知识库" />
             {knowledgeRepositories.length === 0 ? (
               <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
                 暂无知识库
@@ -668,10 +727,9 @@ export function WorkspaceSidebar({
       case "loop":
         return (
           <div>
-            <ViewHeader label="Loop" action={onOpenLoops} actionLabel="新建 / 管理 Loop" />
             {loops.length === 0 ? (
               <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
-                暂无 Loop。点击右上角 + 新建。
+                暂无 Loop。点击头部「管理」新建。
               </div>
             ) : loops.map((loop) => {
               const expanded = expandedLoopId === loop.id;
@@ -743,7 +801,7 @@ export function WorkspaceSidebar({
                             {run.seededSessionId && (
                               <span style={{ padding: "1px 6px", borderRadius: 5, border: "1px solid var(--border)", color: "var(--accent)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>已播种</span>
                             )}
-                            <span style={{ color: run.seedRefused ? "var(--text-dim)" : "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+                            <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
                               {run.seedRefused ? `播种被拒：${run.seedRefused}` : (run.verdict || run.progress || "—")}
                             </span>
                           </button>
@@ -757,339 +815,64 @@ export function WorkspaceSidebar({
           </div>
         );
 
-      case "work-items":
-        return (
-          <div>
-            <ViewHeader
-              label="工作项"
-              action={() => onCreateWorkItem("requirement")}
-              actionLabel="新建工作项"
-            />
-            <WorkItemGroup
-              label="需求"
-              items={groupedWorkItems.requirements}
-              open={requirementsOpen}
-              selectedKey={selectedWorkItemKey}
-              onSelect={onSelectWorkItem}
-              onToggle={() => toggleWorkItemGroup("requirements", requirementsOpen)}
-              onArchive={archiveWorkItem}
-            />
-            <WorkItemGroup
-              label="Bug"
-              items={groupedWorkItems.bugs}
-              open={bugsOpen}
-              selectedKey={selectedWorkItemKey}
-              onSelect={onSelectWorkItem}
-              onToggle={() => toggleWorkItemGroup("bugs", bugsOpen)}
-              onArchive={archiveWorkItem}
-            />
-          </div>
-        );
-
       default:
         return null;
     }
   };
 
+  const panelHeader = (() => {
+    switch (activeView) {
+      case "workbench":
+        return (
+          <PanelHeader
+            title="工作台"
+            actions={
+              <>
+                {/* 工作区切换：点击弹同列表（复用中栏同款交互），选即切。 */}
+                <WorkspaceSwitcher
+                  workspaces={workspaces}
+                  activeWorkspace={activeWorkspace}
+                  onSelect={onSelectWorkspace}
+                />
+                <PanelHeaderButton onClick={onNewSession} title="新建会话" primary>
+                  ＋ 新建会话
+                </PanelHeaderButton>
+              </>
+            }
+          />
+        );
+      case "knowledge":
+        return (
+          <PanelHeader
+            title="知识库"
+            actions={
+              <PanelHeaderButton onClick={onAddRepository} title="添加知识库">
+                ＋ 知识库
+              </PanelHeaderButton>
+            }
+          />
+        );
+      case "loop":
+        return (
+          <PanelHeader
+            title="Loop"
+            actions={
+              <PanelHeaderButton onClick={onOpenLoops} title="新建 / 管理 Loop">
+                管理
+              </PanelHeaderButton>
+            }
+          />
+        );
+      default:
+        return null;
+    }
+  })();
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      <div style={{ padding: "10px", borderBottom: "1px solid var(--border)", position: "relative" }}>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            onClick={() => setWorkspaceMenuOpen((current) => !current)}
-            style={{
-              flex: 1,
-              minWidth: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-              padding: "7px 9px",
-              border: "1px solid var(--border)",
-              borderRadius: 7,
-              background: "var(--bg)",
-              color: "var(--text)",
-              cursor: "pointer",
-              fontWeight: 700,
-              textAlign: "left",
-            }}
-          >
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {activeWorkspace.name}
-            </span>
-            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <path d="m6 9 6 6 6-6" />
-            </svg>
-          </button>
-          <div style={{ position: "relative" }}>
-            <button
-              onClick={() => setCreateMenuOpen((current) => !current)}
-              title="新建 / 导入"
-              aria-label="新建 / 导入"
-              style={{
-                width: 34,
-                height: 34,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                border: "1px solid var(--border)",
-                borderRadius: 7,
-                background: "var(--bg)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-              }}
-            >
-              ＋
-            </button>
-            {createMenuOpen && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: 40,
-                  right: 0,
-                  zIndex: 20,
-                  minWidth: 168,
-                  padding: 5,
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  background: "var(--bg)",
-                  boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
-                }}
-              >
-                <button
-                  style={rowStyle()}
-                  onClick={() => { setCreateMenuOpen(false); onCreateWorkspace(); }}
-                >
-                  ＋ 新建 Workspace
-                </button>
-                <button
-                  style={rowStyle()}
-                  onClick={() => { setCreateMenuOpen(false); onImportDirectory(); }}
-                >
-                  ＋ 导入目录…
-                </button>
-              </div>
-            )}
-          </div>
-          <button
-            onClick={onOpenWorkspaceSettings}
-            title="Workspace 设置"
-            aria-label="Workspace 设置"
-            style={{
-              width: 34,
-              height: 34,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              border: "1px solid var(--border)",
-              borderRadius: 7,
-              background: "var(--bg)",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-            }}
-          >
-            ⚙
-          </button>
-        </div>
-        {workspaceMenuOpen && (
-          <div
-            style={{
-              position: "absolute",
-              top: 48,
-              left: 10,
-              right: 10,
-              zIndex: 20,
-              padding: 5,
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              background: "var(--bg)",
-              boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
-            }}
-          >
-            {workspaces.map((workspace) => (
-              <button
-                key={workspace.id}
-                disabled={!workspace.available}
-                style={rowStyle(workspace.id === activeWorkspace.id)}
-                onClick={() => {
-                  setWorkspaceMenuOpen(false);
-                  onSelectWorkspace(workspace);
-                }}
-              >
-                {workspace.name}
-              </button>
-            ))}
-          </div>
-        )}
-        <button
-          onClick={onNewSession}
-          style={{
-            width: "100%",
-            marginTop: 8,
-            padding: "var(--pi-sidebar-section-py) 10px",
-            border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))",
-            borderRadius: 7,
-            background: "color-mix(in srgb, var(--accent) 10%, transparent)",
-            color: "var(--accent)",
-            cursor: "pointer",
-            fontWeight: 700,
-          }}
-        >
-          ＋ 新建会话
-        </button>
-      </div>
-
-      {/* Middle: Activity Bar (left icon strip on desktop / bottom tab bar on
-          mobile) + the single focused view. Only one view renders at a time. */}
-      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: isMobile ? "column" : "row" }}>
-        {!isMobile && (
-          <ActivityBar
-            variant="vertical"
-            activeView={activeView}
-            capabilities={activeWorkspace.capabilities}
-            onSwitch={handleSwitchView}
-            highlightView={loopsActive ? "loop" : null}
-          />
-        )}
-        <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto" }}>
-          {renderActiveView()}
-        </div>
-      </div>
-
-      <ArchiveBarButton count={archivedCount} onOpen={onOpenArchive} />
-
-      <SettingsBar
-        scopeLabel={activeWorkspace.name}
-        workspaceScoped
-        onOpenModels={onOpenModels}
-        onOpenSkills={onOpenSkills}
-        onOpenPlugins={onOpenPlugins}
-      />
-
-      {isMobile && (
-        <ActivityBar
-          variant="horizontal"
-          activeView={activeView}
-          capabilities={activeWorkspace.capabilities}
-          onSwitch={handleSwitchView}
-          highlightView={loopsActive ? "loop" : null}
-        />
-      )}
-    </div>
-  );
-}
-
-function WorkItemGroup({
-  label,
-  items,
-  open,
-  selectedKey,
-  onSelect,
-  onToggle,
-  onArchive,
-}: {
-  label: string;
-  items: WorkItemRecord[];
-  open: boolean;
-  selectedKey: string | null;
-  onSelect: (item: WorkItemRecord) => void;
-  onToggle: () => void;
-  onArchive?: (item: WorkItemRecord) => void;
-}) {
-  return (
-    <div>
-      <button
-        onClick={onToggle}
-        aria-expanded={open}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          padding: "calc(var(--pi-sidebar-row-py) - 2px) 10px calc(var(--pi-sidebar-row-py) - 2px) 22px",
-          border: 0,
-          background: "transparent",
-          color: "var(--text-dim)",
-          fontSize: "var(--pi-sidebar-fs-meta)",
-          fontWeight: 500,
-          cursor: "pointer",
-          textAlign: "left",
-        }}
-      >
-        <span
-          aria-hidden="true"
-          style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
-        >
-          ›
-        </span>
-        <span style={{ flex: 1 }}>{label}</span>
-        <span>{items.length}</span>
-      </button>
-      {open && items.map((item) => (
-        <WorkItemRow
-          key={item.id}
-          item={item}
-          isSelected={item.key === selectedKey}
-          onSelect={() => onSelect(item)}
-          onArchive={onArchive ? () => onArchive(item) : undefined}
-        />
-      ))}
-    </div>
-  );
-}
-
-function SettingsBar({
-  scopeLabel,
-  workspaceScoped,
-  onOpenModels,
-  onOpenSkills,
-  onOpenPlugins,
-}: {
-  scopeLabel: string;
-  workspaceScoped: boolean;
-  onOpenModels: () => void;
-  onOpenSkills: () => void;
-  onOpenPlugins: () => void;
-}) {
-  return (
-    <div style={{ borderTop: "1px solid var(--border)", padding: "7px 8px 8px" }}>
-      <div
-        title={scopeLabel}
-        style={{
-          padding: "0 3px 5px",
-          color: "var(--text-dim)",
-          fontSize: "var(--pi-sidebar-fs-meta)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {workspaceScoped
-          ? `模型：全局 · Skills / 插件：${scopeLabel}`
-          : "设置作用域：全局"}
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
-        {[
-          ["模型", onOpenModels],
-          ["Skills", onOpenSkills],
-          ["插件", onOpenPlugins],
-        ].map(([label, action]) => (
-          <button
-            key={label as string}
-            onClick={action as () => void}
-            style={{
-              minHeight: "var(--pi-sidebar-btn-h)",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              background: "var(--bg)",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: "var(--pi-sidebar-btn-fs)",
-            }}
-          >
-            {label as string}
-          </button>
-        ))}
+      {panelHeader}
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto" }}>
+        {renderActiveView()}
       </div>
     </div>
   );
@@ -1105,72 +888,6 @@ const hoverActionBtn: React.CSSProperties = {
   fontSize: 11,
   padding: "2px 8px",
 };
-
-function ArchiveBarButton({ count, onOpen }: { count: number; onOpen: () => void }) {
-  return (
-    <button
-      onClick={onOpen}
-      style={{
-        width: "100%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 8,
-        padding: "7px 12px",
-        border: 0,
-        borderTop: "1px solid var(--border)",
-        background: "transparent",
-        color: "var(--text-muted)",
-        cursor: "pointer",
-        fontSize: "var(--pi-sidebar-fs)",
-        textAlign: "left",
-      }}
-    >
-      <span>归档</span>
-      {count > 0 && (
-        <span style={{
-          fontSize: 11,
-          color: "var(--text-dim)",
-          background: "var(--bg-hover)",
-          borderRadius: 10,
-          padding: "1px 8px",
-        }}>{count}</span>
-      )}
-    </button>
-  );
-}
-
-function WorkItemRow({
-  item,
-  isSelected,
-  onSelect,
-  onArchive,
-}: {
-  item: WorkItemRecord;
-  isSelected: boolean;
-  onSelect: () => void;
-  onArchive?: () => void;
-}) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <div
-      onClick={onSelect}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{ ...rowStyle(isSelected) }}
-    >
-      <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>
-        {item.key}
-      </span>
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-        {item.title}
-      </span>
-      {hovered && onArchive && (
-        <button title="归档" onClick={(e) => { e.stopPropagation(); onArchive(); }} style={hoverActionBtn}>归档</button>
-      )}
-    </div>
-  );
-}
 
 function SessionRow({
   session,

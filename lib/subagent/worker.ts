@@ -20,7 +20,25 @@ import type { AgentEvent, AgentSessionWrapper } from "../rpc-manager.ts";
 import { startRpcSession } from "../rpc-manager.ts";
 import { markSubagentChild } from "./registry.ts";
 
+/** Inactivity budget for a child run. NOT a wall-clock cap: every child event
+ *  (streaming delta, tool partial, message boundary) re-arms the timer, so an
+ *  implementer that streams for an hour never trips it — only a genuinely
+ *  silent child does. This fixes the blind 30-minute cap (REQ-0027): the
+ *  implementer was still working productively at minute 30, the parent got
+ *  "subagent timed out", assumed a half-finished worktree and re-dispatched a
+ *  SECOND implementer onto it while the first kept running. Note the timeout
+ *  deliberately does NOT abort the child — pi's bash only emits partials when
+ *  there IS output, so a quiet long build is legitimately eventless and may
+ *  still finish; the daemon's heartbeat monitor owns truly-hung children. The
+ *  error message therefore carries the child session id so the parent verifies
+ *  the child's actual state before re-dispatching. */
 const RUN_TIMEOUT_MS = 30 * 60 * 1000;
+/** Upper bound on child-session CREATION (before the first prompt). Creation
+ *  normally takes seconds; if it hangs (e.g. a stuck network call inside
+ *  model resolution) the parent's tool call — and with it the parent's whole
+ *  turn and the daemon's running set — used to hang forever: abort never
+ *  reached this phase (the tool signal was only wired into capturePrompt). */
+const SESSION_START_TIMEOUT_MS = 5 * 60 * 1000;
 /** Cap the display-item trail we stream per update (bounds SSE bandwidth). */
 const STREAM_ITEM_CAP = 12;
 
@@ -158,17 +176,31 @@ function capturePrompt(
     let settled = false;
     const state: RunState = { turns: 0, usage: { ...EMPTY_USAGE }, displayItems: [], lastText: "" };
     let off: () => void = () => {};
+    // Sliding inactivity timer (see RUN_TIMEOUT_MS): re-armed on every child
+    // event below, so activity of ANY kind keeps the wait alive.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const armTimer = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(
+        () =>
+          finish({
+            output: "",
+            errorMessage: `subagent timed out after ${Math.round(RUN_TIMEOUT_MS / 60_000)}min without progress (child session ${session.sessionId} may still be running — check its output/state before re-dispatching)`,
+          }),
+        RUN_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    };
 
     const finish = (outcome: { output: string; errorMessage?: string }): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       off();
       resolve({ output: outcome.output, errorMessage: outcome.errorMessage, state });
     };
 
-    const timer = setTimeout(() => finish({ output: "", errorMessage: "subagent timed out" }), RUN_TIMEOUT_MS);
-    timer.unref?.();
+    armTimer();
 
     if (signal?.aborted) {
       finish({ output: "", errorMessage: "aborted" });
@@ -184,6 +216,8 @@ function capturePrompt(
     );
 
     off = session.onEvent((event: AgentEvent) => {
+      // Any child event = the child is alive; restart the inactivity window.
+      armTimer();
       if (event.type === "message_end") {
         const message = event.message as AssistantMessageLike | undefined;
         if (message) {
@@ -237,17 +271,59 @@ export interface RunWorkerOptions {
 
 export async function runWorker(opts: RunWorkerOptions): Promise<WorkerResult> {
   const modelSpec = parseModelSpec(opts.agent.model) ?? opts.parentModel;
-  const { session, realSessionId } = await startRpcSession(
-    "",
-    "",
-    opts.cwd,
-    opts.agent.tools,
-    {
-      parentSession: opts.parentSessionFile || undefined,
-      appendSystemPrompt: opts.agent.systemPrompt || undefined,
-      ...(modelSpec ? { model: modelSpec } : {}),
-    },
+
+  // Creation is abortable AND bounded: forward the parent tool's abort signal
+  // and arm a start timeout on one controller. startRpcSession races its
+  // creation against this signal, so an abort/timeout rejects promptly and the
+  // parent's turn (and the daemon's abort path) stays responsive.
+  const startController = new AbortController();
+  const forwardAbort = (): void => startController.abort(opts.signal?.reason);
+  opts.signal?.addEventListener("abort", forwardAbort, { once: true });
+  const startTimer = setTimeout(
+    () =>
+      startController.abort(
+        new Error(`subagent session creation timed out after ${Math.round(SESSION_START_TIMEOUT_MS / 1000)}s`),
+      ),
+    SESSION_START_TIMEOUT_MS,
   );
+  startTimer.unref?.();
+
+  let session: AgentSessionWrapper;
+  let realSessionId: string;
+  try {
+    ({ session, realSessionId } = await startRpcSession(
+      "",
+      "",
+      opts.cwd,
+      opts.agent.tools,
+      {
+        parentSession: opts.parentSessionFile || undefined,
+        appendSystemPrompt: opts.agent.systemPrompt || undefined,
+        ...(modelSpec ? { model: modelSpec } : {}),
+        signal: startController.signal,
+      },
+    ));
+  } catch (error) {
+    // Creation failed/aborted/timed out — degrade to a failed result instead of
+    // throwing, so the parent renders a normal failure card (and, in parallel
+    // mode, siblings keep running). No child session id exists yet.
+    return {
+      agent: opts.agent.name,
+      task: opts.task,
+      source: opts.agent.source,
+      output: "",
+      turns: 0,
+      childSessionId: "",
+      exitCode: 1,
+      stopReason: opts.signal?.aborted ? "aborted" : "error",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      usage: { ...EMPTY_USAGE },
+      displayItems: [],
+    };
+  } finally {
+    clearTimeout(startTimer);
+    opts.signal?.removeEventListener("abort", forwardAbort);
+  }
   // Mark this child so the session list hides it; it is still openable by id
   // from the parent's subagent result card (see ./registry.ts).
   markSubagentChild(realSessionId);

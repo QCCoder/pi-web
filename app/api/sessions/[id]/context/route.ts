@@ -11,6 +11,8 @@ export async function GET(
   const leafId = url.searchParams.get("leafId") ?? undefined;
   const deferThinking = url.searchParams.has("deferThinking");
   const deferToolResultImages = url.searchParams.has("deferMedia");
+  const tailParam = Number(url.searchParams.get("tail") ?? "");
+  const tailMessages = Number.isSafeInteger(tailParam) && tailParam > 0 ? tailParam : undefined;
 
   try {
     const filePath = await resolveSessionPath(id);
@@ -22,6 +24,7 @@ export async function GET(
     const context = buildSessionContext(sm.getEntries() as never, leafId, {
       deferThinking,
       deferToolResultImages,
+      tailMessages,
     });
 
     return NextResponse.json({ context });

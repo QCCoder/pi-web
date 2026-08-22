@@ -976,6 +976,15 @@ span.linenumber {
     transform: translateX(-100%);
     box-shadow: none;
   }
+  /* Archive/settings render as a FULL-SCREEN overlay instead of the 280px
+     drawer (mobile consensus: ≈ the former modal experience). */
+  .sidebar-container.sidebar-fullscreen {
+    width: 100vw;
+    max-width: 100vw;
+  }
+  .sidebar-container.sidebar-fullscreen.sidebar-closed {
+    transform: translateX(-100%);
+  }
 
   .right-panel-container {
     overflow: hidden;

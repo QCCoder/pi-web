@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
@@ -578,11 +579,20 @@ export function PluginsConfig({
   sessionId,
   onClose,
   onReloaded,
+  embedded,
+  split,
 }: {
   cwd: string;
   sessionId: string | null;
-  onClose: () => void;
+  onClose?: () => void;
   onReloaded?: () => void;
+  /** Embedded (middle-column panel) mode: fill container, no overlay/header. */
+  embedded?: boolean;
+  /** Split (three-column) mode: the package list renders inline (the middle
+   *  column) while the detail/add panel + footer portal into the right
+   *  column's config area (`portalTarget` = AppShell's config portal node).
+   *  Modal/embedded modes are unchanged. */
+  split?: { portalTarget: HTMLElement | null };
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -712,79 +722,14 @@ export function PluginsConfig({
 
   const addBusy = busyKey?.startsWith("install:") ?? false;
 
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 1000,
-        background: "rgba(0,0,0,0.35)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        style={{
-          width: isMobile ? "calc(100vw - 16px)" : 860,
-          maxWidth: "calc(100vw - 16px)",
-          height: isMobile ? "calc(100dvh - 16px)" : "76vh",
-          maxHeight: "calc(100dvh - 16px)",
-          background: "var(--bg)",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "12px 18px",
-            borderBottom: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
-              {t("common.plugins")}
-            </span>
-            <code
-              style={{
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {shortenPath(cwd)}
-            </code>
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 20,
-              lineHeight: 1,
-              padding: "2px 6px",
-            }}
-          >
-            ×
-          </button>
-        </div>
+  const splitMode = split != null;
+  const portalTarget = split?.portalTarget ?? null;
 
+  // Context banner (project-trust notice) — it explains the detail pane's
+  // install semantics, so in split mode it travels with the detail into the
+  // right column.
+  const contextBanners = (
+    <>
         {!projectResourcesLoaded && (
           <div
             role="status"
@@ -799,20 +744,26 @@ export function PluginsConfig({
             {t("trust.pluginsNotLoaded")}
           </div>
         )}
+    </>
+  );
 
-        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
-          <div
-            style={{
-              width: isMobile ? "100%" : 245,
-              maxHeight: isMobile ? "40vh" : undefined,
-              borderRight: isMobile ? "none" : "1px solid var(--border)",
-              borderBottom: isMobile ? "1px solid var(--border)" : "none",
-              display: "flex",
-              flexDirection: "column",
-              flexShrink: 0,
-              background: "var(--bg-panel)",
-            }}
-          >
+  // Left: package list — shared by every mode. In split mode it fills the
+  // middle column (width 100%); in modal/embedded mode it is the fixed-width
+  // left pane of the internal two-pane body.
+  const listPane = (
+    <div style={splitMode
+      ? { width: "100%", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)" }
+      : {
+          width: isMobile ? "100%" : embedded ? 160 : 245,
+          maxHeight: isMobile ? "40vh" : undefined,
+          borderRight: isMobile ? "none" : "1px solid var(--border)",
+          borderBottom: isMobile ? "1px solid var(--border)" : "none",
+          display: "flex",
+          flexDirection: "column",
+          flexShrink: 0,
+          background: "var(--bg-panel)",
+        }}
+    >
             <div style={{ flex: 1, overflowY: "auto", padding: "8px 6px" }}>
               {loading ? (
                 <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>
@@ -969,9 +920,13 @@ export function PluginsConfig({
                  {t("i18n.addPlugin")}
               </button>
             </div>
-          </div>
+    </div>
+  );
 
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+  // Right: detail or add panel — shared by every mode (portaled into the
+  // right column in split mode; addMode replaces the detail).
+  const detailPane = (
+    <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
             {addMode ? (
               <AddPluginPanel
                 cwd={cwd}
@@ -1010,20 +965,24 @@ export function PluginsConfig({
                 {t("i18n.selectPackage")}
               </div>
             )}
-          </div>
-        </div>
+    </div>
+  );
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            padding: "10px 18px",
-            borderTop: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
+  // Footer — diagnostics/totals + refresh + close. Stays with the detail
+  // pane: embedded renders it in-panel, split portals it into the right
+  // column.
+  const footerPane = (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 12,
+        padding: "10px 18px",
+        borderTop: "1px solid var(--border)",
+        flexShrink: 0,
+      }}
+    >
           <div style={{ minWidth: 0, flex: 1, fontSize: 11, color: "var(--text-dim)", overflow: "hidden" }}>
             {data?.diagnostics.length ? (
               <span
@@ -1044,7 +1003,122 @@ export function PluginsConfig({
           <button onClick={onClose} style={buttonStyle(false)}>
              {t("i18n.close")}
           </button>
+    </div>
+  );
+
+  if (splitMode) {
+    // Split (three-column) mode: the package list renders inline (middle
+    // column, under AppShell's PanelHeader) while the banner + detail/add
+    // panel + footer portal into the right column's config area. One
+    // component instance keeps every bit of state — selection, install flow.
+    return (
+      <>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }}>
+          {listPane}
         </div>
+        {portalTarget
+          ? createPortal(
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
+                {contextBanners}
+                {detailPane}
+                {footerPane}
+              </div>,
+              portalTarget,
+            )
+          : null}
+      </>
+    );
+  }
+
+  return (
+    <div
+      style={embedded
+        ? { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }
+        : {
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+      onClick={embedded ? undefined : (e) => {
+        if (e.target === e.currentTarget) onClose?.();
+      }}
+    >
+      <div
+        style={embedded
+          ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }
+          : {
+              width: isMobile ? "calc(100vw - 16px)" : 860,
+              maxWidth: "calc(100vw - 16px)",
+              height: isMobile ? "calc(100dvh - 16px)" : "76vh",
+              maxHeight: "calc(100dvh - 16px)",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              display: "flex",
+              flexDirection: "column",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+              overflow: "hidden",
+            }}
+      >
+        {/* Header (suppressed in embedded mode — the panel header carries it) */}
+        {!embedded && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "12px 18px",
+            borderBottom: "1px solid var(--border)",
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
+              {t("common.plugins")}
+            </span>
+            <code
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                fontFamily: "var(--font-mono)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {shortenPath(cwd)}
+            </code>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 20,
+              lineHeight: 1,
+              padding: "2px 6px",
+            }}
+          >
+            ×
+          </button>
+        </div>
+        )}
+
+        {contextBanners}
+
+        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
+          {listPane}
+
+          {detailPane}
+        </div>
+
+        {footerPane}
       </div>
     </div>
   );

@@ -29,6 +29,7 @@ export interface SessionData {
     entryIds: string[];
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
+    hasEarlier?: boolean;
   };
 }
 
@@ -361,9 +362,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isCompacting, compactError, compactResult, currentModelOverride,
     forkingEntryId, activeLeafId, extensionStatuses, extensionWidgets,
     queuedMessages, pendingBash, toolExecutionUpdates,
+    hasEarlierMessages, loadingEarlier,
   } = runtime;
 
   const loadSessionAbortRef = useRef<AbortController | null>(null);
+  /** L3 earlier-page 单飞锁（loadEarlier 去重）。 */
+  const earlierInFlightRef = useRef(false);
   /** 当前被 pin 住的 Loop-Host 会话 id（见挂载 effect 的 loopOwned 处理）。 */
   const pinnedLoopSidRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -479,6 +483,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     patchRuntime({
       activeLeafId: d.leafId,
       currentModelOverride: null,
+      hasEarlierMessages: d.context.hasEarlier === true,
+      loadingEarlier: false,
       ...(d.context.thinkingLevel && d.context.thinkingLevel !== "off"
         ? { thinkingLevel: d.context.thinkingLevel as ThinkingLevelOption }
         : {}),
@@ -508,7 +514,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // running 并连 SSE。疯狂切换时只跳大请求，避免堆积又不丢流式连接。
       const fresh = Boolean(cached) && Date.now() - (cached?.loadedAt ?? 0) < SESSION_REFETCH_THRESHOLD_MS;
       if (!fresh) {
-        const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+        const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", tail: "100" });
         const headers: Record<string, string> = {};
         if (cached?.revision) headers["If-None-Match"] = cached.revision;
         const fetchOpts: RequestInit = { signal: ac.signal };
@@ -590,20 +596,70 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", tail: "100" });
       if (leafId) params.set("leafId", leafId);
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[] } };
+      const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[]; hasEarlier?: boolean } };
       updateCachedSessionData(sid, (sd) => ({
         ...sd,
-        context: { ...sd.context, messages: d.context.messages, entryIds: d.context.entryIds ?? [] },
+        context: {
+          ...sd.context,
+          messages: d.context.messages,
+          entryIds: d.context.entryIds ?? [],
+          ...(d.context.hasEarlier !== undefined ? { hasEarlier: d.context.hasEarlier } : {}),
+        },
       }));
+      // 分支切换后窗口语义重置：hasEarlier 以新分支为准。
+      patchRuntime({ hasEarlierMessages: d.context.hasEarlier === true, loadingEarlier: false });
     } catch (e) {
       console.error("Failed to load context:", e);
     }
-  }, []);
+  }, [patchRuntime]);
+
+  /** L3：把更早的一页消息前置到当前窗口（顶部哨兵触发）。锚点 = 当前窗口头部
+   *  entryId；分支用当前 activeLeafId（会话继续追加也不影响旧分支锚点）。 */
+  const loadEarlier = useCallback(async () => {
+    const sid = session?.id;
+    if (!sid) return;
+    if (earlierInFlightRef.current) return;
+    earlierInFlightRef.current = true;
+    patchRuntime({ loadingEarlier: true });
+    try {
+      const key = runtimeKeyRef.current;
+      const sd = getCachedSession(key);
+      const anchor = sd?.data.context.entryIds[0];
+      if (!anchor) {
+        patchRuntime({ hasEarlierMessages: false, loadingEarlier: false });
+        return;
+      }
+      const params = new URLSearchParams({ before: anchor, limit: "100", deferThinking: "1", deferMedia: "1" });
+      if (activeLeafId) params.set("leafId", activeLeafId);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/earlier?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[]; hasEarlier?: boolean } };
+      if (d.context.messages.length === 0) {
+        patchRuntime({ hasEarlierMessages: d.context.hasEarlier === true, loadingEarlier: false });
+        return;
+      }
+      updateCachedSessionData(key, (prev) => ({
+        ...prev,
+        context: {
+          ...prev.context,
+          messages: [...d.context.messages, ...prev.context.messages],
+          entryIds: [...d.context.entryIds, ...prev.context.entryIds],
+          ...(d.context.hasEarlier !== undefined ? { hasEarlier: d.context.hasEarlier } : {}),
+        },
+      }));
+      patchRuntime({ hasEarlierMessages: d.context.hasEarlier === true, loadingEarlier: false });
+    } catch (e) {
+      console.error("Failed to load earlier messages:", e);
+      patchRuntime({ loadingEarlier: false });
+    } finally {
+      earlierInFlightRef.current = false;
+    }
+  }, [session?.id, activeLeafId, patchRuntime]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {
@@ -1519,6 +1575,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     toolExecutionUpdates,
+    // L3 tail window
+    hasEarlierMessages, loadingEarlier, loadEarlier,
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -1533,3 +1591,5 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     bashRunning, pendingBash,
   };
 }
+
+// L3 runtime 派生字段解构（见上 return）由调用方直接读取。

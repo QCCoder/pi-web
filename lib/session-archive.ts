@@ -1,26 +1,18 @@
 // Session archive primitives: move .jsonl files between an encoded-cwd session
-// directory and its `.archived/` subdirectory. `SessionManager.listAll()` only
-// scans the top-level .jsonl files of each cwd directory (it does not recurse),
-// so moving a file into `.archived/` hides it from the normal session list, and
-// moving it back restores it — with no changes to the .jsonl format that pi owns.
-import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { mkdir, readdir, rename, stat, unlink } from "fs/promises";
+// directory and its `.archived/` subdirectory. The session index (lib/session-index)
+// scans both locations, so moving a file into `.archived/` flips its `archived`
+// flag on the next ensure pass — with no changes to the .jsonl format that pi owns.
+import { mkdir, rename, unlink } from "fs/promises";
 import { basename, dirname, join } from "path";
 import {
   cacheSessionPath,
-  getAgentDir,
+  firstMessageTitle,
   invalidateSessionListCache,
   invalidateSessionPathCache,
-  readSessionHeader,
   resolveSessionPath,
 } from "./session-reader";
+import { ensureSessionIndex, invalidateSessionIndexMemory } from "./session-index";
 import { daemonProxy } from "./agent-proxy";
-import { skillMessageTitle } from "./skill-message";
-
-/** Root directory holding all per-cwd session folders (~/.pi/agent/sessions). */
-function getSessionsDir(): string {
-  return join(getAgentDir(), "sessions");
-}
 
 /** Subdirectory name used to archive session files within a cwd session dir. */
 export const ARCHIVE_DIR_NAME = ".archived";
@@ -56,6 +48,10 @@ const ARCHIVED_CACHE_TTL_MS = 30_000;
 
 export function invalidateArchivedSessionsCache(): void {
   globalThis.__piArchivedSessionsCache = undefined;
+  // The archived list derives from the session index; a move changes paths, so
+  // the in-memory index snapshot must go too (the disk walk re-parses only the
+  // moved file — everything else still hits the mtime cache).
+  invalidateSessionIndexMemory();
 }
 
 /** The `.archived/` directory sibling to a session file. */
@@ -63,79 +59,19 @@ function archiveDirFor(sessionFilePath: string): string {
   return join(dirname(sessionFilePath), ARCHIVE_DIR_NAME);
 }
 
-function firstUserMessageText(entries: { type: string; message?: { role: string; content: unknown } }[]): string {
-  for (const entry of entries) {
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (!message || message.role !== "user") continue;
-    const content = message.content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      const textBlock = content.find((b: { type?: string }) => b?.type === "text") as { text?: string } | undefined;
-      if (textBlock?.text) return textBlock.text;
-    }
-  }
-  return "";
-}
-
-async function buildArchivedSessionInfo(filePath: string): Promise<ArchivedSessionInfo | null> {
-  const header = readSessionHeader(filePath);
-  if (!header?.id) return null;
-  let name = "";
-  let firstMessage = "";
-  try {
-    const sm = SessionManager.open(filePath);
-    name = sm.getSessionName() ?? "";
-    firstMessage = firstUserMessageText(sm.getEntries() as never);
-  } catch {
-    // Degrade gracefully — header-only info is still usable for restore/delete.
-  }
-  let modified: string;
-  let archivedAt: string;
-  try {
-    const s = await stat(filePath);
-    modified = s.mtime.toISOString();
-    archivedAt = s.mtime.toISOString();
-  } catch {
-    modified = header.timestamp ?? new Date().toISOString();
-    archivedAt = modified;
-  }
-  return {
-    id: header.id,
-    path: filePath,
-    cwd: header.cwd ?? "",
-    name,
-    firstMessage: firstMessage ? skillMessageTitle(firstMessage) : "(no messages)",
-    modified,
-    archivedAt,
-  };
-}
-
 async function loadArchivedSessions(): Promise<ArchivedSessionInfo[]> {
-  const sessionsDir = getSessionsDir();
-  const out: ArchivedSessionInfo[] = [];
-  let cwdDirs: string[];
-  try {
-    const entries = await readdir(sessionsDir, { withFileTypes: true });
-    cwdDirs = entries.filter((e) => e.isDirectory() && e.name !== ARCHIVE_DIR_NAME).map((e) => join(sessionsDir, e.name));
-  } catch {
-    return [];
-  }
-  for (const cwdDir of cwdDirs) {
-    const archiveDir = join(cwdDir, ARCHIVE_DIR_NAME);
-    let files: string[];
-    try {
-      files = (await readdir(archiveDir)).filter((f) => f.endsWith(".jsonl"));
-    } catch {
-      continue;
-    }
-    for (const file of files) {
-      const info = await buildArchivedSessionInfo(join(archiveDir, file));
-      if (info) out.push(info);
-    }
-  }
-  out.sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
-  return out;
+  const entries = (await ensureSessionIndex()).filter((entry) => entry.archived);
+  const data: ArchivedSessionInfo[] = entries.map((entry) => ({
+    id: entry.id,
+    path: entry.path,
+    cwd: entry.cwd,
+    name: entry.name ?? "",
+    firstMessage: entry.firstMessage ? firstMessageTitle(entry) : "(no messages)",
+    modified: new Date(entry.modifiedMs).toISOString(),
+    archivedAt: new Date(entry.mtimeMs).toISOString(),
+  }));
+  data.sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
+  return data;
 }
 
 export async function listArchivedSessions(): Promise<ArchivedSessionInfo[]> {

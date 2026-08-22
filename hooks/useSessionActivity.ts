@@ -49,7 +49,10 @@ export function useSessionActivity(selectedSessionId: string | null, refreshKey 
   }, []);
 
   useEffect(() => {
-    void loadSessions();
+    // Coalesce bursts of refreshKey bumps (an archive cascade or a work-item
+    // mutation can bump several times in one tick) into one list fetch.
+    const timer = setTimeout(() => void loadSessions(), 300);
+    return () => clearTimeout(timer);
   }, [loadSessions, refreshKey]);
 
   useEffect(() => {

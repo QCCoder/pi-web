@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { MarkdownBody } from "./MarkdownBody";
 import { ImporterConfig } from "./ImporterConfig";
 import { LoopConfig } from "./LoopConfig";
@@ -41,6 +42,19 @@ type WorkItemFilter = "all" | WorkItemType;
 interface Props {
   open: boolean;
   embedded?: boolean;
+  /** Narrow (middle-column panel) variant: hides the workspace rail and
+   *  stacks the body single-column — the panel is too narrow for the 280px
+   *  rail + content grid. Workspace switching stays in the top tab bar. */
+  panel?: boolean;
+  /** Split (three-column) mode: the workspace LIST (rail) renders inline in
+   *  the middle column while the selected workspace's settings DETAIL portals
+   *  into the right column's config area (`portalTarget` = AppShell's
+   *  configPortalNode — same pattern as the 模型/Skills/插件 split views). One
+   *  instance keeps every bit of state (selection, drafts, save flow); only
+   *  the layout splits. The manager chrome (header/tabs) is skipped — the
+   *  middle column already renders its own PanelHeader. A null portal target
+   *  renders nothing for the detail (the frame arrives in the next commit). */
+  split?: { portalTarget: HTMLElement | null };
   initialSection?: ManagerSection;
   activeWorkspacePath?: string | null;
   initialWorkItemKey?: string | null;
@@ -65,6 +79,9 @@ interface Props {
   onWorkItemsChanged?: () => void;
   onWorkspaceChanged?: () => void;
   onOpenLoops?: () => void;
+  /** Reports the rail's current selection up (e.g. the right-column
+   *  工作区设置 header shows the selected name in split mode). */
+  onSelectedWorkspaceChange?: (workspace: WorkspaceSummary | null) => void;
 }
 
 const STATUS_OPTIONS: WorkItemStatus[] = ["open", "in_progress", "blocked", "done", "cancelled"];
@@ -89,7 +106,7 @@ const CAPABILITY_LABELS: Record<string, string> = {
   "work-items": "工作项",
 };
 
-const STATUS_LABELS: Record<WorkItemStatus, string> = {
+export const STATUS_LABELS: Record<WorkItemStatus, string> = {
   open: "待处理",
   in_progress: "处理中",
   blocked: "已阻塞",
@@ -168,6 +185,8 @@ function SelectField<T extends string>({
 export function WorkspaceManager({
   open,
   embedded = false,
+  panel = false,
+  split,
   initialSection = "workspaces",
   activeWorkspacePath,
   initialWorkItemKey,
@@ -183,6 +202,7 @@ export function WorkspaceManager({
   onWorkItemsChanged,
   onWorkspaceChanged,
   onOpenLoops,
+  onSelectedWorkspaceChange,
 }: Props) {
   const [section, setSection] = useState<ManagerSection>(initialSection);
   const [workspaceData, setWorkspaceData] = useState<WorkspaceListResponse | null>(null);
@@ -332,6 +352,12 @@ export function WorkspaceManager({
   useEffect(() => {
     setShowArchived(false);
   }, [selectedWorkspaceId]);
+
+  // Split mode: report the rail's selection up so the owner (AppShell's
+  // right-column 工作区设置 header) can show the selected workspace's name.
+  useEffect(() => {
+    onSelectedWorkspaceChange?.(selectedWorkspace);
+  }, [onSelectedWorkspaceChange, selectedWorkspace]);
 
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspace) {
@@ -708,14 +734,10 @@ export function WorkspaceManager({
 
   if (!open && !embedded) return null;
 
-  return (
-    <div
-      className={embedded ? "workspace-manager-page" : "workspace-manager-backdrop"}
-      role={embedded ? undefined : "dialog"}
-      aria-modal={embedded ? undefined : "true"}
-      aria-label="Pi Workspace"
-    >
-      <style>{`
+  const splitMode = split != null;
+  const portalTarget = split?.portalTarget ?? null;
+
+  const managerStyles = `
         .workspace-manager-backdrop {
           position: fixed;
           inset: 0;
@@ -739,6 +761,13 @@ export function WorkspaceManager({
           border-radius: 0;
           box-shadow: none;
         }
+        ${panel ? `
+        .workspace-manager-body { grid-template-columns: minmax(0, 1fr); }
+        .workspace-rail { display: none; }
+        .workspace-manager-header { padding: 7px 10px; }
+        .workspace-manager-title { display: none; }
+        .workspace-content { padding: 12px; }
+        ` : ""}
         .workspace-manager {
           width: min(1180px, 100%);
           height: min(780px, 100%);
@@ -1050,35 +1079,13 @@ export function WorkspaceManager({
             grid-column: 4;
           }
         }
-      `}</style>
-      <div className="workspace-manager">
-        <header className="workspace-manager-header">
-          <div className="workspace-manager-title">Pi Workspace</div>
-          <nav className="workspace-manager-tabs" aria-label="Workspace views">
-            <button
-              className="workspace-manager-tab"
-              data-active={section === "workspaces"}
-              onClick={() => setSection("workspaces")}
-            >
-              Workspaces
-            </button>
-            {selectedWorkspace?.capabilities.includes("work-items") && (
-              <button
-                className="workspace-manager-tab"
-                data-active={section === "work-items"}
-                onClick={() => setSection("work-items")}
-              >
-                工作项
-              </button>
-            )}
-          </nav>
-          {!embedded && (
-            <button className="workspace-icon-button" onClick={onClose} aria-label="Close">×</button>
-          )}
-        </header>
+  `;
 
-        <div className="workspace-manager-body">
-          <aside className="workspace-rail">
+  const railPane = (
+    <aside
+      className="workspace-rail"
+      style={splitMode ? { width: "100%", flex: 1, minHeight: 0, borderRight: "none" } : undefined}
+    >
             <div className="workspace-page-header">
               <strong>Workspaces</strong>
               <button className="workspace-action" onClick={() => setCreateWorkspaceOpen(true)}>新建</button>
@@ -1107,9 +1114,14 @@ export function WorkspaceManager({
             {!loading && workspaceData?.workspaces.length === 0 && (
               <div className="workspace-rail-meta">尚未创建 Workspace。</div>
             )}
-          </aside>
+    </aside>
+  );
 
-          <main className="workspace-content">
+  const contentPane = (
+    <main
+      className="workspace-content"
+      style={splitMode ? { flex: 1, minHeight: 0 } : undefined}
+    >
             {error && <div className="workspace-error">{error}</div>}
 
             {section === "workspaces" && (
@@ -1208,7 +1220,7 @@ export function WorkspaceManager({
                     </div>
                     <section className="workspace-settings-section">
                       <div className="repository-section-header">
-                        <h3>Pi Skills</h3>
+                        <h3>工作区可用 Skills</h3>
                         <button
                           className="workspace-action"
                           onClick={() => {
@@ -1754,7 +1766,68 @@ export function WorkspaceManager({
                 </>
               )
             )}
-          </main>
+    </main>
+  );
+
+  if (splitMode) {
+    // Split (three-column) mode: the workspace LIST (rail) fills the middle
+    // column — no manager chrome, the column's own PanelHeader (via
+    // SettingsPanel) already titles the panel — while the selected
+    // workspace's settings DETAIL portals into the right column's config
+    // area (the container under the 工作区设置 PanelHeader). The detail keeps
+    // `.workspace-content` styling with full-height scroll; work-items
+    // content flows through the same pane so every section keeps working.
+    // A null portal target renders nothing for the detail — the frame
+    // arrives in the next commit (same guard as the config components).
+    return (
+      <div
+        className="workspace-manager-page"
+        style={{ display: "flex", flexDirection: "column" }}
+      >
+        <style>{managerStyles}</style>
+        {railPane}
+        {portalTarget ? createPortal(contentPane, portalTarget) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={embedded ? "workspace-manager-page" : "workspace-manager-backdrop"}
+      role={embedded ? undefined : "dialog"}
+      aria-modal={embedded ? undefined : "true"}
+      aria-label="Pi Workspace"
+    >
+      <style>{managerStyles}</style>
+      <div className="workspace-manager">
+        <header className="workspace-manager-header">
+          <div className="workspace-manager-title">Pi Workspace</div>
+          <nav className="workspace-manager-tabs" aria-label="Workspace views">
+            <button
+              className="workspace-manager-tab"
+              data-active={section === "workspaces"}
+              onClick={() => setSection("workspaces")}
+            >
+              Workspaces
+            </button>
+            {selectedWorkspace?.capabilities.includes("work-items") && (
+              <button
+                className="workspace-manager-tab"
+                data-active={section === "work-items"}
+                onClick={() => setSection("work-items")}
+              >
+                工作项
+              </button>
+            )}
+          </nav>
+          {!embedded && (
+            <button className="workspace-icon-button" onClick={onClose} aria-label="Close">×</button>
+          )}
+        </header>
+
+        <div className="workspace-manager-body">
+          {railPane}
+          {contentPane}
         </div>
       </div>
     </div>

@@ -5,14 +5,17 @@ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
-import { ModelsConfig } from "./ModelsConfig";
-import { SkillsConfig } from "./SkillsConfig";
 import { ArchiveModal } from "./ArchiveModal";
-import { PluginsConfig } from "./PluginsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { WorkspaceOverview } from "./WorkspaceOverview";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
+import { ActivityBar, visibleActivityViews, GLOBAL_ACTIVITY_VIEWS, isConfigView, type SidebarView, type ConfigView } from "./ActivityBar";
+import { PanelHeader } from "./PanelHeader";
+import { SettingsPanel, PreferencesPage, type SettingsPage } from "./SettingsPanel";
+import { ModelsConfig } from "./ModelsConfig";
+import { SkillsConfig } from "./SkillsConfig";
+import { PluginsConfig } from "./PluginsConfig";
 import { LoopConfig } from "./LoopConfig";
 import { LoopLaunchingPlaceholder } from "./LoopLaunchOverlay";
 import { HomeLanding } from "./HomeLanding";
@@ -43,7 +46,11 @@ type AutoNameStatus =
   | { kind: "success" }
   | { kind: "error"; message: string };
 
-type WorkspaceView = "overview" | "settings" | "work-items" | "loops" | "chat";
+/** The right column's content view: the overview dashboard is the landing
+ *  state, chat takes over once a session is selected / a new session starts.
+ *  (The former "settings" / "work-items" / "loops" values moved to the middle
+ *  column panels — legacy URLs map onto panel switches in applyUrlToTabs.) */
+type WorkspaceView = "overview" | "chat";
 
 /** Loop run terminal statuses (shared by the run polling effect). */
 const LOOP_TERMINAL = new Set(["succeeded", "failed"]);
@@ -102,6 +109,101 @@ export function AppShell() {
   const activeFileTabId = activeTab?.activeFileTabId ?? null;
   const rightPanelOpen = activeTab?.rightPanelOpen ?? false;
   const activeCwd = activeTab?.workspace.path ?? null;
+  // Middle-column panel selection — one `sidebarView` for everything (module
+  // views + the global archive/settings panels). Module views persist per
+  // workspace under `pi-active-view:<wsId>`; the global panels persist under
+  // the shared `pi-active-panel` key (settings survives workspace switches —
+  // archive is transient and falls back to the per-workspace module view).
+  // Stale stored values (the former sessions/explorer split, removed views)
+  // fail the visible-views check and fall back to "workbench".
+  const GLOBAL_PANEL_KEY = "pi-active-panel";
+  const [sidebarView, setSidebarView] = useState<SidebarView>("workbench");
+  // Config views (模型/Skills/插件) are strict three-column views on desktop:
+  // the rail icon puts the config's LIST in the middle column (temporarily
+  // replacing the sidebarView panel) and its DETAIL in the right column — the
+  // middle-column split panel portals the detail across via configPortalNode.
+  // Clicking the active config icon again toggles it off; any panel switch
+  // hands the middle column back to sidebarView. Session-only state, never
+  // persisted; reset when the active workspace changes. Mobile never sets it
+  // (its bar has no config icons — the settings index subpages serve the same
+  // content there via the components' embedded mode).
+  const [configView, setConfigView] = useState<ConfigView | null>(null);
+  // The right column's config portal target (the div under the config view's
+  // PanelHeader). The middle-column split panel (ModelsConfig/SkillsConfig/
+  // PluginsConfig in `split` mode) portals its DETAIL pane into this node —
+  // callback-ref + state so the portal re-renders as soon as the node mounts
+  // (same commit, before paint; null target simply renders nothing).
+  const [configPortalNode, setConfigPortalNode] = useState<HTMLDivElement | null>(null);
+  const handleOpenConfig = useCallback((view: ConfigView) => {
+    setConfigView((current) => (current === view ? null : view));
+    // The config LIST lives in the middle column — make sure the column is
+    // visible when a config view opens (desktop-only entry point; mobile
+    // serves the same content via the settings subpages and never gets here).
+    setSidebarOpen(true);
+  }, []);
+  useEffect(() => {
+    setConfigView(null);
+    if (!activeWorkspace) {
+      const storedGlobal = localStorage.getItem(GLOBAL_PANEL_KEY) as SidebarView | null;
+      setSidebarView(storedGlobal === "settings" ? "settings" : "workbench");
+      return;
+    }
+    const visible = visibleActivityViews(activeWorkspace.capabilities);
+    const storedGlobal = localStorage.getItem(GLOBAL_PANEL_KEY) as SidebarView | null;
+    if (storedGlobal === "settings" && visible.includes("settings")) {
+      setSidebarView("settings");
+      return;
+    }
+    const stored = localStorage.getItem(`pi-active-view:${activeWorkspace.id}`) as SidebarView | null;
+    setSidebarView(stored && visible.includes(stored) && !GLOBAL_ACTIVITY_VIEWS.includes(stored) ? stored : "workbench");
+  }, [activeWorkspace]);
+  const handleSidebarSwitchView = useCallback((view: SidebarView) => {
+    // Defensive: a config view is right-column content, never a middle-column
+    // panel — route it to the config handler instead of switching panels.
+    if (isConfigView(view)) {
+      handleOpenConfig(view);
+      return;
+    }
+    // A config view temporarily owns the middle column (its list renders
+    // there) — any panel switch must hand the column back.
+    setConfigView(null);
+    setSidebarView(view);
+    if (GLOBAL_ACTIVITY_VIEWS.includes(view)) {
+      try { localStorage.setItem(GLOBAL_PANEL_KEY, view); } catch { /* ignore */ }
+      if (view === "settings") setSettingsPage("index");
+    } else {
+      setLoopEditorOpen(false);
+      if (activeWorkspace) {
+        try { localStorage.setItem(`pi-active-view:${activeWorkspace.id}`, view); } catch { /* ignore */ }
+      }
+    }
+  }, [activeWorkspace, handleOpenConfig]);
+  // The rail's switch behavior: a DIFFERENT icon switches the panel (opening
+  // the column if collapsed); the ACTIVE icon toggles the column (VS Code
+  // collapse). Config icons toggle the three-column config view (list in the
+  // middle column + detail in the right; opening also opens the column). On
+  // mobile, module views toggle the drawer; settings opens as a full-screen
+  // overlay (the drawer renders full-screen for global panels).
+  const handleRailSwitch = useCallback((view: SidebarView) => {
+    if (isConfigView(view)) {
+      handleOpenConfig(view);
+      return;
+    }
+    // While a config view owns the middle column (its list renders there),
+    // any other rail click hands the column back to that panel — never a
+    // column toggle.
+    if (configView !== null) {
+      handleSidebarSwitchView(view);
+      setSidebarOpen(true);
+      return;
+    }
+    if (view === sidebarView) {
+      setSidebarOpen((open) => !open);
+      return;
+    }
+    handleSidebarSwitchView(view);
+    setSidebarOpen(true);
+  }, [sidebarView, configView, handleSidebarSwitchView, handleOpenConfig]);
   const [refreshKey, setRefreshKey] = useState(0);
   const sessionActivity = useSessionActivity(selectedSession?.id ?? null, refreshKey);
   // Running-id 集来自 session daemon 的 SSE（/api/agent/running/events 代理它的
@@ -113,11 +215,33 @@ export function AppShell() {
   useGlobalAgentEvents(sessionActivity.runningIds);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
-  const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
-  const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
-  const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
+  // The settings panel's subpage (index → workspace/models/skills/plugins/
+  // preferences). Owned here so external entry points (overview 添加仓库, home
+  // create-workspace…) can deep-link straight to a subpage.
+  const [settingsPage, setSettingsPage] = useState<SettingsPage>("index");
+  // The selected workspace's name inside the settings › 工作区 split view —
+  // reported up by the middle-column WorkspaceManager (its rail selection is
+  // internal state) so the right-column 工作区设置 header can show it.
+  const [workspaceSettingsName, setWorkspaceSettingsName] = useState<string | null>(null);
+  const handleWorkspaceSettingsSelection = useCallback((workspace: WorkspaceSummary | null) => {
+    setWorkspaceSettingsName(workspace?.name ?? null);
+  }, []);
+  // Leaving the settings › 工作区 split view drops the reported name so a
+  // later reopen never flashes a stale header — the manager re-reports on
+  // mount.
+  useEffect(() => {
+    if (!(sidebarView === "settings" && settingsPage === "workspace")) {
+      setWorkspaceSettingsName(null);
+    }
+  }, [sidebarView, settingsPage]);
+  // When true and the loop panel is active, the middle column shows the
+  // LoopConfig editor instead of the loop list (temporarily widened — see
+  // middleColumnWidth below; the widened value is derived, never persisted).
+  const [loopEditorOpen, setLoopEditorOpen] = useState(false);
+  // Home create-workspace wizard — the one remaining WorkspaceManager modal
+  // (creating a workspace is a focused flow; managing one lives in the
+  // settings › workspace panel page).
   const [workspaceManagerOpen, setWorkspaceManagerOpen] = useState(false);
   const [importPickerOpen, setImportPickerOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -333,13 +457,13 @@ export function AppShell() {
       : [...current, workspace]);
     setTabs((prev) => {
       if (prev.some((t) => t.id === workspace.id)) return prev;
-      const hasOverview = workspace.capabilities.includes("overview");
       const tab: WorkspaceTabState = {
         id: workspace.id,
         workspace,
-        view: hasOverview ? "overview" : "chat",
+        // The overview dashboard is the unconditional landing view.
+        view: "overview",
         session: null,
-        newSessionCwd: hasOverview ? null : workspace.path,
+        newSessionCwd: null,
         workItemKey: null,
         fileTabs: [],
         activeFileTabId: null,
@@ -350,14 +474,10 @@ export function AppShell() {
     return workspace.id;
   }, []);
 
-  // Make a tab active (or go home with null). Closes modals and clears the
+  // Make a tab active (or go home with null). Closes overlays and clears the
   // per-session UI that ChatWindow will re-populate for the new session.
   const activateTab = useCallback((id: string | null) => {
     setWorkspaceManagerOpen(false);
-    setModelsConfigOpen(false);
-    setSkillsConfigOpen(false);
-    setPluginsConfigOpen(false);
-    setArchiveOpen(false);
     setProjectTrustDialogOpen(false);
     setActiveTopPanel(null);
     if (id) setMruIds((ids) => [id, ...ids.filter((x) => x !== id)]);
@@ -380,9 +500,8 @@ export function AppShell() {
   }, []);
 
   const buildTabQuery = useCallback((tab: WorkspaceTabState): string => {
-    const parts = [`workspace=${encodeURIComponent(tab.id)}`, `view=${tab.view}`];
+    const parts = [`workspace=${encodeURIComponent(tab.id)}`, `view=${tab.view === "chat" ? "chat" : "overview"}`];
     if (tab.view === "chat" && tab.session) parts.push(`session=${encodeURIComponent(tab.session.id)}`);
-    if (tab.view === "work-items" && tab.workItemKey) parts.push(`item=${encodeURIComponent(tab.workItemKey)}`);
     return parts.join("&");
   }, []);
 
@@ -459,19 +578,35 @@ export function AppShell() {
       return;
     }
 
-    let view: WorkspaceView = rawView && (["overview", "settings", "work-items", "loops", "chat"] as const).includes(rawView as WorkspaceView)
-      ? rawView as WorkspaceView
-      : (workspace.capabilities.includes("overview") ? "overview" : "chat");
-    if (view === "loops" && !workspace.capabilities.includes("loop")) {
-      view = workspace.capabilities.includes("overview") ? "overview" : "chat";
+    // Legacy URL views (settings / work-items / loops) map onto middle-column
+    // panels — the right column only knows overview/chat now.
+    const panelFromLegacy: Partial<Record<string, SidebarView>> = {
+      settings: "settings",
+      "work-items": "work-items",
+      loops: "loop",
+    };
+    let view: WorkspaceView = rawView === "chat" ? "chat" : "overview";
+    const legacyPanel = rawView ? panelFromLegacy[rawView] : undefined;
+    if (legacyPanel === "loop" && !workspace.capabilities.includes("loop")) {
+      // loop panel gated — fall through to overview
+      view = "overview";
     }
     ensureTab(workspace);
     updateTab(workspaceId, {
       view,
       session,
       newSessionCwd: view === "chat" && !session ? workspace.path : null,
-      workItemKey: view === "work-items" ? itemKey : null,
+      workItemKey: legacyPanel === "work-items" ? itemKey : null,
     });
+    // Persist the legacy deep-linked panel BEFORE activating the tab — the
+    // activeWorkspace effect re-derives `sidebarView` from these keys on tab
+    // switch and would otherwise clobber an immediate setState.
+    if (legacyPanel && (legacyPanel !== "loop" || workspace.capabilities.includes("loop"))) {
+      try {
+        if (legacyPanel === "settings") localStorage.setItem(GLOBAL_PANEL_KEY, "settings");
+        else localStorage.setItem(`pi-active-view:${workspaceId}`, legacyPanel);
+      } catch { /* ignore */ }
+    }
     activateTab(workspaceId);
   }, [workspaces, sessionActivity.sessions, ensureTab, updateTab, activateTab]);
 
@@ -501,10 +636,7 @@ export function AppShell() {
         const fresh = workspaces.find((w) => w.id === t.id);
         if (fresh && fresh !== t.workspace) {
           changed = true;
-          const view = t.view === "loops" && !fresh.capabilities.includes("loop")
-            ? (fresh.capabilities.includes("overview") ? "overview" : "chat")
-            : t.view;
-          return { ...t, workspace: fresh, view };
+          return { ...t, workspace: fresh };
         }
         return t;
       });
@@ -524,6 +656,9 @@ export function AppShell() {
 
   const handleSelectSession = useCallback((session: SessionInfo) => {
     if (!activeTabId) return;
+    // Opening a session is an explicit “show me the chat” intent — drop the
+    // right-column config view so the chat is actually visible.
+    setConfigView(null);
     updateTab(activeTabId, { session, newSessionCwd: null, view: "chat" });
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
@@ -636,11 +771,12 @@ export function AppShell() {
     // Project the (possibly already-open) tab to the URL. `tabs` may not yet
     // reflect a brand-new tab, so fall back to the workspace's default view.
     const existing = tabs.find((t) => t.id === id);
-    navigateUrl(existing ? buildTabQuery(existing) : `workspace=${encodeURIComponent(id)}&view=${workspace.capabilities.includes("overview") ? "overview" : "chat"}`);
+    navigateUrl(existing ? buildTabQuery(existing) : `workspace=${encodeURIComponent(id)}&view=overview`);
   }, [ensureTab, activateTab, tabs, buildTabQuery, navigateUrl]);
 
   const handleWorkspaceNewSession = useCallback(() => {
     if (!activeTabId) return;
+    setConfigView(null);
     updateTab(activeTabId, { view: "chat", session: null, newSessionCwd: activeWorkspace?.path ?? null });
     setSessionKey((k) => k + 1);
     setBranchTree([]);
@@ -654,17 +790,6 @@ export function AppShell() {
     activateTab(null);
     navigateUrl("tab=home");
   }, [activateTab, navigateUrl]);
-
-  const navigateWorkspaceView = useCallback((view: WorkspaceView, itemKey?: string | null) => {
-    if (!activeTabId) return;
-    updateTab(activeTabId, {
-      view,
-      ...(view === "work-items" ? { workItemKey: itemKey ?? null } : {}),
-    });
-    let query = `workspace=${encodeURIComponent(activeTabId)}&view=${view}`;
-    if (view === "work-items" && itemKey) query += `&item=${encodeURIComponent(itemKey)}`;
-    navigateUrl(query);
-  }, [activeTabId, updateTab, navigateUrl]);
 
   const handleCloseWorkspaceTab = useCallback((workspaceId: string) => {
     const tab = tabs.find((t) => t.id === workspaceId) ?? null;
@@ -769,10 +894,12 @@ export function AppShell() {
   }, [workspaces, ensureTab, updateTab, activateTab, navigateUrl]);
 
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
-    navigateWorkspaceView("work-items");
+    // The work-items panel (full manager) receives the create request.
+    if (activeWorkspace?.capabilities.includes("work-items")) handleSidebarSwitchView("work-items");
     setCreateWorkItemRequest({ type, id: Date.now() });
-    if (isMobile) setSidebarOpen(false);
-  }, [isMobile, navigateWorkspaceView]);
+    // The manager lives in the middle column — on mobile that's the drawer.
+    if (isMobile) setSidebarOpen(true);
+  }, [isMobile, activeWorkspace, handleSidebarSwitchView]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -1184,54 +1311,222 @@ export function AppShell() {
     return result;
   }, [sessionActivity.completedIds, sessionActivity.runningIds, sessionActivity.sessions, workspaces]);
 
-  const sidebarContent = (
-    <WorkspaceSidebar
-      activeWorkspace={activeWorkspace}
-      workspaces={workspaces}
-      selectedSessionId={selectedSession?.id ?? null}
-      selectedWorkItemKey={selectedWorkItemKey}
-      runningSessionIds={sessionActivity.runningIds}
-      completedSessionIds={sessionActivity.completedIds}
-      allSessions={sessionActivity.sessions}
-      refreshKey={refreshKey}
-      explorerRefreshKey={explorerRefreshKey}
-      onSelectWorkspace={handleOpenWorkspace}
-      onCreateWorkspace={handleCreateWorkspace}
-      onImportDirectory={() => setImportPickerOpen(true)}
-      onOpenWorkspaceSettings={() => {
-        setOpenRepositoryFormRequest(undefined);
-        navigateWorkspaceView("settings");
-      }}
-      onOpenLoops={() => {
-        navigateWorkspaceView("loops");
-        if (isMobile) setSidebarOpen(false);
-      }}
-      loopsActive={workspaceView === "loops"}
-      onOpenLoopSession={handleOpenLoopSession}
-      onTriggerLoop={handleLoopTriggered}
-      onAddRepository={() => {
-        navigateWorkspaceView("settings");
-        setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
-        if (isMobile) setSidebarOpen(false);
-      }}
-      onNewSession={handleWorkspaceNewSession}
-      onSelectSession={handleSelectSession}
-      onSelectWorkItem={(item) => {
-        navigateWorkspaceView("work-items", item.key);
-        if (isMobile) setSidebarOpen(false);
-      }}
-      onCreateWorkItem={handleCreateWorkItem}
-      onOpenFile={handleOpenFile}
-      onOpenModels={() => setModelsConfigOpen(true)}
-      onOpenSkills={() => setSkillsConfigOpen(true)}
-      onOpenPlugins={() => setPluginsConfigOpen(true)}
-      onOpenArchive={() => setArchiveOpen(true)}
-      onSessionRemoved={(id) => {
-        updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
-        setRefreshKey((k) => k + 1);
-      }}
-    />
-  );
+  // ---- Middle column content (three-column layout) ----------------------------
+  // One `sidebarView` drives everything: module views (workbench/knowledge/
+  // loop/work-items) render WorkspaceSidebar / the work-items manager; global
+  // panels (archive/settings) render the former modals as embedded panels.
+  // The loop editor (LoopConfig) replaces the loop list and temporarily widens
+  // the column — the widened value is derived, never persisted.
+  const middleColumnWidth = loopEditorOpen && sidebarView === "loop"
+    ? Math.max(sidebarWidth, 520)
+    : sidebarWidth;
+  const openLoopsPanel = useCallback(() => {
+    setLoopEditorOpen(true);
+  }, []);
+
+  const renderMiddleColumn = () => {
+    // Desktop config views (模型/Skills/插件): the LIST renders here in the
+    // middle column (under a PanelHeader like every other panel); the DETAIL
+    // portals into the right column's config area (configPortalNode). Mobile
+    // never sets configView — its settings subpages serve the same content
+    // via the components' embedded mode.
+    if (!isMobile && configView) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+          <PanelHeader
+            title={configView === "models" ? "模型" : configView === "skills" ? "Skills" : "插件"}
+            meta={configView === "models" ? "~/.pi/agent/models.json" : settingsCwd ?? undefined}
+          />
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            {configView === "models" ? (
+              <ModelsConfig split={{ portalTarget: configPortalNode }} onSaved={() => setModelsRefreshKey((key) => key + 1)} />
+            ) : configView === "skills" && settingsCwd ? (
+              <SkillsConfig
+                split={{ portalTarget: configPortalNode }}
+                cwd={settingsCwd}
+                globalOnly={!activeWorkspace}
+                workspace={activeWorkspace}
+                onWorkspaceSkillsChange={(updated) => {
+                  setWorkspaces((current) =>
+                    current.map((w) => (w.id === updated.id ? updated : w)),
+                  );
+                }}
+              />
+            ) : configView === "plugins" && settingsCwd ? (
+              <PluginsConfig
+                split={{ portalTarget: configPortalNode }}
+                cwd={settingsCwd}
+                sessionId={selectedSession?.id ?? null}
+                onReloaded={() => setSessionKey((key) => key + 1)}
+              />
+            ) : null}
+          </div>
+        </div>
+      );
+    }
+    // Global settings panel works at home too (workspace subpage hidden).
+    if (sidebarView === "settings") {
+      return (
+        <SettingsPanel
+          page={settingsPage}
+          onPageChange={setSettingsPage}
+          workspace={activeWorkspace}
+          settingsCwd={settingsCwd ?? ""}
+          workspaceSlot={activeWorkspace && !isMobile ? (
+            // Desktop: the manager is mounted whenever settings is open — its
+            // rail (workspace list) shows BELOW the index rows only while the
+            // 工作区 row is active; its detail portals to the right column.
+            settingsPage === "workspace" ? (
+              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", borderTop: "1px solid var(--border)", marginTop: 8 }}>
+                <WorkspaceManager
+                  open
+                  embedded
+                  initialSection="workspaces"
+                  split={{ portalTarget: configPortalNode }}
+                  onSelectedWorkspaceChange={handleWorkspaceSettingsSelection}
+                  activeWorkspacePath={activeWorkspace.path}
+                  openRepositoryFormRequest={openRepositoryFormRequest}
+                  onClose={() => {}}
+                  onOpenWorkspace={handleOpenWorkspace}
+                  onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                  onRunContract={handleRunContract}
+                  onOpenConversation={handleOpenLoopSession}
+                  onWorkspaceDeleted={handleWorkspaceDeleted}
+                  onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+                  onWorkspaceChanged={() => void loadWorkspaces()}
+                />
+              </div>
+            ) : null
+          ) : activeWorkspace ? (
+            <WorkspaceManager
+              open
+              embedded
+              panel={isMobile}
+              initialSection="workspaces"
+              split={isMobile ? undefined : { portalTarget: configPortalNode }}
+              onSelectedWorkspaceChange={handleWorkspaceSettingsSelection}
+              activeWorkspacePath={activeWorkspace.path}
+              openRepositoryFormRequest={openRepositoryFormRequest}
+              onClose={() => {}}
+              onOpenWorkspace={handleOpenWorkspace}
+              onOpenWorkItemConversation={handleOpenWorkItemConversation}
+              onRunContract={handleRunContract}
+              onOpenConversation={handleOpenLoopSession}
+              onWorkspaceDeleted={handleWorkspaceDeleted}
+              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+              onWorkspaceChanged={() => void loadWorkspaces()}
+            />
+          ) : null}
+          onOpenArchive={activeWorkspace ? () => handleSidebarSwitchView("archive") : undefined}
+          onWorkspaceSkillsChange={(updated) => {
+            setWorkspaces((current) =>
+              current.map((w) => (w.id === updated.id ? updated : w)),
+            );
+          }}
+          onPluginsReloaded={() => setSessionKey((k) => k + 1)}
+          onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
+          sessionId={selectedSession?.id ?? null}
+          onCloseOverlay={isMobile ? () => setSidebarOpen(false) : undefined}
+          // Desktop: the 模型/Skills/插件 index rows open the right-column
+          // config views instead of in-panel subpages. Mobile keeps subpages.
+          onOpenConfigView={isMobile ? undefined : handleOpenConfig}
+        />
+      );
+    }
+    if (activeWorkspace && sidebarView === "archive") {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+          <PanelHeader
+            title="归档"
+            meta={activeWorkspace.name}
+            onClose={isMobile ? () => setSidebarOpen(false) : undefined}
+          />
+          <ArchiveModal
+            embedded
+            workspaceId={activeWorkspace.id}
+            workspacePath={activeWorkspace.path}
+            onChanged={() => setRefreshKey((k) => k + 1)}
+          />
+        </div>
+      );
+    }
+    if (activeWorkspace && sidebarView === "work-items") {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+          <PanelHeader
+            title="工作项"
+            meta={activeWorkspace.name}
+            onClose={isMobile ? () => setSidebarOpen(false) : undefined}
+          />
+          <WorkspaceManager
+            open
+            embedded
+            panel
+            initialSection="work-items"
+            activeWorkspacePath={activeWorkspace.path}
+            initialWorkItemKey={selectedWorkItemKey}
+            createWorkItemRequest={createWorkItemRequest}
+            onClose={() => {}}
+            onOpenWorkspace={handleOpenWorkspace}
+            onOpenWorkItemConversation={handleOpenWorkItemConversation}
+            onRunContract={handleRunContract}
+            onOpenConversation={handleOpenLoopSession}
+            onWorkspaceDeleted={handleWorkspaceDeleted}
+            onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+            onWorkspaceChanged={() => void loadWorkspaces()}
+          />
+        </div>
+      );
+    }
+    if (activeWorkspace && sidebarView === "loop" && loopEditorOpen && activeWorkspace.capabilities.includes("loop")) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+          <PanelHeader
+            title="Loop 管理"
+            onBack={() => setLoopEditorOpen(false)}
+            backLabel="返回"
+          />
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onTriggered={handleLoopTriggered} />
+          </div>
+        </div>
+      );
+    }
+    // Module views (workbench / knowledge / loop list) + the home panel.
+    return (
+      <WorkspaceSidebar
+        activeWorkspace={activeWorkspace}
+        activeView={sidebarView}
+        workspaces={workspaces}
+        selectedSessionId={selectedSession?.id ?? null}
+        runningSessionIds={sessionActivity.runningIds}
+        completedSessionIds={sessionActivity.completedIds}
+        allSessions={sessionActivity.sessions}
+        refreshKey={refreshKey}
+        explorerRefreshKey={explorerRefreshKey}
+        onSelectWorkspace={handleOpenWorkspace}
+        onCreateWorkspace={handleCreateWorkspace}
+        onImportDirectory={() => setImportPickerOpen(true)}
+        onOpenLoops={openLoopsPanel}
+        onOpenLoopSession={handleOpenLoopSession}
+        onTriggerLoop={handleLoopTriggered}
+        onAddRepository={() => {
+          handleSidebarSwitchView("settings");
+          setSettingsPage("workspace");
+          setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
+          if (isMobile) setSidebarOpen(true);
+        }}
+        onNewSession={handleWorkspaceNewSession}
+        onSelectSession={handleSelectSession}
+        onOpenFile={handleOpenFile}
+        onSessionRemoved={(id) => {
+          updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
+          setRefreshKey((k) => k + 1);
+        }}
+      />
+    );
+  };
+
   return (
     <>
     <style>{`
@@ -1305,7 +1600,7 @@ export function AppShell() {
         }
       }
     `}</style>
-    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)", paddingBottom: isMobile ? 48 : 0, boxSizing: "border-box" }}>
       {/* Mobile overlay backdrop */}
       <div
         className={`sidebar-overlay-backdrop${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}
@@ -1321,10 +1616,28 @@ export function AppShell() {
         }}
       />
 
-      {/* Left sidebar */}
+      {/* Left icon rail (desktop) — module views + separator + global group
+          (模型/Skills/插件 config icons + archive + bottom-pinned settings).
+          A config icon highlights while its split view is open (configView
+          takes precedence over the middle-column panel). Sits OUTSIDE the
+          resizable middle column — always visible when closed. */}
+      {!isMobile && (
+        <ActivityBar
+          variant="vertical"
+          activeView={configView ?? sidebarView}
+          capabilities={activeWorkspace?.capabilities ?? []}
+          onSwitch={handleRailSwitch}
+          hasWorkspace={Boolean(activeWorkspace)}
+          highlightView={loopEditorOpen ? "loop" : null}
+        />
+      )}
+
+      {/* Middle column: the single focused panel. On mobile it is the 280px
+          overlay drawer — except archive/settings, which render as a
+          full-screen overlay (`sidebar-fullscreen`). */}
       <div
         ref={sidebarContainerRef}
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizing ? " sidebar-resizing" : ""}`}
+        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizing ? " sidebar-resizing" : ""}${isMobile && (sidebarView === "archive" || sidebarView === "settings") ? " sidebar-fullscreen" : ""}`}
         style={{
           background: "var(--bg-panel)",
           borderRight: "1px solid var(--border)",
@@ -1332,10 +1645,10 @@ export function AppShell() {
           flexDirection: "column",
           flexShrink: 0,
           zIndex: 200,
-          "--pi-sidebar-width": `${sidebarWidth}px`,
+          "--pi-sidebar-width": `${middleColumnWidth}px`,
         } as React.CSSProperties}
       >
-        {sidebarContent}
+        {renderMiddleColumn()}
       </div>
       {/* Desktop sidebar resize handle (drag to widen/narrow; double-click resets) */}
       {!isMobile && sidebarOpen && (
@@ -2009,63 +2322,91 @@ export function AppShell() {
           onSelectWorkspace={handleOpenWorkspace}
           onCloseWorkspace={handleCloseWorkspaceTab}
           onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is WorkspaceTabState => Boolean(t)))}
+          onCreateWorkspace={handleCreateWorkspace}
         />
 
-        {/* Chat content */}
+        {/* Main content: a config view (模型/Skills/插件 — desktop rail icons)
+            renders its DETAIL here; its LIST lives in the middle column and
+            portals the detail into this container via configPortalNode. The
+            settings › 工作区 and 偏好 split views reuse the same mechanism:
+            the middle column keeps the settings INDEX (plus the workspace
+            list rail for 工作区), and the detail portals into this container. */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {activeWorkspace && workspaceView === "overview" ? (
+          {!isMobile && (configView || (sidebarView === "settings" && settingsPage !== "index")) ? (
+            configView ? (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+                <PanelHeader
+                  title={configView === "models" ? "模型" : configView === "skills" ? "Skills" : "插件"}
+                  meta="详情"
+                  onClose={() => setConfigView(null)}
+                />
+                <div
+                  ref={setConfigPortalNode}
+                  style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+                />
+              </div>
+            ) : sidebarView === "settings" && settingsPage === "workspace" ? (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+                <PanelHeader
+                  title="工作区设置"
+                  meta={workspaceSettingsName ?? activeWorkspace?.name ?? undefined}
+                  onClose={() => setSettingsPage("index")}
+                />
+                <div
+                  ref={setConfigPortalNode}
+                  style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+                />
+              </div>
+            ) : sidebarView === "settings" && settingsPage === "preferences" ? (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+                <PanelHeader
+                  title="偏好"
+                  meta="主题 / 语言"
+                  onClose={() => setSettingsPage("index")}
+                />
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                  <PreferencesPage />
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+                <PanelHeader
+                  title="详情"
+                  onClose={() => setSettingsPage("index")}
+                />
+                <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }} />
+              </div>
+            )
+          ) : activeWorkspace && workspaceView === "overview" ? (
             <WorkspaceOverview
               workspace={activeWorkspace}
               onNewSession={handleWorkspaceNewSession}
               onOpenSettings={() => {
                 setOpenRepositoryFormRequest(undefined);
-                navigateWorkspaceView("settings");
+                handleSidebarSwitchView("settings");
+                setSettingsPage("workspace");
               }}
-              onOpenWorkItems={() => navigateWorkspaceView("work-items")}
+              onOpenWorkItems={() => handleSidebarSwitchView("work-items")}
               onCreateWorkItem={handleCreateWorkItem}
               onSelectSession={handleSelectSession}
+              onOpenLoops={() => {
+                handleSidebarSwitchView("loop");
+                setLoopEditorOpen(true);
+              }}
+              onTriggerLoop={handleLoopTriggered}
+              onOpenLoopSession={handleOpenLoopSession}
+              onSwitchSidebarView={(view) => {
+                if (view === "knowledge" || view === "workbench") handleSidebarSwitchView(view);
+              }}
+              onAddRepository={() => {
+                handleSidebarSwitchView("settings");
+                setSettingsPage("workspace");
+                setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
+              }}
               onSessionDeleted={(id) => {
                 setRefreshKey((key) => key + 1);
                 updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
               }}
-            />
-          ) : activeWorkspace
-            && workspaceView === "loops" ? (
-            <div style={{ height: "100%", overflowY: "auto", padding: 20 }}>
-              <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onTriggered={handleLoopTriggered} />
-            </div>
-          ) : activeWorkspace
-            && (workspaceView === "settings" || workspaceView === "work-items") ? (
-            <WorkspaceManager
-              open
-              embedded
-              initialSection={workspaceView === "settings" ? "workspaces" : "work-items"}
-              activeWorkspacePath={activeWorkspace.path}
-              initialWorkItemKey={selectedWorkItemKey}
-              createWorkItemRequest={createWorkItemRequest}
-              openRepositoryFormRequest={openRepositoryFormRequest}
-              onClose={() => navigateWorkspaceView("overview")}
-              onOpenWorkspace={handleOpenWorkspace}
-              onOpenWorkItemConversation={handleOpenWorkItemConversation}
-              onRunContract={handleRunContract}
-              onOpenConversation={handleOpenLoopSession}
-              onWorkspaceDeleted={handleWorkspaceDeleted}
-              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-              onWorkspaceChanged={() => void loadWorkspaces()}
-              onOpenLoops={() => navigateWorkspaceView("loops")}
-            />
-          ) : !activeWorkspace && workspaceManagerOpen ? (
-            <WorkspaceManager
-              open
-              embedded
-              initialSection="workspaces"
-              activeWorkspacePath={null}
-              createWorkspaceOnOpen
-              onClose={() => setWorkspaceManagerOpen(false)}
-              onOpenWorkspace={handleOpenWorkspace}
-              onOpenWorkItemConversation={handleOpenWorkItemConversation}
-              onWorkspaceDeleted={handleWorkspaceDeleted}
-              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
             />
           ) : showChat ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -2201,21 +2542,39 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>}
-    {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
+    {/* Mobile bottom menu bar — module views (toggle the drawer) + settings
+        (full-screen overlay). Archive is reachable from the settings index. */}
+    {isMobile && (
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 250, paddingBottom: "env(safe-area-inset-bottom)", background: "var(--bg-panel)" }}>
+        <ActivityBar
+          variant="horizontal"
+          activeView={sidebarOpen ? sidebarView : null}
+          capabilities={activeWorkspace?.capabilities ?? []}
+          onSwitch={handleRailSwitch}
+          hasWorkspace={Boolean(activeWorkspace)}
+          highlightView={loopEditorOpen ? "loop" : null}
+        />
+      </div>
+    )}
+    {workspaceManagerOpen && (
+      <WorkspaceManager
+        open
+        initialSection="workspaces"
+        activeWorkspacePath={null}
+        createWorkspaceOnOpen
+        onClose={() => setWorkspaceManagerOpen(false)}
+        onOpenWorkspace={handleOpenWorkspace}
+        onOpenWorkItemConversation={handleOpenWorkItemConversation}
+        onWorkspaceDeleted={handleWorkspaceDeleted}
+        onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+      />
+    )}
     {importPickerOpen && (
       <DirectoryPicker
         onCancel={() => setImportPickerOpen(false)}
         onSelect={(path) => void handleImportDirectory(path)}
         busy={importBusy}
         error={importError}
-      />
-    )}
-    {archiveOpen && activeWorkspace && (
-      <ArchiveModal
-        workspaceId={activeWorkspace.id}
-        workspacePath={activeWorkspace.path}
-        onClose={() => setArchiveOpen(false)}
-        onChanged={() => setRefreshKey((k) => k + 1)}
       />
     )}
     {projectTrustDialogOpen && projectTrustCwd && (
@@ -2227,27 +2586,6 @@ export function AppShell() {
           if (!projectTrustBusy) setProjectTrustDialogOpen(false);
         }}
         onConfirm={() => void handleTrustProject()}
-      />
-    )}
-    {skillsConfigOpen && settingsCwd && (
-      <SkillsConfig
-        cwd={settingsCwd}
-        globalOnly={!activeWorkspace}
-        workspace={activeWorkspace}
-        onWorkspaceSkillsChange={(updated) => {
-          setWorkspaces((current) =>
-            current.map((w) => (w.id === updated.id ? updated : w)),
-          );
-        }}
-        onClose={() => setSkillsConfigOpen(false)}
-      />
-    )}
-    {pluginsConfigOpen && settingsCwd && (
-      <PluginsConfig
-        cwd={settingsCwd}
-        sessionId={selectedSession?.id ?? null}
-        onClose={() => setPluginsConfigOpen(false)}
-        onReloaded={() => setSessionKey((k) => k + 1)}
       />
     )}
     </>

@@ -313,4 +313,7 @@ export interface SessionContext {
   entryIds: string[]; // parallel to messages — the session entry id for each message
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
+  /** True when `messages` is a tail window and older messages exist on the same
+   *  branch (fetch them via /api/sessions/[id]/earlier?before=). */
+  hasEarlier?: boolean;
 }

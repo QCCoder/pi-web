@@ -7,44 +7,63 @@ import {
 import { closeSync, openSync, readSync } from "fs";
 import { normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
-import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry as PiSessionEntry } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 import { sessionPathKey } from "./session-path";
+import { ensureSessionIndex, type SessionIndexEntry } from "./session-index";
 import { skillMessageTitle } from "./skill-message";
 import { resolveProject, type ProjectInfo } from "./worktree";
 
 export { getAgentDir };
 
-async function loadAllSessions(): Promise<SessionInfo[]> {
-  const piSessions: PiSessionInfo[] = await SessionManager.listAll();
+/** Title shown in session lists — keep it short; the raw first message can be
+ *  tens of KB and once inflated a 1MB /api/sessions payload. */
+const FIRST_MESSAGE_DISPLAY_CHARS = 160;
+
+export function firstMessageTitle(entry: Pick<SessionIndexEntry, "firstMessage">): string {
+  const raw = entry.firstMessage;
+  if (!raw) return "(no messages)";
+  const title = skillMessageTitle(raw);
+  return title.length > FIRST_MESSAGE_DISPLAY_CHARS
+    ? `${title.slice(0, FIRST_MESSAGE_DISPLAY_CHARS)}…`
+    : title;
+}
+
+/** Map index entries (active only) to the API's SessionInfo shape. */
+async function entriesToSessionInfos(entries: SessionIndexEntry[]): Promise<SessionInfo[]> {
+  const active = entries.filter((entry) => !entry.archived);
   const pathToId = new Map<string, string>();
-  for (const s of piSessions) pathToId.set(sessionPathKey(s.path), s.id);
+  for (const entry of active) pathToId.set(sessionPathKey(entry.path), entry.id);
 
   // Resolve each unique cwd to its project root (main repo shared by all
   // worktrees). resolveProject caches per-cwd, so this is cheap after warmup.
-  const uniqueCwds = [...new Set(piSessions.map((s) => s.cwd).filter(Boolean))];
+  const uniqueCwds = [...new Set(active.map((entry) => entry.cwd).filter(Boolean))];
   const projectByCwd = new Map<string, ProjectInfo>();
   await Promise.all(uniqueCwds.map(async (cwd) => {
     projectByCwd.set(cwd, await resolveProject(cwd));
   }));
 
-  return piSessions.map((s) => {
-    cacheSessionPath(s.id, s.path);
-    const project = s.cwd ? projectByCwd.get(s.cwd) : undefined;
+  return active.map((entry) => {
+    cacheSessionPath(entry.id, entry.path);
+    const project = entry.cwd ? projectByCwd.get(entry.cwd) : undefined;
     return {
-      path: s.path,
-      id: s.id,
-      cwd: s.cwd,
-      name: s.name,
-      created: s.created instanceof Date ? s.created.toISOString() : String(s.created),
-      modified: s.modified instanceof Date ? s.modified.toISOString() : String(s.modified),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage ? skillMessageTitle(s.firstMessage) : "(no messages)",
-      parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
-      projectRoot: project?.projectRoot ?? s.cwd,
+      path: entry.path,
+      id: entry.id,
+      cwd: entry.cwd,
+      name: entry.name,
+      created: new Date(entry.createdMs).toISOString(),
+      modified: new Date(entry.modifiedMs).toISOString(),
+      messageCount: entry.messageCount,
+      firstMessage: firstMessageTitle(entry),
+      parentSessionId: entry.parentPath ? pathToId.get(sessionPathKey(entry.parentPath)) : undefined,
+      projectRoot: project?.projectRoot ?? entry.cwd,
       ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
     };
-  });
+  }).sort((left, right) => right.modified.localeCompare(left.modified)); // newest first — canonical list order
+}
+
+async function loadAllSessions(): Promise<SessionInfo[]> {
+  return entriesToSessionInfos(await ensureSessionIndex());
 }
 
 export async function listAllSessions(): Promise<SessionInfo[]> {
@@ -94,7 +113,10 @@ declare global {
   var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
 }
 
-const SESSION_LIST_CACHE_TTL_MS = 30_000;
+// Short TTL: the index made list rebuilds cheap, so this cache now only
+// coalesces concurrent requests — fresh sessions appear on the next poll/bump
+// instead of waiting out a long staleness window.
+const SESSION_LIST_CACHE_TTL_MS = 3_000;
 
 export function invalidateSessionListCache(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
@@ -205,7 +227,13 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean } = {},
+  options: {
+    deferThinking?: boolean;
+    deferToolResultImages?: boolean;
+    /** Return only the last N messages (tail window) — the initial big-session
+     *  view. Older messages load on demand via buildEarlierContext. */
+    tailMessages?: number;
+  } = {},
 ): SessionContext {
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
@@ -219,24 +247,82 @@ export function buildSessionContext(
     byId as unknown as Map<string, PiSessionEntry>,
   );
 
-  // Convert the SDK-selected context entries and their IDs together. This keeps
-  // fork/navigation targets aligned while preserving pi's compaction ordering.
-  const messages: AgentMessage[] = [];
-  const entryIds: string[] = [];
-  for (const entry of contextEntries) {
-    const localEntry = entry as unknown as SessionEntry;
+  // Collect the requested window from the END backwards — a long session must
+  // not materialize every thinking block/tool payload just to show its tail.
+  const limit = options.tailMessages && options.tailMessages > 0 ? options.tailMessages : Infinity;
+  const window: Array<{ entry: SessionEntry; m: AgentMessage }> = [];
+  let hasEarlier = false;
+  for (let i = contextEntries.length - 1; i >= 0; i--) {
+    const localEntry = contextEntries[i] as unknown as SessionEntry;
     const m = entryToUiMessage(localEntry, options);
-    if (m) {
-      messages.push(m);
-      entryIds.push(localEntry.id);
+    if (!m) continue;
+    if (window.length >= limit) {
+      hasEarlier = true; // found an older mappable entry beyond the window
+      break;
     }
+    window.push({ entry: localEntry, m });
   }
+  window.reverse(); // chronological
 
   return {
-    messages,
-    entryIds,
+    messages: window.map((x) => x.m),
+    entryIds: window.map((x) => x.entry.id),
     thinkingLevel: piCtx.thinkingLevel,
     model: piCtx.model,
+    ...(hasEarlier ? { hasEarlier: true } : {}),
+  };
+}
+
+/** Build a window of OLDER messages immediately before `beforeEntryId` on the
+ *  same branch (leafId). The server-side half of tail-first loading: the client
+ *  prepends the result as the user scrolls up. */
+export function buildEarlierContext(
+  entries: SessionEntry[],
+  beforeEntryId: string,
+  options: {
+    leafId?: string | null;
+    deferThinking?: boolean;
+    deferToolResultImages?: boolean;
+    limit?: number;
+  } = {},
+): SessionContext | null {
+  const byId = new Map<string, SessionEntry>();
+  for (const e of entries) byId.set(e.id, e);
+
+  const piEntries = entries as unknown as PiSessionEntry[];
+  const contextEntries = piBuildContextEntries(
+    piEntries,
+    options.leafId ?? null,
+    byId as unknown as Map<string, PiSessionEntry>,
+  );
+
+  const anchorIndex = contextEntries.findIndex((entry) => entry.id === beforeEntryId);
+  if (anchorIndex < 0) return null;
+  const limit = options.limit && options.limit > 0 ? options.limit : 100;
+
+  // Walk backwards from the anchor, mapping at most `limit` messages.
+  const mapped: Array<{ entry: SessionEntry; m: AgentMessage }> = [];
+  let hasEarlier = false;
+  for (let i = anchorIndex - 1; i >= 0; i--) {
+    const localEntry = contextEntries[i] as unknown as SessionEntry;
+    const m = entryToUiMessage(localEntry, options);
+    if (!m) continue;
+    if (mapped.length >= limit) {
+      hasEarlier = true; // older mappable entries remain beyond this window
+      break;
+    }
+    mapped.push({ entry: localEntry, m });
+  }
+  // Walked backwards; reverse to chronological order.
+  mapped.reverse();
+  return {
+    messages: mapped.map((x) => x.m),
+    entryIds: mapped.map((x) => x.entry.id),
+    // thinkingLevel/model are properties of the leaf context, not of an older
+    // window — the client ignores them here.
+    thinkingLevel: "",
+    model: null,
+    ...(hasEarlier ? { hasEarlier: true } : {}),
   };
 }
 
@@ -349,3 +435,5 @@ function entryToUiMessage(
       return null;
   }
 }
+// bump 1787327832864408000
+// bump 1787353777527299000

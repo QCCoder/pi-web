@@ -2,6 +2,8 @@ import { existsSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getRpcSession, startRpcSession } from "../rpc-manager.ts";
+import type { AgentSessionWrapper } from "../rpc-manager.ts";
+import { creationTimeoutSignal } from "../abort-race";
 import { resolveSessionPath } from "../session-reader.ts";
 import { readWorkItem, recordWorkItemMilestone, updateWorkItem } from "../work-items/service.ts";
 
@@ -24,6 +26,11 @@ import { readWorkItem, recordWorkItemMilestone, updateWorkItem } from "../work-i
  *  execution" — matches the zombie threshold the selection round reports on
  *  (decision 1: remind, don't restart). */
 export const SEED_INACTIVITY_MS = 2 * 60 * 60 * 1000;
+/** Upper bound on execution-session creation. Creation normally takes
+ *  seconds; a hang here (stuck network call inside session services/model
+ *  resolution) used to pin the seeding request — and any late-materializing
+ *  session would have run the contract as an unowned zombie. */
+const SESSION_START_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Extract the work-item key from a selection round's output. The thin
  *  LOOP.md promises the marker on its own final line; tolerate casing and
@@ -144,13 +151,25 @@ export async function seedExecutionSession(input: SeedExecutionInput): Promise<S
   const agentsDir = join(input.workspacePath, ".pi", "agents");
   const extraAgentDirs = existsSync(agentsDir) ? [agentsDir] : undefined;
   // One-time key so two concurrent seeds never coalesce onto one session.
-  const { session, realSessionId } = await startRpcSession(
-    `__seed__${randomUUID()}`,
-    "",
-    input.workspacePath,
-    undefined,
-    { extraAgentDirs },
+  // Creation is bounded: on hang/abort nothing is stamped and a session that
+  // materializes late is destroyed by startRpcSession (no zombie contract run).
+  const { signal: startSignal, dispose: disposeStartTimer } = creationTimeoutSignal(
+    SESSION_START_TIMEOUT_MS,
+    "execution session creation timed out",
   );
+  let session: AgentSessionWrapper;
+  let realSessionId: string;
+  try {
+    ({ session, realSessionId } = await startRpcSession(
+      `__seed__${randomUUID()}`,
+      "",
+      input.workspacePath,
+      undefined,
+      { extraAgentDirs, signal: startSignal },
+    ));
+  } finally {
+    disposeStartTimer();
+  }
   // Deterministic title: the first message is the expanded skill contract —
   // huge and useless as a tab label.
   session.inner.setSessionName(`${input.key} ${detail.item.title}`);

@@ -168,7 +168,11 @@ export async function GET(
     const searchParams = new URL(req.url).searchParams;
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
-    const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages });
+    // Tail-first loading (L3): ship only the last N messages for the initial
+    // view; older ones arrive via /earlier as the user scrolls up.
+    const tailParam = Number(searchParams.get("tail") ?? "");
+    const tailMessages = Number.isSafeInteger(tailParam) && tailParam > 0 ? tailParam : undefined;
+    const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages, tailMessages });
 
     const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();

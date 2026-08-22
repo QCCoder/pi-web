@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { loopHostClient } from "@/lib/loop/client";
 import { createLoopDefinition, type CreateLoopInput } from "@/lib/loop/authoring";
 import { LoopConflictError, LoopValidationError } from "@/lib/loop/store";
-import { effectiveCapabilities, getWorkspace } from "@/lib/workspaces/service";
+import { getWorkspace } from "@/lib/workspaces/service";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -17,7 +17,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   try {
     const { id } = await params;
     const { path, manifest } = await getWorkspace(id);
-    if (!effectiveCapabilities(manifest).includes("loop")) {
+    if (!manifest.capabilities.includes("loop")) {
       return NextResponse.json({ error: "loop capability is not enabled" }, { status: 409 });
     }
     const loop = await createLoopDefinition(

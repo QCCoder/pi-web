@@ -354,8 +354,9 @@ export async function readWorkItem(workspacePath: string, key: string): Promise<
 
 export async function listWorkItems(
   workspacePath: string,
-): Promise<{ items: WorkItemRecord[]; invalid: InvalidWorkItem[] }> {
+): Promise<{ items: WorkItemRecord[]; archivedItems: WorkItemRecord[]; invalid: InvalidWorkItem[] }> {
   const items: WorkItemRecord[] = [];
+  const archivedItems: WorkItemRecord[] = [];
   const invalid: InvalidWorkItem[] = [];
   for (const [directory, prefix] of [["requirements", "REQ-"], ["bugs", "BUG-"]] as const) {
     const root = join(workspacePath, directory);
@@ -371,7 +372,14 @@ export async function listWorkItems(
       const key = workItemKeyFromDirectoryName(entry.name);
       try {
         if (!key) throw new WorkItemValidationError(`Invalid Work Item directory: ${entry.name}`);
-        items.push((await readWorkItem(workspacePath, key)).item);
+        // List reads touch ONLY item.yaml — README.md and events.jsonl are
+        // detail payloads, full-reading them here was the list-view hotspot.
+        const metadata = await readFile(join(path, "item.yaml"), "utf8");
+        const item = parseWorkItem(parse(metadata));
+        if (item.key !== workItemKeyFromDirectoryName(entry.name)) {
+          throw new WorkItemValidationError(`Work Item directory must begin with ${item.key}`);
+        }
+        (item.archivedAt ? archivedItems : items).push(item);
       } catch (error) {
         invalid.push({
           path,
@@ -381,8 +389,11 @@ export async function listWorkItems(
       }
     }
   }
-  items.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  return { items, invalid };
+  const byUpdated = (left: WorkItemRecord, right: WorkItemRecord) =>
+    right.updatedAt.localeCompare(left.updatedAt);
+  items.sort(byUpdated);
+  archivedItems.sort(byUpdated);
+  return { items, archivedItems, invalid };
 }
 
 

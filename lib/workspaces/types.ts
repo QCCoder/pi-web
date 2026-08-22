@@ -6,7 +6,6 @@ export type WorkspaceCapability =
   | "work-items"
   | "repositories"
   | "knowledge"
-  | "overview"
   | "workflows"
   | "requirement-sources"
   | "loop"
@@ -62,10 +61,10 @@ export interface WorkspaceManifest {
   skills: string[];
   repositories: WorkspaceRepository[];
   agent: WorkspaceAgentSettings;
-  /** Enabled capabilities for this workspace (capability-driven). Written explicitly
-   *  by `createWorkspace`/`updateWorkspace`; `effectiveCapabilities` falls back to
-   *  `["sessions", "explorer"]` when absent. */
-  capabilities?: WorkspaceCapability[];
+  /** Enabled capabilities for this workspace (capability-driven). REQUIRED —
+   *  always written explicitly by `createWorkspace`/`updateWorkspace`/the v2
+   *  index migration; a manifest without it is config-invalid. */
+  capabilities: WorkspaceCapability[];
   git?: WorkspaceGitSettings;
   workItems: {
     nextRequirementNumber: number;
@@ -99,6 +98,12 @@ export interface WorkspaceIndexEntry {
 }
 
 export interface WorkspaceIndex {
+  schemaVersion: 2;
+  workspaces: WorkspaceIndexEntry[];
+}
+
+/** Legacy on-disk index shape; migrated in place to v2 on first read. */
+export interface WorkspaceIndexV1 {
   schemaVersion: 1;
   workspaces: WorkspaceIndexEntry[];
 }

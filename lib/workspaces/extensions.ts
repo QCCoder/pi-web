@@ -1,6 +1,6 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceWorkItemExtension } from "../work-items/extension.ts";
-import { effectiveCapabilities, workspaceRepositoryPath } from "./service.ts";
+import { workspaceRepositoryPath } from "./service.ts";
 import type { KnowledgeRepoRef } from "./kb-search/index.ts";
 import { createKbSearchExtension } from "./kb-search/extension.ts";
 import type { WorkspaceCapability, WorkspaceManifest } from "./types.ts";
@@ -65,7 +65,7 @@ export function buildWorkspaceExtensions(
   manifest: WorkspaceManifest,
   workspacePath: string,
 ): InlineExtension[] {
-  const capabilities = effectiveCapabilities(manifest);
+  const capabilities = manifest.capabilities;
   const extensions: InlineExtension[] = [];
   for (const entry of WORKSPACE_EXTENSION_FACTORIES) {
     if (!capabilities.includes(entry.capability)) continue;

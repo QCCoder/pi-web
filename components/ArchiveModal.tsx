@@ -18,9 +18,13 @@ interface Props {
   /** Absolute workspace path — archived sessions are filtered to those whose
    *  cwd belongs to this workspace, matching the active session list. */
   workspacePath: string;
-  onClose: () => void;
+  onClose?: () => void;
   /** Called after any restore/delete so the sidebar can refresh its counts. */
   onChanged?: () => void;
+  /** Embedded (middle-column panel) mode: no fixed overlay / panel chrome —
+   *  the body fills its container; the internal header is suppressed (the
+   *  panel's unified header carries the title instead). */
+  embedded?: boolean;
 }
 
 const overlayStyle: React.CSSProperties = {
@@ -49,23 +53,33 @@ function belongsToWorkspace(session: ArchivedSession, workspacePath: string): bo
   return session.cwd === workspacePath || session.cwd.startsWith(prefix);
 }
 
-export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged }: Props) {
+export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged, embedded }: Props) {
   const [sessions, setSessions] = useState<ArchivedSession[]>([]);
   const [items, setItems] = useState<WorkItemRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // 分组折叠态：默认展开，会话内存态（与 SkillsConfig 分组折叠一致，不持久化）。
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggleGroup = useCallback((label: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }, []);
 
   const reload = useCallback(async () => {
     const [s, i] = await Promise.all([
       fetch("/api/sessions?archived").then((r) => (r.ok ? r.json() : { sessions: [] })).catch(() => ({ sessions: [] })),
-      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/work-items?archived`)
-        .then((r) => (r.ok ? r.json() : { items: [] }))
-        .catch(() => ({ items: [] })),
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/work-items`)
+        .then((r) => (r.ok ? r.json() : { archivedItems: [] }))
+        .catch(() => ({ archivedItems: [] })),
     ]);
     const allSessions = (s.sessions ?? []) as ArchivedSession[];
     setSessions(allSessions.filter((session) => belongsToWorkspace(session, workspacePath)));
-    setItems((i.items ?? []) as WorkItemRecord[]);
+    setItems((i.archivedItems ?? []) as WorkItemRecord[]);
     setLoading(false);
   }, [workspaceId, workspacePath]);
 
@@ -115,15 +129,8 @@ export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged }:
 
   const empty = !loading && sessions.length === 0 && items.length === 0;
 
-  return (
-    <div style={overlayStyle} onClick={onClose}>
-      <div style={panelStyle} onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
-          <strong style={{ fontSize: 14 }}>归档</strong>
-          <button onClick={onClose} style={closeBtnStyle}>✕</button>
-        </div>
-
-        <div style={{ flex: 1, overflowY: "auto", padding: "8px 8px 12px" }}>
+  const body = (
+    <div style={{ flex: 1, overflowY: "auto", padding: "8px 8px 12px" }}>
           {loading ? (
             <div style={{ padding: 24, textAlign: "center", color: "var(--text-dim)", fontSize: 13 }}>加载中…</div>
           ) : empty ? (
@@ -131,7 +138,7 @@ export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged }:
           ) : (
             <>
               {sessions.length > 0 && (
-                <Section label={`会话 (${sessions.length})`}>
+                <Section label={`会话 (${sessions.length})`} collapsed={collapsed.has("会话")} onToggle={() => toggleGroup("会话")}>
                   {sessions.map((s) => (
                     <ArchiveRow
                       key={`s-${s.id}`}
@@ -148,7 +155,7 @@ export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged }:
                 </Section>
               )}
               {items.length > 0 && (
-                <Section label={`需求与 Bug (${items.length})`}>
+                <Section label={`需求与 Bug (${items.length})`} collapsed={collapsed.has("需求与 Bug")} onToggle={() => toggleGroup("需求与 Bug")}>
                   {items.map((item) => (
                     <ArchiveRow
                       key={`i-${item.id}`}
@@ -167,6 +174,20 @@ export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged }:
             </>
           )}
         </div>
+  );
+
+  if (embedded) {
+    return <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>{body}</div>;
+  }
+
+  return (
+    <div style={overlayStyle} onClick={onClose}>
+      <div style={panelStyle} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+          <strong style={{ fontSize: 14 }}>归档</strong>
+          <button onClick={onClose} style={closeBtnStyle}>✕</button>
+        </div>
+        {body}
       </div>
     </div>
   );
@@ -183,11 +204,44 @@ const closeBtnStyle: React.CSSProperties = {
   height: 26,
 };
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+function Section({ label, collapsed, onToggle, children }: { label: string; collapsed: boolean; onToggle: () => void; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 8 }}>
-      <div style={{ padding: "8px 10px 4px", color: "var(--text-dim)", fontSize: 12, fontWeight: 700 }}>{label}</div>
-      {children}
+      <button
+        type="button"
+        onClick={onToggle}
+        title={collapsed ? "展开" : "收起"}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          width: "100%",
+          padding: "8px 10px 4px",
+          border: 0,
+          background: "transparent",
+          color: "var(--text-dim)",
+          fontSize: 12,
+          fontWeight: 700,
+          cursor: "pointer",
+          textAlign: "left",
+          userSelect: "none",
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            fontSize: 8,
+            lineHeight: 1,
+            transform: collapsed ? "none" : "rotate(90deg)",
+            transition: "transform 0.15s",
+            flexShrink: 0,
+          }}
+        >
+          ▶
+        </span>
+        <span>{label}</span>
+      </button>
+      {!collapsed && children}
     </div>
   );
 }

@@ -52,7 +52,7 @@ Browser                Next.js Server                Session Daemon (bin/pi-loop
   ├─ running ids ───▶ GET /api/agent/running/events ─ proxy ─▶ GET  /v1/sessions/running/events
 ```
 
-- **Session browsing** (read-only): reads `.jsonl` files via SDK `SessionManager` helpers and `lib/session-reader.ts` — no AgentSession is created.
+- **Session browsing** (read-only): list views are served from the **persistent session index** (`lib/session-index.ts`, mtime+size incremental over `~/.pi/agent/sessions` incl. `.archived/`, cache file `~/.pi/agent/sessions/.index.json`, rebuildable, tmp+rename atomic write, failed saves retried in background via a dirty flag). **The in-process memo is TTL-bound (`PI_SESSION_INDEX_MEMO_TTL_MS`, default 3s)** — once it served a forever-snapshot, files written by OTHER processes (the daemon spawning subagent children / loop rounds) stayed invisible to locate/detail/list until a web restart, which resurfaced as "opening a subagent (child) does nothing / opens blank"; now every TTL expiry re-runs the cheap incremental walk (stat-heavy, not read-heavy) through the single in-flight promise. `listAllSessions()` in `lib/session-reader.ts` maps index entries to `SessionInfo` (firstMessage truncated to 160 chars for display — the raw text once inflated the payload to 1MB+); `GET /api/sessions?archived` and `listArchivedSessions()` derive from the same index; `GET /api/sessions/[id]/locate` resolves by id through `findSessionIndexEntry` and — on the daemon-probe hit — also seeds `cacheSessionPath` from the probe's `sessionFile`, so a just-spawned child whose .jsonl isn't flushed yet still opens (detail answers the empty-but-valid placeholder, live SSE renders on top). Opening a session detail still reads the whole .jsonl via SDK `SessionManager`, but the response is a **tail window** (`?tail=100`): `buildSessionContext(..., { tailMessages })` maps only the last N entries and sets `hasEarlier`; older pages arrive via `GET /api/sessions/[id]/earlier?before=<entryId>&limit=&leafId=` (`buildEarlierContext` — needs an explicit leaf, defaults to the session's current leaf). The client (`useAgentSession.loadEarlier` + ChatWindow prepend detection) grows the window as the user scrolls up; `VISIBLE_PAGE_SIZE` render-windowing in `lib/chat-lazy-load.ts` sits on top of the loaded window.
 - **Sending a message**: the web routes are **pure proxies** (`lib/agent-proxy.ts` → `loopHostClient`) over the session daemon, where `startRpcSession()` in `lib/rpc-manager.ts` creates the AgentSession. At creation it resolves the enclosing **Workspace** (if any) and attaches that workspace's extensions + skills + AGENTS.md.
 - **Workspace management**: `app/api/workspaces/**` reads/writes `~/.pi/workspaces/**` and `~/.pi/workspace.yaml` (the global index). Capability edits, repository add/remove, work-item CRUD, loop authoring) all flow through this surface.
 
@@ -83,9 +83,7 @@ work_items: { next_requirement_number, next_bug_number }
 created_at / updated_at
 ```
 
-- **Global index**: `~/.pi/workspace.yaml` (or `$PI_WORKSPACE_INDEX_FILE`) lists every known workspace
-  `{ id, path, name, template_id, template_version, added_at, last_opened_at }`. `discoverWorkspaces()` reconciles it
-  against disk on read and migrates legacy `workspace-*` dirs into it on first run.
+- **Workspace index v2（一刀切迁移）**: `~/.pi/workspace.yaml` is schemaVersion 2. On first read a v1 index triggers `migrateIndexV2`: every registered manifest is rewritten with explicit `capabilities` (materialized `["sessions","explorer"]` when absent; retired channel values stripped), and `importWorkspace` runs the same `migrateManifestFile` normalization for unregistered directories. After the cut, `WorkspaceManifest.capabilities` is REQUIRED — `parseWorkspaceManifest` throws "capabilities is required" without it, `parseCapabilities` rejects retired channel values (`feishu-transport`/`feishu-channel`/`wecom-channel`) instead of silently stripping, and the `effectiveCapabilities` fallback helper is deleted (read `manifest.capabilities` directly).
 - **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", status }`. `kind` drives the storage path
   (`repositories/<kind>/<alias>`) and, for `knowledge`, the **OKF seed** written on `init` (see Knowledge below). Note:
   `knowledge` is *also* a top-level `WorkspaceCapability` (the UI "知识库" toggle); the repository `kind` and the
@@ -97,10 +95,7 @@ created_at / updated_at
   pre-create `requirements/ bugs/ designs/ plans/ repositories/` — those are `mkdir -p`'d on first use (work-item
   creation, repo clone/init). It writes `.pi/workspace.yaml` + a capability-driven `AGENTS.md` always, and `git init`s
   the workspace repo only when a git-using capability (`repositories` **or** `work-items`) is selected (git branch
-  rules are set only when `work-items` is on). The built-in templates (`empty`, `software-development`) and custom
-  template discovery (`lib/workspaces/templates.ts`, `.pi/workspace-templates/<id>/`) are **kept but `@deprecated`** —
-  they exist only so `effectiveCapabilities` can fall back to a built-in template's capabilities for legacy manifests
-  that have no cached `capabilities`.
+  rules are set only when `work-items` is on). Built-in templates are gone — manifests are capability-driven only.
 
 ### Capability system & extension mounting
 
@@ -109,15 +104,13 @@ repository `kind` to a first-class capability — redesign decision 4, type laye
 `lib/workspaces/service.ts` is the validation registry (the source of truth for which capabilities can be persisted):
 
 ```
-sessions, explorer, work-items, repositories, knowledge, overview, workflows,
+sessions, explorer, work-items, repositories, knowledge, workflows,
 requirement-sources, loop
 ```
 
-(`parseCapabilities` silently strips legacy channel capability values (`feishu-transport`, `feishu-channel`, `wecom-channel`) from manifests, so old workspaces keep loading and self-heal on the next save.)
+(`parseCapabilities` REJECTS retired capability values (`feishu-transport`, `feishu-channel`, `wecom-channel`, and the retired `overview` — the overview dashboard is now the unconditional landing view) — `WorkspaceValidationError` → HTTP 400. For the channel values the v2 index migration has already rewritten them out of existing manifests. `overview` is the one **read-path exception**: `parseWorkspaceManifest` strips it from `manifest.capabilities` BEFORE `parseCapabilities` validation, so legacy manifests that still list it keep parsing and normalize on every read — the value disappears from the file at the next manifest write.)
 
-- **`effectiveCapabilities(manifest)`** = `manifest.capabilities` if present, else the matching built-in template's set
-  (by id **and** version), else `["sessions", "explorer"]`. Legacy manifests without a cached `capabilities` snapshot
-  are derived from the template lookup.
+- `manifest.capabilities` is required and always present (see "Workspace index v2" above). Read it directly; there is no derivation helper.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
 - **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below).
 - **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by effective capabilities. `lib/rpc-manager.ts` always attaches `createSubagentExtension(...)` globally, then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
@@ -145,22 +138,25 @@ The **repositories** block is *auto-maintained* between managed markers:
 runs when the `repositories` capability is effective. `pi` injects `AGENTS.md` into the system prompt **verbatim** —
 there is no `@`-include expansion; large content must be *referenced* and the model follows the reference to `read` it.
 
-### Navigation: Activity Bar (single focus)
+### Navigation: three-column layout (icon rail | middle panel | main area)
 
-`WorkspaceSidebar` is **no longer a stacked-group sidebar** — it is a left **Activity Bar** (`components/ActivityBar.tsx`) + a
-single focused view (redesign decisions 2 & 6). Exactly one view is active at a time (`activeView`, persisted per workspace
-in `localStorage` key `pi-active-view:<wsId>`, default `sessions`); switching workspace re-derives the stored view and falls
-back to `sessions` if it is absent or no longer valid.
+Desktop is four vertical strips: **`[ActivityBar 44px icon rail] [middle column 200–560px drag-resizable] [main area: WorkspaceTabBar + Overview/chat] [file panel 42% toggleable]`** — the old sidebar's icon strip + focused view split into the rail + middle column, so the width budget is unchanged. The middle column is **always mounted** (default 工作台); clicking the ACTIVE rail icon toggles the column (VS Code collapse). One `sidebarView` (`SidebarView` = module views + `archive` + `settings`, lifted in AppShell) drives everything — the five former modal/shell open-states (models/skills/plugins/archive/settings) collapsed into it.
 
-Icon order is fixed and strict (redesign §6 decision 6):
-**会话(sessions) → Explorer(explorer) → 仓库(repositories) → 知识库(knowledge) → Loop(loop) → 工作项(work-items)**.
-`sessions` and `explorer` are **always shown** (mandatory capabilities); the rest appear only when the workspace capability is
-on. `ACTIVITY_VIEW_ORDER` + `visibleActivityViews()` in `ActivityBar.tsx` are the single source of truth for order/visibility.
+Icon groups are fixed and strict (`ACTIVITY_VIEW_ORDER` + `RAIL_GLOBAL_VIEWS` in `ActivityBar.tsx`, the single source of truth for order/visibility):
+**Module group (workspace-scoped, capability-gated): 工作台(workbench) → 知识库(knowledge) → Loop(loop) → 工作项(work-items)** — `workbench` is always shown (`capability: null`); then a **separator + global group (app-scoped): 模型(models) → Skills(skills) → 插件(plugins) → 归档（needs an active workspace）→ 设置（pinned to the rail bottom）**.
+**The three config icons (模型/Skills/插件) are strict three-column views**: clicking one renders the config's **LIST in the MIDDLE column** (under a `PanelHeader` like every other panel — it temporarily replaces the `sidebarView` panel) and its **DETAIL in the RIGHT column**: the middle-column panel component (`ModelsConfig`/`SkillsConfig`/`PluginsConfig` in `split` mode) stays ONE component instance owning all state (selection, drafts, save flow) and portals its detail + footer into the right column's config area via `createPortal` — AppShell renders the portal-target div under the right `PanelHeader` (with ×) and feeds it back as `configPortalNode` (a null target renders nothing, so SSR stays safe). Opening a config view also opens the middle column (`handleOpenConfig` → `setSidebarOpen(true)`); any panel switch (`handleSidebarSwitchView` clears `configView`), session select, or × hands the column back to `sidebarView`; switching workspace resets it too. The rail highlights the config icon (`activeView={configView ?? sidebarView}`). They never persist (`isConfigView` routes them out of every panel switch; `GLOBAL_ACTIVITY_VIEWS` — the `pi-active-panel` persistence/validation surface — deliberately stays `["archive","settings"]`, and `visibleActivityViews()` does NOT include them). Mobile never gets here (the settings subpages render the same components in `embedded` mode, unchanged).
+**The standalone 仓库 view is REMOVED** — repo browsing lives in the 工作台 file tree, add/manage in 设置 › 工作区 + the overview dashboard. Stale `pi-active-view` values pointing at removed views fall back via the `visibleActivityViews` validation.
 
-Per-view content (data still comes from `loadWorkspaceData` — only the render organization changed; decision 3 splits repos by kind):
-- **会话** — session list + 新建会话 (header).
-- **Explorer** — Slice-3 Explorer, including the `[ 文件 | 改动(N) ]` segmented tabs (`pi-explorer-tab:<wsId>`).
-- **仓库** — **only `kind === "code"`** repositories (decision 3: Repositories only holds code).
+The panel bodies: 工作台/知识库/Loop-list render in `WorkspaceSidebar` (module views only) under a unified `PanelHeader` (`components/PanelHeader.tsx`, ~36px: panel name + context actions — 工作台 shows the workspace name + ＋新建会话). Loop 管理/⚙ opens the **LoopConfig editor IN the middle column** (temporarily widens to `max(persisted, 520)` — derived, never persisted). 工作项 is the **full `WorkspaceManager` in `panel` mode** (rail hidden, single column; the old simplified sidebar grouping view is retired). 归档 is `ArchiveModal embedded`. 设置 is `SettingsPanel` (`components/SettingsPanel.tsx`): iOS-settings index → 工作区 (WorkspaceManager; hidden at home) / 模型 / Skills / 插件 / 偏好 (theme + language; the former `SettingsBar` is retired). **On desktop the settings index keeps ALL its rows visible permanently (subpages render in the RIGHT column, the index row just highlights — `desktopSplit` in SettingsPanel); the 模型/Skills/插件 rows are HIDDEN there entirely (rail icons are the entry). On mobile (no prop) the rows keep the in-panel subpage navigation, which renders the former modals in `embedded` mode (fill container, own header suppressed); 归档 stays an index row on mobile only (desktop's rail already has the archive icon).** **The 设置 › 工作区 subpage is ALSO a desktop three-column split view**: the middle column keeps the WorkspaceManager's workspace LIST (its `split` mode renders the rail inline — no manager chrome — and `onSelectedWorkspaceChange` reports the rail selection up for the right-column header) while the selected workspace's settings DETAIL portals into the same right-column config area (`configPortalNode`, PanelHeader 工作区设置; × returns to the settings index). 偏好 (preferences) renders in the right column too (PanelHeader 偏好; no portal — PreferencesPage is mounted directly). The right-column branch condition is `!isMobile && (configView || (sidebarView === "settings" && settingsPage !== "index"))` — configView wins when both apply; on the 工作区 subpage the workspace list rail renders in the middle column BELOW the index rows (the WorkspaceManager in `split` mode is mounted under them only while `settingsPage === "workspace"`). On mobile the subpage stays the single-column `panel`-mode WorkspaceManager (`panel={isMobile}` — desktop drops `panel` so the rail shows). The remaining `WorkspaceManager` modal is the home create-workspace wizard only.
+
+**Persistence**: module views per workspace (`pi-active-view:<wsId>`), global panels under one `pi-active-panel` key (settings survives workspace switches; archive is transient). Legacy URL views (settings/work-items/loops) map onto panel switches in `applyUrlToTabs` by writing the storage key BEFORE activating the tab (the activeWorkspace effect re-derives `sidebarView` from storage and would clobber an immediate setState); `buildTabQuery` only emits overview/chat.
+
+- **工作台** — the merged 会话 + Explorer view: two stacked sections. Upper **会话** (chevron + label + count header,
+  collapsible, capped at `max-height: 40%` with internal scroll); lower **文件** takes the remaining ~60% and is **always
+  expanded** (no chevron — `WorkbenchSectionHeader` takes `collapsible:false`); its header carries the
+  `[ 文件 | 改动(N) ]` segmented tabs (`pi-explorer-tab:<wsId>`) when inside a git repo. 会话 collapse state persists per
+  workspace in `localStorage` key `pi-workbench-sections:<wsId>`. The panel header carries a **WorkspaceSwitcher**
+  (current workspace name + ▾ → workspace dropdown, select to switch) plus the ＋ 新建会话 button.
 - **知识库** — **only `kind === "knowledge"`** repositories; each is an **OKF (Open Knowledge Format v0.2)** bundle
   (Markdown + YAML frontmatter) browsed via a `FileExplorer` pointed at `knowledge/<alias>` (flat layout — sibling of `repositories/`, per `workspaceRepositoryPath`). A newly
   `init`'d bundle is seeded with `index.md` (progressive-disclosure entry), `log.md`, and a `concepts/welcome.md`
@@ -168,15 +164,14 @@ Per-view content (data still comes from `loadWorkspaceData` — only the render 
   **L0 access is always built-in** — `read`/`ls`/`grep` need no tool. The view has an "open index.md" hint as the L0
   entry point. Ranked retrieval augmentation (`kb_search`) is **opt-in**: the tool is mounted automatically when the
   `knowledge` capability is on, and searches across all active bundles (see "kb_search" below).
-- **Loop** — the loop list itself (no longer a "管理 Loops" button): each loop row shows name + trigger summary with ▶ manual-trigger and ⚙ edit (opens the center `LoopConfig` definition editor); clicking a loop expands its **run records** in place (`GET /api/workspaces/[id]/loop/runs?loopId=` — web-process read of `RUNS.jsonl`, deduped latest snapshot per run). v3: runs are thin **selection rounds** — a run row with `seededSessionId` opens the seeded **execution session** (badge 已播种); unseeded runs open the selection orchestrator. Non-terminal runs poll every 5s while expanded.
-- **工作项** — the requirements/bugs groups.
+- **Loop** — the loop list itself: each loop row shows name + trigger summary with ▶ manual-trigger and ⚙ edit (opens the `LoopConfig` editor IN the middle column — temporarily widened); clicking a loop expands its **run records** in place (`GET /api/workspaces/[id]/loop/runs?loopId=` — web-process read of `RUNS.jsonl`, deduped latest snapshot per run). v3: runs are thin **selection rounds** — a run row with `seededSessionId` opens the seeded **execution session** (badge 已播种); unseeded runs open the selection orchestrator. Non-terminal runs poll every 5s while expanded.
+- **工作项** — the FULL WorkspaceManager work-item surface (筛选/详情/对话链接/归档) as a middle-column panel.
 
-Mobile: the Activity Bar becomes a **bottom tab bar** (`variant="horizontal"`); desktop is a left icon strip
-(`variant="vertical"`). The header (workspace switcher / 新建 / 设置), the 归档 button and `SettingsBar` are preserved outside
-the focus area. **Don't reintroduce stacked sections** — a new module gets an Activity Bar icon (register it in
-`ACTIVITY_VIEW_ORDER` + `visibleActivityViews`), not a new collapsible group.
+Mobile: 顶部 WorkspaceTabBar（含 ＋ 新建按钮）· 中间聊天 · **底部固定菜单栏**（module views + 设置， 5 icons; 归档 via the settings index row; 模型/Skills/插件 stay in the settings index subpages — the horizontal bar's only global icon is 设置). Module panels open the 280px drawer; 归档/设置 render as FULL-SCREEN overlays (`.sidebar-fullscreen` mobile CSS — ≈ the former modal experience, × in the PanelHeader). **Don't reintroduce stacked focus views** — a new module gets a rail icon (register it in
+`ACTIVITY_VIEW_ORDER` + `visibleActivityViews`), not a new collapsible group. (Collapsible sections *inside* the 工作台 view
+are fine — they are view content, not navigation.)
 
-**Desktop sidebar is drag-resizable.** The width is a CSS var (`--pi-sidebar-width`, default `260px`) set inline on
+**Desktop middle column is drag-resizable.** The width is a CSS var (`--pi-sidebar-width`, default `260px`) set inline on
 `.sidebar-container` from `AppShell`'s `sidebarWidth` state; a thin `.sidebar-resize-handle` strip (sibling of the
 container, desktop + open only) drives it via `onMouseDown` window listeners. Width persists in `localStorage`
 (`pi-sidebar-width`), clamped `[200, 560]`; double-click the handle resets to 260. Mobile keeps a fixed 280px drawer
@@ -193,6 +188,7 @@ File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage und
 - `events.jsonl` — **append-only** timeline (id/at/type/actor/optional conversationId/data). Never rewrite it.
 
 Key behavior:
+- `listWorkItems()` reads ONLY `item.yaml` per directory (README/events are detail payloads — reading them here was the list hotspot) and returns `{ items, archivedItems, invalid }` in ONE pass — the sidebar's active+archived fetches and the importer dedup index (active ∪ archived) both consume this single result.
 - The `KEY` counter lives in `manifest.work_items.next{Requirement,Bug}Number` and is incremented under the workspace
   write lock (`reserveWorkItemKey`).
 - Updates take `expectedRevision` (optimistic concurrency); appending a milestone via `recordWorkItemMilestone` does
@@ -247,9 +243,11 @@ Only streamed status + final result return to the parent; the full child run is 
 - `getGitFileDiff(cwd, filePath)`: resolves the repo from the **file's** location, builds a unified patch (synthesized
   "new file" patch for untracked; `git diff HEAD` otherwise; respects rename pairs).
 - APIs: `GET /api/git/status?cwd=`, `GET /api/git/diff?cwd=&path=` — guarded by the file-access allow-list. Polled by
-  `hooks/useGitStatus.ts`; rendered by `components/ChangesPanel.tsx` (flat list for one repo, collapsible per-repo
-  groups when cwd spans several). In `WorkspaceSidebar` the Changes list is **no longer a standalone section** — it is
-  a `[ 文件 | 改动(N) ]` tab inside the single-focus **Explorer view** (redesign decision 8), following the Explorer's current cwd
+  `hooks/useGitStatus.ts`; rendered by `components/ChangesPanel.tsx` — **always grouped by repository** (even a
+  single dirty repo gets a named group header with file count + +/- subtotal; the cwd-enclosing repo group defaults to
+  expanded, nested repo groups to collapsed; only clean repos produce no group). In `WorkspaceSidebar` the Changes list
+  is **no longer a standalone section** — it is
+  a `[ 文件 | 改动(N) ]` tab inside the 工作台 view's **文件 section** header (redesign decision 8), following the Explorer's current cwd
   scope; `ChangesPanel` itself is unchanged. Tab choice persists in `localStorage` key `pi-explorer-tab:<wsId>`;
   non-git directories hide the "改动" tab. `SessionSidebar` keeps its own standalone Changes section.
 
@@ -327,7 +325,8 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), **v3** 
 app/api/
   sessions/route.ts                      GET  list all sessions (grouped by project/worktree root)
   sessions/[id]/route.ts                 GET/PATCH/DELETE session
-  sessions/[id]/context/route.ts         GET ?leafId= — context for a specific leaf
+  sessions/[id]/context/route.ts         GET ?leafId= — context for a specific leaf (tail-windowed via ?tail=)
+  sessions/[id]/earlier/route.ts         GET ?before=&limit=&leafId= — older-messages page for tail-first loading
   sessions/[id]/export/route.ts          GET exported HTML for a session
   sessions/[id]/state|archive|restore|locate|auto-name/route.ts   session lifecycle helpers
   sessions/[id]/entries/[entryId]/thinking/route.ts               GET a thinking block
@@ -375,6 +374,7 @@ app/api/
   worktrees/route.ts                     GET/POST/DELETE git worktrees
 
 lib/
+  abort-race.ts             raceAbort (promise vs AbortSignal, with onLateSettle cleanup) + creationTimeoutSignal — bounds session CREATION everywhere a startRpcSession hang would pin a turn/run (subagent spawn, loop orchestrator, seed)
   rpc-manager.ts            DAEMON-ONLY session registry + AgentSessionWrapper + startRpcSession (extension/skill/workspace wiring). No web-process code may import it — web routes proxy through lib/agent-proxy.ts
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
@@ -424,7 +424,8 @@ lib/
   git-status.ts             porcelain-v1 parse, status classify, buildRepoGroups (pure)
   git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index)
   git-types.ts              GitFileStatus / RepoGroup / response shapes
-  session-reader.ts         SessionManager wrappers + path cache + buildSessionContext adapter
+  session-reader.ts         index-backed SessionInfo mapping + buildSessionContext (tail window) + buildEarlierContext + path caches
+  session-index.ts          persistent mtime-incremental session index (~/.pi/agent/sessions/.index.json, active + .archived; rebuildable cache)
   session-changed-files.ts  PURE deriveSessionChangedFiles — files written/edited in a session from the message stream (write/edit toolCalls + subagent displayItems; relative `file_path` args resolved against session cwd so openFile passes the /api/files allow-list; NOT git state; survives commits); isEditToolName consolidated here
   session-archive.ts        move .jsonl to/from .archived/ to hide/restore sessions
   archive-cascade.ts        work-item archive ↔ session archive bridge
@@ -443,13 +444,15 @@ lib/
   npx.ts, skill-lock.ts, skill-message.ts, skills-service.ts, skill-updates.ts   skills/plugins plumbing
 
 components/
-  AppShell.tsx              top-level layout + URL state + tab management
-  HomeLanding.tsx           the workspace picker / home screen
-  ActivityBar.tsx           workspace Activity Bar — single-focus capability switcher (left icon strip on desktop / bottom tab bar on mobile); icon order sessions→explorer→repositories(code)→knowledge→loop→work-items
-  WorkspaceSidebar.tsx      single-focus sidebar: ActivityBar (left) + one focused view (sessions / explorer / repositories(code-only) / knowledge / loop / work-items); explorer view has [ 文件 | 改动(N) ] tabs; archive + SettingsBar footer
-  WorkspaceManager.tsx      workspace create/import + settings modal (capabilities, skills)
-  WorkspaceOverview.tsx     workspace landing view (recent sessions, work items, repos)
-  WorkspaceTabBar.tsx       workspace switcher tabs (shortest-unique labels)
+  AppShell.tsx              top-level three-column layout + URL state + tab management (owns `sidebarView`/`settingsPage`/`loopEditorOpen` + `middleColumnWidth` + `configView`/`configPortalNode`: the 模型/Skills/插件 split views put their LIST in the middle column and portal their detail into the right column's config area, desktop-only)
+  HomeLanding.tsx           the workspace picker / home screen (desktop scrolling column; mobile one-screen two-zone layout: compact hero row + horizontal 工作区 chips + internal-scroll 最近会话)
+  ActivityBar.tsx           the icon rail (desktop left strip / mobile fixed bottom bar): module group 工作台→知识库→loop→工作项 + separator + global group 模型→Skills→插件→归档→设置(bottom-pinned; the config trio renders in the RIGHT column, not the middle column); defines `SidebarView` + `ConfigView`/`isConfigView` + `ACTIVITY_VIEW_ORDER` + `RAIL_GLOBAL_VIEWS` (rail icon order) + `GLOBAL_ACTIVITY_VIEWS` (middle-column persistence surface: archive/settings only) + `visibleActivityViews()`
+  PanelHeader.tsx           unified ~36px middle-column panel header (title + back + context actions + mobile ×) + PanelHeaderButton
+  SettingsPanel.tsx         the 设置 panel — iOS-settings index → 工作区/模型/Skills/插件/偏好 subpages (mounts the config bodies in `embedded` mode)
+  WorkspaceSidebar.tsx      middle-column content for module views (workbench/knowledge/loop-list under a PanelHeader) + the home workspace-list panel; 工作台 = stacked collapsible 会话 (≤40%) + 文件 sections with [ 文件 | 改动(N) ] tabs (`pi-workbench-sections:<wsId>` persistence)
+  WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant, `split` = desktop three-column mode: rail list inline + settings detail portaled into the right column's config area); remaining modal = home create-workspace wizard
+  WorkspaceOverview.tsx     workspace dashboard — the unconditional landing view (quick actions incl. Loop trigger/manage, 活跃工作项, Loop 动态 run rows, 仓库/知识库 rows that navigate the sidebar, recent sessions with delete)
+  WorkspaceTabBar.tsx       workspace switcher tabs (shortest-unique labels) + ＋ create-workspace button
   SessionSidebar.tsx        in-workspace session tree + FileExplorer + Changes section
   ChangesPanel.tsx          git changes list (flat or per-repo grouped)
   FileExplorer.tsx          file tree inside sidebar
@@ -464,10 +467,10 @@ components/
   BranchNavigator.tsx       in-session branch switcher
   ChatMinimap.tsx           scroll minimap alongside the message list
   MarkdownBody.tsx / MermaidBlock.tsx   markdown + mermaid renderers
-  ModelsConfig.tsx          modal for editing models.json
-  PluginsConfig.tsx         modal for installed package plugins
-  SkillsConfig.tsx          modal for loaded/search/installable skills
-  ArchiveModal.tsx          archived sessions/items modal
+  ModelsConfig.tsx          models.json editor (`split` mode = list in middle column + detail/footer portaled into the right column; `embedded` mode = settings-subpage body; `onSaved` refresh hook)
+  PluginsConfig.tsx         installed package plugins panel body (`split`/`embedded` modes as above)
+  SkillsConfig.tsx          loaded/search/installable skills panel body (`split`/`embedded` modes as above)
+  ArchiveModal.tsx          archived sessions/items (embedded = the 归档 panel body)
   TabBar.tsx                chat + open-file tabs
   FileIcons.tsx / git-ui.tsx   file icon + git-status UI helpers
 
@@ -488,6 +491,8 @@ hooks/
 
 ### AgentSession lifecycle (`lib/rpc-manager.ts` — daemon process)
 - One `AgentSessionWrapper` per session id, keyed in `globalThis.__piSessions`.
+- **Session CREATION is abortable + bounded** (`StartSessionOptions.signal`): `startRpcSession` races creation against the signal (`raceAbort`, `lib/abort-race.ts`) — an already-aborted signal throws immediately, a hung creation (e.g. stuck network call in model resolution) rejects on abort/timeout, and a session that materializes late (after the caller gave up) is destroyed on arrival so no live zombie wrapper stays in the registry. Callers bound it: subagent `runWorker` (parent tool signal + 5-min timeout; failure degrades to a failed WorkerResult, not a throw), loop orchestrator + seed (`creationTimeoutSignal`, 5-min). Without this, a creation hang pinned the parent's turn, the daemon's `abort` path (which awaits idle), and the running set forever. The start-lock key for NEW sessions is a one-time `__new__<uuid>` — never `""`, which made concurrent creations (parallel subagents) coalesce onto the first session.
+- **Heartbeat monitor — the zombie safety net** (`lib/session-heartbeat.ts` + `startSessionHeartbeatMonitor` in rpc-manager, started from `getRegistry()` init): every 60s (unref'd, daemon-process only) each RUNNING wrapper is checked for time-since-last-activity (any agent event — streaming deltas, tool partials — or inbound command, tracked in `lastActivityAt`). Silent past `STALL_WARN_MS` (5min) → listed in `GET /v1/sessions/running`'s additive `stalled` snapshot and `get_state`'s `stalledMs`; silent past `STALL_KILL_MS` (20min, env `PI_SESSION_STALL_*_MS`) → synthetic `prompt_error` (visible as a chat notice, NOT persisted) then `destroy()` (aborts in-flight prompt, drops registry, closes SSE → badges clear; human resends to resume). Rationale: a false kill costs one resend, a zombie costs a daemon restart (REQ-0026: 4 silent hours). NOT covered: creation-phase hangs (bounded by `StartSessionOptions.signal`/raceAbort above), gate-paused sessions (not `running`, never monitored — human waits can be arbitrarily long), and sessions with a **pending extension UI request** (`hasPendingUiRequests()` — running but human-paused on a confirm/select dialog; exempt like gate-paused, since the dialog is replayed to any reconnecting viewer and stays answerable). The KILL margin exists for QUIET BUILDS: pi's bash tool only emits partials when there IS output, so a legit `npm install`/`mvn` (and a subagent parent waiting on such a child) is genuinely eventless — kill must outlive the longest normal build.
 - The registry lives in the **session daemon** (bin/pi-loop.js). Its lifecycle no longer follows web hot-reloads — the `globalThis` guard survives daemon-internal restarts of the module graph, and a daemon restart cold-starts sessions from their .jsonl on demand (same revive semantics as commands).
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`).
 - **`destroy()` aborts an in-flight prompt** (`promptRunning || isStreaming → inner.abort()`). Without this, destroying a wrapper mid-run (Loop round timeout/abort) only unsubscribes events and drops the registry entry — the inner prompt keeps executing as an invisible zombie: still writing the .jsonl and spawning subagents for many minutes after every surface (run status, running badge, host probe) says it is gone. The idle-timer path is unaffected (it guards on `isRunning()` and never destroys a busy session), and fork is idle-only, so the abort branch fires only where a kill is intended.
@@ -510,10 +515,10 @@ Pi stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolC
 Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[]`). For existing sessions, the active preset is inferred on mount via `get_tools` → `getPresetFromTools()`. When tools are fully disabled (`toolNames = []`), `rpc-manager.ts` passes an empty tool allow-list and forces `agent.state.systemPrompt = ""` after startup/reload/resource discovery.
 
 ### Workspace capability registry is the source of truth
-`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered but currently inert — no factory, no template.)
+`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered but currently inert — no factory, no template. The former `overview` capability is RETIRED — the overview dashboard renders unconditionally; manifests still listing `overview` get it stripped on read, see the capability system section.)
 
-### `effectiveCapabilities` template fallback
-`effectiveCapabilities(manifest)` reads `manifest.capabilities` first; if absent it falls back to the built-in template lookup (by id **and** version) for legacy manifests that still carry `template`; if that misses (or `template` is absent — now allowed for capability-driven workspaces) it returns `["sessions", "explorer"]`. **This template fallback path must be preserved** so existing `software-development` workspaces (which carry `template` + cached `capabilities`) keep working. New workspaces always write `capabilities` explicitly and omit `template`, so they never rely on the fallback.
+### Capabilities are required — no fallback path
+`WorkspaceManifest.capabilities` is non-optional. `parseWorkspaceManifest` throws on a manifest without it, and the deleted `effectiveCapabilities` helper is NOT to be reintroduced — read `manifest.capabilities` directly. Legacy manifests were rewritten once by the v2 index migration (see Work Items → Key behavior above / "Workspace index v2" in the manifest section).
 
 ### AGENTS.md managed-segment replacement is a no-op without markers
 `updateManagedRepositoryInstructions()` only rewrites content **between** the managed markers, and now maintains **two**
@@ -550,7 +555,7 @@ bundles** of the workspace and merges results.
   read (so `kb_search` and L0 always agree on which bundles exist).
 
 ### Subagent is global, not a workspace capability
-The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs`.
+The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs` — and when a wrapper is cold-rebuilt from the `.jsonl` (idle eviction after a long gate wait, daemon restart) with no caller to re-pass them, `startRpcSession` re-derives `extraAgentDirs = [<workspace>/.pi/agents]` from the enclosing workspace, so loop roles keep their gate-exempt `loop` source instead of degrading to `project` discovery (which would hang unattended runs on a per-dispatch confirm dialog — the REQ-0027 lesson). The child-run timeout in `lib/subagent/worker.ts` is an **inactivity** budget (`RUN_TIMEOUT_MS`, re-armed on every child event), not a wall-clock cap: a still-streaming child never trips it, and on timeout the child is deliberately NOT aborted (quiet builds are legitimately eventless; the heartbeat monitor owns truly-hung children) — the parent gets a `childSessionId` hint and must verify the child's state before re-dispatching.
 
 ### The session daemon (C2 redesign): one process owns every AgentSession
 

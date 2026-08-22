@@ -1,20 +1,44 @@
 import { NextResponse } from "next/server";
-import { invalidateSessionListCache, listAllSessions } from "@/lib/session-reader";
 import { loopHostClient } from "@/lib/loop/client";
+import { findSessionIndexEntry } from "@/lib/session-index";
+import { resolveProject } from "@/lib/worktree";
+import { cacheSessionPath } from "@/lib/session-reader";
 import type { SessionInfo } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 /** Resolve a session id to a SessionInfo so the UI can open it by id.
  *
- *  Used by `handleOpenLoopSession` after a Loop round reports its orchestrator
- *  session id. Two sources, in order of authority:
+ *  Used by `handleOpenLoopSession` (after a Loop round reports its orchestrator
+ *  session id) and `handleOpenSessionViewer` (subagent children). Two sources,
+ *  in order of authority:
  *    1. Loop Host probe — the orchestrator session physically lives in the Loop
- *       Host process, which knows its cwd + sessionFile immediately. This works
- *       even before Pi's 30s session-list cache picks up the freshly written
- *       .jsonl, and regardless of where on disk the file landed.
- *    2. Disk fallback — force a fresh scan (bypass the cache) and look it up.
- *       Covers the case where the Loop Host is down or running older code. */
+ *       Host process, which knows its cwd + sessionFile immediately.
+ *    2. Session index — mtime-incremental over `~/.pi/agent/sessions` (active +
+ *       `.archived/`), so a freshly written .jsonl resolves without a full disk
+ *       scan and WITHOUT invalidating the (cheap) list cache.
+ */
+async function sessionInfoFromIndex(id: string): Promise<SessionInfo | null> {
+  const entry = await findSessionIndexEntry(id);
+  if (!entry) return null;
+  const project = entry.cwd ? await resolveProject(entry.cwd) : undefined;
+  cacheSessionPath(entry.id, entry.path);
+  return {
+    path: entry.path,
+    id: entry.id,
+    cwd: entry.cwd,
+    ...(entry.name !== undefined ? { name: entry.name } : {}),
+    created: new Date(entry.createdMs).toISOString(),
+    modified: new Date(entry.modifiedMs).toISOString(),
+    messageCount: entry.messageCount,
+    firstMessage: entry.firstMessage
+      ? entry.firstMessage.slice(0, 160)
+      : "(no messages)",
+    projectRoot: project?.projectRoot ?? entry.cwd,
+    ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
+  };
+}
+
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -33,14 +57,20 @@ export async function GET(
         firstMessage: "(loop session)",
         projectRoot: meta.cwd ?? "",
       };
-      // Best-effort enrich from disk: the probe carries no firstMessage/stats,
-      // and the .jsonl (orchestrator or running subagent child) usually exists
-      // already — real stats make the tab label meaningful. Keep the probe's
-      // authoritative path/cwd when it has them (live wrapper); a COLD
-      // orchestrator probe (gate-paused after a host restart) has neither —
-      // then the disk scan's values are the authority.
-      invalidateSessionListCache();
-      const onDisk = (await listAllSessions()).find((s) => s.id === id);
+      // Best-effort enrich from the index: the probe carries no
+      // firstMessage/stats, and the .jsonl (orchestrator or running subagent
+      // child) usually exists already — real stats make the tab label
+      // meaningful. Keep the probe's authoritative path/cwd when it has them
+      // (live wrapper); a COLD orchestrator probe (gate-paused after a host
+      // restart) has neither — then the index's values are the authority.
+      const onDisk = await sessionInfoFromIndex(id);
+      // Seed the path cache from the probe even when the index misses: a
+      // freshly spawned subagent child's .jsonl may not exist yet (pi creates
+      // it lazily on first append), so the index cannot know it — but the
+      // daemon registry already does. With the path cached, GET
+      // /api/sessions/[id] answers the empty-but-valid placeholder and the
+      // viewer renders live SSE on top instead of 404ing ("cannot resolve").
+      if (meta.sessionFile) cacheSessionPath(id, meta.sessionFile);
       if (onDisk) {
         return NextResponse.json({
           session: {
@@ -58,11 +88,9 @@ export async function GET(
       return NextResponse.json({ session, source: "loop" });
     }
   } catch {
-    // Loop Host unreachable — fall through to the disk scan.
+    // Loop Host unreachable — fall through to the index.
   }
-  invalidateSessionListCache();
-  const all = await listAllSessions();
-  const found = all.find((s) => s.id === id);
+  const found = await sessionInfoFromIndex(id);
   if (found) return NextResponse.json({ session: found, source: "disk" });
   return NextResponse.json({ error: "Session not found" }, { status: 404 });
 }
