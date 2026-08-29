@@ -5,9 +5,9 @@ import { join } from "node:path";
 /**
  * Session-daemon sidecar lifecycle.
  *
- * The loop host process (bin/pi-loop.js, `npm run loop`) is being promoted to
- * THE single session-owning daemon (C2). The web server attaches to it when it
- * is already running and spawns it detached when it is not — so `npm run dev`
+ * The pi-daemon process (bin/pi-daemon.js, `npm run daemon`) is THE single
+ * session-owning daemon (C2). The web server attaches to it when it is
+ * already running and spawns it detached when it is not — so `npm run dev`
  * alone remains a complete, working setup. Re-attach (probe-first, never a
  * second spawn against a live port) keeps daemon timers decoupled from web
  * restarts: the "web owns no unattended timers" rule is preserved because the
@@ -22,8 +22,8 @@ export function decideSidecarAction(daemonHealthy: boolean): SidecarAction {
 }
 
 /** Pure guard: a sidecar may only be spawned for a daemon address this machine
- *  can own. A PI_LOOP_URL pointing at a remote host means the daemon is managed
- *  elsewhere — never spawn a local process for it. */
+ *  can own. A PI_DAEMON_URL pointing at a remote host means the daemon is
+ *  managed elsewhere — never spawn a local process for it. */
 export function spawnableDaemonUrl(baseUrl: string): boolean {
   let url: URL;
   try {
@@ -36,15 +36,17 @@ export function spawnableDaemonUrl(baseUrl: string): boolean {
 }
 
 function daemonBaseUrl(): string {
-  return (process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
+  // PI_DAEMON_URL is canonical; PI_LOOP_URL is the legacy fallback.
+  return (process.env.PI_DAEMON_URL ?? process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
 }
 
 /** Env for the spawned daemon so it listens exactly where this web process
- *  will look for it. The daemon binds PI_LOOP_HOST/PI_LOOP_PORT (NOT
- *  PI_LOOP_URL — that is the web-side client address), so a PI_LOOP_URL-only
+ *  will look for it. The daemon binds PI_DAEMON_HOST/PI_DAEMON_PORT (NOT
+ *  PI_DAEMON_URL — that is the web-side client address), so a URL-only
  *  configuration must be translated; otherwise the sidecar would spawn a
  *  daemon on the default port and then poll the URL's port forever. Explicit
- *  PI_LOOP_HOST/PI_LOOP_PORT in the environment always win. */
+ *  PI_DAEMON_HOST/PI_DAEMON_PORT (or their PI_LOOP_* legacy spellings) always
+ *  win. */
 export function sidecarSpawnEnv(
   daemonUrl: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
@@ -53,8 +55,8 @@ export function sidecarSpawnEnv(
   const hostname = url.hostname.replace(/^\[(.+)\]$/, "$1");
   return {
     ...baseEnv,
-    PI_LOOP_HOST: baseEnv.PI_LOOP_HOST ?? hostname,
-    PI_LOOP_PORT: baseEnv.PI_LOOP_PORT ?? url.port,
+    PI_DAEMON_HOST: baseEnv.PI_DAEMON_HOST ?? baseEnv.PI_LOOP_HOST ?? hostname,
+    PI_DAEMON_PORT: baseEnv.PI_DAEMON_PORT ?? baseEnv.PI_LOOP_PORT ?? url.port,
   };
 }
 
@@ -82,7 +84,7 @@ async function startOnce(): Promise<StartState> {
 
   if (!spawnableDaemonUrl(baseUrl)) {
     throw new Error(
-      `session daemon is not reachable at ${baseUrl} and PI_LOOP_URL points at a ` +
+      `session daemon is not reachable at ${baseUrl} and PI_DAEMON_URL points at a ` +
       "non-local host — refusing to spawn a local sidecar for it",
     );
   }
@@ -91,9 +93,9 @@ async function startOnce(): Promise<StartState> {
   // `npm start`), so resolve the daemon entry from cwd. Deliberately no
   // `import.meta.url`: this module is webpack-bundled into an app route, and
   // `new URL(".", import.meta.url)` fails that build ("Can't resolve '.'").
-  const entry = join(process.cwd(), "bin", "pi-loop.js");
+  const entry = join(process.cwd(), "bin", "pi-daemon.js");
   if (!existsSync(entry)) {
-    throw new Error("bin/pi-loop.js not found — cannot spawn the session daemon sidecar");
+    throw new Error("bin/pi-daemon.js not found — cannot spawn the session daemon sidecar");
   }
 
   const child = spawn(process.execPath, [entry], {

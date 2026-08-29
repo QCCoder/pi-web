@@ -16,8 +16,8 @@
  * render an official-style progress/result view without opening the child.
  */
 import type { AgentConfig } from "./agents.ts";
-import type { AgentEvent, AgentSessionWrapper } from "../rpc-manager.ts";
-import { startRpcSession } from "../rpc-manager.ts";
+import type { AgentEvent, AgentSessionWrapper } from "../daemon/rpc-manager.ts";
+import { startRpcSession } from "../daemon/rpc-manager.ts";
 import { markSubagentChild } from "./registry.ts";
 
 /** Inactivity budget for a child run. NOT a wall-clock cap: every child event

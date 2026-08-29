@@ -7,8 +7,8 @@ import {
   readImporterConfig,
   writeImporterConfig,
   toPublicConfig,
-} from "@/lib/importers/config";
-import type { ChandaoConfig, ImporterConfig } from "@/lib/importers/types";
+} from "@/lib/work-items/importers/config";
+import type { ChandaoConfig, ImporterConfig } from "@/lib/work-items/importers/types";
 
 function errorResponse(error: unknown): NextResponse {
   const status = error instanceof WorkspaceNotFoundError ? 404 : 500;

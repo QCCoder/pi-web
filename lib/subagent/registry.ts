@@ -10,7 +10,7 @@
  * Design notes:
  *   - Append-only (`appendFileSync`) so parallel subagent workers never lose
  *     ids to a read-modify-write race.
- *   - Cross-process safe: the loop host creates children in its own process,
+ *   - Cross-process safe: the daemon creates children in its own process,
  *     so the reader re-reads the file on mtime change instead of trusting an
  *     in-memory cache.
  *   - Stale ids (deleted sessions) are harmless: they simply match nothing.

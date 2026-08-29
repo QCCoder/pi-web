@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentEvent, AgentSessionWrapper } from "../rpc-manager.ts";
-import { startRpcSession } from "../rpc-manager.ts";
+import type { AgentEvent, AgentSessionWrapper } from "../daemon/rpc-manager.ts";
+import { startRpcSession } from "../daemon/rpc-manager.ts";
 import { creationTimeoutSignal } from "../abort-race";
 import type {
   LoopDefinition,

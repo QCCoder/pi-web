@@ -32,11 +32,23 @@ export function skillCommandText(skill: Pick<ParsedSkillMessage, "name" | "userM
   return `/skill:${skill.name}${skill.userMessage ? ` ${skill.userMessage}` : ""}`;
 }
 
+/** The unambiguous pi wrapper header — a text starting with this was
+ *  necessarily produced by `/skill:` expansion. */
+const SKILL_WRAPPER_HEAD =
+  /^<skill name="([^"]+)" location="([^"]+)">\nReferences are relative to [^\n]+\.\n/;
+
 /** Text suitable for a fallback session title. */
 export function skillMessageTitle(text: string): string {
   const skill = parseSkillMessage(text);
-  if (!skill) return text;
-  return skill.userMessage || `/skill:${skill.name}`;
+  if (skill) return skill.userMessage || `/skill:${skill.name}`;
+  // Truncated copy of the wrapper (e.g. a firstMessage clipped at 400 chars
+  // before the closing </skill>): the arguments after the wrapper are gone,
+  // so the best readable title is the reconstructed command. Only fires on
+  // the exact pi header shape and only when no closing tag survived — a
+  // hand-written skill-like blob with </skill> is still left untouched.
+  const head = text.match(SKILL_WRAPPER_HEAD);
+  if (head && !text.includes("</skill>")) return `/skill:${head[1]}`;
+  return text;
 }
 
 /**

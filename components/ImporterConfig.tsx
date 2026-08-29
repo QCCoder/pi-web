@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { WorkspaceCapability, WorkspaceSummary } from "@/lib/workspaces/types";
-import type { ChandaoConfigPublic } from "@/lib/importers/types";
+import type { ChandaoConfigPublic } from "@/lib/work-items/importers/types";
 import { CapabilityToggle } from "./CapabilityToggle";
 
 const CAPABILITY: WorkspaceCapability = "requirement-sources";
@@ -161,7 +161,7 @@ export function ImporterConfig({
   return (
     <section className="workspace-settings-section">
       <div className="repository-section-header">
-        <h3>需求来源（禅道 Importer）</h3>
+        <h3>工作项 · 需求来源（禅道）</h3>
         <CapabilityToggle enabled={enabled} loading={toggling} onToggle={(next) => void toggleCapability(next)} />
       </div>
       <div className="workspace-summary-card">

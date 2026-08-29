@@ -1,11 +1,11 @@
 "use client";
 
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { useViewportIsMobile } from "@/hooks/useIsMobile";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { useAppShellState } from "./shell/useAppShellState";
-import { AppShellProvider } from "./shell/context";
+import { AppShellProvider, IsMobileContext } from "./shell/context";
 import { DesktopShell } from "./shell/DesktopShell";
 import { MobileShell } from "./shell/MobileShell";
 
@@ -20,13 +20,16 @@ import { MobileShell } from "./shell/MobileShell";
  *   设置) with per-tab secondary stacks; no drawer.
  *
  * The viewport breakpoint decides which shell renders; the state layer is
- * shell-agnostic so the flip loses nothing. The shell-agnostic overlays
+ * shell-agnostic so the flip loses nothing. `initialIsMobile` is the
+ * server's UA guess (see `app/page.tsx`) — it seeds SSR AND hydration so the
+ * correct shell is in the very first HTML response; matchMedia corrects a
+ * wrong guess right after mount. The shell-agnostic overlays
  * (home create-workspace wizard, directory import picker, project trust
  * dialog) render here for both.
  */
-export function AppShell() {
+export function AppShell({ initialIsMobile = false }: { initialIsMobile?: boolean }) {
   const state = useAppShellState();
-  const isMobile = useIsMobile();
+  const isMobile = useViewportIsMobile(initialIsMobile);
   const {
     workspaceManagerOpen,
     setWorkspaceManagerOpen,
@@ -49,6 +52,7 @@ export function AppShell() {
 
   return (
     <AppShellProvider value={state}>
+      <IsMobileContext.Provider value={isMobile}>
       <style>{`
         @keyframes session-info-pop {
           0% {
@@ -146,6 +150,7 @@ export function AppShell() {
           onConfirm={() => void handleTrustProject()}
         />
       )}
+      </IsMobileContext.Provider>
     </AppShellProvider>
   );
 }

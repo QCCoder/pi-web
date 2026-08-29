@@ -20,6 +20,7 @@ import type {
   WorkItemStatus,
   WorkItemType,
 } from "@/lib/work-items/types";
+import { sourceLabel } from "@/lib/work-items/importers/source-labels";
 import type { SkillInfo } from "@/lib/api-types";
 
 interface WorkspaceListResponse {
@@ -42,9 +43,11 @@ type WorkItemFilter = "all" | WorkItemType;
 interface Props {
   open: boolean;
   embedded?: boolean;
-  /** Narrow (middle-column panel) variant: hides the workspace rail and
-   *  stacks the body single-column — the panel is too narrow for the 280px
-   *  rail + content grid. Workspace switching stays in the top tab bar. */
+  /** Narrow (middle-column panel) variant: hides the workspace rail AND the
+   *  manager chrome header (the enclosing PanelHeader already titles the
+   *  panel) and stacks the body single-column — the panel is too narrow for
+   *  the 280px rail + content grid. Rows/toolbars compact below a 480px
+   *  container width (the middle column is drag-resizable 200–560px). */
   panel?: boolean;
   /** Split (three-column) mode: the workspace LIST (rail) renders inline in
    *  the middle column while the selected workspace's settings DETAIL portals
@@ -56,6 +59,19 @@ interface Props {
    *  renders nothing for the detail (the frame arrives in the next commit). */
   split?: { portalTarget: HTMLElement | null };
   initialSection?: ManagerSection;
+  /** Desktop work-items split (the 工作项 middle-column panel): the LIST
+   *  stays mounted in the middle column while the selected work item's
+   *  DETAIL portals into the right column's config area (same mechanism as
+   *  the 模型/Skills/插件 split views — `portalTarget` is AppShell's
+   *  configPortalNode; null renders nothing until the frame mounts). Omitted
+   *  on mobile — the detail replaces the list in place there. */
+  workItemSplit?: { portalTarget: HTMLElement | null };
+  /** Reports the selection up (the right-column PanelHeader shows key/title;
+   *  the shell clears its mirror when it hands the right column elsewhere). */
+  onSelectedWorkItemChange?: (item: { key: string; title: string } | null) => void;
+  /** Increment to clear the selection (the right column's × — request-counter
+   *  pattern, same as createWorkItemRequest). */
+  closeWorkItemDetailRequest?: number;
   activeWorkspacePath?: string | null;
   initialWorkItemKey?: string | null;
   createWorkItemRequest?: { type: WorkItemType; id: number } | null;
@@ -188,6 +204,9 @@ export function WorkspaceManager({
   panel = false,
   split,
   initialSection = "workspaces",
+  workItemSplit,
+  onSelectedWorkItemChange,
+  closeWorkItemDetailRequest,
   activeWorkspacePath,
   initialWorkItemKey,
   createWorkItemRequest,
@@ -392,6 +411,20 @@ export function WorkspaceManager({
     setSection("work-items");
     openCreateWorkItem(createWorkItemRequest.type);
   }, [createWorkItemRequest, embedded, open, openCreateWorkItem]);
+
+  // Work-item detail split (desktop): report selection changes up (the
+  // right-column header + shell mirror), and honor the right column's ×
+  // (request counter — clearing here unmounts the portaled detail).
+  useEffect(() => {
+    if (!onSelectedWorkItemChange) return;
+    onSelectedWorkItemChange(selectedWorkItem
+      ? { key: selectedWorkItem.item.key, title: selectedWorkItem.item.title }
+      : null);
+  }, [selectedWorkItem, onSelectedWorkItemChange]);
+  useEffect(() => {
+    if (!closeWorkItemDetailRequest) return;
+    setSelectedWorkItem(null);
+  }, [closeWorkItemDetailRequest]);
 
   useEffect(() => {
     if ((!open && !embedded) || !createWorkspaceOnOpen) return;
@@ -736,6 +769,45 @@ export function WorkspaceManager({
 
   const splitMode = split != null;
   const portalTarget = split?.portalTarget ?? null;
+  const workItemSplitMode = workItemSplit != null;
+
+  // Shared narrow-layout compaction (single-column form grids, wrapping
+  // toolbars, 2-line work-item rows, stacked detail header). Used by BOTH the
+  // mobile media query and — in `panel` mode — a container query, because the
+  // desktop middle column is drag-resizable (200–560px) while the full
+  // work-item grid alone needs ~410px.
+  const compactStyles = `
+          .workspace-form-grid { grid-template-columns: 1fr; }
+          .repository-row { grid-template-columns: minmax(0, 1fr) auto; }
+          .skill-selection-list { grid-template-columns: 1fr; }
+          .capability-checklist { grid-template-columns: 1fr; }
+          .repository-row > code { grid-column: 1 / -1; grid-row: 2; }
+          .repository-actions { grid-column: 1 / -1; grid-row: 3; }
+          .workspace-page-header h2 { font-size: 17px; }
+          .workspace-page-header { flex-wrap: wrap; }
+          .work-item-toolbar { flex-wrap: wrap; }
+          .work-item-filter { flex: 1 1 auto; min-width: 0; }
+          .work-item-filter .workspace-manager-tab { flex: 0 0 auto; }
+          .work-item-toolbar > .workspace-action { flex: 0 0 auto; }
+          .workspace-search { max-width: none; order: 3; margin-left: 0; flex: 1 1 100%; }
+          .work-item-row {
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: 7px;
+          }
+          .work-item-row .work-item-badge + .work-item-badge { display: none; }
+          .work-item-row time { grid-column: 2; color: var(--text-dim); font-size: 10px; }
+          .work-item-fields { display: grid; grid-template-columns: 1fr 1fr; }
+          .workspace-field-compact select { min-width: 0; }
+          .work-item-event { grid-template-columns: 92px 1fr; }
+          /* Detail header: robust to button count (返回/继续会话/编辑正文/归档…)
+             — key+title takes its own full-width line, buttons wrap below.
+             (The old :nth-of-type grid placements silently mis-laid-out every
+             button past the third.) */
+          .work-item-detail-header { display: flex; flex-wrap: wrap; gap: 8px; }
+          .work-item-detail-header > div { order: -1; flex: 1 1 100%; }
+          .work-item-detail-header h2 { font-size: 15px; }
+          .work-item-detail-header > .workspace-action { flex: 0 0 auto; white-space: nowrap; }
+  `;
 
   const managerStyles = `
         .workspace-manager-backdrop {
@@ -761,13 +833,6 @@ export function WorkspaceManager({
           border-radius: 0;
           box-shadow: none;
         }
-        ${panel ? `
-        .workspace-manager-body { grid-template-columns: minmax(0, 1fr); }
-        .workspace-rail { display: none; }
-        .workspace-manager-header { padding: 7px 10px; }
-        .workspace-manager-title { display: none; }
-        .workspace-content { padding: 12px; }
-        ` : ""}
         .workspace-manager {
           width: min(1180px, 100%);
           height: min(780px, 100%);
@@ -971,7 +1036,20 @@ export function WorkspaceManager({
           text-align: left;
           cursor: pointer;
         }
-        .work-item-key { color: var(--accent); font-family: var(--font-mono); font-size: 11px; }
+        .work-item-key { color: var(--accent); font-family: var(--font-mono); font-size: 11px; display: flex; align-items: center; gap: 4px; }
+        .work-item-source {
+          font-size: 9px;
+          line-height: 1;
+          color: var(--text-muted);
+          border: 1px solid var(--border);
+          border-radius: 4px;
+          padding: 2px 3px;
+          white-space: nowrap;
+        }
+        .work-item-row[data-active="true"] {
+          border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+          background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+        }
         .work-item-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
         .work-item-badge {
           display: inline-flex;
@@ -1029,6 +1107,33 @@ export function WorkspaceManager({
         }
         .work-item-event { display: grid; grid-template-columns: 120px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
         .work-item-event time { color: var(--text-dim); }
+        /* Long unbreakable tokens (file paths, SPEC refs) must not blow out the
+           1fr track — min-width:0 lets the track shrink, overflow-wrap breaks
+           the token (inherited by the summary div). */
+        .work-item-event > div { min-width: 0; overflow-wrap: anywhere; }
+        ${panel ? `
+        /* Narrow middle-column variant — MUST stay AFTER the base rules above:
+           these are same-specificity overrides, and when this block lived
+           before the base rules the cascade silently reverted every one of
+           them (body kept the 280px rail track + 0px content column, content
+           kept 18px padding — the whole pane overflowed the column). The
+           manager chrome header is hidden entirely: the enclosing PanelHeader
+           (工作项 panel / settings subpage) already titles the panel, and the
+           Workspaces tab was a dead-end in this context. */
+        .workspace-manager-page { container-type: inline-size; }
+        .workspace-manager-header { display: none; }
+        .workspace-manager-body { grid-template-columns: minmax(0, 1fr); }
+        .workspace-rail { display: none; }
+        .workspace-content { padding: 12px; }
+        .work-item-toolbar { flex-wrap: wrap; }
+        .work-item-filter { flex: 1 1 auto; min-width: 0; }
+        .work-item-filter .workspace-manager-tab { flex: 0 0 auto; }
+        .work-item-toolbar > .workspace-action { flex: 0 0 auto; }
+        .workspace-search { max-width: none; order: 3; margin-left: 0; flex: 1 1 100%; }
+        @container (max-width: 480px) {
+          ${compactStyles}
+        }
+        ` : ""}
         @media (max-width: 640px) {
           .workspace-manager-backdrop { padding: 0; background: var(--bg); }
           .workspace-manager { width: 100%; height: 100dvh; min-height: 0; border: 0; border-radius: 0; }
@@ -1039,50 +1144,394 @@ export function WorkspaceManager({
           .workspace-manager-body { display: block; overflow: auto; }
           .workspace-rail { display: ${section === "workspaces" ? "block" : "none"}; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 10px; }
           .workspace-content { display: block; height: auto; min-height: 100%; padding: 12px; }
-          .workspace-form-grid { grid-template-columns: 1fr; }
-          .repository-row { grid-template-columns: minmax(0, 1fr) auto; }
-          .skill-selection-list { grid-template-columns: 1fr; }
-          .capability-checklist { grid-template-columns: 1fr; }
-          .repository-row > code { grid-column: 1 / -1; grid-row: 2; }
-          .repository-actions { grid-column: 1 / -1; grid-row: 3; }
-          .workspace-page-header h2 { font-size: 17px; }
-          .workspace-page-header { flex-wrap: wrap; }
-          .work-item-toolbar { flex-wrap: wrap; }
-          .work-item-filter { flex: 1 1 auto; min-width: 0; }
-          .work-item-filter .workspace-manager-tab { flex: 0 0 auto; }
-          .work-item-toolbar > .workspace-action { flex: 0 0 auto; }
-          .workspace-search { max-width: none; order: 3; margin-left: 0; flex: 1 1 100%; }
-          .work-item-row {
-            grid-template-columns: auto 1fr auto;
-            gap: 7px;
-          }
-          .work-item-row .work-item-badge:nth-of-type(2) { display: none; }
-          .work-item-row time { grid-column: 2; color: var(--text-dim); font-size: 10px; }
-          .work-item-fields { display: grid; grid-template-columns: 1fr 1fr; }
-          .workspace-field-compact select { min-width: 0; }
-          .work-item-event { grid-template-columns: 92px 1fr; }
-          .work-item-detail-header {
-            display: grid;
-            grid-template-columns: auto 1fr auto auto;
-            align-items: start;
-          }
-          .work-item-detail-header > div {
-            grid-column: 1 / -1;
-            grid-row: 2;
-            margin-top: 4px;
-          }
-          .work-item-detail-header > .workspace-action {
-            white-space: nowrap;
-          }
-          .work-item-detail-header > .workspace-action:nth-of-type(2) {
-            grid-column: 3;
-            margin-left: 0 !important;
-          }
-          .work-item-detail-header > .workspace-action:nth-of-type(3) {
-            grid-column: 4;
-          }
+          ${compactStyles}
         }
   `;
+
+  // Work-items panes. In the default (modal / mobile / settings-split)
+  // contexts the detail replaces the list in place. In `workItemSplit` mode
+  // (desktop 工作项 panel) the LIST stays mounted in the middle column while
+  // the DETAIL portals into the right column's config area — one instance
+  // keeps every bit of state (selection, drafts, save flow).
+  const workItemDetailPane = selectedWorkItem && selectedWorkspace ? (
+    <div className="work-item-detail-card">
+                  <div className="work-item-detail-header">
+                    {!workItemSplitMode && (
+                      <button className="workspace-action" onClick={() => setSelectedWorkItem(null)}>← 返回</button>
+                    )}
+                    <div>
+                      <div className="work-item-key">{selectedWorkItem.item.key}</div>
+                      <h2>{selectedWorkItem.item.title}</h2>
+                    </div>
+                    {selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.events.length > 0
+                      && [...selectedWorkItem.events].reverse().find((event) => event.type === "loop.gate" || event.type.startsWith("loop."))?.type === "loop.gate" && (
+                      <span
+                        style={{ padding: "2px 8px", borderRadius: 5, background: "rgba(245,158,11,0.15)", color: "#b45309", fontSize: 12, fontWeight: 700, alignSelf: "center" }}
+                        title="执行会话已提问并等待答复——去关联会话里回答即可继续"
+                      >
+                        待裁决
+                      </span>
+                    )}
+                    {onRunContract && selectedWorkspace.capabilities.includes("loop") && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" ? (
+                      selectedWorkItem.item.conversations.length === 0 ? (
+                        <button
+                          className="workspace-action"
+                          style={{ marginLeft: "auto" }}
+                          disabled={saving}
+                          onClick={() => void runContract("execute")}
+                          title="以 dev-loop skill 合同种子一个执行会话（开场判定→SPEC→maker/checker→合并→验证）"
+                        >
+                          开始对话
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="workspace-action"
+                            style={{ marginLeft: "auto" }}
+                            onClick={() => onOpenWorkItemConversation(selectedWorkspace, selectedWorkItem.item)}
+                            title="打开最新的合同执行会话（skill 已在其上下文中，直接继续聊/gate 答复）"
+                          >
+                            继续对话
+                          </button>
+                          {selectedWorkItem.events.some((event) => event.type === "loop.started") && (
+                            <button
+                              className="workspace-action"
+                              disabled={saving}
+                              onClick={() => void runContract("adopt")}
+                              title="新会话从派发计划+里程碑缺口续跑（不重做开场判定）——旧会话僵死/重开时用"
+                            >
+                              收养续跑
+                            </button>
+                          )}
+                        </>
+                      )
+                    ) : (
+                      <button
+                        className="workspace-action"
+                        style={{ marginLeft: "auto" }}
+                        onClick={() => onOpenWorkItemConversation(selectedWorkspace, selectedWorkItem.item)}
+                      >
+                        {selectedWorkItem.item.conversations.length > 0 ? "继续会话" : "开始会话"}
+                      </button>
+                    )}
+                    <button
+                      className="workspace-action"
+                      onClick={() => setContentEditing((value) => !value)}
+                    >
+                      {contentEditing ? "预览" : "编辑正文"}
+                    </button>
+                    <button
+                      className="workspace-action"
+                      disabled={saving}
+                      onClick={() => void toggleWorkItemArchive()}
+                    >
+                      {selectedWorkItem.item.archivedAt ? "取消归档" : "归档"}
+                    </button>
+                  </div>
+                  {onOpenConversation && selectedWorkItem.item.conversations.length > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                      <span style={{ fontSize: 12, color: "var(--text-dim)", flexShrink: 0 }}>关联会话：</span>
+                      {selectedWorkItem.item.conversations.map((conversationId) => (
+                        <button
+                          key={conversationId}
+                          className="workspace-action"
+                          onClick={() => onOpenConversation(conversationId)}
+                          title={conversationId}
+                        >
+                          {(conversationId.slice(0, 8))}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="work-item-fields">
+                    <SelectField
+                      label="状态"
+                      value={selectedWorkItem.item.status}
+                      options={STATUS_OPTIONS}
+                      labels={STATUS_LABELS}
+                      disabled={saving}
+                      onChange={(status) => void patchWorkItem({ status })}
+                    />
+                    <SelectField
+                      label="阶段"
+                      value={selectedWorkItem.item.phase}
+                      options={PHASE_OPTIONS}
+                      labels={PHASE_LABELS}
+                      disabled={saving}
+                      onChange={(phase) => void patchWorkItem({ phase })}
+                    />
+                    <SelectField
+                      label="优先级"
+                      value={selectedWorkItem.item.priority}
+                      options={PRIORITY_OPTIONS}
+                      disabled={saving}
+                      onChange={(priority) => void patchWorkItem({ priority })}
+                    />
+                    <div className="workspace-field workspace-field-compact">
+                      <span>Revision</span>
+                      <div style={{ padding: "9px 0", fontFamily: "var(--font-mono)" }}>
+                        {selectedWorkItem.item.revision}
+                      </div>
+                    </div>
+                    {selectedWorkItem.item.external && (
+                      <div className="workspace-field workspace-field-compact">
+                        <span>来源</span>
+                        <div style={{ padding: "9px 0", fontSize: 13 }}>
+                          {selectedWorkItem.item.external.url ? (
+                            <a
+                              href={selectedWorkItem.item.external.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: "var(--accent)" }}
+                            >
+                              {sourceLabel(selectedWorkItem.item.external.source)} #{selectedWorkItem.item.external.sourceId} ↗
+                            </a>
+                          ) : (
+                            <span>
+                              {sourceLabel(selectedWorkItem.item.external.source)} #{selectedWorkItem.item.external.sourceId}
+                            </span>
+                          )}
+                          {selectedWorkItem.item.external.lastSyncedAt && (
+                            <span style={{ color: "var(--text-dim)", marginLeft: 8, fontSize: 11 }}>
+                              同步于 {formatDate(selectedWorkItem.item.external.lastSyncedAt)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {selectedWorkspace.repositories.length > 0 && (
+                    <div className="work-item-repositories" aria-label="Repository scope">
+                      {selectedWorkspace.repositories.map((repository) => {
+                        const checked = selectedWorkItem.item.repositories.includes(repository.id);
+                        return (
+                          <label className="work-item-repository" key={repository.id}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={saving || repository.status === "removed"}
+                              onChange={(event) => {
+                                const next = event.target.checked
+                                  ? [...new Set([...selectedWorkItem.item.repositories, repository.id])]
+                                  : selectedWorkItem.item.repositories.filter((id) => id !== repository.id);
+                                void patchWorkItem({ repositories: next });
+                              }}
+                            />
+                            {repository.name}{repository.status === "removed" ? "（已停用）" : ""}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {contentEditing ? (
+                    <>
+                      <textarea
+                        className="work-item-editor"
+                        value={contentDraft}
+                        onChange={(event) => setContentDraft(event.target.value)}
+                      />
+                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+                        <button
+                          className="workspace-action"
+                          onClick={() => {
+                            setContentDraft(selectedWorkItem.content);
+                            setContentEditing(false);
+                          }}
+                        >
+                          取消
+                        </button>
+                        <button className="workspace-action" disabled={saving} onClick={() => void saveContent()}>
+                          {saving ? "保存中…" : "保存"}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="work-item-content">
+                      {/* cwd = work-item dir so relative image refs (e.g. importer-written
+                          `attachments/chandao-<id>.png`) resolve to /api/files and actually render;
+                          without it the browser 404s the relative src and images vanish. */}
+                      <MarkdownBody cwd={selectedWorkItem.path}>{selectedWorkItem.content}</MarkdownBody>
+                    </div>
+                  )}
+                  <section className="work-item-events">
+                    <div className="work-item-events-header">
+                      <h3>执行里程碑</h3>
+                      <button
+                        className="workspace-action"
+                        disabled={saving}
+                        onClick={() => void trashWorkItem()}
+                      >
+                        移到回收站
+                      </button>
+                    </div>
+                    {selectedWorkItem.events.map((event) => (
+                      <div className="work-item-event" key={event.id}>
+                        <time>{formatDate(event.at)}</time>
+                        <div>
+                          <strong>{event.type}</strong>
+                          <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>{event.actor}</span>
+                          {typeof event.data?.summary === "string" && (
+                            <div style={{ color: "var(--text-muted)", marginTop: 3 }}>
+                              {event.data.summary}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </section>
+    </div>
+  ) : null;
+  const workItemListPane = selectedWorkspace ? (
+    <>
+                  <div className="workspace-page-header">
+                    <h2>{selectedWorkspace.name} · 工作项</h2>
+                    <button className="workspace-action" onClick={() => openCreateWorkItem()}>
+                      + 新建工作项
+                    </button>
+                  </div>
+                  {createWorkItemOpen && (
+                    <div className="workspace-form-card" style={{ marginBottom: 14 }}>
+                      <div className="workspace-form-grid">
+                        <label className="workspace-field">
+                          <span>类型</span>
+                          <select
+                            value={workItemType}
+                            onChange={(event) => setWorkItemType(event.target.value as WorkItemType)}
+                          >
+                            <option value="requirement">需求</option>
+                            <option value="bug">Bug</option>
+                          </select>
+                        </label>
+                        <label className="workspace-field">
+                          <span>优先级</span>
+                          <select
+                            value={workItemPriority}
+                            onChange={(event) => setWorkItemPriority(event.target.value as WorkItemPriority)}
+                          >
+                            {PRIORITY_OPTIONS.map((priority) => (
+                              <option key={priority} value={priority}>{priority}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
+                          <span>标题</span>
+                          <input
+                            value={workItemTitle}
+                            onChange={(event) => setWorkItemTitle(event.target.value)}
+                            placeholder="简短描述需要完成或修复的事情"
+                            autoFocus
+                          />
+                        </label>
+                        <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
+                          <span>原始描述</span>
+                          <textarea
+                            value={workItemDescription}
+                            onChange={(event) => setWorkItemDescription(event.target.value)}
+                            placeholder="保留你最初的描述，Agent 后续分析不会覆盖它。"
+                          />
+                        </label>
+                        {selectedWorkspace.repositories.length > 0 && (
+                          <div className="workspace-field" style={{ gridColumn: "1 / -1" }}>
+                            <span>关联仓库</span>
+                            <div className="work-item-repositories" style={{ marginBottom: 0 }}>
+                              {selectedWorkspace.repositories
+                                .filter((repository) => repository.status === "active")
+                                .map((repository) => (
+                                <label className="work-item-repository" key={repository.id}>
+                                  <input
+                                    type="checkbox"
+                                    checked={workItemRepositories.includes(repository.id)}
+                                    onChange={(event) => {
+                                      setWorkItemRepositories((current) => event.target.checked
+                                        ? [...new Set([...current, repository.id])]
+                                        : current.filter((id) => id !== repository.id));
+                                    }}
+                                  />
+                                  {repository.name} · {repository.kind === "code" ? "代码" : "知识库"}
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
+                        <button className="workspace-action" onClick={() => setCreateWorkItemOpen(false)}>取消</button>
+                        <button
+                          className="workspace-action"
+                          disabled={saving || !workItemTitle.trim() || !workItemDescription.trim()}
+                          onClick={() => void createWorkItem()}
+                        >
+                          {saving ? "创建中…" : "创建工作项"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="work-item-toolbar">
+                    <div className="work-item-filter">
+                      {([
+                        ["all", "全部"],
+                        ["requirement", "需求"],
+                        ["bug", "Bug"],
+                      ] as const).map(([value, label]) => (
+                        <button
+                          key={value}
+                          className="workspace-manager-tab"
+                          data-active={filter === value}
+                          onClick={() => setFilter(value)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      className="workspace-search"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="搜索编号、标题或标签"
+                    />
+                    <button
+                      className="workspace-action"
+                      data-active={showArchived}
+                      onClick={() => setShowArchived((current) => !current)}
+                    >
+                      {showArchived ? "返回未归档" : "查看归档"}
+                    </button>
+                  </div>
+                  <div className="work-item-list">
+                    {visibleWorkItems.map((item) => (
+                      <button
+                        className="work-item-row"
+                        key={item.id}
+                        onClick={() => void loadWorkItem(selectedWorkspace.id, item.key)}
+                        data-active={selectedWorkItem?.item.key === item.key}
+                      >
+                        <span className="work-item-key">
+                          {item.key}
+                          {item.external && (
+                            <span className="work-item-source" title={`来自${sourceLabel(item.external.source)} #${item.external.sourceId}`}>
+                              {sourceLabel(item.external.source)}
+                            </span>
+                          )}
+                        </span>
+                        <span className="work-item-title">{item.title}</span>
+                        <span className="work-item-badge">{STATUS_LABELS[item.status]}</span>
+                        <span className="work-item-badge">{PHASE_LABELS[item.phase]}</span>
+                        <time>{formatDate(item.updatedAt)}</time>
+                      </button>
+                    ))}
+                    {!itemsLoading && visibleWorkItems.length === 0 && (
+                      <div className="workspace-summary-card">
+                        {showArchived ? "没有匹配的归档工作项。" : "没有匹配的工作项。"}
+                      </div>
+                    )}
+                    {workItemData.invalid.map((item) => (
+                      <div className="workspace-error" key={item.path}>
+                        <strong>{item.key}</strong>：{item.error}
+                      </div>
+                    ))}
+                  </div>
+    </>
+  ) : null;
 
   const railPane = (
     <aside
@@ -1288,10 +1737,6 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
-                    <ImporterConfig
-                      workspace={selectedWorkspace}
-                      onWorkspaceChanged={() => void loadWorkspaces()}
-                    />
                     <LoopConfig
                       workspace={selectedWorkspace}
                       mode="settings"
@@ -1416,6 +1861,10 @@ export function WorkspaceManager({
                       </div>
                     </section>
                     )}
+                    <ImporterConfig
+                      workspace={selectedWorkspace}
+                      onWorkspaceChanged={() => void loadWorkspaces()}
+                    />
                   </>
                 ) : (
                   <div className="workspace-summary-card">
@@ -1426,348 +1875,7 @@ export function WorkspaceManager({
             )}
 
             {section === "work-items" && selectedWorkspace && (
-              selectedWorkItem ? (
-                <div className="work-item-detail-card">
-                  <div className="work-item-detail-header">
-                    <button className="workspace-action" onClick={() => setSelectedWorkItem(null)}>← 返回</button>
-                    <div>
-                      <div className="work-item-key">{selectedWorkItem.item.key}</div>
-                      <h2>{selectedWorkItem.item.title}</h2>
-                    </div>
-                    {selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.events.length > 0
-                      && [...selectedWorkItem.events].reverse().find((event) => event.type === "loop.gate" || event.type.startsWith("loop."))?.type === "loop.gate" && (
-                      <span
-                        style={{ padding: "2px 8px", borderRadius: 5, background: "rgba(245,158,11,0.15)", color: "#b45309", fontSize: 12, fontWeight: 700, alignSelf: "center" }}
-                        title="执行会话已提问并等待答复——去关联会话里回答即可继续"
-                      >
-                        待裁决
-                      </span>
-                    )}
-                    {onRunContract && selectedWorkspace.capabilities.includes("loop") && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" ? (
-                      selectedWorkItem.item.conversations.length === 0 ? (
-                        <button
-                          className="workspace-action"
-                          style={{ marginLeft: "auto" }}
-                          disabled={saving}
-                          onClick={() => void runContract("execute")}
-                          title="以 dev-loop skill 合同种子一个执行会话（开场判定→SPEC→maker/checker→合并→验证）"
-                        >
-                          开始对话
-                        </button>
-                      ) : (
-                        <>
-                          <button
-                            className="workspace-action"
-                            style={{ marginLeft: "auto" }}
-                            onClick={() => onOpenWorkItemConversation(selectedWorkspace, selectedWorkItem.item)}
-                            title="打开最新的合同执行会话（skill 已在其上下文中，直接继续聊/gate 答复）"
-                          >
-                            继续对话
-                          </button>
-                          {selectedWorkItem.events.some((event) => event.type === "loop.started") && (
-                            <button
-                              className="workspace-action"
-                              disabled={saving}
-                              onClick={() => void runContract("adopt")}
-                              title="新会话从派发计划+里程碑缺口续跑（不重做开场判定）——旧会话僵死/重开时用"
-                            >
-                              收养续跑
-                            </button>
-                          )}
-                        </>
-                      )
-                    ) : (
-                      <button
-                        className="workspace-action"
-                        style={{ marginLeft: "auto" }}
-                        onClick={() => onOpenWorkItemConversation(selectedWorkspace, selectedWorkItem.item)}
-                      >
-                        {selectedWorkItem.item.conversations.length > 0 ? "继续会话" : "开始会话"}
-                      </button>
-                    )}
-                    <button
-                      className="workspace-action"
-                      onClick={() => setContentEditing((value) => !value)}
-                    >
-                      {contentEditing ? "预览" : "编辑正文"}
-                    </button>
-                    <button
-                      className="workspace-action"
-                      disabled={saving}
-                      onClick={() => void toggleWorkItemArchive()}
-                    >
-                      {selectedWorkItem.item.archivedAt ? "取消归档" : "归档"}
-                    </button>
-                  </div>
-                  {onOpenConversation && selectedWorkItem.item.conversations.length > 0 && (
-                    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
-                      <span style={{ fontSize: 12, color: "var(--text-dim)", flexShrink: 0 }}>关联会话：</span>
-                      {selectedWorkItem.item.conversations.map((conversationId) => (
-                        <button
-                          key={conversationId}
-                          className="workspace-action"
-                          onClick={() => onOpenConversation(conversationId)}
-                          title={conversationId}
-                        >
-                          {(conversationId.slice(0, 8))}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  <div className="work-item-fields">
-                    <SelectField
-                      label="状态"
-                      value={selectedWorkItem.item.status}
-                      options={STATUS_OPTIONS}
-                      labels={STATUS_LABELS}
-                      disabled={saving}
-                      onChange={(status) => void patchWorkItem({ status })}
-                    />
-                    <SelectField
-                      label="阶段"
-                      value={selectedWorkItem.item.phase}
-                      options={PHASE_OPTIONS}
-                      labels={PHASE_LABELS}
-                      disabled={saving}
-                      onChange={(phase) => void patchWorkItem({ phase })}
-                    />
-                    <SelectField
-                      label="优先级"
-                      value={selectedWorkItem.item.priority}
-                      options={PRIORITY_OPTIONS}
-                      disabled={saving}
-                      onChange={(priority) => void patchWorkItem({ priority })}
-                    />
-                    <div className="workspace-field workspace-field-compact">
-                      <span>Revision</span>
-                      <div style={{ padding: "9px 0", fontFamily: "var(--font-mono)" }}>
-                        {selectedWorkItem.item.revision}
-                      </div>
-                    </div>
-                  </div>
-                  {selectedWorkspace.repositories.length > 0 && (
-                    <div className="work-item-repositories" aria-label="Repository scope">
-                      {selectedWorkspace.repositories.map((repository) => {
-                        const checked = selectedWorkItem.item.repositories.includes(repository.id);
-                        return (
-                          <label className="work-item-repository" key={repository.id}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              disabled={saving || repository.status === "removed"}
-                              onChange={(event) => {
-                                const next = event.target.checked
-                                  ? [...new Set([...selectedWorkItem.item.repositories, repository.id])]
-                                  : selectedWorkItem.item.repositories.filter((id) => id !== repository.id);
-                                void patchWorkItem({ repositories: next });
-                              }}
-                            />
-                            {repository.name}{repository.status === "removed" ? "（已停用）" : ""}
-                          </label>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {contentEditing ? (
-                    <>
-                      <textarea
-                        className="work-item-editor"
-                        value={contentDraft}
-                        onChange={(event) => setContentDraft(event.target.value)}
-                      />
-                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
-                        <button
-                          className="workspace-action"
-                          onClick={() => {
-                            setContentDraft(selectedWorkItem.content);
-                            setContentEditing(false);
-                          }}
-                        >
-                          取消
-                        </button>
-                        <button className="workspace-action" disabled={saving} onClick={() => void saveContent()}>
-                          {saving ? "保存中…" : "保存"}
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="work-item-content">
-                      {/* cwd = work-item dir so relative image refs (e.g. importer-written
-                          `attachments/chandao-<id>.png`) resolve to /api/files and actually render;
-                          without it the browser 404s the relative src and images vanish. */}
-                      <MarkdownBody cwd={selectedWorkItem.path}>{selectedWorkItem.content}</MarkdownBody>
-                    </div>
-                  )}
-                  <section className="work-item-events">
-                    <div className="work-item-events-header">
-                      <h3>执行里程碑</h3>
-                      <button
-                        className="workspace-action"
-                        disabled={saving}
-                        onClick={() => void trashWorkItem()}
-                      >
-                        移到回收站
-                      </button>
-                    </div>
-                    {selectedWorkItem.events.map((event) => (
-                      <div className="work-item-event" key={event.id}>
-                        <time>{formatDate(event.at)}</time>
-                        <div>
-                          <strong>{event.type}</strong>
-                          <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>{event.actor}</span>
-                          {typeof event.data?.summary === "string" && (
-                            <div style={{ color: "var(--text-muted)", marginTop: 3 }}>
-                              {event.data.summary}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </section>
-                </div>
-              ) : (
-                <>
-                  <div className="workspace-page-header">
-                    <h2>{selectedWorkspace.name} · 工作项</h2>
-                    <button className="workspace-action" onClick={() => openCreateWorkItem()}>
-                      + 新建工作项
-                    </button>
-                  </div>
-                  {createWorkItemOpen && (
-                    <div className="workspace-form-card" style={{ marginBottom: 14 }}>
-                      <div className="workspace-form-grid">
-                        <label className="workspace-field">
-                          <span>类型</span>
-                          <select
-                            value={workItemType}
-                            onChange={(event) => setWorkItemType(event.target.value as WorkItemType)}
-                          >
-                            <option value="requirement">需求</option>
-                            <option value="bug">Bug</option>
-                          </select>
-                        </label>
-                        <label className="workspace-field">
-                          <span>优先级</span>
-                          <select
-                            value={workItemPriority}
-                            onChange={(event) => setWorkItemPriority(event.target.value as WorkItemPriority)}
-                          >
-                            {PRIORITY_OPTIONS.map((priority) => (
-                              <option key={priority} value={priority}>{priority}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                          <span>标题</span>
-                          <input
-                            value={workItemTitle}
-                            onChange={(event) => setWorkItemTitle(event.target.value)}
-                            placeholder="简短描述需要完成或修复的事情"
-                            autoFocus
-                          />
-                        </label>
-                        <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                          <span>原始描述</span>
-                          <textarea
-                            value={workItemDescription}
-                            onChange={(event) => setWorkItemDescription(event.target.value)}
-                            placeholder="保留你最初的描述，Agent 后续分析不会覆盖它。"
-                          />
-                        </label>
-                        {selectedWorkspace.repositories.length > 0 && (
-                          <div className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                            <span>关联仓库</span>
-                            <div className="work-item-repositories" style={{ marginBottom: 0 }}>
-                              {selectedWorkspace.repositories
-                                .filter((repository) => repository.status === "active")
-                                .map((repository) => (
-                                <label className="work-item-repository" key={repository.id}>
-                                  <input
-                                    type="checkbox"
-                                    checked={workItemRepositories.includes(repository.id)}
-                                    onChange={(event) => {
-                                      setWorkItemRepositories((current) => event.target.checked
-                                        ? [...new Set([...current, repository.id])]
-                                        : current.filter((id) => id !== repository.id));
-                                    }}
-                                  />
-                                  {repository.name} · {repository.kind === "code" ? "代码" : "知识库"}
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
-                        <button className="workspace-action" onClick={() => setCreateWorkItemOpen(false)}>取消</button>
-                        <button
-                          className="workspace-action"
-                          disabled={saving || !workItemTitle.trim() || !workItemDescription.trim()}
-                          onClick={() => void createWorkItem()}
-                        >
-                          {saving ? "创建中…" : "创建工作项"}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  <div className="work-item-toolbar">
-                    <div className="work-item-filter">
-                      {([
-                        ["all", "全部"],
-                        ["requirement", "需求"],
-                        ["bug", "Bug"],
-                      ] as const).map(([value, label]) => (
-                        <button
-                          key={value}
-                          className="workspace-manager-tab"
-                          data-active={filter === value}
-                          onClick={() => setFilter(value)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <input
-                      className="workspace-search"
-                      value={query}
-                      onChange={(event) => setQuery(event.target.value)}
-                      placeholder="搜索编号、标题或标签"
-                    />
-                    <button
-                      className="workspace-action"
-                      data-active={showArchived}
-                      onClick={() => setShowArchived((current) => !current)}
-                    >
-                      {showArchived ? "返回未归档" : "查看归档"}
-                    </button>
-                  </div>
-                  <div className="work-item-list">
-                    {visibleWorkItems.map((item) => (
-                      <button
-                        className="work-item-row"
-                        key={item.id}
-                        onClick={() => void loadWorkItem(selectedWorkspace.id, item.key)}
-                      >
-                        <span className="work-item-key">{item.key}</span>
-                        <span className="work-item-title">{item.title}</span>
-                        <span className="work-item-badge">{STATUS_LABELS[item.status]}</span>
-                        <span className="work-item-badge">{PHASE_LABELS[item.phase]}</span>
-                        <time>{formatDate(item.updatedAt)}</time>
-                      </button>
-                    ))}
-                    {!itemsLoading && visibleWorkItems.length === 0 && (
-                      <div className="workspace-summary-card">
-                        {showArchived ? "没有匹配的归档工作项。" : "没有匹配的工作项。"}
-                      </div>
-                    )}
-                    {workItemData.invalid.map((item) => (
-                      <div className="workspace-error" key={item.path}>
-                        <strong>{item.key}</strong>：{item.error}
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )
+              workItemSplitMode ? workItemListPane : selectedWorkItem ? workItemDetailPane : workItemListPane
             )}
     </main>
   );
@@ -1833,6 +1941,9 @@ export function WorkspaceManager({
           {contentPane}
         </div>
       </div>
+      {workItemSplitMode && workItemDetailPane && workItemSplit.portalTarget
+        ? createPortal(workItemDetailPane, workItemSplit.portalTarget)
+        : null}
     </div>
   );
 }

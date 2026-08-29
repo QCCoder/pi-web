@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { loopHostClient } from "@/lib/loop/client";
+import { daemonClient } from "@/lib/daemon/client";
 import { findSessionIndexEntry } from "@/lib/session-index";
 import { resolveProject } from "@/lib/worktree";
-import { cacheSessionPath } from "@/lib/session-reader";
+import { cacheSessionPath, firstMessageTitle } from "@/lib/session-reader";
 import type { SessionInfo } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
  *  Used by `handleOpenLoopSession` (after a Loop round reports its orchestrator
  *  session id) and `handleOpenSessionViewer` (subagent children). Two sources,
  *  in order of authority:
- *    1. Loop Host probe — the orchestrator session physically lives in the Loop
+ *    1. daemon probe — the orchestrator session physically lives in the daemon
  *       Host process, which knows its cwd + sessionFile immediately.
  *    2. Session index — mtime-incremental over `~/.pi/agent/sessions` (active +
  *       `.archived/`), so a freshly written .jsonl resolves without a full disk
@@ -31,9 +31,7 @@ async function sessionInfoFromIndex(id: string): Promise<SessionInfo | null> {
     created: new Date(entry.createdMs).toISOString(),
     modified: new Date(entry.modifiedMs).toISOString(),
     messageCount: entry.messageCount,
-    firstMessage: entry.firstMessage
-      ? entry.firstMessage.slice(0, 160)
-      : "(no messages)",
+    firstMessage: firstMessageTitle(entry),
     projectRoot: project?.projectRoot ?? entry.cwd,
     ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
   };
@@ -45,7 +43,7 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
-    const meta = await loopHostClient.probeSession(id);
+    const meta = await daemonClient.probeSession(id);
     if (meta) {
       const session: SessionInfo = {
         path: meta.sessionFile ?? "",
@@ -88,7 +86,7 @@ export async function GET(
       return NextResponse.json({ session, source: "loop" });
     }
   } catch {
-    // Loop Host unreachable — fall through to the index.
+    // Daemon unreachable — fall through to the index.
   }
   const found = await sessionInfoFromIndex(id);
   if (found) return NextResponse.json({ session: found, source: "disk" });

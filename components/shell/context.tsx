@@ -23,3 +23,13 @@ export function useShell(): AppShellState {
   if (!value) throw new Error("useShell must be used inside <AppShellProvider>");
   return value;
 }
+
+/**
+ * The mobile-shell flag. `AppShell` owns the single viewport subscription
+ * (`useViewportIsMobile`, seeded by the server's User-Agent guess — see
+ * `app/page.tsx`) and provides it here, so every `useIsMobile()` caller SSRs
+ * the same shell variant as the server rendered and no phone paints the
+ * desktop layout first. `null` = outside the shell tree; callers then fall
+ * back to their own viewport subscription.
+ */
+export const IsMobileContext = createContext<boolean | null>(null);

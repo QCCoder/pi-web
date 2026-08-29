@@ -3,28 +3,28 @@ import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@e
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
-import { validateAgentImages } from "./image-attachments";
-import { invalidateModelsCache } from "./models-cache";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
-import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
+import { validateAgentImages } from "../image-attachments";
+import { invalidateModelsCache } from "../models-cache";
+import { cacheSessionPath, invalidateSessionListCache } from "../session-reader";
+import { getProjectTrustStatus, projectTrustReloadOptions } from "../project-trust";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
-import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
-import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
-import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
-import { buildWorkspaceExtensions } from "./workspaces/extensions";
-import { createSubagentExtension } from "./subagent/extension";
-import { raceAbort } from "./abort-race";
+import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "../pi-types";
+import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "../types";
+import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "../custom-ui-terminal";
+import { buildWorkspaceExtensions } from "../workspaces/extensions";
+import { createSubagentExtension } from "../subagent/extension";
+import { raceAbort } from "../abort-race";
 import { buildStalledSnapshot, classifyStall, HEARTBEAT_TICK_MS, stallInterruptMessage, type StalledSessionInfo } from "./session-heartbeat";
-import { findWorkspaceForPath } from "./workspaces/service";
+import { findWorkspaceForPath } from "../workspaces/service";
 
 // ============================================================================
 // SESSION REGISTRY — daemon-process code only (C2 Phase 3)
 // ============================================================================
-// This module owns every AgentSession in the session-daemon process
-// (bin/pi-loop.js). NO web-process code may import it: the Next.js routes are
-// pure proxies (lib/agent-proxy.ts → lib/loop/client.ts) and the web side
+// This module owns every AgentSession in the pi-daemon process
+// (bin/pi-daemon.js). NO web-process code may import it: the Next.js routes are
+// pure proxies (lib/agent-proxy.ts → lib/daemon/client.ts) and the web side
 // never touches a live session. If a web route needs something from here, it
-// must be exposed as a daemon route (lib/loop/host.ts) and called through the
+// must be exposed as a daemon route (lib/daemon/host.ts) and called through the
 // client instead.
 // ============================================================================
 // Types

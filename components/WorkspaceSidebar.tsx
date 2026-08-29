@@ -68,10 +68,11 @@ interface WorkbenchSectionState {
   files: boolean;
 }
 
-const WORKBENCH_SECTIONS_DEFAULT: WorkbenchSectionState = { sessions: true, files: true };
+const WORKBENCH_SECTIONS_DEFAULT: WorkbenchSectionState = { sessions: true, files: false };
 
 /** Read `pi-workbench-sections:<wsId>` defensively: bad JSON or missing keys fall
- *  back to the per-key default (both sections open). */
+ *  back to the per-key default (会话 open, 文件 collapsed — the file tree is
+ *  opt-in and collapsed by default, pinned to the panel bottom). */
 function readWorkbenchSections(workspaceId: string): WorkbenchSectionState {
   try {
     const raw = localStorage.getItem(`pi-workbench-sections:${workspaceId}`);
@@ -79,7 +80,7 @@ function readWorkbenchSections(workspaceId: string): WorkbenchSectionState {
     const parsed = JSON.parse(raw) as Partial<Record<keyof WorkbenchSectionState, unknown>>;
     return {
       sessions: typeof parsed.sessions === "boolean" ? parsed.sessions : true,
-      files: typeof parsed.files === "boolean" ? parsed.files : true,
+      files: typeof parsed.files === "boolean" ? parsed.files : false,
     };
   } catch {
     return WORKBENCH_SECTIONS_DEFAULT;
@@ -190,9 +191,6 @@ function ExplorerSegmentedTabs({
   );
 }
 
-/** Collapsible section header for the workbench view (会话 / 文件).
- *  Chevron + label + count on the left; `children` (e.g. the segmented
- *  文件|改动 tabs) fill the remaining header space. */
 /** 工作台头部的工作区切换器：当前工作区名 + ▾，点击弹出同列表（本工作区置顶），
  *  选即切；不在弹层里提供新建（顶部 WorkspaceTabBar 的 ＋ 是新建入口）。 */
 function WorkspaceSwitcher({
@@ -286,21 +284,20 @@ function WorkspaceSwitcher({
   );
 }
 
+/** Collapsible section header for the workbench view (会话 / 文件).
+ *  Chevron + label + count on the left; `children` (e.g. the segmented
+ *  文件|改动 tabs) fill the remaining header space. */
 function WorkbenchSectionHeader({
   label,
   count,
   open,
   onToggle,
-  collapsible = true,
   children,
 }: {
   label: string;
   count?: number;
   open: boolean;
   onToggle: () => void;
-  /** false = fixed-open header (no chevron / no toggle) — e.g. the 文件
-   *  section is always expanded in the workbench. */
-  collapsible?: boolean;
   children?: ReactNode;
 }) {
   return (
@@ -310,22 +307,20 @@ function WorkbenchSectionHeader({
         alignItems: "center",
         gap: 7,
         padding: "5px 8px 5px 6px",
+        minHeight: 38,
         borderBottom: "1px solid var(--border)",
         flexShrink: 0,
-        ...(collapsible ? undefined : { paddingLeft: 10 }),
       }}
     >
-      {collapsible && (
-        <button
-          onClick={onToggle}
-          aria-expanded={open}
-          title={open ? `收起${label}` : `展开${label}`}
-          aria-label={open ? `收起${label}` : `展开${label}`}
-          style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", width: 16, fontSize: 11, padding: 0, flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
-        >
-          ›
-        </button>
-      )}
+      <button
+        onClick={onToggle}
+        aria-expanded={open}
+        title={open ? `收起${label}` : `展开${label}`}
+        aria-label={open ? `收起${label}` : `展开${label}`}
+        style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", width: 16, fontSize: 11, padding: 0, flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
+      >
+        ›
+      </button>
       <div
         style={{
           display: "flex",
@@ -492,7 +487,7 @@ export function WorkspaceSidebar({
   // 工作台分段折叠状态，按工作区持久化（JSON，坏数据防御性回退到默认全展开）。
   useEffect(() => {
     if (!activeWorkspace) {
-      setWorkbenchSections({ sessions: true, files: true });
+      setWorkbenchSections(WORKBENCH_SECTIONS_DEFAULT);
       return;
     }
     setWorkbenchSections(readWorkbenchSections(activeWorkspace.id));
@@ -595,8 +590,9 @@ export function WorkspaceSidebar({
   const renderActiveView = (): ReactNode => {
     switch (activeView) {
       case "workbench":
-        // 工作台：会话（上，固定 40% 占比内部滚动——不随内容伸缩，保证两段高度稳定）
-        // + 文件（下，占余下 60%）两个可折叠分段。
+        // 工作台：会话（上）+ 文件（下）两个可折叠分段。两段都展开时会话固定 40%
+        // 占比内部滚动（不随内容伸缩，保证两段高度稳定）；文件默认收起——收起时只剩
+        // 头部贴在面板底部（marginTop:auto 吸收剩余空间），会话列表占满剩余高度。
         return (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <WorkbenchSectionHeader
@@ -606,7 +602,7 @@ export function WorkspaceSidebar({
               onToggle={() => toggleWorkbenchSection("sessions", workbenchSections.sessions)}
             />
             {workbenchSections.sessions && (
-              <div style={{ flex: "0 0 40%", minHeight: 0, overflowY: "auto" }}>
+              <div style={{ flex: workbenchSections.files ? "0 0 40%" : "1 1 0", minHeight: 0, overflowY: "auto" }}>
                 {sessions.map((session) => (
                   <SessionRow
                     key={session.id}
@@ -625,16 +621,24 @@ export function WorkspaceSidebar({
                 )}
               </div>
             )}
-            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-              {/* 文件区不折叠：常驻展开（占比余下 ~60%，会话区上限 40%）。头部仅保留
-                  [ 文件 | 改动 ] 分段。 */}
+            <div
+              style={{
+                flex: workbenchSections.files ? "1 1 0" : "0 0 auto",
+                marginTop: "auto",
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
+              {/* 文件段可折叠、默认收起：展开时占余下 ~60%，头部带 [ 文件 | 改动 ]
+                  分段（收起时不渲染分段，只剩标题条贴底）。 */}
               <WorkbenchSectionHeader
                 label="文件"
-                open
-                onToggle={() => {}}
-                collapsible={false}
+                open={workbenchSections.files}
+                onToggle={() => toggleWorkbenchSection("files", workbenchSections.files)}
               >
-                {isGitRepo && (
+                {isGitRepo && workbenchSections.files && (
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <ExplorerSegmentedTabs
                       active={effectiveExplorerTab}
@@ -644,7 +648,7 @@ export function WorkspaceSidebar({
                   </div>
                 )}
               </WorkbenchSectionHeader>
-              {(
+              {workbenchSections.files && (
                 <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
                   {isGitRepo && effectiveExplorerTab === "changes" ? (
                     <ChangesPanel

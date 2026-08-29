@@ -1,7 +1,7 @@
 import { ensureSessionDaemonStarted } from "./session-daemon/sidecar.ts";
-import { loopHostClient } from "./loop/client.ts";
+import { daemonClient } from "./daemon/client.ts";
 
-export { loopHostClient };
+export { daemonClient };
 
 /** Map a session-daemon error to an HTTP status for proxy routes.
  *  DaemonHttpError carries the daemon's status (404 session-not-found, 409
@@ -19,7 +19,7 @@ export function daemonErrorStatus(error: unknown): number {
  *  before handing the caller the client. Imported by every /api/agent and
  *  session-lifecycle proxy route so a crashed daemon is revived on the next
  *  request instead of leaving the web UI dead until a manual restart. */
-export async function daemonProxy(): Promise<typeof loopHostClient> {
+export async function daemonProxy(): Promise<typeof daemonClient> {
   await ensureSessionDaemonStarted();
-  return loopHostClient;
+  return daemonClient;
 }

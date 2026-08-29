@@ -129,6 +129,7 @@ export function MobileShell() {
     setSettingsPage,
     settingsCwd,
     handleOpenWorkspace,
+    handleOpenWorkspaceToChat,
     handleCloseWorkspaceTab,
     handleCreateWorkspace,
     handleReturnHome,
@@ -433,7 +434,7 @@ export function MobileShell() {
         onSelectWorkspace={handleOpenWorkspace}
         onCloseWorkspace={handleCloseWorkspaceTab}
         onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is NonNullable<typeof t> => Boolean(t)))}
-        onCreateWorkspace={handleCreateWorkspace}
+        onPickWorkspace={handleOpenWorkspaceToChat}
       />
 
       {/* Main area — the active tab's content. The 会话 tab's chat is ALWAYS

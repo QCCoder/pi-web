@@ -13,7 +13,7 @@ export async function GET(req: Request) {
     if (archived) {
       return NextResponse.json({ sessions: await listArchivedSessions() });
     }
-    // A freshly triggered Loop round writes its .jsonl from the Loop Host
+    // A freshly triggered Loop round writes its .jsonl from the daemon
     // process; the disk scan below is cached 30s, so without an explicit
     // invalidate the new session would be invisible until the cache expires.
     if (url.searchParams.has("refresh")) {

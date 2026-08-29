@@ -5,7 +5,7 @@
  *    introduced (design §10: avoid touching the KEY counter / git rules / UI).
  *  - `buildExternalIndex`: builds a `source:sourceId → item` map from existing
  *    work items so the runner can dedup in O(1). */
-import type { WorkItemRecord } from "../work-items/types.ts";
+import type { WorkItemRecord } from "../types.ts";
 import type { SourceItemKind } from "./types.ts";
 
 export function mapSourceKindToWorkItemType(kind: SourceItemKind): "bug" | "requirement" {

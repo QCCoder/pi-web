@@ -1,19 +1,23 @@
-/** Importer system timer. Runs IN THE LOOP HOST PROCESS (not the web server),
- *  as a sibling to — but independent of — the Loop engine. Per design §5 the
- *  runner is "a non-Loop scheduled I/O task": cron/webhook/manual wake it; the
- *  web server holds no timers (instrumentation.ts is untouched).
+/** Importer system job (DaemonJob). Registered into the daemon's job
+ *  registry (lib/daemon/jobs.ts) — the daemon core knows only the interface,
+ *  this module owns all importer logic. Per design §5 the runner is "a
+ *  non-Loop scheduled I/O task": cron/webhook/manual wake it; the web server
+ *  holds no timers (instrumentation.ts is untouched).
  *
  *  Every tick, lists workspaces that (a) have the `requirement-sources`
  *  capability and (b) have importer credentials configured, and runs one import
  *  sync per workspace. Errors are swallowed and logged so one failing workspace
  *  never stops the others. */
-import { discoverWorkspaces } from "../workspaces/service.ts";
+import type { DaemonJob } from "../../daemon/jobs.ts";
+import { discoverWorkspaces } from "../../workspaces/service.ts";
 import { readImporterConfig } from "./config.ts";
 import { syncImporterForWorkspace } from "./runner.ts";
 
 const DEFAULT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
-export class ImporterScheduler {
+export class ImporterScheduler implements DaemonJob {
+  readonly id = "importer-sync";
+
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
 

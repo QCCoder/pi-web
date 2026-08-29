@@ -121,8 +121,26 @@ export function useAppShellState() {
   // callback-ref + state so the portal re-renders as soon as the node mounts
   // (same commit, before paint; null target simply renders nothing).
   const [configPortalNode, setConfigPortalNode] = useState<HTMLDivElement | null>(null);
+  // The work-item DETAIL split (desktop): clicking a work item in the
+  // middle-column 工作项 panel opens its detail in the right column (the same
+  // config area the 模型/Skills/插件 split views use — the middle column keeps
+  // the LIST). `workItemDetail` is the shell-side mirror of the manager's
+  // selection (key/title, for the right-column PanelHeader); the close tick
+  // tells the manager to clear its selection (the × button — request-counter
+  // pattern, like createWorkItemRequest). Cleared wherever configView clears
+  // (panel switch / session select / new session / workspace switch): those
+  // are all “show me something else in the right column” intents.
+  const [workItemDetail, setWorkItemDetail] = useState<{ key: string; title: string } | null>(null);
+  const [closeWorkItemDetailTick, setCloseWorkItemDetailTick] = useState(0);
+  const handleCloseWorkItemDetail = useCallback(() => {
+    setWorkItemDetail(null);
+    setCloseWorkItemDetailTick((tick) => tick + 1);
+  }, []);
   const handleOpenConfig = useCallback((view: ConfigView) => {
     setConfigView((current) => (current === view ? null : view));
+    // The config view takes over the right column — drop a stale work-item
+    // detail so closing the config view doesn't resurrect it.
+    setWorkItemDetail(null);
     // The config LIST lives in the middle column — make sure the column is
     // visible when a config view opens (desktop-only entry point; mobile
     // serves the same content via the settings subpages and never gets here).
@@ -130,6 +148,7 @@ export function useAppShellState() {
   }, []);
   useEffect(() => {
     setConfigView(null);
+    setWorkItemDetail(null);
     if (!activeWorkspace) {
       const storedGlobal = localStorage.getItem(GLOBAL_PANEL_KEY) as SidebarView | null;
       setSidebarView(storedGlobal === "settings" ? "settings" : "workbench");
@@ -154,6 +173,7 @@ export function useAppShellState() {
     // A config view temporarily owns the middle column (its list renders
     // there) — any panel switch must hand the column back.
     setConfigView(null);
+    setWorkItemDetail(null);
     setSidebarView(view);
     if (GLOBAL_ACTIVITY_VIEWS.includes(view)) {
       try { localStorage.setItem(GLOBAL_PANEL_KEY, view); } catch { /* ignore */ }
@@ -639,6 +659,7 @@ export function useAppShellState() {
     // Opening a session is an explicit “show me the chat” intent — drop the
     // right-column config view so the chat is actually visible.
     setConfigView(null);
+    setWorkItemDetail(null);
     updateTab(activeTabId, { session, newSessionCwd: null, view: "chat" });
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
@@ -756,9 +777,30 @@ export function useAppShellState() {
     navigateUrl(existing ? buildTabQuery(existing) : `workspace=${encodeURIComponent(id)}&view=overview`);
   }, [ensureTab, activateTab, tabs, buildTabQuery, navigateUrl]);
 
+  // The tab-bar ＋ picker: open (or switch to) a workspace and land in its
+  // CHAT view. An already-open tab keeps its session binding (continue the
+  // conversation); a fresh one gets the new-session composer. Mirrors
+  // handleSelectSession's "show me the chat" intent (drop the right-column
+  // overlays, focus the mobile 会话 tab) but never touches the session.
+  const handleOpenWorkspaceToChat = useCallback((workspace: WorkspaceSummary) => {
+    setConfigView(null);
+    setWorkItemDetail(null);
+    const id = ensureTab(workspace);
+    const existing = tabs.find((t) => t.id === id);
+    updateTab(id, existing?.session
+      ? { view: "chat" }
+      : { view: "chat", newSessionCwd: existing?.newSessionCwd ?? workspace.path });
+    activateTab(id);
+    const parts = [`workspace=${encodeURIComponent(id)}`, "view=chat"];
+    if (existing?.session) parts.push(`session=${encodeURIComponent(existing.session.id)}`);
+    navigateUrl(parts.join("&"));
+    focusChat();
+  }, [ensureTab, updateTab, activateTab, tabs, navigateUrl, focusChat]);
+
   const handleWorkspaceNewSession = useCallback(() => {
     if (!activeTabId) return;
     setConfigView(null);
+    setWorkItemDetail(null);
     updateTab(activeTabId, { view: "chat", session: null, newSessionCwd: activeWorkspace?.path ?? null });
     setSessionKey((k) => k + 1);
     setBranchTree([]);
@@ -943,6 +985,11 @@ export function useAppShellState() {
     workspace: WorkspaceSummary,
     item: WorkItemRecord,
   ) => {
+    // Opening the conversation is an explicit “show me the chat” intent — drop
+    // the right-column config/work-item-detail views so the chat is visible
+    // (the button itself lives inside the portaled work-item detail).
+    setConfigView(null);
+    setWorkItemDetail(null);
     // Latest conversation first: a loop-seeded execution session is APPENDED to
     // `conversations`, so the most recent entry is the live/latest contract
     // run. Resolve via /locate (daemon probe + forced disk scan) — never the
@@ -1020,6 +1067,10 @@ export function useAppShellState() {
       return data.reason ?? data.error ?? `HTTP ${response.status}`;
     }
     const sessionId = data.sessionId!;
+    // The seeded execution session opens as the chat view — hand the right
+    // column over from any open config/work-item detail first.
+    setConfigView(null);
+    setWorkItemDetail(null);
     // Resolve the freshly seeded daemon session via locate (probe-first — the
     // .jsonl may not be flushed into the 30s-cached session list yet).
     let info: SessionInfo | undefined;
@@ -1309,6 +1360,10 @@ export function useAppShellState() {
     setConfigView,
     configPortalNode,
     setConfigPortalNode,
+    workItemDetail,
+    setWorkItemDetail,
+    handleCloseWorkItemDetail,
+    closeWorkItemDetailTick,
     refreshKey,
     setRefreshKey,
     sessionKey,
@@ -1423,6 +1478,7 @@ export function useAppShellState() {
     loopSeedAutoOpenedRef,
     handleLoopTriggered,
     handleOpenWorkspace,
+    handleOpenWorkspaceToChat,
     handleWorkspaceNewSession,
     handleReturnHome,
     handleCloseWorkspaceTab,

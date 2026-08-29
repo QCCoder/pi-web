@@ -168,6 +168,35 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   return result;
 }
 
+/** Capability dependencies enforced on update (PATCH). Each entry maps a
+ *  capability to the prerequisite it silently force-includes — mirroring the
+ *  init path's `normalizeInitCapabilities` pattern (normalize, never reject,
+ *  so a partial UI toggle cannot produce a broken manifest):
+ *  - `requirement-sources` needs `work-items`: the importer runner
+ *    materializes bug/task as REQ-/BUG- items and reserves their keys from
+ *    `manifest.work_items`, which only exists when work-items is on.
+ *  - the mandatory core (`sessions`, `explorer`) can never be dropped. */
+const CAPABILITY_PREREQUISITES: Partial<Record<WorkspaceCapability, WorkspaceCapability>> = {
+  "requirement-sources": "work-items",
+};
+
+export function normalizeUpdateCapabilities(
+  selected: readonly WorkspaceCapability[],
+): WorkspaceCapability[] {
+  const seen = new Set<WorkspaceCapability>(selected);
+  for (const [capability, prerequisite] of Object.entries(CAPABILITY_PREREQUISITES)) {
+    if (seen.has(capability as WorkspaceCapability)) seen.add(prerequisite as WorkspaceCapability);
+  }
+  seen.add("sessions");
+  seen.add("explorer");
+  // Preserve a stable order: caller's order first, then anything force-added.
+  const ordered = selected.filter((capability) => seen.has(capability));
+  for (const capability of seen) {
+    if (!ordered.includes(capability)) ordered.push(capability);
+  }
+  return ordered;
+}
+
 export function validateWorkspaceSlug(slug: string): string {
   const normalized = slug.trim().toLowerCase();
   if (!WORKSPACE_SLUG_RE.test(normalized)) {
@@ -1128,7 +1157,7 @@ export async function updateWorkspace(
       latest.skills = [...new Set(input.skills.map((skill) => skill.trim()))];
     }
     if (input.capabilities !== undefined) {
-      latest.capabilities = parseCapabilities(input.capabilities);
+      latest.capabilities = normalizeUpdateCapabilities(parseCapabilities(input.capabilities));
     }
     latest.updatedAt = new Date().toISOString();
     await writeWorkspaceManifest(current.path, latest);

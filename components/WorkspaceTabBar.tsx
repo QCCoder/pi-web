@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 interface Props {
@@ -12,10 +13,11 @@ interface Props {
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCloseWorkspace: (workspaceId: string) => void;
   onReorder: (tabIds: string[]) => void;
-  /** ＋ at the tab strip's right end — open the create-workspace wizard.
-   *  (Mobile top-bar consensus: 切换/增加工作区 live here now that the
-   *  sidebar header no longer carries a workspace switcher.) */
-  onCreateWorkspace?: () => void;
+  /** ＋ at the tab strip's right end — opens a workspace picker: select one
+   *  to open (or switch to) that workspace's chat view. Creating workspaces
+   *  lives on HomeLanding only (mobile consensus: the old ＋-opens-wizard
+   *  behavior made switching to an unopened workspace a detour through 首页). */
+  onPickWorkspace: (workspace: WorkspaceSummary) => void;
 }
 
 function shortestUniqueLabels(workspaces: WorkspaceSummary[]): Map<string, string> {
@@ -54,15 +56,35 @@ export function WorkspaceTabBar({
   onSelectWorkspace,
   onCloseWorkspace,
   onReorder,
-  onCreateWorkspace,
+  onPickWorkspace,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
+  const plusRef = useRef<HTMLButtonElement>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerRect, setPickerRect] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
   const openWorkspaces = tabIds
     .map((id) => workspaces.find((workspace) => workspace.id === id))
     .filter((workspace): workspace is WorkspaceSummary => Boolean(workspace));
   const labels = shortestUniqueLabels(openWorkspaces);
+  const availableWorkspaces = workspaces.filter((workspace) => workspace.available);
+  const pickerLabels = shortestUniqueLabels(availableWorkspaces);
+  const openTabIds = new Set(tabIds);
+
+  // The picker dropdown lives in a body-level portal: the tab strip is an
+  // overflow-x scroller and would clip an absolutely-positioned child.
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const rect = plusRef.current?.getBoundingClientRect();
+    if (rect) {
+      setPickerRect({
+        top: rect.bottom + 4,
+        right: window.innerWidth - rect.right,
+        maxHeight: Math.max(160, Math.min(320, window.innerHeight - rect.bottom - 16)),
+      });
+    }
+  }, [pickerOpen]);
 
   useEffect(() => {
     activeRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
@@ -181,33 +203,102 @@ export function WorkspaceTabBar({
           </div>
         );
       })}
-      {onCreateWorkspace && (
-        <button
-          type="button"
-          title="新建 Workspace"
-          aria-label="新建 Workspace"
-          onClick={onCreateWorkspace}
-          style={{
-            width: 36,
-            height: 36,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-            padding: 0,
-            border: 0,
-            borderLeft: "1px solid var(--border)",
-            background: "transparent",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            fontSize: 16,
-            lineHeight: 1,
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-        >
-          ＋
-        </button>
+      <button
+        ref={plusRef}
+        type="button"
+        title="打开工作区"
+        aria-label="打开工作区"
+        aria-haspopup="menu"
+        aria-expanded={pickerOpen}
+        onClick={() => setPickerOpen((open) => !open)}
+        style={{
+          width: 36,
+          height: 36,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          padding: 0,
+          border: 0,
+          borderLeft: "1px solid var(--border)",
+          background: pickerOpen ? "var(--bg-hover)" : "transparent",
+          color: pickerOpen ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 16,
+          lineHeight: 1,
+        }}
+      >
+        ＋
+      </button>
+      {pickerOpen && pickerRect && createPortal(
+        <>
+          <div
+            aria-hidden="true"
+            onClick={() => setPickerOpen(false)}
+            style={{ position: "fixed", inset: 0, zIndex: 2000 }}
+          />
+          <div
+            role="menu"
+            aria-label="打开工作区"
+            style={{
+              position: "fixed",
+              top: pickerRect.top,
+              right: pickerRect.right,
+              zIndex: 2001,
+              minWidth: 220,
+              maxWidth: 300,
+              maxHeight: pickerRect.maxHeight,
+              overflowY: "auto",
+              padding: 4,
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              background: "var(--bg)",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
+            }}
+          >
+            {availableWorkspaces.length === 0 && (
+              <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-dim)" }}>没有可用工作区</div>
+            )}
+            {availableWorkspaces.map((workspace) => {
+              const active = workspace.id === activeWorkspaceId;
+              const isOpen = openTabIds.has(workspace.id);
+              return (
+                <button
+                  key={workspace.id}
+                  type="button"
+                  role="menuitem"
+                  title={`${workspace.name}\n${workspace.path}`}
+                  onClick={() => { setPickerOpen(false); onPickWorkspace(workspace); }}
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 7,
+                    minHeight: 34,
+                    padding: "6px 8px",
+                    border: 0,
+                    borderRadius: 6,
+                    background: active ? "var(--bg-selected)" : "transparent",
+                    color: active ? "var(--text)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    fontSize: 12,
+                    fontWeight: active ? 600 : 450,
+                  }}
+                >
+                  <WorkspaceIcon />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                    {pickerLabels.get(workspace.id) ?? workspace.name}
+                  </span>
+                  <ActivityIndicator status={activityByWorkspaceId[workspace.id]} />
+                  {isOpen && <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>已打开</span>}
+                  {active && <span aria-hidden style={{ color: "var(--accent)", fontSize: 12, flexShrink: 0 }}>✓</span>}
+                </button>
+              );
+            })}
+          </div>
+        </>,
+        document.body,
       )}
     </div>
   );

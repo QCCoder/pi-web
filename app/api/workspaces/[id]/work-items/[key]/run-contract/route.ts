@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { loopHostClient } from "@/lib/loop/client";
-import { DaemonHttpError } from "@/lib/loop/client";
+import { daemonClient } from "@/lib/daemon/client";
+import { DaemonHttpError } from "@/lib/daemon/client";
 
 /**
  * dev-loop v3 seeding entry for the work-item 「按合同执行」 button.
@@ -21,7 +21,7 @@ export async function POST(
     const { id, key } = await params;
     const input = await req.json().catch(() => ({})) as { mode?: string };
     const mode = input.mode === "adopt" ? "adopt" : "execute";
-    const { seed } = await loopHostClient.seedExecution(id, key, mode);
+    const { seed } = await daemonClient.seedExecution(id, key, mode);
     return NextResponse.json(seed);
   } catch (error) {
     if (error instanceof DaemonHttpError) {

@@ -12,10 +12,13 @@
  *
  * Entry semantics deliberately mirror the SDK's `buildSessionInfo`:
  *  - messageCount counts every `type === "message"` entry;
- *  - firstMessage is the first *user* message's text content;
+ *  - firstMessage is the first *user* message's text content, with a
+ *    `/skill:name` expansion reduced back to its command/arguments form;
  *  - name is the latest `session_info` entry's name;
  *  - modified falls back last-activity → header timestamp → file mtime.
- * firstMessage is truncated at index time (list rows only need a title).
+ * firstMessage is truncated at index time (list rows only need a title) —
+ * but only AFTER the skill reduction: the wrapper's user arguments live
+ * after the multi-KB SKILL.md body, so a naive clip hides them.
  */
 
 import { createReadStream } from "node:fs";
@@ -24,8 +27,13 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { withWorkspaceWriteLock } from "./workspaces/service";
+import { skillMessageTitle } from "./skill-message";
 
-const SESSION_INDEX_SCHEMA_VERSION = 1 as const;
+// v2: firstMessage is now skill-wrapper-reduced BEFORE truncation. v1 entries
+// truncated a `/skill:` expansion mid-wrapper — the surviving `<skill name=…>`
+// prefix is unparseable by the reader, so those titles showed raw XML noise.
+// The bump discards the stale cache once and re-derives clean titles.
+const SESSION_INDEX_SCHEMA_VERSION = 2 as const;
 const FIRST_MESSAGE_MAX_CHARS = 400;
 
 export interface SessionIndexEntry {
@@ -39,7 +47,8 @@ export interface SessionIndexEntry {
   /** SDK semantics: last user/assistant activity, else header time, else mtime. */
   modifiedMs: number;
   messageCount: number;
-  /** Truncated first user message text (raw; the reader applies skill titles). */
+  /** Truncated first user message text (skill wrappers already reduced to a
+   * readable `/skill:name args` form at index time — see buildIndexEntry). */
   firstMessage: string;
   /** Absolute path from the header's `parentSession`, if any. */
   parentPath?: string;
@@ -158,7 +167,11 @@ async function buildIndexEntry(
         }
       }
       if (!firstMessage && message.role === "user") {
-        firstMessage = extractTextContent(message).slice(0, FIRST_MESSAGE_MAX_CHARS);
+        // Reduce a `/skill:` expansion on the FULL text before clipping: the
+        // wrapper is `header + SKILL.md body + </skill> + arguments`, so a
+        // 400-char clip lands mid-body and hides both the closing tag and the
+        // user's actual arguments (the only part worth showing in a list row).
+        firstMessage = skillMessageTitle(extractTextContent(message)).slice(0, FIRST_MESSAGE_MAX_CHARS);
       }
     }
   } catch {

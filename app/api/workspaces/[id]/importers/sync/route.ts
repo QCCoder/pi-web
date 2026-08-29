@@ -3,8 +3,8 @@ import {
   getWorkspace,
   WorkspaceNotFoundError,
 } from "@/lib/workspaces/service";
-import { loopHostClient } from "@/lib/loop/client";
-import { syncImporterForWorkspace } from "@/lib/importers/runner";
+import { daemonClient } from "@/lib/daemon/client";
+import { syncImporterForWorkspace } from "@/lib/work-items/importers/runner";
 
 function errorResponse(error: unknown): NextResponse {
   const status = error instanceof WorkspaceNotFoundError ? 404 : 500;
@@ -14,7 +14,7 @@ function errorResponse(error: unknown): NextResponse {
   );
 }
 
-/** POST a manual Importer sync. Forwards to the Loop Host (which owns the cron
+/** POST a manual Importer sync. Forwards to the daemon (which owns the cron
  *  timer per design §5; the web server holds no timers). If the host is
  *  unreachable, runs the sync in-process as a graceful fallback — a one-shot
  *  synchronous request is not a timer, so this does not violate "web server
@@ -28,7 +28,7 @@ export async function POST(
     const { manifest } = await getWorkspace(id);
 
     // Forward to the host first (single source of truth for importer runs).
-    const forwarded = await loopHostClient.syncImporters(manifest.id);
+    const forwarded = await daemonClient.syncImporters(manifest.id);
     if (forwarded) {
       return NextResponse.json({ summary: forwarded, ranVia: "loop-host" });
     }

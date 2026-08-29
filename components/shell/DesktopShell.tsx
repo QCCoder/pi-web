@@ -52,6 +52,10 @@ export function DesktopShell() {
     setConfigView,
     configPortalNode,
     setConfigPortalNode,
+    workItemDetail,
+    setWorkItemDetail,
+    handleCloseWorkItemDetail,
+    closeWorkItemDetailTick,
     settingsPage,
     setSettingsPage,
     settingsCwd,
@@ -91,6 +95,7 @@ export function DesktopShell() {
     handleSidebarSwitchView,
     handleWorkspaceSettingsSelection,
     handleOpenWorkspace,
+    handleOpenWorkspaceToChat,
     handleCloseWorkspaceTab,
     handleCreateWorkspace,
     handleReturnHome,
@@ -252,6 +257,9 @@ const renderMiddleColumn = () => {
           activeWorkspacePath={activeWorkspace.path}
           initialWorkItemKey={selectedWorkItemKey}
           createWorkItemRequest={createWorkItemRequest}
+          workItemSplit={{ portalTarget: configPortalNode }}
+          onSelectedWorkItemChange={setWorkItemDetail}
+          closeWorkItemDetailRequest={closeWorkItemDetailTick}
           onClose={() => {}}
           onOpenWorkspace={handleOpenWorkspace}
           onOpenWorkItemConversation={handleOpenWorkItemConversation}
@@ -371,7 +379,7 @@ const renderMiddleColumn = () => {
         onSelectWorkspace={handleOpenWorkspace}
         onCloseWorkspace={handleCloseWorkspaceTab}
         onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is WorkspaceTabState => Boolean(t)))}
-        onCreateWorkspace={handleCreateWorkspace}
+        onPickWorkspace={handleOpenWorkspaceToChat}
       />
 
       {/* Main content: a config view (模型/Skills/插件 — desktop rail icons)
@@ -379,9 +387,12 @@ const renderMiddleColumn = () => {
           portals the detail into this container via configPortalNode. The
           settings › 工作区 and 偏好 split views reuse the same mechanism:
           the middle column keeps the settings INDEX (plus the workspace
-          list rail for 工作区), and the detail portals into this container. */}
+          list rail for 工作区), and the detail portals into this container.
+          The 工作项 panel does the same for the selected work item — the
+          list stays in the middle column, the detail opens here (× or any
+          chat/panel intent hands the column back). */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {(configView || (sidebarView === "settings" && settingsPage !== "index")) ? (
+        {(configView || workItemDetail || (sidebarView === "settings" && settingsPage !== "index")) ? (
           configView ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
               <PanelHeader
@@ -392,6 +403,18 @@ const renderMiddleColumn = () => {
               <div
                 ref={setConfigPortalNode}
                 style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+              />
+            </div>
+          ) : workItemDetail ? (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title={workItemDetail.key}
+                meta={workItemDetail.title}
+                onClose={handleCloseWorkItemDetail}
+              />
+              <div
+                ref={setConfigPortalNode}
+                style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", padding: "14px 16px" }}
               />
             </div>
           ) : sidebarView === "settings" && settingsPage === "workspace" ? (

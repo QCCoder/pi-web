@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { loopHostClient } from "@/lib/loop/client";
+import { daemonClient } from "@/lib/daemon/client";
 import { createLoopDefinition, type CreateLoopInput } from "@/lib/loop/authoring";
 import { LoopConflictError, LoopValidationError } from "@/lib/loop/store";
 import { getWorkspace } from "@/lib/workspaces/service";
@@ -7,7 +7,7 @@ import { getWorkspace } from "@/lib/workspaces/service";
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    return NextResponse.json(await loopHostClient.listLoops(id));
+    return NextResponse.json(await daemonClient.listLoops(id));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
   }

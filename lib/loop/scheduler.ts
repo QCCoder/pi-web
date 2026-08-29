@@ -1,3 +1,4 @@
+import type { DaemonJob } from "../daemon/jobs.ts";
 import type { LoopRuntime, WorkspaceResolver } from "./types.ts";
 
 const TICK_MS = 30_000;
@@ -34,8 +35,10 @@ export function cronMatches(expression: string, timezone: string, now: Date): bo
   return dayOfMonth && dayOfWeek;
 }
 
-/** Timer ownership lives here, in the independent Host—not in a Pi extension. */
-export class LoopHostScheduler {
+/** Loop trigger cron job (DaemonJob). Timer ownership lives here, in the
+ *  daemon process — not in a Pi extension and not in the web server. */
+export class LoopHostScheduler implements DaemonJob {
+  readonly id = "loop-triggers";
   private timer?: ReturnType<typeof setInterval>;
   private readonly emittedSlots = new Set<string>();
 

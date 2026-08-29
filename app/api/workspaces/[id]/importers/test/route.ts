@@ -3,8 +3,8 @@ import {
   getWorkspace,
   WorkspaceNotFoundError,
 } from "@/lib/workspaces/service";
-import { readImporterConfig } from "@/lib/importers/config";
-import { ChandaoImporter } from "@/lib/importers/chandao-importer";
+import { readImporterConfig } from "@/lib/work-items/importers/config";
+import { ChandaoImporter } from "@/lib/work-items/importers/chandao-importer";
 
 function errorResponse(error: unknown): NextResponse {
   const status = error instanceof WorkspaceNotFoundError ? 404 : 500;

@@ -12,13 +12,13 @@
  *  `node --test` as well as jiti/Next. */
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getWorkspace } from "../workspaces/service.ts";
+import { getWorkspace } from "../../workspaces/service.ts";
 import {
   createWorkItem,
   listWorkItems,
   recordWorkItemMilestone,
-} from "../work-items/service.ts";
-import { ChandaoImporter } from "./chandao-importer.ts";
+} from "../service.ts";
+import { buildImporterForConfig } from "./adapters.ts";
 import { readImporterConfig } from "./config.ts";
 import { extractChandaoFileIds, rewriteChandaoImageSources } from "./images.ts";
 import { buildExternalIndex, externalKey, mapSourceKindToWorkItemType } from "./mapping.ts";
@@ -155,13 +155,13 @@ export async function runImporterForWorkspace(
   return summary;
 }
 
-/** Read the workspace's importer config, build the matching adapter, and run.
- *  Currently only Chandao is supported; throws if not configured. */
+/** Read the workspace's importer config, build the matching adapter (see
+ *  adapters.ts), and run. Throws if not configured or the source is unknown. */
 export async function syncImporterForWorkspace(workspaceId: string): Promise<ImporterRunSummary> {
   const config = await readImporterConfig(workspaceId);
   if (!config?.chandao) {
     throw new Error(`No importer configured for workspace ${workspaceId}`);
   }
-  const importer = new ChandaoImporter(config.chandao);
+  const importer = buildImporterForConfig("chandao", config.chandao);
   return runImporterForWorkspace(workspaceId, importer);
 }

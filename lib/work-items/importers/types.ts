@@ -4,7 +4,7 @@
  *
  *  The SPI is a deep-module seam: `listAssigned/getDetail/getAttachment` hide
  *  REST+token+binary+field-name differences behind three methods. The runner
- *  (lib/importers/runner.ts) depends only on this interface, never on Chandao. */
+ *  (runner.ts) depends only on this interface, never on Chandao. */
 
 // ---- SPI domain shapes -----------------------------------------------------
 

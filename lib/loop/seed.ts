@@ -1,8 +1,8 @@
 import { existsSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { getRpcSession, startRpcSession } from "../rpc-manager.ts";
-import type { AgentSessionWrapper } from "../rpc-manager.ts";
+import { getRpcSession, startRpcSession } from "../daemon/rpc-manager.ts";
+import type { AgentSessionWrapper } from "../daemon/rpc-manager.ts";
 import { creationTimeoutSignal } from "../abort-race";
 import { resolveSessionPath } from "../session-reader.ts";
 import { readWorkItem, recordWorkItemMilestone, updateWorkItem } from "../work-items/service.ts";

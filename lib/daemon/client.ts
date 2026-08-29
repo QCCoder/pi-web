@@ -1,7 +1,10 @@
-import type { LoopDefinition, LoopRun, TriggerCommand, TriggerReceipt } from "./types.ts";
-import type { ImporterRunSummary } from "../importers/runner.ts";
+import type { LoopDefinition, LoopRun, TriggerCommand, TriggerReceipt } from "../loop/types.ts";
+import type { ImporterRunSummary } from "../work-items/importers/runner.ts";
 
-const baseUrl = () => (process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
+/** Daemon base URL. PI_DAEMON_URL is the canonical name; PI_LOOP_URL is the
+ *  legacy fallback kept so existing shells/systemd units keep working. */
+const baseUrl = () =>
+  (process.env.PI_DAEMON_URL ?? process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
 
 /** Input for the session-daemon create route — mirrors /api/agent/new's body
  *  (cwd + optional pre-selection + optional first command). */
@@ -17,7 +20,7 @@ export interface CreateSessionInput {
   command?: { type: string; [key: string]: unknown };
 }
 
-/** Max wait for the Loop Host on graceful-degradation probes. The host is on
+/** Max wait for the daemon on graceful-degradation probes. The daemon is on
  *  localhost and answers in single-digit ms when healthy; if it cannot answer
  *  within this window it is effectively unavailable (event loop blocked by a
  *  runaway orchestrator, a long sync op, GC storm, etc.) and callers MUST fall
@@ -26,10 +29,10 @@ export interface CreateSessionInput {
  *  probe (2s) + cold startRpcSession (~1-2s) must fit before that window. */
 const PROBE_TIMEOUT_MS = 2_000;
 
-/** Metadata + live state for a session physically owned by the Loop Host.
- *  Pi Web probes this to decide whether to proxy the Loop Host's event stream
+/** Metadata + live state for a session physically owned by the daemon.
+ *  Pi Web probes this to decide whether to proxy the daemon's event stream
  *  instead of loading the .jsonl into its own process (which would race the
- *  Loop Host for the same file). */
+ *  daemon for the same file). */
 export interface LoopSessionMeta {
   id: string;
   /** Absent on the cold-orchestrator probe (host restarted while a gate was
@@ -64,7 +67,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return value;
 }
 
-export const loopHostClient = {
+/** HTTP client for the pi-daemon process (sessions + loop + importers). */
+export const daemonClient = {
   /** Session-daemon surface (C2 Phase 1): create a new session in the daemon
    *  process. Response carries the real pi session id plus the session cwd so
    *  the web proxy can sync its file-access allow-list. */
@@ -135,8 +139,8 @@ export const loopHostClient = {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/seed`,
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, mode }) },
     ),
-  /** Ask the Loop Host whether it owns a given pi session id. Returns null
-   *  when the host is unreachable OR does not own the session, so callers can
+  /** Ask the daemon whether it owns a given pi session id. Returns null
+   *  when the daemon is unreachable OR does not own the session, so callers can
    *  fall back to the normal local .jsonl path without distinguishing the two. */
   probeSession: async (sessionId: string): Promise<LoopSessionMeta | null> => {
     let response: Response;
@@ -164,8 +168,8 @@ export const loopHostClient = {
    *  (pipe) its body straight to the browser. */
   sessionEvents: (sessionId: string, signal?: AbortSignal) =>
     fetch(`${baseUrl()}/v1/sessions/${encodeURIComponent(sessionId)}/events`, { signal }),
-  /** Trigger a manual Importer sync on the Loop Host (a non-Loop system task).
-   *  Returns null when the host is unreachable so the web route can fall back to
+  /** Trigger a manual Importer sync on the daemon (a non-Loop system job).
+   *  Returns null when the daemon is unreachable so the web route can fall back to
    *  an in-process run (a one-shot sync is not a timer — see instrumentation.ts). */
   syncImporters: async (workspaceId: string): Promise<ImporterRunSummary | null> => {
     let response: Response;
