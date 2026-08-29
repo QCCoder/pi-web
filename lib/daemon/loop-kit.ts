@@ -44,7 +44,9 @@ export function parseLoopDeclaration(
   const record = data as Record<string, unknown>;
   const cron = typeof record.cron === "string" ? record.cron.trim() : "";
   if (!cron) return undefined; // cron 必填（无 cron 即非 kit loop）
-  const loopName = basename(dir);
+  // name 可选、缺省取目录名（kit/README.md 契约）；pattern 缺省跟随 loopName。
+  const loopName = typeof record.name === "string" && record.name.trim()
+    ? record.name.trim() : basename(dir);
   const pattern = typeof record.pattern === "string" && record.pattern.trim()
     ? record.pattern.trim() : loopName;
   const rawLevel = typeof record.level === "string" ? record.level.trim().toUpperCase() : "L1";
