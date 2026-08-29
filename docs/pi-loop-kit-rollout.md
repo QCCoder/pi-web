@@ -61,7 +61,7 @@
 |---|---|---|---|
 | A1 | pi SDK 升级 0.82.1 → 0.84.4 | ✅ 已完成（feature/pi-upgrade） | 旗子已验证存在；唯一 API 破坏是 `Theme` 构造器要求完整色表（`lib/daemon/rpc-manager.ts` PlainTextTheme）；peer 包 `pi-agent-core`/`pi-ai`/`pi-tui` 同步 0.84.4 |
 | A2 | 上游 PR：`@henryqw/pi-subagent` | 待做 | 两点：项目级角色目录（现在只认 `~/.pi/agents`）+ 子会话持久化（去掉 `--no-session`，子会话可被观测/收养）。**提交前需用户批准——不得未经确认 push 任何公开内容** |
-| A3 | pi-web 切包 + 删 `lib/subagent/` | 待做，门禁 A2 合入 | 切换门槛三项全过才动：①工作区角色目录可用（workspace `.pi/agents` 注入）②子会话可观测（落盘、能从 UI 打开、超时/中断不丢）③安静构建安全的超时语义（inactivity 预算，静默长构建不误杀；对齐现有 `lib/subagent/worker.ts` 语义） |
+| A3 | pi-web 切包 + 删 `lib/subagent/` | 待做，门禁 A2 合入；切换时接线项：结果卡/MessageView 适配社区包结果形状（session.id 替代内置 childSessionId——现状链路 MessageView.tsx:826 onOpenSession(r.childSessionId)，切换不得静默丢跳转） | 切换门槛三项全过才动：①工作区角色目录可用（workspace `.pi/agents` 注入）②子会话可观测（落盘、能从 UI 打开、超时/中断不丢）③安静构建安全的超时语义（inactivity 预算，静默长构建不误杀；对齐现有 `lib/subagent/worker.ts` 语义） |
 
 ### 带外（§11.3 / phase 2）
 - [ ] GitHub demo 仓库：Actions cron + `pi -p` + 社区 subagent 包跑 L1 triage；**workflow 模板需补 STATE/ledger 持久化**（ephemeral runner 上写盘会丢——git commit/push 步骤或 artifact 策略）
