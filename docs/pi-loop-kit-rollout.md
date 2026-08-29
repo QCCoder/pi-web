@@ -15,12 +15,10 @@
 ## 下一步：Phase B 演练轮（人工操作）
 
 1. **挑空闲窗口**：`curl -s http://127.0.0.1:30142/v1/sessions/running` → `{"ids":[],"stalled":[]}` 才动手（ids 非空=有会话在跑，等它完成；对话不会因重启丢失，daemon 重启后按需从 .jsonl 冷恢复）。
-2. **重启**：
-   ```bash
-   kill <旧daemon pid>
-   cd /Users/qiancheng/Documents/Workspace/qyinf-workspace/pi-web
-   PI_LOOP_KIT=1 npm run daemon      # 前台跑看日志；应见 loop-kit-heartbeats 注册
-   ```
+2. **重启（注意 sidecar 竞态）**：web dev server 在跑时，kill 后浏览器轮询会在几秒内**不带旗子**自动重拉 daemon，手动的带旗子进程反而 EADDRINUSE 静默退出。两种正解：
+   - **推荐（持久）**：停掉 `npm run dev` → `kill <旧daemon pid>` → `PI_LOOP_KIT=1 npm run dev`（sidecar 的 spawn env 全量透传 `process.env`，旗子随之传给 daemon，未来任何 respawn 也带）。
+   - 或（想前台看 daemon 日志）：停 `npm run dev` → `kill <旧daemon pid>` → `PI_LOOP_KIT=1 npm run daemon`（前台跑）→ 另开终端 `npm run dev`（web probe 到健康 daemon 会 attach，不再 spawn）。
+   - 验证旗子真的在：`ps eww <daemon pid> | tr ' ' '\n' | grep PI_LOOP_KIT`，或等 cron 轮出现 `dev-loop · <时间>` 会话。
 3. **触发**：等 cron（`*/30 9-22 * * 1-5`）或临时把 `~/.pi/workspaces/workspace-c/loops/dev-loop/LOOP.md` 的 cron 改成下一分钟（演练完改回）。
 4. **可选（练收养）**：把 STATE.md Watch List 里的 BUG-0015 挪进 High Priority。
 5. **验收**（§11.2，两处口径已按 kit 调整）：
