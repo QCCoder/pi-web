@@ -86,9 +86,12 @@ never aborted a quiet build (inactivity budget, heartbeat monitor owned hung
 children). Mitigation (A3 criterion ③): pi-web pins **idle 30 min / max
 120 min** in `pi-subagent-host.ts` — output-producing builds renew the idle
 deadline (`bash_execution_update` counts as activity), so only a totally
-silent build can die. Per-machine overrides:
-`~/.pi/agent/config/pi-subagent/pi-subagent.json` (`timeout.idleMinutes` /
-`maxMinutes`, `maxSubagents`, `childSessions: false` global opt-out).
+silent build can die. The timeout policy is pinned in `pi-subagent-host.ts`
+and explicitly passed to the extension factory — it WINS over the package's
+per-machine config file, so the `timeout.*` keys there are inert under
+pi-web. Remaining effective keys in
+`~/.pi/agent/config/pi-subagent/pi-subagent.json`: `maxSubagents` (or the
+`PI_SUBAGENT_MAX_SUBAGENTS` env) and `childSessions: false` global opt-out.
 
 ## Module layout
 

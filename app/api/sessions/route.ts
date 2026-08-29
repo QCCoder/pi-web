@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { invalidateSessionListCache, listAllSessions } from "@/lib/session-reader";
 import { listArchivedSessions } from "@/lib/session-archive";
-import { isSubagentChildSession } from "@/lib/subagent-child";
+import {
+  isSubagentChildSession,
+  loadLegacySubagentChildIds,
+} from "@/lib/subagent-child";
 import { daemonProxy } from "@/lib/agent-proxy";
 import { invalidateLoopSessionTags, loopSessionTags } from "@/lib/loop/session-tags";
 import type { SessionInfo } from "@/lib/types";
@@ -54,9 +57,13 @@ export async function GET(req: Request) {
     // response so the parent's "open child" action can still resolve by id.
     // Community @henryqw/pi-subagent children persist with parent-generated
     // `pi-subagent-<uuid>` ids and `pi-subagent <role>` names — the prefix IS
-    // the registry (the old append-only subagent-children.txt file is retired).
+    // the registry for new children; ids recorded by the retired built-in in
+    // subagent-children.txt (read-only, mtime-cached) still tag as children.
+    const legacyChildIds = loadLegacySubagentChildIds();
     let sessionsWithFlags = merged.map((session) =>
-      isSubagentChildSession(session) ? { ...session, subagentChild: true } : session
+      isSubagentChildSession(session, legacyChildIds)
+        ? { ...session, subagentChild: true }
+        : session
     );
 
     // Tag Loop selection orchestrators: hidden from session lists — their only

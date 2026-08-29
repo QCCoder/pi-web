@@ -117,28 +117,53 @@ export function preparePiSubagentHost(): void {
   if (cliEntry) process.argv[1] = cliEntry;
 }
 
-let cachedExtension: Promise<InlineExtension> | undefined;
+/** Success-only extension cache, keyed by entry path (tests use fixture paths). */
+const extensionCache = new Map<string, Promise<InlineExtension>>();
 
 /**
  * Load the community subagent extension once per daemon process and wrap it
  * with pi-web's timeout policy. Attached to EVERY session by rpc-manager
  * (the `subagent` capability remains global, not workspace-gated).
+ *
+ * Caches SUCCESS only (A3 review F2): rpc-manager awaits this for every
+ * session, so caching a rejected promise would 500 ALL POST /v1/sessions
+ * until a daemon restart. On rejection the slot is reset and the error
+ * re-thrown — the session that hit the failure surfaces it loudly, and the
+ * next session retries the load. `entryPath` is a seam for tests; production
+ * always uses the installed package entry.
  */
-export function piSubagentExtension(): Promise<InlineExtension> {
-  cachedExtension ??= (async () => {
-    preparePiSubagentHost();
-    const jiti = createJiti(moduleFile());
-    const mod = await jiti.import<{
-      default: (pi: ExtensionAPI, overrideTimeoutPolicy?: PiSubagentTimeoutPolicy) => void;
-    }>(piSubagentExtensionPath());
-    if (typeof mod.default !== "function") {
-      throw new Error("@henryqw/pi-subagent extension entry has no default factory export");
-    }
-    const factory = mod.default;
-    return {
-      name: "pi-subagent",
-      factory: (pi: ExtensionAPI) => factory(pi, PI_SUBAGENT_TIMEOUT_POLICY),
-    } satisfies InlineExtension;
-  })();
-  return cachedExtension;
+export function piSubagentExtension(
+  entryPath = piSubagentExtensionPath(),
+): Promise<InlineExtension> {
+  const cached = extensionCache.get(entryPath);
+  if (cached) return cached;
+  const load = loadPiSubagentExtension(entryPath);
+  extensionCache.set(entryPath, load);
+  // Handled rejection keeps this warning-only; the awaiting caller still sees
+  // the original rejection from the returned promise.
+  load.catch((error) => {
+    console.error(
+      "[pi-web] @henryqw/pi-subagent extension load FAILED (cache slot reset — the next session retries):",
+      error,
+    );
+    if (extensionCache.get(entryPath) === load) extensionCache.delete(entryPath);
+  });
+  return load;
+}
+
+/** Loader half: identity prep + jiti import + timeout-policy wrap. */
+async function loadPiSubagentExtension(entryPath: string): Promise<InlineExtension> {
+  preparePiSubagentHost();
+  const jiti = createJiti(moduleFile());
+  const mod = await jiti.import<{
+    default: (pi: ExtensionAPI, overrideTimeoutPolicy?: PiSubagentTimeoutPolicy) => void;
+  }>(entryPath);
+  if (typeof mod.default !== "function") {
+    throw new Error("@henryqw/pi-subagent extension entry has no default factory export");
+  }
+  const factory = mod.default;
+  return {
+    name: "pi-subagent",
+    factory: (pi: ExtensionAPI) => factory(pi, PI_SUBAGENT_TIMEOUT_POLICY),
+  } satisfies InlineExtension;
 }
