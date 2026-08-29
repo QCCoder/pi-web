@@ -254,9 +254,9 @@ export async function DELETE(
   try {
     // Archived sessions are deleted directly (no fork re-parenting — the
     // parentSession links are preserved so a restore reconnects the tree).
-    // Tell the session daemon to destroy a live wrapper first (best-effort:
-    // loop orchestrators are skipped engine-side; the web layer's file surgery
-    // proceeds regardless — a daemon hiccup must not block deletion).
+    // Tell the session daemon to destroy a live wrapper first (best-effort;
+    // the web layer's file surgery proceeds regardless — a daemon hiccup must
+    // not block deletion).
     try {
       const client = await daemonProxy();
       await client.destroySession(id);

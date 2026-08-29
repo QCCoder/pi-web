@@ -138,15 +138,18 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "workflows",
   // Module capabilities (toggled per-workspace, not surfaced in the init checklist):
   "requirement-sources",
-  "loop",
 ];
 
 /** Retired capability values that legacy manifests may still carry. They are
  *  stripped on read (BEFORE parseCapabilities validation) so old manifests keep
  *  parsing; NEW writes are rejected by parseCapabilities because the values are
  *  no longer in ALL_WORKSPACE_CAPABILITIES. The overview dashboard became the
- *  unconditional landing view, so `overview` no longer gates anything. */
-const LEGACY_READ_CAPABILITIES = new Set(["overview"]);
+ *  unconditional landing view, so `overview` no longer gates anything. Read-path
+ *  retirement: `loop` was replaced by the pi-loop kit (file protocol,
+ *  docs/pi-loop-kit-design.md D5 — kit loops are declared by a
+ *  loops/<loopId>/LOOP.md file, no capability gate). Existing manifests listing it
+ *  are stripped on read and physically lose the value at the next manifest write. */
+const LEGACY_READ_CAPABILITIES = new Set(["overview", "loop"]);
 
 export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   if (!Array.isArray(value)) {

@@ -37,7 +37,7 @@ export type GlobalConnectStatus = "connected" | "timeout" | "closed";
 class GlobalAgentEventManager {
   private sources = new Map<string, EventSource>();
   private running = new Set<string>();
-  /** 观看中的「活而不 running」会话（主要是 gate 暂停中的 loop orchestrator）。
+  /** 观看中的「活而不 running」会话（主要是 gate 暂停中的 kit 轮会话）。
    *  它们不在任何 running 集里（当前运行的定义是 prompt 在跑），但 resume 后的
    *  agent_start 要从已连接的事件流直播到达 —— pin 住现看现保，不受
    *  syncRunningIds 拆线影响，fatal 断开后重探 daemon 是否仍持有两决定重连。 */

@@ -9,12 +9,11 @@ import { ChangesPanel } from "./ChangesPanel";
 import type { SessionInfo } from "@/lib/types";
 import type { GitFileStatus } from "@/lib/git-types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
-import type { CronTriggerDefinition, LoopDefinition, LoopRun } from "@/lib/loop/types";
 import { joinFilePath } from "@/lib/file-paths";
 
 /**
  * The middle-column panel content for the three-column layout. Renders exactly
- * ONE module view (workbench / knowledge / loop) under a unified PanelHeader —
+ * ONE module view (workbench / knowledge) under a unified PanelHeader —
  * the global panels (archive / settings) and the work-items manager panel are
  * rendered by AppShell directly, and the ActivityBar icon rail lives OUTSIDE
  * this component (a sibling column). At home (no active workspace) it renders
@@ -41,13 +40,6 @@ interface Props {
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCreateWorkspace: () => void;
   onImportDirectory: () => void;
-  /** Open the LoopConfig editor as the middle-column content (temporarily
-   *  widened) — the loop panel's ＋/⚙ action. */
-  onOpenLoops: () => void;
-  /** Open a Loop orchestrator/execution session by id (run record rows). */
-  onOpenLoopSession: (sessionId: string) => void;
-  /** Manual-trigger a loop definition (AppShell opens the chat tab + status bar). */
-  onTriggerLoop: (loop: LoopDefinition) => void;
   /** Knowledge panel ＋ — switches to settings › workspace › repository form. */
   onAddRepository: () => void;
   onNewSession: () => void;
@@ -355,9 +347,6 @@ export function WorkspaceSidebar({
   onSelectWorkspace,
   onCreateWorkspace,
   onImportDirectory,
-  onOpenLoops,
-  onOpenLoopSession,
-  onTriggerLoop,
   onAddRepository,
   onNewSession,
   onSelectSession,
@@ -378,19 +367,11 @@ export function WorkspaceSidebar({
         .sort((left, right) => right.path.length - left.path.length)[0];
       // Hide subagent worker sessions — they stay openable from the parent's
       // subagent result card, but must not clutter the workspace session list.
-      // Loop orchestrators of IDLE runs (no work-item link) are hidden too —
-      // their entry point is the Loop run record; runs that picked an item
-      // stay listed like any development session.
       return owner?.id === activeWorkspace.id
-        && !session.subagentChild
-        && !session.loopOrchestrator;
+        && !session.subagentChild;
     });
   }, [allSessions, activeWorkspace, workspaces]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
-  // Loop 视图：定义列表 + 展开中的 loop 运行记录（run records 直读 RUNS.jsonl）。
-  const [loops, setLoops] = useState<LoopDefinition[]>([]);
-  const [expandedLoopId, setExpandedLoopId] = useState<string | null>(null);
-  const [loopRuns, setLoopRuns] = useState<Record<string, LoopRun[]>>({});
   const [explorerTab, setExplorerTab] = useState<"files" | "changes">("files");
   // 工作台分段（会话/文件）折叠状态，按工作区持久化；默认两个都展开。
   const [workbenchSections, setWorkbenchSections] = useState<WorkbenchSectionState>({
@@ -417,61 +398,18 @@ export function WorkspaceSidebar({
   const loadWorkspaceData = useCallback(async () => {
     if (!activeWorkspace) {
       setRepositories([]);
-      setLoops([]);
       return;
     }
-    const [repositoriesResponse, loopsResponse] = await Promise.all([
+    const [repositoriesResponse] = await Promise.all([
       hasCapability("repositories")
         ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/repositories`)
-        : null,
-      hasCapability("loop")
-        ? fetch(`/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/loop/loops`)
         : null,
     ]);
     const repositoriesData = repositoriesResponse?.ok
       ? await repositoriesResponse.json() as { repositories?: WorkspaceRepositoryState[] }
       : {};
-    const loopsData = loopsResponse?.ok
-      ? await loopsResponse.json() as { loops?: LoopDefinition[] }
-      : {};
     setRepositories(repositoriesData.repositories ?? []);
-    setLoops(loopsData.loops ?? []);
   }, [activeWorkspace, hasCapability]);
-
-  // 运行记录：展开某 loop 时拉取一次；有非终态 run 时每 5s 轮询刷新，全部终态即停。
-  const loadLoopRuns = useCallback(async (loopId: string) => {
-    if (!activeWorkspace) return;
-    try {
-      const response = await fetch(
-        `/api/workspaces/${encodeURIComponent(activeWorkspace.id)}/loop/runs?loopId=${encodeURIComponent(loopId)}`,
-      );
-      if (!response.ok) return;
-      const data = await response.json() as { runs?: LoopRun[] };
-      setLoopRuns((current) => ({ ...current, [loopId]: data.runs ?? [] }));
-    } catch { /* 下轮重试 */ }
-  }, [activeWorkspace]);
-
-  const toggleLoopExpanded = useCallback((loopId: string) => {
-    setExpandedLoopId((current) => {
-      const next = current === loopId ? null : loopId;
-      if (next) void loadLoopRuns(next);
-      return next;
-    });
-  }, [loadLoopRuns]);
-
-  const expandedLoopRuns = expandedLoopId ? loopRuns[expandedLoopId] : undefined;
-  const hasActiveLoopRun = Boolean(expandedLoopRuns?.some((run) =>
-    run.status === "queued" || run.status === "running"));
-  useEffect(() => {
-    if (!expandedLoopId || !hasActiveLoopRun) return;
-    const timer = setTimeout(() => void loadLoopRuns(expandedLoopId), 5000);
-    return () => clearTimeout(timer);
-  }, [expandedLoopId, hasActiveLoopRun, loopRuns, loadLoopRuns]);
-
-  // 切换工作区时收起运行记录，避免上个工作区的记录残留在新 loop 下。
-  useEffect(() => {
-    setExpandedLoopId(null);
-  }, [activeWorkspace?.id]);
 
   useEffect(() => {
     void loadWorkspaceData();
@@ -729,97 +667,6 @@ export function WorkspaceSidebar({
           </div>
         );
 
-      case "loop":
-        return (
-          <div>
-            {loops.length === 0 ? (
-              <div style={{ padding: "7px 22px 10px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>
-                暂无 Loop。点击头部「管理」新建。
-              </div>
-            ) : loops.map((loop) => {
-              const expanded = expandedLoopId === loop.id;
-              const runs = loopRuns[loop.id];
-              const cron = loop.triggers.find((trigger): trigger is CronTriggerDefinition => trigger.type === "cron" && trigger.enabled);
-              const summary = !loop.enabled
-                ? "已停用"
-                : cron ? cron.expression
-                : loop.triggers.some((trigger) => trigger.type === "manual" && trigger.enabled) ? "手动"
-                : "—";
-              return (
-                <div key={loop.id}>
-                  <div style={{ display: "flex", alignItems: "center", padding: "4px 12px 4px 10px" }}>
-                    <button
-                      onClick={() => toggleLoopExpanded(loop.id)}
-                      title={expanded ? "收起运行记录" : "展开运行记录"}
-                      style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", width: 18, fontSize: 10, padding: 0, flexShrink: 0, transition: "transform 0.15s", transform: expanded ? "rotate(90deg)" : "none" }}
-                    >
-                      ▶
-                    </button>
-                    <button
-                      onClick={() => toggleLoopExpanded(loop.id)}
-                      style={{ ...rowStyle(), padding: "6px 4px", flex: 1, minWidth: 0 }}
-                    >
-                      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: loop.enabled ? "var(--text)" : "var(--text-dim)" }}>{loop.name}</span>
-                      <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>{summary}</span>
-                    </button>
-                    <button
-                      onClick={() => onTriggerLoop(loop)}
-                      title="手动触发一轮"
-                      style={{ border: 0, background: "transparent", color: "var(--accent)", cursor: "pointer", width: 22, fontSize: 12, padding: 0, flexShrink: 0 }}
-                    >
-                      ▶
-                    </button>
-                    <button
-                      onClick={onOpenLoops}
-                      title="配置 / 编辑定义"
-                      style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", width: 22, fontSize: 12, padding: 0, flexShrink: 0 }}
-                    >
-                      ⚙
-                    </button>
-                  </div>
-                  {expanded && (
-                    <div>
-                      {!runs ? (
-                        <div style={{ padding: "4px 22px 8px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>加载中…</div>
-                      ) : runs.length === 0 ? (
-                        <div style={{ padding: "4px 22px 8px", color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)" }}>暂无运行记录</div>
-                      ) : runs.map((run) => {
-                        const dotColor = run.status === "failed" ? "#e5484d"
-                          : run.status === "running" || run.status === "queued" ? "#22c55e"
-                          : "#16a34a";
-                        const started = new Date(run.startedAt);
-                        const time = `${String(started.getMonth() + 1).padStart(2, "0")}-${String(started.getDate()).padStart(2, "0")} ${String(started.getHours()).padStart(2, "0")}:${String(started.getMinutes()).padStart(2, "0")}`;
-                        // v3: a seeded run opens its EXECUTION session (the
-                        // contract run — where gates/answers live); only
-                        // unseeded runs open the selection orchestrator.
-                        const openTarget = run.seededSessionId ?? run.sessionId;
-                        return (
-                          <button
-                            key={run.id}
-                            onClick={() => openTarget && onOpenLoopSession(openTarget)}
-                            disabled={!openTarget}
-                            title={openTarget ? (run.seededSessionId ? "打开执行会话" : "打开选品会话") : "会话尚未创建"}
-                            style={{ ...rowStyle(false), padding: "5px 10px 5px 30px", cursor: openTarget ? "pointer" : "default", opacity: openTarget ? 1 : 0.55 }}
-                          >
-                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, flexShrink: 0, boxShadow: run.status === "running" ? "0 0 0 3px rgba(34,197,94,0.18)" : "none" }} />
-                            <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>{time}</span>
-                            {run.seededSessionId && (
-                              <span style={{ padding: "1px 6px", borderRadius: 5, border: "1px solid var(--border)", color: "var(--accent)", fontSize: "var(--pi-sidebar-fs-meta)", flexShrink: 0 }}>已播种</span>
-                            )}
-                            <span style={{ color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs-meta)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-                              {run.seedRefused ? `播种被拒：${run.seedRefused}` : (run.verdict || run.progress || "—")}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        );
-
       default:
         return null;
     }
@@ -853,17 +700,6 @@ export function WorkspaceSidebar({
             actions={
               <PanelHeaderButton onClick={onAddRepository} title="添加知识库">
                 ＋ 知识库
-              </PanelHeaderButton>
-            }
-          />
-        );
-      case "loop":
-        return (
-          <PanelHeader
-            title="Loop"
-            actions={
-              <PanelHeaderButton onClick={onOpenLoops} title="新建 / 管理 Loop">
-                管理
               </PanelHeaderButton>
             }
           />

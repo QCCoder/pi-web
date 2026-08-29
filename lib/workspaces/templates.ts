@@ -22,11 +22,12 @@ export const MANDATORY_CAPABILITIES = ["sessions", "explorer"] as const;
  *  Per redesign §6.2 this intentionally excludes `subagent` and `workflows` —
  *  those exist as legal capabilities (and stay toggleable via PATCH), but are
  *  not surfaced in the init checklist. (The former `overview` capability is
- *  retired entirely — the overview dashboard is the unconditional landing view.) */
+ *  retired entirely — the overview dashboard is the unconditional landing view.
+ *  The former `loop` capability is likewise retired — kit loops are
+ *  file-declared via a loops/<loopId>/LOOP.md file, no capability gate.) */
 export const INIT_CAPABILITY_CHECKLIST: readonly WorkspaceCapability[] = [
   "repositories",
   "knowledge",
-  "loop",
   "work-items",
 ];
 

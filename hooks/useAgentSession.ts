@@ -341,7 +341,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
-  /** 会话是否由 session daemon 持有（selection orchestrator / subagent
+  /** 会话是否由 session daemon 持有（kit 轮会话 / subagent
    *  child / interactive）。drives pin 语义：被查看但未在跑的 daemon 会话
    *  不被 running-set 清扫断流（见挂载 effect 的 loopOwned 处理）。 */
   const [loopOwned, setLoopOwned] = useState(false);
@@ -368,7 +368,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadSessionAbortRef = useRef<AbortController | null>(null);
   /** L3 earlier-page 单飞锁（loadEarlier 去重）。 */
   const earlierInFlightRef = useRef(false);
-  /** 当前被 pin 住的 Loop-Host 会话 id（见挂载 effect 的 loopOwned 处理）。 */
+  /** 当前被 pin 住的 daemon 会话 id（见挂载 effect 的 loopOwned 处理）。 */
   const pinnedLoopSidRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const bashRecoveryIdRef = useRef(0);
@@ -1393,7 +1393,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (session) {
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
-        // Loop-Host 拥有的会话（orchestrator / subagent child）不在 web 进程的
+        // daemon 拥有的会话（kit 轮 / subagent child）不在 web 进程的
         // running 集里，syncRunningIds 会把它们的 SSE 拆掉。pin 住：观看期间事件流
         // 一直连着（包括 gate 暂停期间，resume 后 agent_start 直接从这条流到达）。
         if (agentState?.loopOwned) {

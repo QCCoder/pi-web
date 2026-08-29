@@ -6,7 +6,6 @@ import {
   loadLegacySubagentChildIds,
 } from "@/lib/subagent-child";
 import { daemonProxy } from "@/lib/agent-proxy";
-import { invalidateLoopSessionTags, loopSessionTags } from "@/lib/loop/session-tags";
 import type { SessionInfo } from "@/lib/types";
 
 export async function GET(req: Request) {
@@ -16,12 +15,11 @@ export async function GET(req: Request) {
     if (archived) {
       return NextResponse.json({ sessions: await listArchivedSessions() });
     }
-    // A freshly triggered Loop round writes its .jsonl from the daemon
-    // process; the disk scan below is cached 30s, so without an explicit
-    // invalidate the new session would be invisible until the cache expires.
+    // A freshly created session writes its .jsonl from the daemon process;
+    // the disk scan below is cached 30s, so without an explicit invalidate
+    // the new session would be invisible until the cache expires.
     if (url.searchParams.has("refresh")) {
       invalidateSessionListCache();
-      invalidateLoopSessionTags();
     }
     const sessions = await listAllSessions();
 
@@ -60,23 +58,11 @@ export async function GET(req: Request) {
     // the registry for new children; ids recorded by the retired built-in in
     // subagent-children.txt (read-only, mtime-cached) still tag as children.
     const legacyChildIds = loadLegacySubagentChildIds();
-    let sessionsWithFlags = merged.map((session) =>
+    const sessionsWithFlags = merged.map((session) =>
       isSubagentChildSession(session, legacyChildIds)
         ? { ...session, subagentChild: true }
         : session
     );
-
-    // Tag Loop selection orchestrators: hidden from session lists — their only
-    // entry point is the Loop view's run record (which opens the seeded
-    // execution session first). v3 execution sessions are NOT tagged; they
-    // surface via their work item's conversations like any conversation.
-    const loopTags = await loopSessionTags().catch(() => new Map());
-    if (loopTags.size > 0) {
-      sessionsWithFlags = sessionsWithFlags.map((session) => {
-        const tag = loopTags.get(session.id);
-        return tag ? { ...session, loopOrchestrator: true } : session;
-      });
-    }
 
     return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: runningIds.ids });
   } catch (error) {

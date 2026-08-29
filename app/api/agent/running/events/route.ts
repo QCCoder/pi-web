@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 // GET /api/agent/running/events - SSE stream of the set of currently-running
 // session ids. Pure proxy over the session daemon (C2): its registry is keyed
 // by real session id and contains interactive sessions, subagent children AND
-// loop orchestrators, so this single stream is the complete running answer —
+// kit loop rounds, so this single stream is the complete running answer —
 // the web-side pin/reprobe + client-side loop-badge merge existed only because
 // the old local set could never contain daemon-owned sessions.
 export async function GET(req: Request) {

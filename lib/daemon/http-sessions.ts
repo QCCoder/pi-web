@@ -19,23 +19,17 @@ import { type DaemonRouteHandler, readJsonBody, sendJson } from "./http.ts";
 
 /** The session-daemon surface: /v1/sessions/** — the daemon's core identity
  *  (C2). Every live session in this process is reachable here: interactive
- *  sessions, subagent children AND loop orchestrators (the registry is keyed
- *  by real session id). Pi Web proxies these routes verbatim.
+ *  sessions, subagent children and kit heartbeat rounds alike (the registry is
+ *  keyed by real session id). Pi Web proxies these routes verbatim.
  *
- *  The single domain seam is `findOrchestratorSession`: the loop engine's
- *  selection rounds are engine-driven mid-run, so direct commands are
- *  rejected (409) and teardown is skipped for them. Everything else is
- *  live-first, cold-start-from-.jsonl revive semantics. */
-export interface SessionsRouteDeps {
-  findOrchestratorSession: (sessionId: string) => AgentSessionWrapper | undefined;
-}
+ *  Everything is live-first, cold-start-from-.jsonl revive semantics. */
 
 /** Stream a live session's agent events to an HTTP client (Pi Web proxies
  *  this to the browser so any daemon-owned session can be watched live).
  *  Mirrors the SSE shape Pi Web emits. The stream also ends when the session
- *  is destroyed (round terminal / timeout / abort) — otherwise the
- *  browser-side pinned runtime would keep `agentRunning` true forever with
- *  no `agent_end` ever arriving. */
+ *  is destroyed (kit round timeout / abort) — otherwise the browser-side
+ *  pinned runtime would keep `agentRunning` true forever with no `agent_end`
+ *  ever arriving. */
 function serveSessionSse(request: IncomingMessage, response: ServerResponse, session: AgentSessionWrapper): void {
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -62,8 +56,8 @@ function serveSessionSse(request: IncomingMessage, response: ServerResponse, ses
 }
 
 /** SSE stream of the set of currently-running session ids in this process.
- *  Because the registry holds interactive sessions, subagent children AND
- *  loop orchestrators alike (keyed by real session id), this single stream is
+ *  Because the registry holds interactive sessions, subagent children and kit
+ *  heartbeat rounds alike (keyed by real session id), this single stream is
  *  the complete running answer — the web route proxies it verbatim for its
  *  badges. Subscribes BEFORE the initial snapshot so no transition can slip
  *  between the two. */
@@ -92,17 +86,14 @@ function serveRunningSse(request: IncomingMessage, response: ServerResponse): vo
   request.on("error", cleanup);
 }
 
-export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandler {
-  /** Any live pi session in this daemon: loop orchestrators first
-   *  (authoritative, indexed by real session id), then the ordinary rpc
-   *  registry — which is where the subagent children an orchestrator spawns
-   *  live. Exposing both lets Pi Web probe + SSE-proxy a RUNNING subagent
-   *  child exactly like its orchestrator; without this the child probe 404s
-   *  and Pi Web would load the .jsonl itself — a second writer racing the
-   *  live child. */
+export function createSessionsRoutes(): DaemonRouteHandler {
+  /** Any live pi session in this daemon: the ordinary rpc registry — where
+   *  interactive sessions, subagent children AND the rounds a loop kit spawner
+   *  starts all live (keyed by real session id). Exposing it lets Pi Web probe
+   *  + SSE-proxy a RUNNING subagent child exactly like its parent; without
+   *  this the child probe 404s and Pi Web would load the .jsonl itself — a
+   *  second writer racing the live child. */
   const findLiveSession = (sid: string): AgentSessionWrapper | undefined => {
-    const orchestrator = deps.findOrchestratorSession(sid);
-    if (orchestrator) return orchestrator;
     const child = getRpcSession(sid);
     return child?.isAlive() ? child : undefined;
   };
@@ -129,7 +120,7 @@ export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandle
       return true;
     }
     if (request.method === "GET" && url.pathname === "/v1/sessions/live") {
-      // Metas of every alive wrapper (interactive + children + orchestrators):
+      // Metas of every alive wrapper (interactive + children + kit rounds):
       // lets the web session-list route synthesize brand-new sessions whose
       // .jsonl has not been flushed/scanned yet.
       sendJson(response, 200, { sessions: getLiveRpcSessionInfos() });
@@ -199,18 +190,9 @@ export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandle
         sendJson(response, 400, { error: "command.type is required" });
         return true;
       }
-      // Selection-round orchestrators are engine-driven mid-round — reject
-      // direct commands so a stray composer message cannot steer a selection.
-      // (v3 execution sessions are normal sessions and are NOT intercepted.)
-      if (deps.findOrchestratorSession(sid)) {
-        sendJson(response, 409, {
-          error: "This session is owned by the Loop engine. Interact via the Loop run gate, not direct messages.",
-        });
-        return true;
-      }
-      // Live session (interactive / subagent child) first, then cold-start
-      // from the .jsonl on disk — the same revive semantics /api/agent/[id]
-      // POST implements in the web process.
+      // Live session (interactive / subagent child / kit round) first, then
+      // cold-start from the .jsonl on disk — the same revive semantics
+      // /api/agent/[id] POST implements in the web process.
       const live = findLiveSession(sid);
       if (live) {
         sendJson(response, 200, { success: true, data: await live.send(command) });
@@ -229,10 +211,9 @@ export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandle
     }
     // Session probe: Pi Web asks "does the daemon own this session?" before
     // falling back to loading the .jsonl itself. Returns metadata + live
-    // state. Covers selection orchestrators AND their running subagent
-    // children (both live in this process). v3: no run-meta payload — gates
-    // are chat turns in normal execution sessions, nothing loop-owned to
-    // surface. (GET must be checked before DELETE — same path pattern.)
+    // state. Covers every live session in this process, including running
+    // subagent children. (GET must be checked before DELETE — same path
+    // pattern.)
     const sessionProbe = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
     if (request.method === "GET" && sessionProbe) {
       const sid = decodeURIComponent(sessionProbe[1]);
@@ -274,10 +255,6 @@ export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandle
     const autoName = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/auto-name$/);
     if (request.method === "POST" && autoName) {
       const sid = decodeURIComponent(autoName[1]);
-      if (deps.findOrchestratorSession(sid)) {
-        sendJson(response, 409, { error: "Loop orchestrator sessions are named by the loop" });
-        return true;
-      }
       const filePath = await resolveSessionPath(sid);
       if (!filePath) {
         sendJson(response, 404, { error: "Session not found" });
@@ -300,15 +277,12 @@ export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandle
     }
     // Best-effort wrapper teardown before the web layer deletes/archives the
     // session file: destroy the live wrapper so it stops appending to a file
-    // that is about to move/disappear. Selection orchestrators are skipped —
-    // their lifecycle belongs to the loop engine.
+    // that is about to move/disappear.
     if (request.method === "DELETE") {
       const sessionTeardown = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/);
       if (sessionTeardown) {
         const sid = decodeURIComponent(sessionTeardown[1]);
-        if (!deps.findOrchestratorSession(sid)) {
-          getRpcSession(sid)?.destroy();
-        }
+        getRpcSession(sid)?.destroy();
         sendJson(response, 200, { ok: true });
         return true;
       }

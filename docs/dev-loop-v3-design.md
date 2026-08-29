@@ -1,3 +1,6 @@
+> **已退役（2026-09）**：v3 loop 引擎已被 pi-loop kit 取代，本文仅作历史参考。
+> 现行设计见 `docs/pi-loop-kit-design.md`。
+
 # dev Loop v3 设计：loop 降级为「选品 + 播种器」，执行归普通会话 + skill
 
 > 状态：设计已确认（2025-06 与用户逐题 grilling 定稿）。前置：v2（`docs/dev-loop-v2-design.md`）。

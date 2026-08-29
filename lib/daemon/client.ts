@@ -1,4 +1,3 @@
-import type { LoopDefinition, LoopRun, TriggerCommand, TriggerReceipt } from "../loop/types.ts";
 import type { ImporterRunSummary } from "../work-items/importers/runner.ts";
 
 /** Daemon base URL. PI_DAEMON_URL is the canonical name; PI_LOOP_URL is the
@@ -20,7 +19,7 @@ export interface CreateSessionInput {
 /** Max wait for the daemon on graceful-degradation probes. The daemon is on
  *  localhost and answers in single-digit ms when healthy; if it cannot answer
  *  within this window it is effectively unavailable (event loop blocked by a
- *  runaway orchestrator, a long sync op, GC storm, etc.) and callers MUST fall
+ *  runaway session, a long sync op, GC storm, etc.) and callers MUST fall
  *  through fast instead of hanging the web UI's session routes. Keep well under
  *  the 5s SSE connect timeout (CONNECT_TIMEOUT_MS in global-agent-events.ts):
  *  probe (2s) + cold startRpcSession (~1-2s) must fit before that window. */
@@ -30,10 +29,8 @@ const PROBE_TIMEOUT_MS = 2_000;
  *  Pi Web probes this to decide whether to proxy the daemon's event stream
  *  instead of loading the .jsonl into its own process (which would race the
  *  daemon for the same file). */
-export interface LoopSessionMeta {
+export interface DaemonSessionMeta {
   id: string;
-  /** Absent on the cold-orchestrator probe (host restarted while a gate was
-   *  paused — no live wrapper, only the run meta is authoritative). */
   cwd?: string;
   sessionFile?: string;
   running: boolean;
@@ -41,8 +38,7 @@ export interface LoopSessionMeta {
 }
 
 /** Error thrown for non-2xx daemon responses. Carries the daemon's HTTP
- *  status so web proxies can surface it faithfully (e.g. 404 session-not-found,
- *  409 orchestrator-owned). */
+ *  status so web proxies can surface it faithfully (e.g. 404 session-not-found). */
 export class DaemonHttpError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -64,7 +60,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return value;
 }
 
-/** HTTP client for the pi-daemon process (sessions + loop + importers). */
+/** HTTP client for the pi-daemon process (sessions + importers). */
 export const daemonClient = {
   /** Session-daemon surface (C2 Phase 1): create a new session in the daemon
    *  process. Response carries the real pi session id plus the session cwd so
@@ -79,8 +75,8 @@ export const daemonClient = {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(command),
     }),
   /** Session-daemon surface: the complete set of running session ids in the
-   *  daemon process (interactive sessions + subagent children + loop
-   *  orchestrators — the registry is keyed by real session id). */
+   *  daemon process (interactive sessions + subagent children + kit heartbeat
+   *  rounds — the registry is keyed by real session id). */
   runningSessionIds: () => request<{ ids: string[] }>("/v1/sessions/running"),
   /** Session-daemon surface: metas of every alive wrapper (for the web
    *  session-list route's live-session synthesis). */
@@ -88,7 +84,7 @@ export const daemonClient = {
     "/v1/sessions/live",
   ),
   /** Session-daemon surface: SSE of the running-id set (interactive + children
-   *  + orchestrators — the complete answer), for the web route to proxy. */
+   *  + kit rounds — the complete answer), for the web route to proxy. */
   runningEvents: (signal?: AbortSignal) =>
     fetch(`${baseUrl()}/v1/sessions/running/events`, { signal }),
   /** Session-daemon surface: is any session in the daemon busy (starting or
@@ -107,39 +103,16 @@ export const daemonClient = {
     `/v1/sessions/${encodeURIComponent(sessionId)}/auto-name`,
     { method: "POST" },
   ),
-  /** Session-daemon surface: best-effort destroy of a live wrapper (skips loop
-   *  orchestrators — engine-owned). Called by the web layer before it deletes
-   *  or archives the session file. */
+  /** Session-daemon surface: best-effort destroy of a live wrapper. Called by
+   *  the web layer before it deletes or archives the session file. */
   destroySession: (sessionId: string) => request<{ ok: boolean }>(
     `/v1/sessions/${encodeURIComponent(sessionId)}`,
     { method: "DELETE" },
   ),
-  listLoops: (workspaceId: string) => request<{ loops: LoopDefinition[] }>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/loops`,
-  ),
-  trigger: (command: TriggerCommand) => request<TriggerReceipt>("/v1/triggers", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(command),
-  }),
-  getRun: (workspaceId: string, runId: string) => request<{ run: LoopRun }>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/runs/${encodeURIComponent(runId)}`,
-  ),
-  abortRun: (workspaceId: string, runId: string) => request<{ run: LoopRun }>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/runs/${encodeURIComponent(runId)}/abort`,
-    { method: "POST" },
-  ),
-  /** v3 seeding: deterministically seed an execution session for a work item
-   *  (guard + `/skill:<loopId>` prompt + conversations/milestone bookkeeping).
-   *  `seeded: false` carries the guard's refusal reason; HTTP errors mean the
-   *  daemon is down or the work item does not exist. */
-  seedExecution: (workspaceId: string, key: string, mode?: "execute" | "adopt") =>
-    request<{ seed: { seeded: boolean; sessionId?: string; reason: string } }>(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/seed`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, mode }) },
-    ),
   /** Ask the daemon whether it owns a given pi session id. Returns null
    *  when the daemon is unreachable OR does not own the session, so callers can
    *  fall back to the normal local .jsonl path without distinguishing the two. */
-  probeSession: async (sessionId: string): Promise<LoopSessionMeta | null> => {
+  probeSession: async (sessionId: string): Promise<DaemonSessionMeta | null> => {
     let response: Response;
     try {
       // A hung/sick host still accepts the socket but never responds. Without a
@@ -149,9 +122,7 @@ export const daemonClient = {
       // the client's 5s window. The bounded timeout lets a healthy host answer
       // instantly while forcing a fast fall-through to the local .jsonl path
       // when the host is unresponsive. (The trade-off — treating a merely-busy
-      // host as down and loading the .jsonl here — is the lesser evil: the only
-      // race risk is for Loop orchestrator sessions, which a host that cannot
-      // answer a probe in 2s is in no state to be driving anyway.)
+      // host as down and loading the .jsonl here — is the lesser evil.)
       response = await fetch(`${baseUrl()}/v1/sessions/${encodeURIComponent(sessionId)}`, {
         signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
       });
@@ -159,13 +130,13 @@ export const daemonClient = {
       return null;
     }
     if (!response.ok) return null;
-    return await response.json().catch(() => null) as LoopSessionMeta | null;
+    return await response.json().catch(() => null) as DaemonSessionMeta | null;
   },
-  /** Open the raw SSE response for a Loop-owned session so Pi Web can proxy
-   *  (pipe) its body straight to the browser. */
+  /** Open the raw SSE response for a session the daemon owns so Pi Web can
+   *  proxy (pipe) its body straight to the browser. */
   sessionEvents: (sessionId: string, signal?: AbortSignal) =>
     fetch(`${baseUrl()}/v1/sessions/${encodeURIComponent(sessionId)}/events`, { signal }),
-  /** Trigger a manual Importer sync on the daemon (a non-Loop system job).
+  /** Trigger a manual Importer sync on the daemon (a background system job).
    *  Returns null when the daemon is unreachable so the web route can fall back to
    *  an in-process run (a one-shot sync is not a timer — see instrumentation.ts). */
   syncImporters: async (workspaceId: string): Promise<ImporterRunSummary | null> => {

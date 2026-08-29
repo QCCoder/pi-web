@@ -12,6 +12,7 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { useShell } from "./shell/context";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -44,11 +45,6 @@ interface Props {
   /** When true, renders as a compact view-oriented viewer (no input bar or
    *  minimap) — used when embedded in the right split pane. */
   embedded?: boolean;
-  /** Notifies the shell when the current session is a Loop orchestrator with
-   *  run meta (from the state probe), so AppShell can pin the LoopStatusBar —
-   * the gate answer channel — onto this chat tab even when the run was NOT
-   * triggered from here (e.g. opened from the sidebar run records). */
-
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -186,6 +182,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
+  // Composer prefill epoch from the shell state (contract prefill, D11) —
+  // keys the ChatInput mount so a draft written while the input is already
+  // mounted still gets picked up. ChatWindow only renders inside the shell
+  // tree (DesktopShell / MobileShell), so the provider is always present.
+  const { composerEpoch } = useShell();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
   // wrapping handleAgentEventRef because useAgentSession overwrites that ref
@@ -437,6 +438,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const chatInputElement = (
     <ChatInput
+      // Prefill epoch (contract prefill, D11): a handler may write the new-session
+      // draft WHILE this input is already mounted on the same draftKey — the
+      // key bump forces a remount so ChatInput re-reads the draft store.
+      key={`composer-${composerEpoch}`}
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}

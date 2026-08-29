@@ -15,8 +15,7 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "pi-web": "bin/pi-web.js",
-    "pi-loop": "bin/pi-loop.js"
+    "pi-web": "bin/pi-web.js"
   },
   "files": [
     "bin",

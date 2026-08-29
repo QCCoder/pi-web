@@ -1,6 +1,5 @@
 "use client";
 
-import { useCallback } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar } from "../TabBar";
@@ -14,8 +13,6 @@ import { SettingsPanel, PreferencesPage } from "../SettingsPanel";
 import { ModelsConfig } from "../ModelsConfig";
 import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
-import { LoopConfig } from "../LoopConfig";
-import { LoopLaunchingPlaceholder } from "../LoopLaunchOverlay";
 import { HomeLanding } from "../HomeLanding";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { useI18n } from "@/hooks/useI18n";
@@ -38,7 +35,6 @@ export function DesktopShell() {
   const {
     tabs,
     setTabs,
-    activeTab,
     activeWorkspace,
     selectedSession,
     workspaceView,
@@ -59,8 +55,6 @@ export function DesktopShell() {
     settingsPage,
     setSettingsPage,
     settingsCwd,
-    loopEditorOpen,
-    setLoopEditorOpen,
     sidebarOpen,
     sidebarWidth,
     sidebarResizing,
@@ -86,7 +80,6 @@ export function DesktopShell() {
     sessionActivity,
     modelsRefreshKey,
     sessionKey,
-    loopRun,
     effectiveNewSessionCwd,
     showChat,
     showPlaceholder,
@@ -99,8 +92,7 @@ export function DesktopShell() {
     handleCloseWorkspaceTab,
     handleCreateWorkspace,
     handleReturnHome,
-    handleOpenLoopSession,
-    handleLoopTriggered,
+    handleOpenConversation,
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
@@ -119,23 +111,15 @@ export function DesktopShell() {
     handleContextUsageChange,
     chatInputRef,
     updateActiveTab,
-    loadWorkspaces,
     setRefreshKey,
     setImportPickerOpen,
   } = s;
 
   // ---- Middle column content (three-column layout) ----------------------------
 // One `sidebarView` drives everything: module views (workbench/knowledge/
-// loop/work-items) render WorkspaceSidebar / the work-items manager; global
+// work-items) render WorkspaceSidebar / the work-items manager; global
 // panels (archive/settings) render the former modals as embedded panels.
-// The loop editor (LoopConfig) replaces the loop list and temporarily widens
-// the column — the widened value is derived, never persisted.
-const middleColumnWidth = loopEditorOpen && sidebarView === "loop"
-  ? Math.max(sidebarWidth, 520)
-  : sidebarWidth;
-const openLoopsPanel = useCallback(() => {
-  setLoopEditorOpen(true);
-}, [setLoopEditorOpen]);
+const middleColumnWidth = sidebarWidth;
 
 const renderMiddleColumn = () => {
   // Desktop config views (模型/Skills/插件): the LIST renders here in the
@@ -203,11 +187,10 @@ const renderMiddleColumn = () => {
                 onOpenWorkspace={handleOpenWorkspace}
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
                 onRunContract={handleRunContract}
-                onOpenConversation={handleOpenLoopSession}
+                onOpenConversation={handleOpenConversation}
                 onWorkspaceDeleted={handleWorkspaceDeleted}
                 onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-                onWorkspaceChanged={() => void loadWorkspaces()}
-              />
+                    />
             </div>
           ) : null
         ) : null}
@@ -264,29 +247,14 @@ const renderMiddleColumn = () => {
           onOpenWorkspace={handleOpenWorkspace}
           onOpenWorkItemConversation={handleOpenWorkItemConversation}
           onRunContract={handleRunContract}
-          onOpenConversation={handleOpenLoopSession}
+          onOpenConversation={handleOpenConversation}
           onWorkspaceDeleted={handleWorkspaceDeleted}
           onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-          onWorkspaceChanged={() => void loadWorkspaces()}
         />
       </div>
     );
   }
-  if (activeWorkspace && sidebarView === "loop" && loopEditorOpen && activeWorkspace.capabilities.includes("loop")) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-        <PanelHeader
-          title="Loop 管理"
-          onBack={() => setLoopEditorOpen(false)}
-          backLabel="返回"
-        />
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onTriggered={handleLoopTriggered} />
-        </div>
-      </div>
-    );
-  }
-  // Module views (workbench / knowledge / loop list) + the home panel.
+  // Module views (workbench / knowledge) + the home panel.
   return (
     <WorkspaceSidebar
       activeWorkspace={activeWorkspace}
@@ -301,9 +269,6 @@ const renderMiddleColumn = () => {
       onSelectWorkspace={handleOpenWorkspace}
       onCreateWorkspace={handleCreateWorkspace}
       onImportDirectory={() => setImportPickerOpen(true)}
-      onOpenLoops={openLoopsPanel}
-      onOpenLoopSession={handleOpenLoopSession}
-      onTriggerLoop={handleLoopTriggered}
       onAddRepository={() => {
         handleSidebarSwitchView("settings");
         setSettingsPage("workspace");
@@ -334,7 +299,6 @@ const renderMiddleColumn = () => {
         capabilities={activeWorkspace?.capabilities ?? []}
         onSwitch={handleRailSwitch}
         hasWorkspace={Boolean(activeWorkspace)}
-        highlightView={loopEditorOpen ? "loop" : null}
       />
 
     {/* Middle column: the single focused panel (module views, global panels,
@@ -461,12 +425,6 @@ const renderMiddleColumn = () => {
             onOpenWorkItems={() => handleSidebarSwitchView("work-items")}
             onCreateWorkItem={handleCreateWorkItem}
             onSelectSession={handleSelectSession}
-            onOpenLoops={() => {
-              handleSidebarSwitchView("loop");
-              setLoopEditorOpen(true);
-            }}
-            onTriggerLoop={handleLoopTriggered}
-            onOpenLoopSession={handleOpenLoopSession}
             onSwitchSidebarView={(view) => {
               if (view === "knowledge" || view === "workbench") handleSidebarSwitchView(view);
             }}
@@ -483,27 +441,23 @@ const renderMiddleColumn = () => {
         ) : showChat ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-              {activeTab?.loopPending && !selectedSession ? (
-                <LoopLaunchingPlaceholder name={activeTab.loopPending.loopName} status={loopRun?.status} error={loopRun?.error} />
-              ) : (
-                <ChatWindow
-                  reloadSignal={sessionKey}
-                  session={selectedSession}
-                  newSessionCwd={effectiveNewSessionCwd}
-                  onAgentEnd={handleAgentEnd}
-                  onSessionCreated={handleSessionCreated}
-                  onSessionForked={handleSessionForked}
-                  modelsRefreshKey={modelsRefreshKey}
-                  chatInputRef={chatInputRef}
-                  onBranchDataChange={handleBranchDataChange}
-                  onSystemPromptChange={handleSystemPromptChange}
-                  onSessionStatsChange={handleSessionStatsChange}
-                  onSessionStatsPanelOpen={openSessionStatsPanel}
-                  onContextUsageChange={handleContextUsageChange}
-                  onOpenFile={handleOpenLinkedFile}
-                  onOpenSession={handleOpenSessionViewer}
-                />
-              )}
+              <ChatWindow
+                reloadSignal={sessionKey}
+                session={selectedSession}
+                newSessionCwd={effectiveNewSessionCwd}
+                onAgentEnd={handleAgentEnd}
+                onSessionCreated={handleSessionCreated}
+                onSessionForked={handleSessionForked}
+                modelsRefreshKey={modelsRefreshKey}
+                chatInputRef={chatInputRef}
+                onBranchDataChange={handleBranchDataChange}
+                onSystemPromptChange={handleSystemPromptChange}
+                onSessionStatsChange={handleSessionStatsChange}
+                onSessionStatsPanelOpen={openSessionStatsPanel}
+                onContextUsageChange={handleContextUsageChange}
+                onOpenFile={handleOpenLinkedFile}
+                onOpenSession={handleOpenSessionViewer}
+              />
             </div>
           </div>
         ) : !activeWorkspace ? (

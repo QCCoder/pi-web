@@ -6,8 +6,8 @@
  * `detached: true` (so it becomes its own process-group leader) and tracks the
  * pid in a global set that is ONLY swept when the whole pi process receives a
  * process-level SIGHUP/SIGTERM. The pi-daemon (`bin/pi-daemon.js`) is a
- * long-lived process that never exits, and `abortRound` tears a round down with
- * `session.destroy()` — which does NOT fire the in-flight tool's `AbortSignal`.
+ * long-lived process that never exits, and the spawner tears a round down
+ * with `session.destroy()` — which does NOT fire the in-flight tool's `AbortSignal`.
  * So a round that is aborted or times out while an `npm install` / `mvn` is
  * running leaves that `bash → npm → node` subtree reparented to launchd (PID 1),
  * still holding `node_modules` file handles (which is why `rm -rf` then fails
@@ -163,9 +163,9 @@ export interface ReapResult {
 /**
  * Find and kill process trees orphaned by a Loop round for `workspacePath`:
  *
- * 1. Direct children of *this* loop-host process whose cwd is inside the
+ * 1. Direct children of *this* daemon process whose cwd is inside the
  *    workspace (the normal case — the round's `bash -c "npm install …"` is
- *    still a live, detached child of the host when the round is aborted).
+ *    still a live, detached child of the daemon when the round is aborted).
  * 2. Any process reparented to launchd (ppid 1) whose command is a build/shell
  *    binary AND whose cwd is inside the workspace (the residual case — a bash
  *    leader that already died but left npm/node behind).

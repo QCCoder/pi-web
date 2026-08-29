@@ -5,8 +5,7 @@ import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
 // Pure proxy over the session daemon (C2): the daemon is the single session
 // owner, so ANY command (prompt, fork, navigate_tree, extension UI responses,
 // …) is forwarded verbatim. The daemon cold-starts idle sessions from their
-// .jsonl exactly like this route used to, and answers 409 for loop
-// orchestrators (gate-driven only) — both semantics preserved end-to-end.
+// .jsonl exactly like this route used to — semantics preserved end-to-end.
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }

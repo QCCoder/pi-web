@@ -1,9 +1,4 @@
 import { createServer } from "node:http";
-import { DefaultLoopRuntime } from "../loop/runtime.ts";
-import { PiRoundExecutionBackend } from "../loop/pi-execution.ts";
-import { LoopHostScheduler } from "../loop/scheduler.ts";
-import { createLoopRoutes } from "../loop/http.ts";
-import { PiWorkspaceResolver } from "../loop/workspace-resolver.ts";
 import { ImporterScheduler } from "../work-items/importers/scheduler.ts";
 import { createImporterRoutes } from "../work-items/importers/http.ts";
 import { LoopKitSpawner } from "./loop-spawner.ts";
@@ -15,47 +10,34 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 30142;
 
 /** The pi-daemon: THE single session-owning process, plus a host for
- *  registered background jobs (loop trigger cron, importer sync).
+ *  registered background jobs (loop kit heartbeats, importer sync).
  *
  *  The core is deliberately thin and domain-free. It provides exactly three
  *  things:
  *    1. the session surface (lib/daemon/http-sessions.ts — the daemon's own
- *       identity, injected with the loop engine's orchestrator index),
+ *       identity),
  *    2. a DaemonJob registry (lib/daemon/jobs.ts) — domains register their
  *       long-lived timers; the daemon starts/stops them uniformly and never
  *       imports their logic,
  *    3. a route mounting point — each domain exports a DaemonRouteHandler
  *       from its own directory and gets chained here.
  *
- *  Domains mounted today: loop (engine routes + trigger cron) and importers
- *  (requirement-source sync job + sync route). Adding a fourth module means
- *  registering it here — one line each for routes and jobs. */
+ *  Domains mounted today: the loop kit spawner (cron heartbeats — the sole
+ *  successor of the removed v3 loop engine) and importers (requirement-source
+ *  sync job + sync route). Adding a fourth module means registering it here
+ *  — one line each for routes and jobs. */
 export function createDaemon() {
-  // ---- Loop engine domain -------------------------------------------------
-  const workspaces = new PiWorkspaceResolver();
-  // v3: the backend runs one short selection round per run — no sessionNamer
-  // seam (selection orchestrators keep their default title; seeded execution
-  // sessions get a deterministic name from the seeder).
-  const execution = new PiRoundExecutionBackend();
-  const runtime = new DefaultLoopRuntime(workspaces, execution);
-
   // ---- Background jobs ----------------------------------------------------
   const jobs = new DaemonJobRegistry();
-  jobs.register(new LoopHostScheduler(runtime, workspaces)); // id: loop-triggers
+  // pi-loop kit spawner（design: docs/pi-loop-kit-design.md）— 转正为唯一的
+  // loop 心跳（v3 loop-triggers cron 已随 v3 引擎拆除，生产翻转后无旗子门控）。
+  jobs.register(new LoopKitSpawner()); // id: loop-kit-heartbeats
   jobs.register(new ImporterScheduler()); // id: importer-sync
-  // pi-loop kit spawner（design: docs/pi-loop-kit-design.md）。Phase 1 与 v3
-  // 引擎并存，PI_LOOP_KIT=1 门控；拆除 PR 中同槽位转正（替换 loop-triggers）。
-  if (process.env.PI_LOOP_KIT === "1") {
-    jobs.register(new LoopKitSpawner()); // id: loop-kit-heartbeats
-  }
 
   // ---- Route chain --------------------------------------------------------
-  const sessionsRoutes = createSessionsRoutes({
-    findOrchestratorSession: (sid) => execution.getBySessionId(sid),
-  });
-  const loopRoutes = createLoopRoutes({ runtime, workspaces });
+  const sessionsRoutes = createSessionsRoutes();
   const importerRoutes = createImporterRoutes();
-  const routes: DaemonRouteHandler[] = [sessionsRoutes, loopRoutes, importerRoutes];
+  const routes: DaemonRouteHandler[] = [sessionsRoutes, importerRoutes];
 
   const server = createServer(async (request, response) => {
     try {
@@ -74,7 +56,7 @@ export function createDaemon() {
       });
     }
   });
-  return { server, jobs, runtime, execution };
+  return { server, jobs };
 }
 
 export async function startDaemon(options: { host?: string; port?: number } = {}): Promise<void> {

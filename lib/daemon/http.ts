@@ -1,11 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { WorkItemNotFoundError } from "../work-items/service.ts";
 import { WorkspaceNotFoundError } from "../workspaces/service.ts";
-import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "../loop/store.ts";
 
 /** Shared HTTP plumbing for the daemon's route modules.
  *
- *  The daemon core composes route handlers from domains (sessions / loop /
+ *  The daemon core composes route handlers from domains (sessions /
  *  importers): each domain exports `createXxxRoutes(deps)` returning this
  *  handler shape, and the host chains them — first handler to claim the
  *  request (returns true) wins; falling through all of them is a 404.
@@ -33,8 +32,5 @@ export function sendJson(response: ServerResponse, status: number, value: unknow
 export function daemonErrorStatus(error: unknown): number {
   if (error instanceof WorkItemNotFoundError) return 404;
   if (error instanceof WorkspaceNotFoundError) return 404;
-  if (error instanceof LoopNotFoundError) return 404;
-  if (error instanceof LoopValidationError) return 400;
-  if (error instanceof LoopConflictError) return 409;
   return 500;
 }
