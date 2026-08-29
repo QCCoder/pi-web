@@ -44,11 +44,6 @@ interface Props {
   /** When true, renders as a compact view-oriented viewer (no input bar or
    *  minimap) — used when embedded in the right split pane. */
   embedded?: boolean;
-  /** Notifies the shell when the current session is a Loop orchestrator with
-   *  run meta (from the state probe), so AppShell can pin the LoopStatusBar —
-   * the gate answer channel — onto this chat tab even when the run was NOT
-   * triggered from here (e.g. opened from the sidebar run records). */
-
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { MarkdownBody } from "./MarkdownBody";
 import { ImporterConfig } from "./ImporterConfig";
-import { LoopConfig } from "./LoopConfig";
 import type {
   WorkspaceCapability,
   WorkspaceRepositoryState,
@@ -93,8 +92,6 @@ interface Props {
   onOpenConversation?: (sessionId: string) => void;
   onWorkspaceDeleted?: (workspace: WorkspaceSummary) => void;
   onWorkItemsChanged?: () => void;
-  onWorkspaceChanged?: () => void;
-  onOpenLoops?: () => void;
   /** Reports the rail's current selection up (e.g. the right-column
    *  工作区设置 header shows the selected name in split mode). */
   onSelectedWorkspaceChange?: (workspace: WorkspaceSummary | null) => void;
@@ -219,8 +216,6 @@ export function WorkspaceManager({
   onOpenConversation,
   onWorkspaceDeleted,
   onWorkItemsChanged,
-  onWorkspaceChanged,
-  onOpenLoops,
   onSelectedWorkspaceChange,
 }: Props) {
   const [section, setSection] = useState<ManagerSection>(initialSection);
@@ -1737,15 +1732,6 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
-                    <LoopConfig
-                      workspace={selectedWorkspace}
-                      mode="settings"
-                      onOpenLoops={onOpenLoops}
-                      onWorkspaceChanged={() => {
-                        void loadWorkspaces();
-                        onWorkspaceChanged?.();
-                      }}
-                    />
                     {selectedWorkspace.capabilities.includes("repositories") && (
                     <section className="repository-section">
                       <div className="repository-section-header">

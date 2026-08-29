@@ -8,11 +8,12 @@ import type { WorkspaceCapability } from "@/lib/workspaces/types";
  * (the left icon rail on desktop / the bottom tab bar on mobile).
  *
  * Two groups with different scopes:
- * - MODULE views (workbench / knowledge / loop / work-items) are
+ * - MODULE views (workbench / knowledge / work-items) are
  *   workspace-scoped and capability-gated — their icons appear only when the
- *   active workspace has the capability. Order: workbench → knowledge → loop
+ *   active workspace has the capability. Order: workbench → knowledge
  *   → work-items. (The former standalone 仓库 view was removed — repo browsing
- *   lives in the workbench file tree, add/manage in settings.)
+ *   lives in the workbench file tree, add/manage in settings. The Loop view
+ *   was removed with the loop-kit teardown.)
  * - GLOBAL views are app-scoped. The desktop rail shows 模型/Skills/插件 (config
  *   views — LIST in the middle column + DETAIL in the right column, see
  *   `ConfigView`), then 归档
@@ -41,7 +42,6 @@ export function isConfigView(view: SidebarView): view is ConfigView {
 export type SidebarView =
   | "workbench"
   | "knowledge"
-  | "loop"
   | "work-items"
   | ConfigView
   | "archive"
@@ -69,7 +69,7 @@ const ICON_PROPS = {
 };
 
 /**
- * Canonical module-view order: workbench → knowledge → loop → work-items.
+ * Canonical module-view order: workbench → knowledge → work-items.
  * `workbench` is always-on (`capability: null`) — it merges the former
  * sessions + explorer views into one stacked layout (会话 above, 文件 below).
  */
@@ -96,20 +96,6 @@ export const ACTIVITY_VIEW_ORDER: ActivityViewDef[] = [
       <svg {...ICON_PROPS}>
         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
         <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-      </svg>
-    ),
-  },
-  {
-    view: "loop",
-    capability: "loop",
-    label: "Loop",
-    title: "自动化 Loop",
-    icon: (
-      <svg {...ICON_PROPS}>
-        <polyline points="17 1 21 5 17 9" />
-        <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-        <polyline points="7 23 3 19 7 15" />
-        <path d="M21 13v2a4 4 0 0 1-4 4H3" />
       </svg>
     ),
   },
@@ -255,8 +241,6 @@ interface Props {
   activeView: SidebarView | null;
   capabilities: WorkspaceCapability[];
   onSwitch: (view: SidebarView) => void;
-  /** Extra non-focus highlight (e.g. when the loop manager is open in the panel). */
-  highlightView?: SidebarView | null;
   /** Whether an active workspace exists — gates the archive icon (its content
    *  is workspace-scoped). Settings is always available. */
   hasWorkspace?: boolean;
@@ -269,7 +253,7 @@ interface Props {
  * to the rail bottom on desktop). The parent owns `activeView` and renders the
  * matching panel beside the rail.
  */
-export function ActivityBar({ variant, activeView, capabilities, onSwitch, highlightView, hasWorkspace = true }: Props) {
+export function ActivityBar({ variant, activeView, capabilities, onSwitch, hasWorkspace = true }: Props) {
   const moduleItems = ACTIVITY_VIEW_ORDER.filter(
     (item) => item.capability === null || capabilities.includes(item.capability),
   );
@@ -291,7 +275,6 @@ export function ActivityBar({ variant, activeView, capabilities, onSwitch, highl
 
   const renderItem = (item: ActivityViewDef) => {
     const isActive = activeView === item.view;
-    const isHighlighted = highlightView === item.view;
     const btnStyle: React.CSSProperties = {
       display: "flex",
       flexDirection: "column",
@@ -303,7 +286,7 @@ export function ActivityBar({ variant, activeView, capabilities, onSwitch, highl
         : { flex: "1 0 auto", minWidth: 56, height: "100%" }),
       border: 0,
       background: isActive ? "var(--bg-selected)" : "transparent",
-      color: isActive || isHighlighted ? "var(--text)" : "var(--text-muted)",
+      color: isActive ? "var(--text)" : "var(--text-muted)",
       cursor: "pointer",
       padding: 0,
       position: "relative",

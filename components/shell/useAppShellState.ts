@@ -17,7 +17,6 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import type { Tab } from "../TabBar";
-import type { LoopDefinition, LoopRun } from "@/lib/loop/types";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -31,9 +30,6 @@ type AutoNameStatus =
  *  (The former "settings" / "work-items" / "loops" values moved to the middle
  *  column panels — legacy URLs map onto panel switches in applyUrlToTabs.) */
 type WorkspaceView = "overview" | "chat";
-
-/** Loop run terminal statuses (shared by the run polling effect). */
-const LOOP_TERMINAL = new Set(["succeeded", "failed"]);
 
 /**
  * One open workspace tab. All per-tab view state (selected session, file tabs,
@@ -49,9 +45,6 @@ export interface WorkspaceTabState {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   workItemKey: string | null;
-  /** When set, this tab is showing a just-triggered Loop run's launching
-   *  placeholder / status bar. Cleared once the run reaches a terminal state. */
-  loopPending?: { runId?: string; loopName: string; workspaceId: string };
   fileTabs: Tab[];
   activeFileTabId: string | null;
   rightPanelOpen: boolean;
@@ -179,7 +172,6 @@ export function useAppShellState() {
       try { localStorage.setItem(GLOBAL_PANEL_KEY, view); } catch { /* ignore */ }
       if (view === "settings") setSettingsPage("index");
     } else {
-      setLoopEditorOpen(false);
       if (activeWorkspace) {
         try { localStorage.setItem(`pi-active-view:${activeWorkspace.id}`, view); } catch { /* ignore */ }
       }
@@ -242,10 +234,6 @@ export function useAppShellState() {
       setWorkspaceSettingsName(null);
     }
   }, [sidebarView, settingsPage]);
-  // When true and the loop panel is active, the middle column shows the
-  // LoopConfig editor instead of the loop list (temporarily widened — see
-  // middleColumnWidth below; the widened value is derived, never persisted).
-  const [loopEditorOpen, setLoopEditorOpen] = useState(false);
   // Home create-workspace wizard — the one remaining WorkspaceManager modal
   // (creating a workspace is a focused flow; managing one lives in the
   // settings › workspace panel page).
@@ -268,7 +256,7 @@ export function useAppShellState() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // ---- Mobile focus signals ---------------------------------------------------
   // Cross-shell navigation intents. Shared handlers (session open, new session,
-  // loop trigger, create work item…) bump these; the mobile shell reacts by
+  // create work item…) bump these; the mobile shell reacts by
   // switching its active tab. The desktop shell ignores them (its center
   // column is always visible). Signals (not direct tab writes) keep this layer
   // shell-agnostic.
@@ -578,19 +566,14 @@ export function useAppShellState() {
       return;
     }
 
-    // Legacy URL views (settings / work-items / loops) map onto middle-column
-    // panels — the right column only knows overview/chat now.
+    // Legacy URL views (settings / work-items) map onto middle-column panels —
+    // the right column only knows overview/chat now.
     const panelFromLegacy: Partial<Record<string, SidebarView>> = {
       settings: "settings",
       "work-items": "work-items",
-      loops: "loop",
     };
-    let view: WorkspaceView = rawView === "chat" ? "chat" : "overview";
+    const view: WorkspaceView = rawView === "chat" ? "chat" : "overview";
     const legacyPanel = rawView ? panelFromLegacy[rawView] : undefined;
-    if (legacyPanel === "loop" && !workspace.capabilities.includes("loop")) {
-      // loop panel gated — fall through to overview
-      view = "overview";
-    }
     ensureTab(workspace);
     updateTab(workspaceId, {
       view,
@@ -601,7 +584,7 @@ export function useAppShellState() {
     // Persist the legacy deep-linked panel BEFORE activating the tab — the
     // activeWorkspace effect re-derives `sidebarView` from these keys on tab
     // switch and would otherwise clobber an immediate setState.
-    if (legacyPanel && (legacyPanel !== "loop" || workspace.capabilities.includes("loop"))) {
+    if (legacyPanel) {
       try {
         if (legacyPanel === "settings") localStorage.setItem(GLOBAL_PANEL_KEY, "settings");
         else localStorage.setItem(`pi-active-view:${workspaceId}`, legacyPanel);
@@ -669,10 +652,10 @@ export function useAppShellState() {
     navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`);
   }, [activeTabId, updateTab, navigateUrl, focusChat]);
 
-  // Loop 运行产生的 orchestrator 会话按 id 打开。走专门的 locate 端点：
-  // 优先 probe Loop Host 拿权威元信息（session 在 Host 进程里，它最先知道），
-  // Host 不可达/旧版本时回退到强制刷新磁盘扫描。两种路径都不依赖 30s 列表缓存，
-  // 所以刚触发的一轮能立刻打开，而不是“过一会才出现”。
+  // 按会话 id 打开（subagent 子会话 / 工作项关联会话）。走专门的 locate 端点：
+  // 优先 probe daemon 拿权威元信息（会话在 daemon 进程里，它最先知道），
+  // daemon 不可达/旧版本时回退到强制刷新磁盘扫描。两种路径都不依赖 30s 列表缓存，
+  // 所以新建的会话能立刻打开，而不是“过一会才出现”。
   const handleOpenLoopSession = useCallback((sessionId: string) => {
     void fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`)
       .then((r) => (r.ok ? (r.json() as Promise<{ session: SessionInfo }>) : null))
@@ -685,88 +668,6 @@ export function useAppShellState() {
       })
       .catch(() => {});
   }, [handleSelectSession]);
-
-  // ---- Loop 手动触发（v3：选品回合）-------------------------------------------
-  // 点击“运行一轮”时立即把当前 tab 切到 chat 并显示启动占位，不等 Loop Host 把
-  // 编排会话创建好。后台轮询 run；v3 的终态处理：seededSessionId 出现 → 自动打开
-  // 播种的执行会话（合同执行的入口）；无 seed（idle/park-all）→ 清占位，结果看
-  // Loop 视图的 run 记录（verdict 就在那里）。
-  const [loopRun, setLoopRun] = useState<LoopRun | null>(null);
-  // 轮询目标（显式状态而非派生：setLoopRun 每秒写新对象，若作 effect 依赖会把
-  // 轮询重置成 300ms 一发）。autoOpen=触发流：seed 一出现就自动切到执行会话。
-  const [loopPollTarget, setLoopPollTarget] = useState<{ workspaceId: string; runId: string } | null>(null);
-  const loopSeedAutoOpenedRef = useRef<string | null>(null);
-
-  const handleLoopTriggered = useCallback((loop: LoopDefinition) => {
-    if (!activeTabId) return;
-    const workspaceId = activeTabId;
-    // 点击瞬间同步切到 chat + 启动占位，不等 trigger POST 往返——这是“立即打开会话框”的关键。
-    setLoopRun({
-      id: "", workspaceId, loopId: loop.id, eventId: "", triggeredBy: "manual",
-      status: "queued", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    });
-    updateTab(workspaceId, {
-      view: "chat", session: null, newSessionCwd: null, workItemKey: null,
-      loopPending: { loopName: loop.name, workspaceId },
-    });
-    setSessionKey((k) => k + 1);
-    focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(workspaceId)}&view=chat`);
-    // 后台触发；runId 一返回就写进 loopPending，轮询 effect 随即接管。
-    void (async () => {
-      try {
-        const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/loop/loops/${encodeURIComponent(loop.id)}/trigger`, { method: "POST" });
-        if (!res.ok) throw new Error(`触发失败 (HTTP ${res.status})`);
-        const receipt = await res.json() as { runId: string };
-        updateTab(workspaceId, (tab) => (tab.loopPending ? { loopPending: { ...tab.loopPending, runId: receipt.runId } } : {}));
-        setLoopPollTarget({ workspaceId, runId: receipt.runId });
-      } catch (error) {
-        setLoopRun((cur) => (cur ? { ...cur, status: "failed", error: error instanceof Error ? error.message : String(error), finishedAt: new Date().toISOString() } : cur));
-        updateTab(workspaceId, { loopPending: undefined });
-        setLoopPollTarget(null);
-      }
-    })();
-  }, [activeTabId, updateTab, navigateUrl, focusChat]);
-
-  // 唯一的 run 轮询：loopPollTarget 存在且 run 未终态时每 1s 拉一次快照。终态时：
-  // 有 seededSessionId → 打开执行会话（ref 去重防抢焦点）；无 → 只清占位（verdict
-  // 在 Loop 视图 run 记录里看）。
-  useEffect(() => {
-    const target = loopPollTarget;
-    if (!target) return;
-    const base = `/api/workspaces/${encodeURIComponent(target.workspaceId)}/loop`;
-    let stopped = false;
-    const poll = async () => {
-      if (stopped) return;
-      try {
-        const res = await fetch(`${base}/runs/${encodeURIComponent(target.runId)}`);
-        if (!res.ok) { if (!stopped) setTimeout(poll, 2000); return; }
-        const { run } = await res.json() as { run: LoopRun };
-        if (stopped) return;
-        setLoopRun(run);
-        if (LOOP_TERMINAL.has(run.status)) {
-          setLoopPollTarget(null);
-          updateTab(target.workspaceId, { loopPending: undefined });
-          if (run.seededSessionId && loopSeedAutoOpenedRef.current !== run.seededSessionId) {
-            loopSeedAutoOpenedRef.current = run.seededSessionId;
-            handleOpenLoopSession(run.seededSessionId);
-          }
-        } else if (run.seededSessionId && loopSeedAutoOpenedRef.current !== run.seededSessionId) {
-          // Seed happens at round settle — effectively terminal for UX purposes.
-          loopSeedAutoOpenedRef.current = run.seededSessionId;
-          setLoopPollTarget(null);
-          updateTab(target.workspaceId, { loopPending: undefined });
-          handleOpenLoopSession(run.seededSessionId);
-        } else {
-          setTimeout(poll, 1000);
-        }
-      } catch {
-        if (!stopped) setTimeout(poll, 2000);
-      }
-    };
-    const timer = setTimeout(poll, 300);
-    return () => { stopped = true; clearTimeout(timer); };
-  }, [loopPollTarget, handleOpenLoopSession, updateTab]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
     const id = ensureTab(workspace);
@@ -1259,7 +1160,7 @@ export function useAppShellState() {
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd;
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null || Boolean(activeTab?.loopPending);
+  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   const settingsCwd = activeWorkspace?.path
     ?? selectedSession?.cwd
@@ -1376,8 +1277,6 @@ export function useAppShellState() {
     setSettingsPage,
     workspaceSettingsName,
     setWorkspaceSettingsName,
-    loopEditorOpen,
-    setLoopEditorOpen,
     workspaceManagerOpen,
     setWorkspaceManagerOpen,
     importPickerOpen,
@@ -1432,10 +1331,6 @@ export function useAppShellState() {
     setActiveTopPanel,
     topPanelPos,
     setTopPanelPos,
-    loopRun,
-    setLoopRun,
-    loopPollTarget,
-    setLoopPollTarget,
     handleOpenConfig,
     handleSidebarSwitchView,
     handleRailSwitch,
@@ -1475,8 +1370,6 @@ export function useAppShellState() {
     initialNavDoneRef,
     handleSelectSession,
     handleOpenLoopSession,
-    loopSeedAutoOpenedRef,
-    handleLoopTriggered,
     handleOpenWorkspace,
     handleOpenWorkspaceToChat,
     handleWorkspaceNewSession,

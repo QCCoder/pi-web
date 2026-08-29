@@ -9,8 +9,6 @@ import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
 import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
-import { LoopConfig } from "../LoopConfig";
-import { LoopLaunchingPlaceholder } from "../LoopLaunchOverlay";
 import { HomeLanding } from "../HomeLanding";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { ACTIVITY_VIEW_ORDER, SETTINGS_VIEW, type SidebarView } from "../ActivityBar";
@@ -22,20 +20,19 @@ import type { WorkspaceCapability } from "@/lib/workspaces/types";
 
 /**
  * The mobile tab keys. 工作台 is first (= the landing tab, Q4), 会话 second;
- * the capability modules (知识库/Loop/工作项) follow in ACTIVITY_VIEW_ORDER,
- * then 设置. Tapping a tab SWITCHES the main area (no drawer — Q1/Q3);
- * tapping the active tab is a no-op. Secondary pages (loop editor, archive)
- * live on a per-tab stack with a ‹返回 header (Q6); the settings and
- * work-items panels manage their own in-panel subpage navigation.
+ * the capability modules (知识库/工作项) follow in ACTIVITY_VIEW_ORDER, then
+ * 设置. Tapping a tab SWITCHES the main area (no drawer — Q1/Q3);
+ * tapping the active tab is a no-op. Secondary pages (archive) live on a
+ * per-tab stack with a ‹返回 header (Q6); the settings and work-items panels
+ * manage their own in-panel subpage navigation.
  */
-type MobileTab = "chat" | "workbench" | "knowledge" | "loop" | "work-items" | "settings";
+type MobileTab = "chat" | "workbench" | "knowledge" | "work-items" | "settings";
 
-const TAB_ORDER: MobileTab[] = ["chat", "workbench", "knowledge", "loop", "work-items", "settings"];
+const TAB_ORDER: MobileTab[] = ["chat", "workbench", "knowledge", "work-items", "settings"];
 
 /** Capability gating for the module tabs (workbench/chat/settings are always on). */
 const TAB_CAPABILITY: Partial<Record<MobileTab, WorkspaceCapability>> = {
   knowledge: "knowledge",
-  loop: "loop",
   "work-items": "work-items",
 };
 
@@ -117,14 +114,11 @@ export function MobileShell() {
     sessionActivity,
     modelsRefreshKey,
     sessionKey,
-    loopRun,
     effectiveNewSessionCwd,
     showChat,
     activeFileTab,
     chatFocusKey,
     panelFocus,
-    loopEditorOpen,
-    setLoopEditorOpen,
     settingsPage,
     setSettingsPage,
     settingsCwd,
@@ -134,7 +128,6 @@ export function MobileShell() {
     handleCreateWorkspace,
     handleReturnHome,
     handleOpenLoopSession,
-    handleLoopTriggered,
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
@@ -154,7 +147,6 @@ export function MobileShell() {
     handleContextUsageChange,
     chatInputRef,
     updateActiveTab,
-    loadWorkspaces,
     setRefreshKey,
     setImportPickerOpen,
     setOpenRepositoryFormRequest,
@@ -195,7 +187,6 @@ export function MobileShell() {
   }, [panelFocus]);
 
   // ---- Secondary pages (per-tab stack, Q6) ------------------------------------
-  // Loop editor: secondary page of the Loop tab, closed by ‹返回.
   // Archive: secondary page of the 设置 tab. The settings and work-items
   // panels own their internal subpage navigation (their embedded variants
   // already render index → subpage with in-panel back buttons).
@@ -204,10 +195,6 @@ export function MobileShell() {
   useEffect(() => {
     if (tab !== "settings") setArchiveOpen(false);
   }, [tab]);
-
-  const openLoopsPanel = useCallback(() => {
-    setLoopEditorOpen(true);
-  }, [setLoopEditorOpen]);
 
   // The knowledge panel's ＋ (add knowledge repo) routes to the settings tab's
   // 工作区 subpage with the repository form open — the mobile equivalent of the
@@ -237,9 +224,6 @@ export function MobileShell() {
             onSelectWorkspace={handleOpenWorkspace}
             onCreateWorkspace={handleCreateWorkspace}
             onImportDirectory={() => setImportPickerOpen(true)}
-            onOpenLoops={openLoopsPanel}
-            onOpenLoopSession={handleOpenLoopSession}
-            onTriggerLoop={handleLoopTriggered}
             onAddRepository={handleKnowledgeAddRepository}
             onNewSession={handleWorkspaceNewSession}
             onSelectSession={handleSelectSession}
@@ -265,47 +249,6 @@ export function MobileShell() {
             onSelectWorkspace={handleOpenWorkspace}
             onCreateWorkspace={handleCreateWorkspace}
             onImportDirectory={() => setImportPickerOpen(true)}
-            onOpenLoops={openLoopsPanel}
-            onOpenLoopSession={handleOpenLoopSession}
-            onTriggerLoop={handleLoopTriggered}
-            onAddRepository={handleKnowledgeAddRepository}
-            onNewSession={handleWorkspaceNewSession}
-            onSelectSession={handleSelectSession}
-            onOpenFile={handleOpenFile}
-            onSessionRemoved={(id) => {
-              updateActiveTab((current) => (current.session?.id === id ? { session: null } : {}));
-              setRefreshKey((k) => k + 1);
-            }}
-          />
-        );
-      case "loop":
-        if (loopEditorOpen && activeWorkspace?.capabilities.includes("loop")) {
-          return (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader title="Loop 管理" onBack={() => setLoopEditorOpen(false)} backLabel="返回" />
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                <LoopConfig workspace={activeWorkspace} onWorkspaceChanged={() => void loadWorkspaces()} onTriggered={handleLoopTriggered} />
-              </div>
-            </div>
-          );
-        }
-        return (
-          <WorkspaceSidebar
-            activeWorkspace={activeWorkspace}
-            activeView="loop"
-            workspaces={workspaces}
-            selectedSessionId={selectedSession?.id ?? null}
-            runningSessionIds={sessionActivity.runningIds}
-            completedSessionIds={sessionActivity.completedIds}
-            allSessions={sessionActivity.sessions}
-            refreshKey={refreshKey}
-            explorerRefreshKey={explorerRefreshKey}
-            onSelectWorkspace={handleOpenWorkspace}
-            onCreateWorkspace={handleCreateWorkspace}
-            onImportDirectory={() => setImportPickerOpen(true)}
-            onOpenLoops={openLoopsPanel}
-            onOpenLoopSession={handleOpenLoopSession}
-            onTriggerLoop={handleLoopTriggered}
             onAddRepository={handleKnowledgeAddRepository}
             onNewSession={handleWorkspaceNewSession}
             onSelectSession={handleSelectSession}
@@ -336,8 +279,7 @@ export function MobileShell() {
               onOpenConversation={handleOpenLoopSession}
               onWorkspaceDeleted={handleWorkspaceDeleted}
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-              onWorkspaceChanged={() => void loadWorkspaces()}
-            />
+                />
           </div>
         );
       case "settings":
@@ -375,8 +317,7 @@ export function MobileShell() {
                 onOpenConversation={handleOpenLoopSession}
                 onWorkspaceDeleted={handleWorkspaceDeleted}
                 onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-                onWorkspaceChanged={() => void loadWorkspaces()}
-              />
+                    />
             ) : null}
             onOpenArchive={activeWorkspace ? () => setArchiveOpen(true) : undefined}
             onWorkspaceSkillsChange={(updated) => {
@@ -395,9 +336,6 @@ export function MobileShell() {
   };
 
   const renderChatTab = () => {
-    if (activeTab?.loopPending && !selectedSession) {
-      return <LoopLaunchingPlaceholder name={activeTab.loopPending.loopName} status={loopRun?.status} error={loopRun?.error} />;
-    }
     // No open session → render the fresh-session composer directly (user
     // feedback round 1: no placeholder page). ChatWindow only creates the
     // .jsonl when the first message is sent, so this never litters sessions.

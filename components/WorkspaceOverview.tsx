@@ -4,12 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
-import type { LoopDefinition, LoopRun } from "@/lib/loop/types";
 import { STATUS_LABELS } from "./WorkspaceManager";
 import { useIsMobile } from "@/hooks/useIsMobile";
-
-/** A run merged across loops, carrying its owning loop's display name. */
-type LoopRunWithName = LoopRun & { loopName: string };
 
 interface Props {
   workspace: WorkspaceSummary;
@@ -18,12 +14,6 @@ interface Props {
   onOpenWorkItems: () => void;
   onCreateWorkItem: (type: WorkItemType) => void;
   onSelectSession: (session: SessionInfo) => void;
-  /** Open the Loop management view (center panel). */
-  onOpenLoops: () => void;
-  /** Manual-trigger a loop definition (AppShell's handleLoopTriggered). */
-  onTriggerLoop: (loop: LoopDefinition) => void;
-  /** Open a Loop orchestrator / seeded execution session by id (locate pipeline). */
-  onOpenLoopSession: (sessionId: string) => void;
   /** Navigate the sidebar's focused Activity Bar view (仓库 rows → 工作台文件区, 知识库 row). */
   onSwitchSidebarView: (view: "workbench" | "knowledge") => void;
   /** Open the workspace settings' add-repository form (AppShell wires it). */
@@ -42,12 +32,6 @@ function formatRelativeTime(dateStr: string): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days} 天前`;
   return new Date(dateStr).toLocaleDateString();
-}
-
-function formatRunTime(dateStr: string): string {
-  const date = new Date(dateStr);
-  if (Number.isNaN(date.getTime())) return "—";
-  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 const sectionStyle: React.CSSProperties = { marginTop: 26 };
@@ -96,13 +80,6 @@ const emptyHintStyle: React.CSSProperties = {
   borderRadius: 10,
 };
 
-/** Loop run rows reuse the sidebar's run-record dot colors. */
-function loopRunDotColor(status: LoopRun["status"]): string {
-  return status === "failed" ? "#e5484d"
-    : status === "running" || status === "queued" ? "#22c55e"
-    : "#16a34a";
-}
-
 export function WorkspaceOverview({
   workspace,
   onNewSession,
@@ -110,9 +87,6 @@ export function WorkspaceOverview({
   onOpenWorkItems,
   onCreateWorkItem,
   onSelectSession,
-  onOpenLoops,
-  onTriggerLoop,
-  onOpenLoopSession,
   onSwitchSidebarView,
   onAddRepository,
   onSessionDeleted,
@@ -121,14 +95,10 @@ export function WorkspaceOverview({
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  // Loop 动态：先拉定义，再按启用中的 loop（按名称取前 3 个）拉运行记录。
-  const [loops, setLoops] = useState<LoopDefinition[]>([]);
-  const [loopRuns, setLoopRuns] = useState<LoopRunWithName[]>([]);
 
   const hasWorkItems = workspace.capabilities.includes("work-items");
   const hasRepositories = workspace.capabilities.includes("repositories");
   const hasKnowledge = workspace.capabilities.includes("knowledge");
-  const hasLoop = workspace.capabilities.includes("loop");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -167,60 +137,6 @@ export function WorkspaceOverview({
     return () => controller.abort();
   }, [workspace.id, hasWorkItems, hasRepositories, hasKnowledge]);
 
-  useEffect(() => {
-    if (!hasLoop) {
-      setLoops([]);
-      setLoopRuns([]);
-      return;
-    }
-    const controller = new AbortController();
-    void fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loop/loops`, {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) return [];
-        const data = await response.json() as { loops?: LoopDefinition[] };
-        return data.loops ?? [];
-      })
-      .then((definitions) => setLoops(definitions))
-      .catch((error) => {
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
-          console.error("Failed to load workspace loops:", error);
-        }
-      });
-    return () => controller.abort();
-  }, [workspace.id, hasLoop]);
-
-  // Runs: fetch only for ENABLED loops, capped at the first 3 by name; merge all
-  // runs sorted by startedAt desc and keep the top 5.
-  useEffect(() => {
-    const enabled = loops
-      .filter((loop) => loop.enabled)
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .slice(0, 3);
-    if (enabled.length === 0) {
-      setLoopRuns([]);
-      return;
-    }
-    const controller = new AbortController();
-    void Promise.all(enabled.map((loop) =>
-      fetch(
-        `/api/workspaces/${encodeURIComponent(workspace.id)}/loop/runs?loopId=${encodeURIComponent(loop.id)}`,
-        { signal: controller.signal },
-      )
-        .then((response) => (response.ok ? response.json() as Promise<{ runs?: LoopRun[] }> : { runs: [] }))
-        .catch(() => ({ runs: [] as LoopRun[] })),
-    )).then((all) => {
-      const nameById = new Map(loops.map((loop) => [loop.id, loop.name]));
-      const merged: LoopRunWithName[] = all
-        .flatMap((payload) => payload.runs ?? [])
-        .map((run) => ({ ...run, loopName: nameById.get(run.loopId) ?? run.loopId }));
-      merged.sort((left, right) => right.startedAt.localeCompare(left.startedAt));
-      setLoopRuns(merged.slice(0, 5));
-    }).catch(() => { /* keep whatever was loaded */ });
-    return () => controller.abort();
-  }, [loops, workspace.id]);
-
   const wsPath = workspace.path.replace(/\/+$/, "");
   const recentSessions = useMemo(() => {
     const path = workspace.path;
@@ -228,7 +144,6 @@ export function WorkspaceOverview({
     return sessions
       .filter((session) =>
         !session.subagentChild
-        && !session.loopOrchestrator
         && (
           session.cwd === path
           || session.cwd.startsWith(prefix)
@@ -260,13 +175,6 @@ export function WorkspaceOverview({
     () => repositories.filter((repository) =>
       repository.kind === "knowledge" && repository.status === "active").length,
     [repositories],
-  );
-
-  // Quick action — Loop: exactly one enabled loop → direct trigger; more →
-  // manage; none → nothing.
-  const enabledLoops = useMemo(
-    () => loops.filter((loop) => loop.enabled),
-    [loops],
   );
 
   return (
@@ -334,58 +242,6 @@ export function WorkspaceOverview({
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
               新建工作项
-            </button>
-          )}
-          {hasLoop && enabledLoops.length === 1 && (
-            <button
-              onClick={() => onTriggerLoop(enabledLoops[0])}
-              title={`手动触发一轮 ${enabledLoops[0].name}`}
-              style={{
-                flex: "0 1 auto",
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "13px 16px",
-                border: "1px solid var(--border)",
-                borderRadius: 10,
-                background: "var(--bg-panel)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontWeight: 600,
-                fontSize: 14,
-              }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="6 3 20 12 6 21 6 3" />
-              </svg>
-              触发 Loop
-            </button>
-          )}
-          {hasLoop && enabledLoops.length > 1 && (
-            <button
-              onClick={onOpenLoops}
-              style={{
-                flex: "0 1 auto",
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "13px 16px",
-                border: "1px solid var(--border)",
-                borderRadius: 10,
-                background: "var(--bg-panel)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontWeight: 600,
-                fontSize: 14,
-              }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="17 1 21 5 17 9" />
-                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-                <polyline points="7 23 3 19 7 15" />
-                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-              </svg>
-              管理 Loop
             </button>
           )}
         </div>
@@ -457,96 +313,6 @@ export function WorkspaceOverview({
                   </span>
                 </button>
               ))
-            )}
-          </section>
-        )}
-
-        {/* Loop activity */}
-        {hasLoop && (
-          <section style={sectionStyle}>
-            <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px" }}>
-              Loop 动态
-              <span style={{ flex: 1 }} />
-              <button onClick={onOpenLoops} style={sectionHeaderLinkStyle}>管理</button>
-            </h2>
-            {loopRuns.length === 0 ? (
-              <div style={emptyHintStyle}>暂无 Loop 运行记录</div>
-            ) : (
-              loopRuns.map((run) => {
-                const openTarget = run.seededSessionId ?? run.sessionId;
-                return (
-                  <button
-                    key={run.id}
-                    onClick={() => openTarget && onOpenLoopSession(openTarget)}
-                    disabled={!openTarget}
-                    title={openTarget ? (run.seededSessionId ? "打开执行会话" : "打开选品会话") : "会话尚未创建"}
-                    style={{
-                      ...cardRowStyle,
-                      cursor: openTarget ? "pointer" : "default",
-                      opacity: openTarget ? 1 : 0.6,
-                    }}
-                    onMouseEnter={(e) => { if (openTarget) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: "50%",
-                        background: loopRunDotColor(run.status),
-                        flexShrink: 0,
-                        boxShadow: run.status === "running" || run.status === "queued"
-                          ? "0 0 0 3px rgba(34,197,94,0.18)"
-                          : "none",
-                      }}
-                    />
-                    <span
-                      style={{
-                        flexShrink: 0,
-                        maxWidth: 180,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontSize: 13,
-                      }}
-                    >
-                      {run.loopName}
-                    </span>
-                    <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                      {formatRunTime(run.startedAt)}
-                    </span>
-                    {run.seededSessionId && (
-                      <span
-                        style={{
-                          flexShrink: 0,
-                          padding: "1px 6px",
-                          borderRadius: 5,
-                          border: "1px solid var(--border)",
-                          color: "var(--accent)",
-                          fontSize: 11,
-                        }}
-                      >
-                        已播种
-                      </span>
-                    )}
-                    <span
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontSize: 11,
-                        color: "var(--text-dim)",
-                        textAlign: "right",
-                      }}
-                    >
-                      {run.seedRefused ? `播种被拒：${run.seedRefused}` : (run.verdict || run.progress || "—")}
-                    </span>
-                  </button>
-                );
-              })
             )}
           </section>
         )}

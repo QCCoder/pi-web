@@ -6,8 +6,8 @@ import type { ReactNode } from "react";
  * The unified ~36px header of every middle-column panel (three-column layout
  * consensus): title + optional back link + optional context actions + optional
  * overlay close (mobile full-screen panels). One visual spec for native panels
- * (workbench / knowledge / loop list) and slot panels (settings / archive /
- * work-items manager / loop editor) alike — the header follows content
+ * (workbench / knowledge) and slot panels (settings / archive /
+ * work-items manager) alike — the header follows content
  * ownership: whoever renders the panel content renders its PanelHeader.
  */
 export function PanelHeader({

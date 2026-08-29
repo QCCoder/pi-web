@@ -51,7 +51,7 @@ test("workspace selection always lands on the unconditional overview dashboard",
   assert.doesNotMatch(appShellSource, /directoryMode|requestedCwd/);
 });
 
-test("activity bar order is 工作台 → 知识库 → Loop → 工作项 (standalone 仓库 view removed)", () => {
+test("activity bar order is 工作台 → 知识库 → 工作项 (standalone 仓库/Loop views removed)", () => {
   // The MODULE group only — the config/archive/settings defs live outside
   // ACTIVITY_VIEW_ORDER (slice up to the first config-view def).
   const orderBlock = activityBarSource.slice(
@@ -59,7 +59,7 @@ test("activity bar order is 工作台 → 知识库 → Loop → 工作项 (stan
     activityBarSource.indexOf("RAIL_GLOBAL_VIEWS"),
   );
   const views = [...orderBlock.matchAll(/view: "([a-z-]+)",/g)].map((m) => m[1]);
-  assert.deepEqual(views, ["workbench", "knowledge", "loop", "work-items"]);
+  assert.deepEqual(views, ["workbench", "knowledge", "work-items"]);
   // workbench is always-on (capability: null) and labeled 工作台.
   assert.match(activityBarSource, /view: "workbench",\s*capability: null,\s*label: "工作台"/);
 });
@@ -114,14 +114,11 @@ test("workspace sidebar renders the merged workbench view with collapsible secti
   assert.match(workspaceSidebarSource, /activeView: SidebarView;/);
 });
 
-test("workspace overview dashboard surfaces work items, loop activity, and repositories", () => {
+test("workspace overview dashboard surfaces work items and repositories", () => {
   assert.match(workspaceOverviewSource, /活跃工作项/);
-  assert.match(workspaceOverviewSource, /Loop 动态/);
-  assert.match(workspaceOverviewSource, /暂无 Loop 运行记录/);
-  assert.match(workspaceOverviewSource, /已播种/);
   assert.match(workspaceOverviewSource, /onSwitchSidebarView/);
-  assert.match(workspaceOverviewSource, /onTriggerLoop/);
-  assert.match(workspaceOverviewSource, /onOpenLoops/);
+  // The loop-kit teardown removed the Loop section and its trigger/manage actions.
+  assert.doesNotMatch(workspaceOverviewSource, /Loop 动态|onTriggerLoop|onOpenLoops/);
   // The 3-card stat strip is gone (replaced by richer sections).
   assert.doesNotMatch(workspaceOverviewSource, /StatCard/);
   // The removed 仓库 sidebar view's add/manage entry lives here now: repo rows
