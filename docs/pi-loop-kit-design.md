@@ -234,6 +234,7 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 ## 11. 验收标准
 
 1. **新 workspace 冒烟**：创建 → 复制 kit 模板 → 下一心跳自动起轮，STATE.md 出现首轮记录，第二轮接续；
+   > ✅ 2026-08-29 已验证（feature/loop-kit 分支）：scratch workspace（kit-smoke，L1，cron `* * * * *`）两轮接续（16:48/16:49），STATE.md 记 `Last run · outcome: report-only`，两轮会话均被 D9 钩子自动归档（命名 `smoke · <slot>`），`loop-pause-all` 后两分钟槽零起轮，无旗子对照 130s 零起轮、v3 无扰。
 2. **workspace-c 全流程**：禅道 REQ 进来 → 心跳轮拾取 → maker/checker → gate 以 events.jsonl 里程碑 + STATE.md 形式问人 → 人工答复继续 → 完成；全程无 orchestrator session、无 RUNS.jsonl；
 3. **GitHub demo 仓库**：Actions cron + `pi -p` + 社区 subagent 包跑通一个 triage 循环（L1）；
 4. **拆除完成**：pi-web `npm test` / typecheck 全绿；loop 入口 UI 消失；存量 workspace manifest 的 `loop` 能力被读路径剥离；

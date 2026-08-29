@@ -6,6 +6,7 @@ import { createLoopRoutes } from "../loop/http.ts";
 import { PiWorkspaceResolver } from "../loop/workspace-resolver.ts";
 import { ImporterScheduler } from "../work-items/importers/scheduler.ts";
 import { createImporterRoutes } from "../work-items/importers/http.ts";
+import { LoopKitSpawner } from "./loop-spawner.ts";
 import { createSessionsRoutes } from "./http-sessions.ts";
 import { daemonErrorStatus, sendJson, type DaemonRouteHandler } from "./http.ts";
 import { DaemonJobRegistry } from "./jobs.ts";
@@ -42,6 +43,11 @@ export function createDaemon() {
   const jobs = new DaemonJobRegistry();
   jobs.register(new LoopHostScheduler(runtime, workspaces)); // id: loop-triggers
   jobs.register(new ImporterScheduler()); // id: importer-sync
+  // pi-loop kit spawner（design: docs/pi-loop-kit-design.md）。Phase 1 与 v3
+  // 引擎并存，PI_LOOP_KIT=1 门控；拆除 PR 中同槽位转正（替换 loop-triggers）。
+  if (process.env.PI_LOOP_KIT === "1") {
+    jobs.register(new LoopKitSpawner()); // id: loop-kit-heartbeats
+  }
 
   // ---- Route chain --------------------------------------------------------
   const sessionsRoutes = createSessionsRoutes({
