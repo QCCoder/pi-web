@@ -1167,7 +1167,10 @@ export function WorkspaceManager({
                         待裁决
                       </span>
                     )}
-                    {onRunContract && selectedWorkspace.capabilities.includes("loop") && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" ? (
+                    {/* The `loop` capability is retired (read-path strip, lib/workspaces/service.ts) —
+                        parsed manifests can no longer carry it, so this gate keeps the run-contract
+                        button hidden until Task 4 of the kit teardown re-gates it on kit-declared loops. */}
+                    {onRunContract && (selectedWorkspace.capabilities as readonly string[]).includes("loop") && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" ? (
                       selectedWorkItem.item.conversations.length === 0 ? (
                         <button
                           className="workspace-action"

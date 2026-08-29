@@ -6,6 +6,14 @@ import { readLoopDefinition } from "@/lib/loop/store";
 import { loopErrorResponse } from "@/lib/loop/web";
 import { getWorkspace } from "@/lib/workspaces/service";
 
+/** Legacy check: the `loop` workspace capability is retired (read-path strip —
+ *  see LEGACY_READ_CAPABILITIES in lib/workspaces/service.ts), so parsed
+ *  manifests can never carry it and this gate now always refuses. The whole v3
+ *  loop route tree is deleted in kit-teardown Task 5. */
+function loopCapabilityMissing(manifest: { capabilities: string[] }): boolean {
+  return !manifest.capabilities.includes("loop");
+}
+
 type Params = { params: Promise<{ id: string; loopId: string }> };
 
 /** GET single loop + raw LOOP.md text (for the edit dialog). */
@@ -13,7 +21,7 @@ export async function GET(_request: Request, { params }: Params) {
   try {
     const { id, loopId } = await params;
     const { path, manifest } = await getWorkspace(id);
-    if (!manifest.capabilities.includes("loop")) {
+    if (loopCapabilityMissing(manifest)) {
       return NextResponse.json({ error: "loop capability is not enabled" }, { status: 409 });
     }
     const loop = await readLoopDefinition({ id: manifest.id, name: manifest.name, path }, loopId);
@@ -38,7 +46,7 @@ export async function PATCH(request: Request, { params }: Params) {
   try {
     const { id, loopId } = await params;
     const { path, manifest } = await getWorkspace(id);
-    if (!manifest.capabilities.includes("loop")) {
+    if (loopCapabilityMissing(manifest)) {
       return NextResponse.json({ error: "loop capability is not enabled" }, { status: 409 });
     }
     const loop = await updateLoopDefinition(
@@ -57,7 +65,7 @@ export async function DELETE(_request: Request, { params }: Params) {
   try {
     const { id, loopId } = await params;
     const { path, manifest } = await getWorkspace(id);
-    if (!manifest.capabilities.includes("loop")) {
+    if (loopCapabilityMissing(manifest)) {
       return NextResponse.json({ error: "loop capability is not enabled" }, { status: 409 });
     }
     await deleteLoopDefinition({ id: manifest.id, name: manifest.name, path }, loopId);
