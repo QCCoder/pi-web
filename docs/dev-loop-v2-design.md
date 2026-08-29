@@ -1,3 +1,6 @@
+> **已退役（2026-09）**：v3 loop 引擎已被 pi-loop kit 取代，本文仅作历史参考。
+> 现行设计见 `docs/pi-loop-kit-design.md`。
+
 # dev Loop v2：动态编排 + 学习整备 设计稿
 
 日期：2026-08-19 · 状态：待评审 · 前身：`docs/autonomous-dev-loop.md` §7（dev Loop）

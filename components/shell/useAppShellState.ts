@@ -207,9 +207,9 @@ export function useAppShellState() {
   const sessionActivity = useSessionActivity(selectedSession?.id ?? null, refreshKey);
   // Running-id 集来自 session daemon 的 SSE（/api/agent/running/events 代理它的
   // /v1/sessions/running/events）。daemon 的注册表按真 session id 存交互会话、
-  // subagent child 和 loop orchestrator —— 单一集合就是完整答案，不再需要
+  // subagent child 和 kit 轮会话 —— 单一集合就是完整答案，不再需要
   // 客户端把「pin 住的 loop 会话」合并进来（那套合并存在的原因是 web 进程的
-  // running 集永远不含 Loop-Host 会话）。
+  // running 集永远不含 daemon 会话）。
   // 全局 SSE：为每个 running session 维护一条事件流，后台 session 事件不丢（决策 8 / B4b）。
   useGlobalAgentEvents(sessionActivity.runningIds);
   const [sessionKey, setSessionKey] = useState(0);
@@ -897,9 +897,9 @@ export function useAppShellState() {
     // (the button itself lives inside the portaled work-item detail).
     setConfigView(null);
     setWorkItemDetail(null);
-    // Latest conversation first: a loop-seeded execution session is APPENDED to
-    // `conversations`, so the most recent entry is the live/latest contract
-    // run. Resolve via /locate (daemon probe + forced disk scan) — never the
+    // Latest conversation first: a kit round (or run-contract prefill) session is
+    // APPENDED to `conversations`, so the most recent entry is the live/latest
+    // contract run. Resolve via /locate (daemon probe + forced disk scan) — never the
     // 30s-cached /api/sessions list, which misses freshly seeded sessions.
     for (let index = item.conversations.length - 1; index >= 0; index -= 1) {
       const conversationId = item.conversations[index];
@@ -1093,7 +1093,7 @@ export function useAppShellState() {
 
   // Open a (subagent) session in the right split pane as a closable tab, so the
   // main conversation stays put. Mirrors handleOpenFile but for sessions.
-  // Resolves the id via the locate endpoint (Loop-Host probe first, then a
+  // Resolves the id via the locate endpoint (daemon probe first, then a
   // FORCED disk scan) — NOT the cached /api/sessions list: a freshly spawned
   // running subagent isn't in the 30s list cache yet, and the old list lookup
   // made the click silently do nothing until the cache caught up (felt like

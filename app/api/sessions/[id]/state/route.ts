@@ -14,7 +14,7 @@ export async function GET(
 
     // Pure proxy over the session daemon (C2): it owns every live session, so
     // it is the only place to ask. `loopOwned: true` here means "live in the
-    // daemon" (orchestrator, subagent child, or interactive session) — the
+    // daemon" (kit round, subagent child, or interactive session) — the
     // client pins such a viewed session so its event stream survives the
     // running-set sweep even while it is idle-warm between turns.
     const client = await daemonProxy();

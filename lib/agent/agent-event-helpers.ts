@@ -74,7 +74,7 @@ export function userMessageKey(message: Partial<AgentMessage>): string {
 }
 
 /** 按toolCallId 在消息流里反查工具名（归一后的 assistant toolCall 块）。中途接入
- *  SSE 的观看者（Loop orchestrator 会话）没看到 tool_execution_start，只有
+ *  SSE 的观看者（daemon 会话）没看到 tool_execution_start，只有
  *  tool_execution_update partial —— 用它把 phase 升级成 running_tools 时需要名字。 */
 export function findToolNameById(messages: AgentMessage[], toolCallId: string): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {

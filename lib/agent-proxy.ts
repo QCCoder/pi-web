@@ -4,8 +4,8 @@ import { daemonClient } from "./daemon/client.ts";
 export { daemonClient };
 
 /** Map a session-daemon error to an HTTP status for proxy routes.
- *  DaemonHttpError carries the daemon's status (404 session-not-found, 409
- *  orchestrator-owned); transport failures map to 503 so the client can
+ *  DaemonHttpError carries the daemon's status (404 session-not-found);
+ *  transport failures map to 503 so the client can
  *  distinguish "daemon down" from "session gone". */
 export function daemonErrorStatus(error: unknown): number {
   if (error && typeof error === "object" && "status" in error && typeof (error as { status: unknown }).status === "number") {

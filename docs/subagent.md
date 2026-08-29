@@ -66,7 +66,7 @@ out of the box.
 The tool result `details` carries `childSessionId` (single) or
 `results[].childSessionId` (parallel). `MessageView` renders an "open subagent →"
 link for `subagent` tool results; clicking opens the child session tab
-(`AppShell.handleOpenLoopSession`).
+(`AppShell.handleOpenConversation`).
 
 ## Module layout
 

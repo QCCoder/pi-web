@@ -1,3 +1,6 @@
+> **已退役（2026-09）**：v3 loop 引擎已被 pi-loop kit 取代，本文仅作历史参考。
+> 现行设计见 `docs/pi-loop-kit-design.md`。
+
 # Loop Runtime（v3）
 
 `pi-loop` 是独立于 Pi Web 的本地常驻进程（同时是 THE session daemon，见根 AGENTS.md「session daemon」节）。v3 起 Loop 的职责收窄为**选品 + 播种**：一轮 run 就是一次短的选品回合；真正的执行是挂在**工作项上的普通会话**，装载该工作区自己的 dev-loop skill 合同（`docs/dev-loop-v3-design.md`）。

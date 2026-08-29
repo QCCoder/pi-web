@@ -10,7 +10,7 @@ const SSE_HEADERS = {
 
 // GET /api/agent/[id]/events - SSE stream of agent events.
 // Pure proxy over the session daemon (C2). The daemon serves live sessions
-// (interactive, subagent children, loop orchestrators — all in its registry)
+// (interactive, subagent children, kit loop rounds — all in its registry)
 // and cold-starts idle ones from their .jsonl for viewing, mirroring the
 // semantics this route used to implement locally. `req.signal` propagates the
 // client disconnect upstream so both sides tear down together.

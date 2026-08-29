@@ -12,8 +12,8 @@ export const dynamic = "force-dynamic";
  *  Used by `handleOpenConversation` (work-item linked conversations, opened
  *  by id) and `handleOpenSessionViewer` (subagent children). Two sources,
  *  in order of authority:
- *    1. daemon probe — the orchestrator session physically lives in the daemon
- *       Host process, which knows its cwd + sessionFile immediately.
+ *    1. daemon probe — a live session (kit round / subagent child) physically
+ *       lives in the daemon, which knows its cwd + sessionFile immediately.
  *    2. Session index — mtime-incremental over `~/.pi/agent/sessions` (active +
  *       `.archived/`), so a freshly written .jsonl resolves without a full disk
  *       scan and WITHOUT invalidating the (cheap) list cache.
@@ -56,11 +56,11 @@ export async function GET(
         projectRoot: meta.cwd ?? "",
       };
       // Best-effort enrich from the index: the probe carries no
-      // firstMessage/stats, and the .jsonl (orchestrator or running subagent
+      // firstMessage/stats, and the .jsonl (kit round or running subagent
       // child) usually exists already — real stats make the tab label
       // meaningful. Keep the probe's authoritative path/cwd when it has them
-      // (live wrapper); a COLD orchestrator probe (gate-paused after a host
-      // restart) has neither — then the index's values are the authority.
+      // (live wrapper); a COLD probe hit (idle-warm gate-paused session after
+      // a daemon restart) has neither — then the index's values are the authority.
       const onDisk = await sessionInfoFromIndex(id);
       // Seed the path cache from the probe even when the index misses: a
       // freshly spawned subagent child's .jsonl may not exist yet (pi creates
