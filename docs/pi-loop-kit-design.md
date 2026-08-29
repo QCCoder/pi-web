@@ -1,6 +1,6 @@
 # pi-loop kit 设计文档
 
-> 状态：设计评审中（2026-09）
+> 状态：已评审定稿（2026-09；评审决议 D9–D14 已并入正文）
 > 背景：用 loop-engineering（cobusgreyling/loop-engineering，10.7k★）的设计理念，替换 pi-web 现有 v3 loop 引擎。
 > 决策记录见本文档末尾"已确认决策"。
 
@@ -51,6 +51,7 @@ loop-engineering 的解法是**文件即程序**：协议文件（LOOP.md/STATE.
 loops/<loop-name>/
   LOOP.md            # 声明 + 合同指针（见下）
   STATE.md           # 记忆脊柱：每轮读写，唯一运行状态
+  PAUSED             # 暂停标记（可选，存在即跳过起轮，见 §7）
 loop-constraints.md  # 绑定约束（宪法文件，agent 禁改）
 loop-budget.md       # token/轮数预算（宪法文件，agent 禁改）
 loop-ledger.json     # 断路器账本（agent 可追加，禁删改历史）
@@ -59,6 +60,8 @@ loop-ledger.json     # 断路器账本（agent 可追加，禁删改历史）
 .pi/settings.json                    # packages 依赖（pin 版本，项目信任后 pi 自动安装）
 .github/workflows/loop.yml           # 仅 GitHub 托管仓库生成；workspace 不需要
 ```
+
+**共享语义（评审决议 D13）**：三份宪法文件与账本位于仓库/workspace **根**，被该根下所有 loop **共享**——`loop-budget.md` 是全 workspace 的总帽（所有 loop 合计），STATE.md 的 `[BUDGET]` 节只是本轮视角的自报快照，**不是权威计数**（phase 2 由 spawner 对账 ledger 后回写）。
 
 ### LOOP.md 格式
 
@@ -124,6 +127,8 @@ Last run: <ISO 时间> · outcome: report-only|escalated|failed
 
 workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装配（work-items 工具、kb_search、角色目录注入）。这**不是** v3 复辟——没有 orchestrator 索引、没有 seed 二段跳、没有 RUNS.jsonl，AgentSession 跑完一轮自然销毁。
 
+**subagent 装配（评审决议 D10）**：daemon 轮一律使用 pi-web **内置** `subagent` 扩展（rpc-manager 全局挂载现状不变，phase 2 才整体切换社区包）；`@henryqw/pi-subagent` 等**只在 GitHub Actions 场景**经 `.pi/settings.json` 声明。同会话双 subagent 工具的命名冲突因此不存在，daemon 无头环境下 `.pi/settings.json` 自动装包所需的项目信任问题也一并规避。
+
 ### 单轮生命周期
 
 ```
@@ -134,6 +139,8 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
   → /skill:<pattern> 执行（L1 只写；L2 worktree+maker/checker+draft 分支；L3 同 L2 但可自动合并白名单路径）
   → 更新 STATE.md + 追加 ledger
   → 进程退出（超时由 spawner/Actions 强制 SIGTERM）
+  → 【仅 daemon 场景】spawner 事后钩子：回填 conversations 链接 +
+     无待决 gate 则自动归档轮会话（见 §9 spawner）
 ```
 
 无状态恢复问题：轮进程崩溃 → 下轮冷启动读 STATE.md 自然接续（v3 的双开 guard/僵尸收割问题在"每轮短进程"模型下天然消失；孤儿 bash 树问题仅 L2+ 存在，由 constraints 的 worktree 纪律 + 超时强杀兜底）。
@@ -164,7 +171,7 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 - **L2 assisted**：可改代码，硬规则：worktree 隔离 → maker/checker 分离（checker 不得由 maker 同角色兼任）→ 只开 draft 分支/PR，人类合并。
 - **L3 unattended**：解锁条件 = L2 连续 7 天 verifier 通过、零 escalated 误判；即使 L3 也只允许自动合并 gate.yaml 式白名单路径（docs/测试）。
 - **晋级**：人类手动改 LOOP.md 的 level——晋级条件与"agent 禁自改宪法"写进 SKILL.md 硬条款。
-- **Kill switch**：STATE.md 头部 `paused: true` 或根目录 `loop-pause-all` 文件存在 → 本轮立即退出（spawner 也可识别跳过起轮）。
+- **Kill switch**（评审决议 D12）：`loops/<name>/PAUSED` 标记文件（单 loop 暂停）或根目录 `loop-pause-all`（全停）存在 → spawner 识别并跳过起轮；已在跑的轮读到标记立即收尾退出。标记文件与 kit"文件即声明"习惯一致（存在即生效，机器解析无歧义）。
 - **Post-run critique**：每轮 STATE.md 复盘节必填（误报/重复项/下轮一个调整）——喂 workspace 的 LEARN 机制。
 
 ## 8. workspace-c 迁移路径
@@ -179,9 +186,10 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
    - 双开 guard / `loop.active_session` 戳删除——由"每轮短进程 + STATE.md 记录当前持有项"替代。
 2. `loops/dev-loop/LOOP.md` 换 kit 格式（cron/level=L2 起步——迁移例外：dev-loop 已在 v3 真实运行多月，视为已过 L1 验证；全新 loop 一律 L1 起步/max_minutes=45）；
 3. 新增 STATE.md（从现有 LEARN/ 与最近 run 记录初始化 Watch List）、loop-constraints.md（从 workspace AGENTS.md 的硬不变量抽取）、loop-budget.md、loop-ledger.json；
-4. `.pi/agents/` 五角色保留，subagent 工具从 pi-web 内置切到社区包（或审计期的兜底包）；
+4. `.pi/agents/` 五角色保留，subagent 工具**沿用 pi-web 内置扩展**（daemon 全局挂载不变，见 §5 评审决议 D10）；workspace-c 的 `.pi/settings.json` **不**声明 subagent 包；
 5. 角色注入：v3 的 `extraAgentDirs` 机制保留（daemon 装配路径不变），GitHub repo 场景靠 `.pi/agents/` 原生发现；
-6. 迁移当天禅道 importer 无感（独立 DaemonJob，不动）。
+6. 迁移当天禅道 importer 无感（独立 DaemonJob，不动）；
+7. 旧 `loop.yaml` / `RUNS.jsonl` 原地保留不再读取（git 历史即审计），不迁移不删除。
 
 ## 9. pi-web 拆除清单
 
@@ -189,13 +197,17 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 - `lib/loop/`：`runtime.ts`、`pi-execution.ts`、`seed.ts`、`store.ts`、`session-tags.ts`（orchestrator 隐藏）；
   `process-cleanup.ts` 的跨 workspace 孤儿扫描删除——但**进程组强杀逻辑收窄保留**：并入 spawner 的超时路径（对轮进程组 SIGTERM→SIGKILL），§10 风险表所指即此
 - `lib/loop/scheduler.ts` → 重写为极简 spawner（保留 DaemonJob 接口，见下）
-- `lib/loop/authoring.ts`、`http.ts` 中 loop 引擎路由（trigger/run/abort/seed）；`/api/workspaces/[id]/loop/**` 仅剩的用途重定向或删除
-- UI：ActivityBar 的 Loop 图标与视图、`LoopConfig`、WorkspaceOverview 的 Loop 区块、WorkspaceSidebar loop-list
-- 能力注册表：`ALL_WORKSPACE_CAPABILITIES` 与类型中移除 `loop`（读路径对存量 manifest 做剥离迁移，同 `overview` 退休先例）
-- manifest 中 `loops` 相关字段随迁移剥离
+- `lib/loop/authoring.ts`、`http.ts` 中 loop 引擎路由（trigger/run/abort/seed）及 `app/api/workspaces/[id]/loop/**` 路由文件；`lib/loop/` 剩余的 `types.ts`、`web.ts`、`workspace-resolver.ts`、全部 `*.test.mjs` 一并删除
+- `lib/daemon/client.ts` 的 loop 管理方法（listLoops/trigger/abort/seedExecution 等）及对 `lib/loop/types.ts` 的类型导入
+- **run-contract 链路改造（评审决议 D11）**：工作项「开始对话/收养续跑」从代理 daemon seed 路由改为**客户端预填**——新建会话并在 composer 预填 `/skill:<loop> 执行 <KEY>`（不自动发送，符合"pi 不预建会话"原则）；`run-contract` 路由与 daemon `/v1/.../seed` 删除
+- UI：ActivityBar 的 Loop 图标与视图（`ACTIVITY_VIEW_ORDER`）、`LoopConfig` 组件、WorkspaceOverview 的 Loop 区块、WorkspaceSidebar loop-list、MobileShell 的 `TAB_ORDER`/`TAB_CAPABILITY` loop 项、`useAppShellState` 的 loop 轮询/handleLoopTriggered 等 handler、HomeLanding/WorkspaceSidebar 的 `loopOrchestrator` tag 过滤（`session-tags.ts` 消费点）；`lib/types.ts` 的 tag 字段（`subagentChild` 保留）
+- 能力注册表：`ALL_WORKSPACE_CAPABILITIES` 与类型中移除 `loop`（读路径对存量 manifest 做剥离迁移，同 `overview` 退休先例——`loop` 进 `LEGACY_READ_CAPABILITIES`，避免存量 manifest 解析失败）
+- manifest 实际核对：schema 无 loop 专属字段，仅 `capabilities` 含 `loop`（随上条剥离）与 `skills` 可能含 loop skill 名（合法 skill，保留）
+- 文档：pi-web 自身 `AGENTS.md` 的 Loop 章节重写为 kit/spawner 形态；`docs/dev-loop-v2-design.md`、`dev-loop-v3-design.md` 头部加"已退役"横幅指向本文档
 
 **新增（daemon）**：
-- `lib/daemon/loop-spawner.ts`（~50-100 行）：DaemonJob，每 30s 扫描已注册 workspace 根的 `loops/*/LOOP.md`，解析 cron/level/max_minutes，到点且非 paused → startRpcSession 起一次性会话跑开场合同，进程级超时强杀。RUNS 记录 = STATE.md + workspace git log，不建新索引。
+- `lib/daemon/loop-spawner.ts`（~150-200 行，含事后钩子）：DaemonJob，每 30s 扫描已注册 workspace 根的 `loops/*/LOOP.md`（frontmatter：cron/level/max_minutes），分钟槽去重复用 `cronMatches`；到点且非 paused（`PAUSED` / `loop-pause-all`）→ `startRpcSession` 起一次性会话（一次性 key + 创建超时等现有机制复用）跑开场合同，`max_minutes` 超时 → `destroy()` + 按该 workspace cwd 收窄收割孤儿进程树。RUNS 记录 = STATE.md + workspace git log，不建新索引。
+  **事后钩子（评审决议 D9，gate 可发现性 + 会话列表防污染）**：轮结束后 spawner 扫该 workspace 的 `requirements/*/bugs/*/events.jsonl`，把 `conversationId === 轮会话 id` 的事件对应的工作项回填 `conversations` 链接（待决 gate 的轮会话从工作项详情「继续对话」可达）；本轮**无** `loop.gate` 里程碑 → 自动 `archiveSession()` 归档轮会话（有事在身的留在会话列表）。全部复用现有服务（work-items service / session-archive），不新建状态。
 
 **留**：daemon 本体、DaemonJob registry、work-items 全套、importer、`lib/subagent/`（phase 2 切换）、`authoring` 的文件写入逻辑可并入模板库。
 
@@ -207,15 +219,17 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 |---|---|
 | 社区 subagent 包审计不过（依赖链/角色发现缺失） | 兜底：抽 `lib/subagent/` 成包（原方案），kit 依赖我们自己的包，phase 2 pi-web 同样切它 |
 | 协议纪律 vs 机器强制：模型可能违反 budget/constraints | 宪法文件硬条款 + 复盘节自检；phase 2 daemon 加 budget 硬校验（读 ledger 对账） |
-| 观测退化（无 Loop 视图/run 卡片） | STATE.md + git log；接受为代价，viewer 后补 |
+| 观测退化（无 Loop 视图/run 卡片） | STATE.md + git log；接受为代价，viewer 后补；轮会话噪音由 spawner 自动归档钩子（D9）收敛 |
+| 选择/执行合并后，无事可做的 tick 也付开场三重判断成本 | cron 粒度 ≥30min 起步 + `loop-budget.md` 每日轮数帽；kit README 写调参指引 |
+| 轮会话 running 中静默构建 >20min 被心跳监视器 STALL_KILL_MS 误杀 | 与 v3 相同暴露，接受；`max_minutes` 与 STALL_KILL_MS 的关系写入 spawner 注释（不引入豁免机制） |
 | workspace-c 迁移当天生产中断 | 演练分支先走一轮完整 REQ 流程；迁移 PR 与 spawner 上线同一提交 |
 | `pi -p` 在 Actions 的项目信任/凭证配置 | `--approve` 已验证支持；provider key 走 repo secrets，文档给出模板 |
 | L2+ 孤儿 bash 树（超时强杀后） | constraints 强制 worktree；超时 SIGTERM→SIGKILL 由 spawner 对整进程组执行（复用 v3 收割经验，仅保留这一个收割点） |
 
-开放问题（实现计划阶段裁决）：
-1. spawner 与 pi-web 现有 30s tick 的 LoopHostScheduler 注册关系（重写同槽位）；
+开放问题（剩余，实现计划阶段裁决）：
+1. ~~spawner 与 LoopHostScheduler 注册关系~~ 已裁决：过渡期 env 旗子 `PI_LOOP_KIT=1` 并存（新 job id），拆除 PR 中同槽位替换；
 2. STATE.md 并发写（同 workspace 多 loop 并行轮）——phase 1 约束单 workspace 串行；
-3. ledger 的 token 统计来源（pi usage 事件 vs 模型自报）。
+3. ledger 的 token 统计来源——phase 1 模型自报（STATE `[BUDGET]`），phase 2 spawner 从轮会话 usage 事件对账回写 ledger（权威计数，见 D13）。
 
 ## 11. 验收标准
 
@@ -237,3 +251,14 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 | D6 | pi-web 是壳：通用 agent 能力下沉 pi 生态（社区包），域工具（work-items/kb/importer）保留 |
 | D7 | 分期：kit + 拆 v3 先行；pi-web subagent 切换与开源发布第二阶段 |
 | D8 | 社区 pi-loop 扩展为进程内调度（已验证），不做无人值守心跳 |
+
+### 评审决议（2026-09 评审会）
+
+| # | 决策 |
+|---|---|
+| D9 | spawner 事后钩子：扫 events.jsonl 的 conversationId 回填工作项 conversations + 本轮无待决 `loop.gate` 里程碑则自动归档轮会话（解决 gate 可发现性与会话列表污染） |
+| D10 | phase 1 daemon 轮一律内置 subagent（rpc-manager 全局挂载不变）；社区包仅 GitHub Actions 场景经 `.pi/settings.json` 声明 |
+| D11 | run-contract 改客户端预填 `/skill:<loop> 执行 <KEY>`（不自动发送），删 daemon seed 路由 |
+| D12 | 暂停用 `loops/<name>/PAUSED` 标记文件 + 根级 `loop-pause-all`（文件即声明，机器可解析；不用 STATE.md 字段） |
+| D13 | constraints/budget/ledger 为根级共享（budget 是全 workspace 总帽），STATE `[BUDGET]` 仅本轮视角自报；phase 2 spawner 对账 |
+| D14 | 拆除清单补全：`lib/loop/` 全部残留文件与测试、daemon client loop 方法、MobileShell/useAppShellState/HomeLanding 触点、run-contract 改造、AGENTS.md 重写、旧版设计文档退役横幅 |
