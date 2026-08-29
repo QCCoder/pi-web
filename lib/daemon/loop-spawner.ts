@@ -66,6 +66,8 @@ export function waitForRoundSettle(
 export interface RoundDeps {
   starter?: typeof startRpcSession;
   reaper?: typeof reapOrphanedRoundProcesses;
+  /** D9 事后钩子注入点（默认真实现）—— 成功与失败路径都会被调（见 runKitRound）。 */
+  bookkeeper?: typeof settleRoundBookkeeping;
 }
 
 /** 起一轮：一次性会话（cwd=workspace 根 → rpc-manager 自动装 workspace 扩展 +
@@ -73,6 +75,7 @@ export interface RoundDeps {
 export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps = {}): Promise<string> {
   const starter = deps.starter ?? startRpcSession;
   const reaper = deps.reaper ?? reapOrphanedRoundProcesses;
+  const bookkeeper = deps.bookkeeper ?? settleRoundBookkeeping;
   const creation = creationTimeoutSignal(5 * 60_000, "kit round session creation timed out");
   let session: AgentSessionWrapper;
   let realSessionId: string;
@@ -106,8 +109,12 @@ export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps 
       console.error("[loop-kit] orphan reap failed:", reapError);
     }
     throw error;
+  } finally {
+    // D9 事后钩子在成功与失败路径都要跑：失败轮的会话同样要归档（防会话列表
+    // 污染）、盖过 loop.started/loop.gate 的工作项同样要回填 conversations ——
+    // 事件已落盘，从盘上回填对超时轮是正确语义；settleRoundBookkeeping 永不抛。
+    await bookkeeper(declaration.workspacePath, realSessionId);
   }
-  await settleRoundBookkeeping(declaration.workspacePath, realSessionId);
   return realSessionId;
 }
 
