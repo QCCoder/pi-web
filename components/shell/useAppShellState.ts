@@ -214,7 +214,7 @@ export function useAppShellState() {
   useGlobalAgentEvents(sessionActivity.runningIds);
   const [sessionKey, setSessionKey] = useState(0);
   // Composer prefill epoch — bumped when a handler writes a NEW-session draft
-  // (run-contract prefill, D11) for a composer that may ALREADY be mounted with
+  // (contract prefill, D11) for a composer that may ALREADY be mounted with
   // the same draftKey. ChatWindow keys its ChatInput mount on this value, so
   // the bump forces a remount and the input re-reads the draft store
   // (ChatInput hydrates from the draft only on mount / draftKey change).

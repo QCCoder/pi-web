@@ -403,7 +403,7 @@ export function WorkspaceManager({
 
   // Kit-declared loops of the selected workspace (read-only GET /loops —
   // pure file discovery, no capability involved). Drives only the
-  // run-contract button gate; failure or offline → no loops (buttons hidden).
+  // contract-execution button gate; failure or offline → no loops (buttons hidden).
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId) {
       setHasKitLoops(false);

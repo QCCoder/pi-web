@@ -24,7 +24,7 @@ function errorResponse(error: unknown): NextResponse {
 /** Kit-declared loops of a workspace (read-only). Discovery is pure fs+yaml
  *  (`lib/daemon/loop-kit.ts` has no daemon dependencies — safe to import in
  *  the web process): a loop EXISTS by its `loops/<name>/LOOP.md` frontmatter
- *  (D5 文件即声明), no manifest capability involved. The work-item run-contract
+ *  (D5 文件即声明), no manifest capability involved. The work-item contract
  *  prefill (D11) and the 开始对话/收养续跑 button gate read this list. */
 export async function GET(
   _req: Request,

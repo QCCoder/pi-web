@@ -182,7 +182,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
-  // Composer prefill epoch from the shell state (run-contract prefill, D11) —
+  // Composer prefill epoch from the shell state (contract prefill, D11) —
   // keys the ChatInput mount so a draft written while the input is already
   // mounted still gets picked up. ChatWindow only renders inside the shell
   // tree (DesktopShell / MobileShell), so the provider is always present.
@@ -439,7 +439,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const chatInputElement = (
     <ChatInput
-      // Prefill epoch (run-contract, D11): a handler may write the new-session
+      // Prefill epoch (contract prefill, D11): a handler may write the new-session
       // draft WHILE this input is already mounted on the same draftKey — the
       // key bump forces a remount so ChatInput re-reads the draft store.
       key={`composer-${composerEpoch}`}

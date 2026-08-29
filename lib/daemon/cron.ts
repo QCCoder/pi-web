@@ -1,5 +1,5 @@
-/** Vixie-cron matching (moved from lib/loop/scheduler.ts ahead of the v3
- *  teardown — kit spawner and the legacy scheduler share it until then). */
+/** Vixie-cron matching. Originally the v3 loop scheduler's matcher (moved
+ *  out ahead of the v3 teardown); the kit spawner is now its only consumer. */
 
 function fieldMatches(field: string, value: number): boolean {
   return field.split(",").some((part) => {
