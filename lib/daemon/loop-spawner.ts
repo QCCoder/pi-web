@@ -4,6 +4,9 @@
 import { creationTimeoutSignal } from "../abort-race.ts";
 import { reapOrphanedRoundProcesses } from "../loop/process-cleanup.ts";
 import { startRpcSession, type AgentSessionWrapper } from "../rpc-manager.ts";
+import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/service.ts";
+import { readWorkspaceManifest } from "../workspaces/service.ts";
+import { archiveSession } from "../session-archive.ts";
 import type { LoopDeclaration } from "./loop-kit.ts";
 
 /** 开场合同：LOOP.md 正文 + spawner 注入的硬规则（含会话 id，供 agent 自行挂
@@ -102,5 +105,74 @@ export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps 
   return realSessionId;
 }
 
-/** 事后钩子（D9）—— Task 5 填充真体。 */
-export async function settleRoundBookkeeping(_workspacePath: string, _sessionId: string): Promise<void> {}
+export interface RoundWorkItemImpact {
+  itemsToLink: Array<{ key: string; revision: number; conversations: string[] }>;
+  hasPendingGate: boolean;
+}
+
+/** 扫活动工作项的 events.jsonl：哪些项在本轮会话上盖过事件、是否有待决 gate。 */
+export async function inspectRoundImpact(workspacePath: string, sessionId: string): Promise<RoundWorkItemImpact> {
+  const { items } = await listWorkItems(workspacePath);
+  const itemsToLink: RoundWorkItemImpact["itemsToLink"] = [];
+  let hasPendingGate = false;
+  for (const item of items) {
+    let detail: Awaited<ReturnType<typeof readWorkItem>>;
+    try {
+      detail = await readWorkItem(workspacePath, item.key);
+    } catch {
+      continue;
+    }
+    const mine = detail.events.filter((event) => event.conversationId === sessionId);
+    if (mine.length === 0) continue;
+    itemsToLink.push({ key: item.key, revision: detail.item.revision, conversations: detail.item.conversations });
+    if (mine.some((event) => event.type.startsWith("loop.gate"))) hasPendingGate = true;
+  }
+  return { itemsToLink, hasPendingGate };
+}
+
+export interface BookkeepingDeps {
+  manifestReader?: typeof readWorkspaceManifest;
+  updater?: typeof updateWorkItem;
+  archiver?: typeof archiveSession;
+}
+
+/** D9 事后钩子：回填 conversations（待决 gate 会话从工作项详情可「继续对话」），
+ *  无待决 gate 则归档轮会话（防会话列表污染）。永不抛 — 清理不得破坏轮流程。 */
+export async function settleRoundBookkeeping(
+  workspacePath: string,
+  sessionId: string,
+  deps: BookkeepingDeps = {},
+): Promise<void> {
+  const manifestReader = deps.manifestReader ?? readWorkspaceManifest;
+  const updater = deps.updater ?? updateWorkItem;
+  const archiver = deps.archiver ?? archiveSession;
+  let impact: RoundWorkItemImpact;
+  try {
+    impact = await inspectRoundImpact(workspacePath, sessionId);
+  } catch (error) {
+    console.error("[loop-kit] inspect round impact failed:", error);
+    return;
+  }
+  if (impact.itemsToLink.length > 0) {
+    try {
+      const manifest = await manifestReader(workspacePath);
+      for (const entry of impact.itemsToLink) {
+        if (entry.conversations.includes(sessionId)) continue;
+        try {
+          await updater(manifest.id, entry.key, {
+            conversations: [...entry.conversations, sessionId],
+            expectedRevision: entry.revision,
+          });
+        } catch (error) {
+          console.error(`[loop-kit] conversations backfill failed for ${entry.key}:`, error);
+        }
+      }
+    } catch (error) {
+      console.error("[loop-kit] manifest read failed, skipping backfill:", error);
+    }
+  }
+  if (!impact.hasPendingGate) {
+    await archiver(sessionId).catch((error: unknown) =>
+      console.error("[loop-kit] round session archive failed:", error));
+  }
+}
