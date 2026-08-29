@@ -71,8 +71,8 @@ export interface RoundDeps {
   bookkeeper?: typeof settleRoundBookkeeping;
 }
 
-/** 起一轮：一次性会话（cwd=workspace 根 → rpc-manager 自动装 workspace 扩展 +
- *  extraAgentDirs 重推导，REQ-0027）→ 命名 → 开场合同 → settle → 事后钩子。 */
+/** 起一轮：一次性会话（cwd=workspace 根 → rpc-manager 自动装 workspace 扩展；
+ *  角色发现由社区 subagent 包按 `<cwd>/.pi/agents/pi-subagent/` 自带）→ 命名 → 开场合同 → settle → 事后钩子。 */
 export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps = {}): Promise<string> {
   const starter = deps.starter ?? startRpcSession;
   const reaper = deps.reaper ?? reapOrphanedRoundProcesses;

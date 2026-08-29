@@ -695,39 +695,37 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
 }
 
 
-// ── Subagent result rendering (web equivalent of the official TUI renderResult) ──
+// ── delegate_task rendering (community @henryqw/pi-subagent transport shape) ──
+// Result/update `details` = { mode, entries: [{ id, index, role, status,
+// summary?, model?, thinkingLevel?, session?: { id, cwd } }] } (+ top-level
+// usage on the final result). `session.id` is the persisted child session —
+// the jump affordance (onOpenSession) wires to it (the old built-in's
+// `childSessionId` per-result field is gone; one entry per delegation now).
 
-interface SubagentUsage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: number;
-  contextTokens: number;
-  turns: number;
+interface DelegateUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens?: number;
+  cost?: { total?: number };
 }
 
-type SubagentDisplayItem =
-  | { type: "text"; text: string }
-  | { type: "toolCall"; name: string; args: Record<string, unknown> };
-
-interface SubagentResultView {
-  agent: string;
-  task?: string;
-  source?: string;
-  status: "running" | "completed" | "failed";
-  childSessionId?: string;
-  usage?: SubagentUsage;
-  displayItems?: SubagentDisplayItem[];
+interface DelegateTaskEntry {
+  id: string;
+  index: number;
+  role: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "rejected" | "skipped";
+  summary?: string;
   model?: string;
-  turns?: number;
-  errorMessage?: string;
-  stopReason?: string;
+  thinkingLevel?: string;
+  session?: { id: string; cwd: string };
 }
 
-interface SubagentDetails {
-  mode: "single" | "parallel";
-  results: SubagentResultView[];
+interface DelegateTaskDetails {
+  mode: "single" | "parallel" | "chain";
+  entries: DelegateTaskEntry[];
+  usage?: DelegateUsage;
 }
 
 function formatTokens(n: number): string {
@@ -737,160 +735,75 @@ function formatTokens(n: number): string {
   return `${(n / 1000000).toFixed(1)}M`;
 }
 
-function formatUsageLine(u: SubagentUsage, model?: string): string {
+function formatUsageLine(u: DelegateUsage, model?: string): string {
   const parts: string[] = [];
-  if (u.turns) parts.push(`${u.turns} turn${u.turns > 1 ? "s" : ""}`);
   if (u.input) parts.push(`↑${formatTokens(u.input)}`);
   if (u.output) parts.push(`↓${formatTokens(u.output)}`);
   if (u.cacheRead) parts.push(`R${formatTokens(u.cacheRead)}`);
   if (u.cacheWrite) parts.push(`W${formatTokens(u.cacheWrite)}`);
-  if (u.cost) parts.push(`$${u.cost.toFixed(4)}`);
-  if (u.contextTokens) parts.push(`ctx:${formatTokens(u.contextTokens)}`);
+  if (u.totalTokens) parts.push(`Σ${formatTokens(u.totalTokens)}`);
+  if (u.cost?.total) parts.push(`$${u.cost.total.toFixed(4)}`);
   if (model) parts.push(model);
   return parts.join(" ");
 }
 
-function formatToolCallItem(name: string, args: Record<string, unknown>): string {
-  const cmd = (v: unknown): string => (typeof v === "string" ? v : "...");
-  switch (name) {
-    case "bash":
-      return `$ ${cmd(args.command).slice(0, 72)}`;
-    case "read": {
-      const p = cmd(args.file_path ?? args.path);
-      return `read ${p}`;
-    }
-    case "write":
-      return `write ${cmd(args.file_path ?? args.path)}`;
-    case "edit":
-      return `edit ${cmd(args.file_path ?? args.path)}`;
-    case "ls":
-      return `ls ${cmd(args.path ?? ".")}`;
-    case "find":
-      return `find ${cmd(args.pattern ?? "*")}`;
-    case "grep":
-      return `grep /${cmd(args.pattern)}/`;
-    default: {
-      const s = JSON.stringify(args) ?? "";
-      return `${name} ${s.slice(0, 50)}`;
-    }
+function delegateStatusIcon(status: DelegateTaskEntry["status"]): string {
+  switch (status) {
+    case "succeeded": return "✓";
+    case "failed":
+    case "rejected": return "✗";
+    case "skipped": return "⤼";
+    default: return "⏳"; // pending | running
   }
 }
 
-const SUBAGENT_COLLAPSED_STEPS = 8;
-
-/** True for tool calls that change code/files — surfaced so a timed-out run still
- *  shows that real work landed, not just "timed out". */
-function isSubagentWriteAction(name: string, args: Record<string, unknown>): boolean {
-  if (name === "write" || name === "edit" || isEditToolName(name)) return true;
-  if (name === "bash") {
-    const cmd = typeof args.command === "string" ? args.command : "";
-    return /\bgit\s+commit\b/.test(cmd);
-  }
-  return false;
+function delegateStatusColor(status: DelegateTaskEntry["status"]): string {
+  return status === "succeeded" ? "#16a34a"
+    : status === "failed" || status === "rejected" ? "#f87171"
+    : "var(--text-dim)";
 }
 
-function SubagentResultRow({ r, onOpenSession }: { r: SubagentResultView; onOpenSession?: (sessionId: string) => void }) {
-  const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
-  const statusIcon = r.status === "running" ? "⏳" : r.status === "failed" ? "✗" : "✓";
-  const statusColor = r.status === "running" ? "var(--text-dim)" : r.status === "failed" ? "#f87171" : "#16a34a";
-  const items = r.displayItems ?? [];
-
-  const writeActions = items.filter(
-    (it): it is { type: "toolCall"; name: string; args: Record<string, unknown> } =>
-      it.type === "toolCall" && isSubagentWriteAction(it.name, it.args),
-  );
-  const touchedFiles = new Set<string>();
-  for (const w of writeActions) {
-    const p = w.args.file_path ?? w.args.path;
-    if (typeof p === "string" && p) touchedFiles.add(p);
-  }
-  const commitCount = writeActions.filter((w) => w.name === "bash").length;
-
-  const turns = r.turns ?? r.usage?.turns ?? 0;
-  const showFailureContext = r.status === "failed" && (turns > 0 || items.length > 0);
-
-  const visibleItems = expanded ? items : items.slice(-SUBAGENT_COLLAPSED_STEPS);
-  const hiddenCount = items.length - visibleItems.length;
-  const canExpand = items.length > SUBAGENT_COLLAPSED_STEPS;
-
+function DelegateTaskEntryRow({ entry, onOpenSession }: { entry: DelegateTaskEntry; onOpenSession?: (sessionId: string) => void }) {
+  const isFailure = entry.status === "failed" || entry.status === "rejected";
   return (
     <div style={{ borderTop: "1px solid var(--border)", padding: "6px 10px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-        <span style={{ color: statusColor, fontFamily: "var(--font-mono)", fontSize: 11 }}>{statusIcon}</span>
-        <span style={{ color: "var(--text)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11 }}>{r.agent}</span>
-        {r.source && <span style={{ color: "var(--text-dim)", fontSize: 10 }}>({r.source})</span>}
-        {r.status === "failed" && r.stopReason && (
-          <span style={{ color: "#f87171", fontSize: 10 }}>[{r.stopReason}]</span>
+        <span style={{ color: delegateStatusColor(entry.status), fontFamily: "var(--font-mono)", fontSize: 11 }}>
+          {delegateStatusIcon(entry.status)}
+        </span>
+        <span style={{ color: "var(--text)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11 }}>{entry.role}</span>
+        {entry.thinkingLevel && (
+          <span style={{ color: "var(--text-dim)", fontSize: 10 }}>({entry.thinkingLevel})</span>
         )}
-        {r.childSessionId && onOpenSession && (
+        {isFailure && (
+          <span style={{ color: "#f87171", fontSize: 10 }}>[{entry.status}]</span>
+        )}
+        {entry.session && onOpenSession && (
           <button
             type="button"
-            onClick={() => onOpenSession(r.childSessionId!)}
-            title={r.childSessionId}
+            onClick={() => onOpenSession(entry.session!.id)}
+            title={entry.session.id}
             style={{ marginLeft: "auto", padding: "1px 7px", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--accent)", background: "none", border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer" }}
           >
             open →
           </button>
         )}
       </div>
-      {r.errorMessage && (
-        <div style={{ color: "#f87171", fontSize: 11, marginTop: 3, whiteSpace: "pre-wrap" }}>{r.errorMessage}</div>
-      )}
-      {/* On failure, make it obvious the subagent did real work before dying —
-          "timed out" alone reads as "did nothing". */}
-      {showFailureContext && (
-        <div style={{ color: "#f59e0b", fontSize: 11, marginTop: 3 }}>
-          {t("subagent.stepsBeforeFailure", { turns, steps: items.length })}
-        </div>
-      )}
-      {writeActions.length > 0 && (
-        <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 3 }}>
-          {commitCount > 0
-            ? t("subagent.writeSummaryCommits", { files: touchedFiles.size, commits: commitCount })
-            : t("subagent.writeSummary", { files: touchedFiles.size })}
-        </div>
-      )}
-      {items.length > 0 && (
-        <div style={{ marginTop: 4, display: "grid", gap: 2 }}>
-          {!expanded && hiddenCount > 0 && (
-            <button
-              type="button"
-              onClick={() => setExpanded(true)}
-              style={{ padding: 0, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--accent)", background: "none", border: "none", cursor: "pointer", justifySelf: "start" }}
-            >
-              ↑ {t("subagent.showEarlier", { count: hiddenCount })}
-            </button>
-          )}
-          {visibleItems.map((item, i) => {
-            if (item.type === "text") {
-              return (
-                <span key={i} style={{ color: "var(--text-muted)", fontSize: 11, whiteSpace: "pre-wrap", overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
-                  {item.text}
-                </span>
-              );
-            }
-            const isWrite = isSubagentWriteAction(item.name, item.args);
-            return (
-              <span key={i} style={{ color: isWrite ? "#16a34a" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-                {isWrite ? "✎" : "→"} {formatToolCallItem(item.name, item.args)}
-              </span>
-            );
-          })}
-          {expanded && canExpand && (
-            <button
-              type="button"
-              onClick={() => setExpanded(false)}
-              style={{ padding: 0, fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-dim)", background: "none", border: "none", cursor: "pointer", justifySelf: "start" }}
-            >
-              {t("subagent.showLess")}
-            </button>
-          )}
-        </div>
-      )}
-      {r.usage && (
-        <div style={{ color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)", marginTop: 3 }}>
-          {formatUsageLine(r.usage, r.model)}
+      {entry.summary && (
+        <div
+          style={{
+            color: isFailure ? "#f87171" : "var(--text-muted)",
+            fontSize: 11,
+            marginTop: 3,
+            whiteSpace: "pre-wrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+          }}
+        >
+          {entry.summary}
         </div>
       )}
     </div>
@@ -903,14 +816,18 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
 
-  // Subagent results — render an official-style progress/result panel.
-  const subagentDetails: SubagentDetails | null = (() => {
-    if (block.toolName !== "subagent") return null;
+  // delegate_task (community subagent) — render the workflow transport panel.
+  const delegateDetails: DelegateTaskDetails | null = (() => {
+    if (block.toolName !== "delegate_task") return null;
     const details = (result as { details?: unknown } | undefined)?.details;
     if (!details || typeof details !== "object") return null;
-    const d = details as Partial<SubagentDetails>;
-    if (!Array.isArray(d.results)) return null;
-    return { mode: d.mode === "parallel" ? "parallel" : "single", results: d.results };
+    const d = details as Partial<DelegateTaskDetails>;
+    if (!Array.isArray(d.entries)) return null;
+    return {
+      mode: d.mode === "parallel" ? "parallel" : d.mode === "chain" ? "chain" : "single",
+      entries: d.entries as DelegateTaskEntry[],
+      ...(d.usage ? { usage: d.usage } : {}),
+    };
   })();
 
   // Result display
@@ -962,17 +879,23 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
         </svg>
       </button>
 
-      {/* ── Subagent progress/result panel (live during run + after) ── */}
-      {subagentDetails && subagentDetails.results.length > 0 && (
+      {/* ── delegate_task progress/result panel (live during run + after) ── */}
+      {delegateDetails && delegateDetails.entries.length > 0 && (
         <div style={{ borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-          {subagentDetails.mode === "parallel" && (
+          {delegateDetails.mode !== "single" && (
             <div style={{ padding: "4px 10px", fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-              {subagentDetails.results.filter((r) => r.status !== "running").length}/{subagentDetails.results.length} done
+              {delegateDetails.entries.filter((e) => e.status !== "pending" && e.status !== "running").length}
+              /{delegateDetails.entries.length} done · {delegateDetails.mode}
             </div>
           )}
-          {subagentDetails.results.map((r, i) => (
-            <SubagentResultRow key={r.childSessionId ?? i} r={r} onOpenSession={onOpenSession} />
+          {delegateDetails.entries.map((entry) => (
+            <DelegateTaskEntryRow key={entry.id} entry={entry} onOpenSession={onOpenSession} />
           ))}
+          {delegateDetails.usage && (
+            <div style={{ borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)", padding: "3px 10px" }}>
+              {formatUsageLine(delegateDetails.usage)}
+            </div>
+          )}
         </div>
       )}
 

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { invalidateSessionListCache, listAllSessions } from "@/lib/session-reader";
 import { listArchivedSessions } from "@/lib/session-archive";
-import { loadSubagentChildIds } from "@/lib/subagent/registry";
+import { isSubagentChildSession } from "@/lib/subagent-child";
 import { daemonProxy } from "@/lib/agent-proxy";
 import { invalidateLoopSessionTags, loopSessionTags } from "@/lib/loop/session-tags";
 import type { SessionInfo } from "@/lib/types";
@@ -52,10 +52,12 @@ export async function GET(req: Request) {
 
     // Tag subagent worker sessions so the sidebar hides them. They stay in the
     // response so the parent's "open child" action can still resolve by id.
-    const subagentChildIds = loadSubagentChildIds();
-    let sessionsWithFlags = subagentChildIds.size > 0
-      ? merged.map((session) => (subagentChildIds.has(session.id) ? { ...session, subagentChild: true } : session))
-      : merged;
+    // Community @henryqw/pi-subagent children persist with parent-generated
+    // `pi-subagent-<uuid>` ids and `pi-subagent <role>` names — the prefix IS
+    // the registry (the old append-only subagent-children.txt file is retired).
+    let sessionsWithFlags = merged.map((session) =>
+      isSubagentChildSession(session) ? { ...session, subagentChild: true } : session
+    );
 
     // Tag Loop selection orchestrators: hidden from session lists — their only
     // entry point is the Loop view's run record (which opens the seeded

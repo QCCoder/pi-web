@@ -14,9 +14,6 @@ export interface CreateSessionInput {
   modelId?: string;
   toolNames?: string[];
   thinkingLevel?: string;
-  /** Trusted subagent source dirs (e.g. the workspace's `.pi/agents/`) injected
-   *  without the per-dispatch project-agent confirmation gate. */
-  extraAgentDirs?: string[];
   command?: { type: string; [key: string]: unknown };
 }
 

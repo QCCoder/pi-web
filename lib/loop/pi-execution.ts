@@ -1,6 +1,4 @@
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { AgentEvent, AgentSessionWrapper } from "../daemon/rpc-manager.ts";
 import { startRpcSession } from "../daemon/rpc-manager.ts";
 import { creationTimeoutSignal } from "../abort-race";
@@ -31,10 +29,10 @@ function progressDetail(event: AgentEvent): string {
     (typeof event.toolName === "string" && event.toolName) ||
     (typeof event.name === "string" && event.name) ||
     undefined;
-  if (toolName === "subagent") {
-    const args = event.arguments as { agent?: string } | undefined;
-    const agent = typeof args?.agent === "string" ? args.agent : undefined;
-    return agent ? `subagent: ${agent}` : "subagent";
+  if (toolName === "delegate_task") {
+    const args = event.arguments as { role?: string } | undefined;
+    const role = typeof args?.role === "string" ? args.role : undefined;
+    return role ? `delegate: ${role}` : "delegate_task";
   }
   if (toolName) return `tool: ${toolName}`;
   return event.type;
@@ -145,11 +143,10 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
     // orchestrator session is still starting can still scope process cleanup.
     this.runWorkspaces.set(run.id, definition.workspacePath);
     const instructions = await readFile(definition.instructionsPath, "utf8");
-    // Inject this loop's own `agents/` directory so the orchestrator's
-    // `subagent` tool can discover this loop's worker agents by name. These are
-    // a trusted, loop-scoped source (no project-agent confirmation gate).
-    const agentsDir = join(definition.directory, "agents");
-    const extraAgentDirs = existsSync(agentsDir) ? [agentsDir] : undefined;
+    // Loop roles need no injection anymore: the community subagent package
+    // discovers workspace roles from `<cwd>/.pi/agents/pi-subagent/` and the
+    // orchestrator's cwd IS the workspace root. (The former built-in needed
+    // extraAgentDirs for loop-scoped agents/ dirs — retired with lib/subagent.)
     const { signal: startSignal, dispose: disposeStartTimer } = creationTimeoutSignal(
       SESSION_START_TIMEOUT_MS,
       "orchestrator session creation timed out",
@@ -162,7 +159,7 @@ export class PiRoundExecutionBackend implements RoundExecutionBackend {
         "",
         definition.workspacePath,
         undefined,
-        { extraAgentDirs, signal: startSignal },
+        { signal: startSignal },
       ));
     } catch (error) {
       // Creation failed/timed out/aborted: there is no session to destroy, but

@@ -2,7 +2,7 @@ import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
+import { resolve } from "path";
 import { validateAgentImages } from "../image-attachments";
 import { invalidateModelsCache } from "../models-cache";
 import { cacheSessionPath, invalidateSessionListCache } from "../session-reader";
@@ -12,7 +12,7 @@ import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "../pi-t
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "../types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "../custom-ui-terminal";
 import { buildWorkspaceExtensions } from "../workspaces/extensions";
-import { createSubagentExtension } from "../subagent/extension";
+import { piSubagentExtension } from "./pi-subagent-host.ts";
 import { raceAbort } from "../abort-race";
 import { buildStalledSnapshot, classifyStall, HEARTBEAT_TICK_MS, stallInterruptMessage, type StalledSessionInfo } from "./session-heartbeat";
 import { findWorkspaceForPath } from "../workspaces/service";
@@ -1294,7 +1294,7 @@ function notifyRunningChange(): void {
  * For new sessions (sessionFile === ""), pi generates its own id.
  * Pass toolNames to pre-configure active tools (empty array = all tools disabled).
  */
-/** Extra options for creating a child/subagent session in-process. */
+/** Extra options for creating a child session in-process. */
 export interface StartSessionOptions {
   /** Link this session to a parent session file (sidebar nests it as a child). */
   parentSession?: string;
@@ -1304,10 +1304,6 @@ export interface StartSessionOptions {
    *  Provider may be omitted to resolve a bare model id (e.g. agent frontmatter
    *  `model: claude-haiku-4-5`) against the model registry. */
   model?: { provider?: string; modelId: string };
-  /** Extra trusted agent directories made discoverable to this session's
-   *  `subagent` tool (e.g. a Loop's own `agents/`). Loaded as a "loop" source
-   *  with highest precedence, bypassing the project-agent confirmation gate. */
-  extraAgentDirs?: string[];
   /** Abort session creation. The returned promise rejects promptly when the
    *  signal fires — including while creation is hung on something internal
    *  (e.g. a stuck network call during model resolution) that no timeout of
@@ -1378,23 +1374,14 @@ export async function startRpcSession(
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
     const workspace = await findWorkspaceForPath(cwd);
     const selectedWorkspaceSkills = new Set(workspace?.manifest.skills ?? []);
-    // `subagent` is a global capability: every session gets the tool regardless
-    // of workspace or capability toggles. Use the session cwd so project agents
-    // (.pi/agents) resolve against the real working directory. Callers (e.g. the
-    // Loop runtime) may inject extra trusted agent dirs via StartSessionOptions.
-    // A cold rebuild (idle eviction + revival from the .jsonl) has no caller to
-    // re-pass them — without re-derivation the workspace's own roles fall back
-    // to project discovery (.pi/agents under the project root) and EVERY
-    // dispatch trips the project-agent confirmation gate, hanging unattended
-    // loop runs on a dialog nobody answers (REQ-0027). The workspace's agents
-    // dir is user-owned (~/.pi/workspaces/**), not repo-controlled, so
-    // re-deriving it as loop-sourced (gate-exempt) is safe.
-    let extraAgentDirs = options?.extraAgentDirs;
-    if (!extraAgentDirs && workspace) {
-      const workspaceAgentsDir = join(workspace.path, ".pi", "agents");
-      if (existsSync(workspaceAgentsDir)) extraAgentDirs = [workspaceAgentsDir];
-    }
-    const extensionFactories = [createSubagentExtension("global", cwd, extraAgentDirs)];
+    // `subagent` is a global capability: every session gets the community
+    // package's `delegate_task` tool regardless of workspace or capability
+    // toggles (lib/daemon/pi-subagent-host.ts — the former built-in
+    // lib/subagent was deleted). Roles come from the package's own discovery:
+    // built-in implementer/reviewer < project `<cwd>/.pi/agents/pi-subagent/`
+    // < user `~/.pi/agent/config/pi-subagent/`. Loop sessions run with
+    // cwd = workspace root, so a workspace's roles load with no extra wiring.
+    const extensionFactories = [await piSubagentExtension()];
     const resourceLoaderOptions: Record<string, unknown> = workspace
       ? {
           extensionFactories: [...extensionFactories, ...buildWorkspaceExtensions(workspace.manifest, workspace.path)],

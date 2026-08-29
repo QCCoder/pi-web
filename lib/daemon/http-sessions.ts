@@ -162,7 +162,6 @@ export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandle
         modelId?: string;
         toolNames?: string[];
         thinkingLevel?: string;
-        extraAgentDirs?: string[];
         command?: { type: string; [key: string]: unknown };
       };
       if (!input.cwd || typeof input.cwd !== "string") {
@@ -176,9 +175,7 @@ export function createSessionsRoutes(deps: SessionsRouteDeps): DaemonRouteHandle
       // One-time key so startRpcSession's start-lock never coalesces two
       // concurrent creates onto one session (mirrors /api/agent/new).
       const tempKey = `__new__${randomUUID()}`;
-      const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, input.toolNames, {
-        extraAgentDirs: input.extraAgentDirs,
-      });
+      const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, input.toolNames);
       if (input.provider && input.modelId) {
         await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
       }

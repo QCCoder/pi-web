@@ -114,7 +114,7 @@ requirement-sources, loop
 - `manifest.capabilities` is required and always present (see "Workspace index v2" above). Read it directly; there is no derivation helper.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
 - **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below).
-- **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by effective capabilities. `lib/rpc-manager.ts` always attaches `createSubagentExtension(...)` globally, then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
+- **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by effective capabilities. `lib/rpc-manager.ts` always attaches the community `@henryqw/pi-subagent` extension globally (`piSubagentExtension()`), then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
 
 ### AGENTS.md auto-management (managed segments)
 
@@ -209,12 +209,12 @@ Key behavior:
 
 **v3 (`docs/dev-loop-v3-design.md`): the loop is a thin selector+seeder.** A run is one short **selection round**; execution is a **normal session** anchored to a work item, running the workspace's own skill contract. Gates are chat turns backed by `loop.gate` milestone stamps — the dedicated gate machinery (state machine, rehydration, LoopStatusBar, 409-for-executors) is retired.
 
-Per-loop files under `<workspace>/loops/<loopId>/`: `loop.yaml` (triggers), thin `LOOP.md` (~15 lines: liveness + park keywords + pick KEY → `LOOP_SEED: <KEY>` / `LOOP_VERDICT: idle|no candidate`), `RUNS.jsonl` (append-only run snapshots; a seeded run records `seededSessionId`), `LEARN/` archive. The **contract** lives in `<workspace>/.agents/skills/<loopId>/SKILL.md` (loop id === skill name; must also be listed in `manifest.skills` — the workspace `skillsOverride` filter gates `/skill:` expansion too). **Roles** live in `<workspace>/.pi/agents/*.md` (subagent discovery; the seeder injects them via `extraAgentDirs`, no approval gate).
+Per-loop files under `<workspace>/loops/<loopId>/`: `loop.yaml` (triggers), thin `LOOP.md` (~15 lines: liveness + park keywords + pick KEY → `LOOP_SEED: <KEY>` / `LOOP_VERDICT: idle|no candidate`), `RUNS.jsonl` (append-only run snapshots; a seeded run records `seededSessionId`), `LEARN/` archive. The **contract** lives in `<workspace>/.agents/skills/<loopId>/SKILL.md` (loop id === skill name; must also be listed in `manifest.skills` — the workspace `skillsOverride` filter gates `/skill:` expansion too). **Roles** live in `<workspace>/.pi/agents/pi-subagent/*.md` (community subagent discovery — project dir under the session cwd; plain workspaces are trusted by default because `.pi/agents` is not a trust-requiring resource for pi's SDK).
 
 Round lifecycle (`runtime.ts` + `pi-execution.ts` + `seed.ts`):
 1. **trigger** (`host.ts`) — dedups by `(workspace, loop, eventId)`; cron from `LoopHostScheduler` (30s tick, per-minute slot dedup).
 2. **startRound** (`pi-execution.ts`) — starts a selection orchestrator AgentSession (rpc key `__loop_host__${run.id}`), runs the thin LOOP.md as the first prompt, bounded by a **30-min timeout** (`RUN_TIMEOUT_MS`) that rejects → run `failed`; a throttled 60s `onProgress` heartbeat keeps the run card alive.
-3. **seed** (`seed.ts`) — on settle, the engine (deterministic code, never an LLM) regex-parses `LOOP_SEED: <KEY>` and calls `seedExecutionSession`: **double-open guard** (last `loop.active_session` stamp + wrapper-liveness probe + item terminality — live wrapper or idle-but-active-≤2h blocks; stale stamps are always harmless, no cleanup exists) → create a normal session (one-time key, cwd=workspace root, `extraAgentDirs=[<ws>/.pi/agents]`, deterministic name `<KEY> <title>`) → seed prompt `/skill:<loopId> 执行 <KEY>` (pi's input expansion mechanically injects the contract — `/skill:` is expanded by the SDK `AgentSession`, so the daemon-side send path gets it for free) → link `conversations` + stamp `loop.started`/`loop.active_session` → **hands off**. Guard refusals/errors are logged, never fail the selection run. Zombie finding is remind-only: the idle verdict lists 疑似中断 items (non-terminal phase + events quiet >2h); humans adopt via the work-item button.
+3. **seed** (`seed.ts`) — on settle, the engine (deterministic code, never an LLM) regex-parses `LOOP_SEED: <KEY>` and calls `seedExecutionSession`: **double-open guard** (last `loop.active_session` stamp + wrapper-liveness probe + item terminality — live wrapper or idle-but-active-≤2h blocks; stale stamps are always harmless, no cleanup exists) → create a normal session (one-time key, cwd=workspace root, deterministic name `<KEY> <title>`) → seed prompt `/skill:<loopId> 执行 <KEY>` (pi's input expansion mechanically injects the contract — `/skill:` is expanded by the SDK `AgentSession`, so the daemon-side send path gets it for free) → link `conversations` + stamp `loop.started`/`loop.active_session` → **hands off**. Guard refusals/errors are logged, never fail the selection run. Zombie finding is remind-only: the idle verdict lists 疑似中断 items (non-terminal phase + events quiet >2h); humans adopt via the work-item button.
 4. **abort/timeout** — `session.destroy()` (aborts the in-flight prompt) + `reapOrphanedRoundProcesses` (SIGTERM→SIGKILL bash/npm/mvn trees still scoped by workspace cwd — kept for selection rounds; a user-killed *execution* session has the same orphan exposure as any normal session kill, surfaced by the zombie report).
 
 The web layer: `/api/workspaces/[id]/loop/**` calls `daemonClient` (`lib/daemon/client.ts`) for list/trigger/run/abort + `POST /v1/workspaces/:id/seed` (the work-item buttons use it too — in a loop-capable workspace 「开始对话」(no conversations yet) = execute seed, 「收养续跑」 = adopt seed (both via `POST .../work-items/[key]/run-contract`), 「继续对话」 = open the latest conversation as a chat tab (the skill is already in its context). All entry points share one guard, one prompt shape, one bookkeeping path). `lib/loop/authoring.ts` writes `loop.yaml`/`LOOP.md` directly in the web process; the runs route is a plain web-process read of `RUNS.jsonl`.
@@ -223,22 +223,49 @@ The web layer: `/api/workspaces/[id]/loop/**` calls `daemonClient` (`lib/daemon/
 
 **Session-list routing of orchestrators (`lib/loop/session-tags.ts`).** `/api/sessions` tags every selection orchestrator `loopOrchestrator: true` (30s-cached RUNS.jsonl scan; no work-item join anymore) and the sidebar/home lists hide them — their only entry is the Loop view's run record (which opens `seededSessionId` first). Execution sessions are NOT tagged — they surface via their work item like any conversation.
 
-### Subagent (`lib/subagent/`)
+### Subagent (community `@henryqw/pi-subagent`)
 
-**Real isolated sessions**, not a subshell. The `subagent` tool (`extension.ts`) delegates a task to a specialized
-agent running as its **own first-class AgentSession** (own context window, model, tools), linked to the parent via
-`parentSession`. Modes: single `{agent, task}` or parallel `{tasks:[{agent,task,cwd?}]}` (max 8, concurrency 4).
-Only streamed status + final result return to the parent; the full child run is viewable by opening its child session.
+**Real isolated pi child processes.** The `delegate_task` tool comes from the community package
+`@henryqw/pi-subagent` (npm `file:` pin at `../pi-subagent-upstream/henryqw-pi-subagent-7.1.0.tgz` — a packed tarball of the local A2-enhanced
+branch `feat/project-roles-and-child-sessions` @ b2007f4, adding project-level roles + persisted child sessions; a tgz snapshot is immutable and
+reproducible where a `file:` directory pin would live-track the upstream tree — swap to the npm version once the upstream PR merges). The built-in `lib/subagent/` is DELETED
+(A3 switch; the former in-process child sessions, worker/agents/registry modules are gone with it).
 
-- **Agent discovery** (`agents.ts`): `~/.pi/agent/agents/*.md` (user, default), `<projectRoot>/.pi/agents/*.md`
-  (project — repo-controlled, gated by a `ctx.ui.confirm` approval unless `confirmProjectAgents:false`), and injected
-  loop agent dirs (highest precedence, no gate). `projectRoot` is resolved worktree→main repo so all worktrees share
-  agents. Markdown frontmatter: `name`, `description`, optional `tools`, `model`. Built-in `general` fallback.
-- **Always global**: `lib/rpc-manager.ts` attaches `createSubagentExtension(...)` to **every** session regardless of
-  workspace. It is intentionally **not** in `WORKSPACE_EXTENSION_FACTORIES` or `ALL_WORKSPACE_CAPABILITIES`.
-- **Child registry** (`registry.ts`): child session ids are appended to `~/.pi/agent/subagent-children.txt` so the
-  sessions API tags them `subagentChild: true` and the sidebar hides them (they're openable only from the parent's
-  result card). Append-only + mtime-cached because the daemon creates children in a different process.
+- **Host adapter** (`lib/daemon/pi-subagent-host.ts`, daemon-only): jiti-imports the package's extension entry
+  (`extensions/subagent.ts`, not exposed via its `exports` map) and wraps its default factory as an `InlineExtension`.
+  Because the package's ephemeral executor only runs inside "the pi CLI" (`PI_CODING_AGENT=true` + process title
+  `pi`/`pi-rpc` + `argv[1]` as the re-invoked entry), the adapter presents that identity and points `argv[1]` at
+  `node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js` — each delegation spawns
+  `node <pi-cli> --mode json -p …`, a real pi process of the SAME version sharing `~/.pi/agent` settings/auth.
+- **Always global**: `lib/rpc-manager.ts` awaits `piSubagentExtension()` for **every** session regardless of
+  workspace. Still intentionally NOT in `WORKSPACE_EXTENSION_FACTORIES` or `ALL_WORKSPACE_CAPABILITIES`.
+- **Roles** (package discovery, precedence built-in < project < user): built-in `implementer`/`reviewer`;
+  **project roles from `<cwd>/.pi/agents/pi-subagent/*.md`** (trust-gated by `ctx.isProjectTrusted()` — `.pi/agents`
+  is NOT a trust-requiring resource for pi's SDK, so plain workspaces are trusted by default, matching the old
+  no-gate posture for user-owned `~/.pi/workspaces/**`); user roles from `~/.pi/agent/config/pi-subagent/*.md`.
+  ⚠️ The old `<ws>/.pi/agents/*.md` layout is NOT read — workspace roles must move into the `pi-subagent/`
+  subdirectory AND add the now-mandatory `tools:`/`extensions:`/`skills:` frontmatter arrays (legacy files fail
+  parse loudly — see `lib/daemon/pi-subagent-roles.test.mjs`). No `model:` key; models come from task profiles.
+- **Task models**: delegation requires `~/.pi/agent/config/pi-task-models.json` mapping `fast`/`balanced` (etc.)
+  profiles to concrete models — without it the tool errors with "Run /task-models". This machine maps them to
+  `zai-coding-cn/glm-5.3`.
+- **Timeouts (kill semantics — philosophy differs from the old built-in)**: idle deadline (30 min) SIGTERMs a child
+  with no recognized pi events; max runtime (120 min) SIGKILLs. Output-producing builds renew the idle deadline
+  (`bash_execution_update` counts), but a TOTALLY silent build is killed — the old built-in never aborted one.
+  Configured via the explicit policy in `pi-subagent-host.ts` (wins over
+  `~/.pi/agent/config/pi-subagent/pi-subagent.json`); cap/max concurrency via `PI_SUBAGENT_MAX_SUBAGENTS` env or
+  `maxSubagents` in that config.
+- **Child sessions** persist BY DEFAULT with parent-generated ids `pi-subagent-<uuid>` + names `pi-subagent <role>`
+  (file `<ts>_pi-subagent-<uuid>.jsonl` under the cwd's session dir; opt-out per role `persist: false` / globally
+  `childSessions: false`). `lib/subagent-child.ts` tags them `subagentChild: true` in `GET /api/sessions` by that
+  id/name prefix — the old append-only `~/.pi/agent/subagent-children.txt` registry is retired. They are separate
+  OS processes, NOT daemon-registry sessions: no live SSE from the daemon, no `parentSession` link, and their file
+  operations never appear in the parent stream (only capped summaries do — `SessionChangedFiles` no longer counts
+  subagent-touched files).
+- **Result shape** (MessageView `delegate_task` panel): `details.entries[]` with `{role, status, summary, model,
+  thinkingLevel, session: {id, cwd}}` — the `open →` jump uses `session.id` (the old `childSessionId` field is gone).
+- **Orphan reaping**: `reapOrphanedRoundProcesses` matches `node` children of the daemon scoped by workspace cwd —
+  package children ARE covered on loop abort/timeout (intended cleanup).
 
 ### Git & Changes (`lib/git-changes.ts`, `lib/git-status.ts`, `lib/git-discover.ts`)
 
@@ -318,9 +345,10 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), **v3** 
     .pi/workspace-templates/<id>/        custom templates (template.yaml + seed/)
   agent/                                 (~/.pi/agent)
     sessions/<encoded-cwd>/*.jsonl
-    agents/*.md                          user subagents
+    agents/*.md                          legacy built-in subagent agents (retired; see lib/subagent-child.ts)
     importers/<workspaceId>.json         chandao importer credentials (0600)
-    subagent-children.txt                child session id registry
+    config/pi-subagent/pi-subagent.json  community subagent config (timeouts/maxSubagents)
+    config/pi-task-models.json           task-model profiles required by delegate_task
 ```
 
 ---
@@ -380,7 +408,7 @@ app/api/
   worktrees/route.ts                     GET/POST/DELETE git worktrees
 
 lib/
-  abort-race.ts             raceAbort (promise vs AbortSignal, with onLateSettle cleanup) + creationTimeoutSignal — bounds session CREATION everywhere a startRpcSession hang would pin a turn/run (subagent spawn, loop orchestrator, seed)
+  abort-race.ts             raceAbort (promise vs AbortSignal, with onLateSettle cleanup) + creationTimeoutSignal — bounds session CREATION everywhere a startRpcSession hang would pin a turn/run (loop orchestrator, seed)
   rpc-manager.ts            DAEMON-ONLY session registry + AgentSessionWrapper + startRpcSession (extension/skill/workspace wiring). No web-process code may import it — web routes proxy through lib/agent-proxy.ts
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
@@ -431,18 +459,15 @@ lib/
     workspace-resolver.ts   PiWorkspaceResolver (lists loop-capable workspaces)
     web.ts                  error → HTTP mapping
   (dev-loop/ retired — loops are per-workspace custom definitions; the R&D loop pattern lives in workspace-c, see Dev Loop section above)
-  subagent/
-    extension.ts            `subagent` tool (single/parallel) + project-agent approval gate
-    worker.ts               spawn real child AgentSessions; stream usage + display trail
-    agents.ts               discover agents (user / project / loop dirs), built-in "general"
-    registry.ts             append-only child-id registry (~/.pi/agent/subagent-children.txt)
+  subagent-child.ts         subagentChild tagging for community @henryqw/pi-subagent children
+                           (id/name prefix `pi-subagent` — replaces the old subagent-children.txt registry)
   git-changes.ts            getGitStatus (multi-repo groups) + getGitFileDiff (patch)
   git-status.ts             porcelain-v1 parse, status classify, buildRepoGroups (pure)
   git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index)
   git-types.ts              GitFileStatus / RepoGroup / response shapes
   session-reader.ts         index-backed SessionInfo mapping + buildSessionContext (tail window) + buildEarlierContext + path caches
   session-index.ts          persistent mtime-incremental session index (~/.pi/agent/sessions/.index.json, active + .archived; rebuildable cache)
-  session-changed-files.ts  PURE deriveSessionChangedFiles — files written/edited in a session from the message stream (write/edit toolCalls + subagent displayItems; relative `file_path` args resolved against session cwd so openFile passes the /api/files allow-list; NOT git state; survives commits); isEditToolName consolidated here
+  session-changed-files.ts  PURE deriveSessionChangedFiles — files written/edited in a session from the message stream (write/edit toolCalls; relative `file_path` args resolved against session cwd so openFile passes the /api/files allow-list; NOT git state; survives commits); isEditToolName consolidated here
   session-archive.ts        move .jsonl to/from .archived/ to hide/restore sessions
   archive-cascade.ts        work-item archive ↔ session archive bridge
   worktree.ts               project/worktree resolution (worktree→main repo) + git worktree ops
@@ -577,7 +602,7 @@ bundles** of the workspace and merges results.
   read (so `kb_search` and L0 always agree on which bundles exist).
 
 ### Subagent is global, not a workspace capability
-The `subagent` tool is attached to **every** session in `rpc-manager.ts` via `createSubagentExtension`, regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Loop worker agents are injected per-session through `StartSessionOptions.extraAgentDirs` — and when a wrapper is cold-rebuilt from the `.jsonl` (idle eviction after a long gate wait, daemon restart) with no caller to re-pass them, `startRpcSession` re-derives `extraAgentDirs = [<workspace>/.pi/agents]` from the enclosing workspace, so loop roles keep their gate-exempt `loop` source instead of degrading to `project` discovery (which would hang unattended runs on a per-dispatch confirm dialog — the REQ-0027 lesson). The child-run timeout in `lib/subagent/worker.ts` is an **inactivity** budget (`RUN_TIMEOUT_MS`, re-armed on every child event), not a wall-clock cap: a still-streaming child never trips it, and on timeout the child is deliberately NOT aborted (quiet builds are legitimately eventless; the heartbeat monitor owns truly-hung children) — the parent gets a `childSessionId` hint and must verify the child's state before re-dispatching.
+The `delegate_task` tool (community `@henryqw/pi-subagent`) is attached to **every** session in `rpc-manager.ts` via `piSubagentExtension()` (`lib/daemon/pi-subagent-host.ts`), regardless of workspace or capability. It is intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. There is no per-session role-dir injection anymore (the old `StartSessionOptions.extraAgentDirs` / REQ-0027 re-derivation is retired with the built-in): the package discovers workspace roles itself from `<cwd>/.pi/agents/pi-subagent/` and loop sessions run with cwd = workspace root, so cold-rebuilt wrappers see the same roles with zero wiring. Timeouts are kill-based (idle 30min / max 120min — see the Subagent section) — deliberately NOT the old built-in's never-abort inactivity budget; quiet builds renew the deadline while producing output.
 
 ### The session daemon (C2 redesign): one process owns every AgentSession
 
@@ -588,28 +613,28 @@ The pi-daemon process (`npm run daemon` → `bin/pi-daemon.js` → `lib/daemon/h
 - **Phase 2**: flip `/api/agent/new`, `/api/agent/[id]` (GET/POST), `/api/agent/[id]/events`, and the session lifecycle routes to pure proxies over the daemon client. The pin/reprobe/loop-badge-merge hacks retire here. The web proxy for create-session must call `allowFileRoot(cwd)` with the daemon's returned cwd (the files/git routes' allow-list lives in the web process).
 - **Phase 3 (done)**: the web-side session registry is gone — no `app/`/`components/` code imports `lib/rpc-manager` (its header now declares it daemon-process-only; `notifyRunningChange` is module-private). The probe-404-fallback double-writer race is structurally impossible: the web process never constructs an AgentSession, so it cannot race the daemon for a .jsonl.
 
-**Daemon command surface (`lib/daemon/http-sessions.ts`, mounted by `lib/daemon/host.ts`)**: `POST /v1/sessions` (create + optional pre-selected model/thinking/tools + optional first command — mirrors `/api/agent/new` including the one-time `__new__<uuid>` key), `POST /v1/sessions/:id/commands` (generic passthrough to `wrapper.send` — ANY command incl. extension UI responses; orchestrators are 409, everything else live-or-cold-started exactly like `/api/agent/[id]` POST), `GET /v1/sessions/running` (`{ids}` — the registry is keyed by real session id and contains interactive sessions + subagent children + orchestrators, so this one set is the complete running answer), plus the pre-existing `GET /v1/sessions/:id` probe and `/v1/sessions/:id/events` SSE. Client methods: `daemonClient.createSession/sendSessionCommand/runningSessionIds` (`lib/daemon/client.ts`).
+**Daemon command surface (`lib/daemon/http-sessions.ts`, mounted by `lib/daemon/host.ts`)**: `POST /v1/sessions` (create + optional pre-selected model/thinking/tools + optional first command — mirrors `/api/agent/new` including the one-time `__new__<uuid>` key), `POST /v1/sessions/:id/commands` (generic passthrough to `wrapper.send` — ANY command incl. extension UI responses; orchestrators are 409, everything else live-or-cold-started exactly like `/api/agent/[id]` POST), `GET /v1/sessions/running` (`{ids}` — the registry is keyed by real session id and contains interactive sessions + orchestrators; community subagent children are separate OS processes, not registry sessions, so they appear only on disk), plus the pre-existing `GET /v1/sessions/:id` probe and `/v1/sessions/:id/events` SSE. Client methods: `daemonClient.createSession/sendSessionCommand/runningSessionIds` (`lib/daemon/client.ts`).
 
 **Sidecar lifecycle (`lib/session-daemon/sidecar.ts`)**: `ensureSessionDaemonStarted()` — probe `/health` (attach if healthy), else spawn `node bin/pi-daemon.js` detached+unref'd and wait (≤15s) for health. Wired fire-and-forget from `instrumentation.ts` (`PI_SESSION_DAEMON_DISABLED=1` opts out). In-flight guard on `globalThis` dedupes concurrent callers and retries after failure. Guards: `spawnableDaemonUrl` refuses to spawn for non-local `PI_DAEMON_URL` (legacy `PI_LOOP_URL` still honored; a remote URL means the daemon is managed elsewhere); `sidecarSpawnEnv` translates the URL → the child's `PI_DAEMON_HOST`/`PI_DAEMON_PORT` (explicit env wins, legacy `PI_LOOP_HOST/PORT` spellings honored) — without this a URL-only config spawns a daemon on the default port while the web polls the URL's port forever. Spawn races resolve quietly: the EADDRINUSE loser exits 0 (`bin/pi-daemon.js`). The "web owns no unattended timers" rule is preserved — daemon timers live in the daemon process and survive web restarts; the web only ever re-attaches by port probe.
 
 ### Loop runs in its own process; the web server only manages + proxies
 `npm run daemon` starts the pi-daemon (`lib/daemon/host.ts`; `npm run loop` is a deprecated alias). The web server never starts loop timers (`instrumentation.ts`). Web routes for list/trigger/run/abort/seed are thin proxies over `daemonClient`; only authoring writes files directly. A selection orchestrator session physically lives in the daemon — the web server probes the daemon and proxies its SSE so it can be opened live. v3 execution sessions are normal daemon sessions (interactive registry), indistinguishable from user chats. The daemon hosts background jobs via the `DaemonJob` registry (`lib/daemon/jobs.ts`): loop trigger cron (`LoopHostScheduler`) and importer sync (`ImporterScheduler`) are registered peers. None of these touches the engine core or runs in the web server.
 
-**Watching a live session (any session — interactive, subagent child, or orchestrator) is one mechanism now (C2).** The daemon owns every session; `/api/agent/[id]/events` is a pure pipe onto `/v1/sessions/:id/events`, which resolves via `findLiveSession` (orchestrator index first, then the ordinary registry where subagent children live) and cold-starts idle sessions for viewing. Two subtleties remain:
+**Watching a live session (any session — interactive or orchestrator) is one mechanism now (C2).** The daemon owns every session; `/api/agent/[id]/events` is a pure pipe onto `/v1/sessions/:id/events`, which resolves via `findLiveSession` (orchestrator index first, then the ordinary registry) and cold-starts idle sessions for viewing. (Community subagent children run as separate pi processes — they're watched from their on-disk `.jsonl`, cold, not via live SSE.) Two subtleties remain:
 
 1. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — a daemon session that is **alive but idle** (between turns, e.g. a gate-paused v3 execution session or any warm idle session) appears in NO running set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (so a resumed turn's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `loopOwned` (= "live in the daemon") and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the daemon no longer holds it).
-2. The event reducer promotes `agentPhase` to `running_tools` on a `tool_execution_update` partial even without a prior `tool_execution_start` — a viewer joining mid-subagent-run never saw the start event, and the subagent worker's streamed partials are the only proof the tool is running. Without this the phase sits on `waiting_model` (「思考中」) for the whole multi-minute run.
+2. The event reducer promotes `agentPhase` to `running_tools` on a `tool_execution_update` partial even without a prior `tool_execution_start` — a viewer joining mid-tool-run never saw the start event, and the streamed partials are the only proof the tool is running. Without this the phase sits on `waiting_model` (「思考中」) for the whole multi-minute run.
 
-**Opening a subagent child by click goes through `/api/sessions/[id]/locate`, never the cached `/api/sessions` list.** `handleOpenSessionViewer` resolves the child id via locate (Loop-Host probe first — now hitting for children too — then a forced disk scan that bypasses the 30s list cache). The old list lookup silently no-op'd for a freshly spawned running child (it isn't in the cached list yet), which felt like "you must wait for the subagent to finish before you can open it". Locate also enriches a loop-hit from disk (real firstMessage/stats for the tab label, keeping the probe's authoritative path/cwd).
+**Opening a subagent child by click goes through `/api/sessions/[id]/locate`, never the cached `/api/sessions` list.** `handleOpenSessionViewer` resolves the child id via locate (daemon probe first, then a forced disk scan that bypasses the 30s list cache). The old list lookup silently no-op'd for a freshly spawned running child (it isn't in the cached list yet), which felt like "you must wait for the subagent to finish before you can open it". (Community children are cold-opened from disk — the parent's result card jump works the same way.)
 
-**Running badges come from one server-side set.** `/api/agent/running/events` pipes the daemon's `/v1/sessions/running/events`; because the daemon registry holds interactive sessions + subagent children + orchestrators alike (keyed by real session id), the sidebar/tab badges need no client-side merge anymore (the old `loopRunningSnapshot` merge existed only because the web set could never contain Loop sessions).
+**Running badges come from one server-side set.** `/api/agent/running/events` pipes the daemon's `/v1/sessions/running/events`; because the daemon registry holds interactive sessions + orchestrators alike (keyed by real session id), the sidebar/tab badges need no client-side merge anymore (the old `loopRunningSnapshot` merge existed only because the web set could never contain Loop sessions). Subagent children never show a running badge — they're not daemon sessions.
 
 **The daemon's session SSE ends on destroy.** `serveSessionSse` registers `session.onDestroy(cleanup)` — when a round ends (terminal/timeout/abort) the stream closes, the browser's pinned EventSource fails fatally, `reprobePinned` sees the daemon no longer holds the session, unpins and clears the badge. Without this a destroyed round leaves the pinned runtime `agentRunning=true` forever (no `agent_end` is ever emitted after destroy), spinning the tab badge indefinitely.
 
 **Orphan-process reaping on abort/timeout.** `session.destroy()` — used by `abortRound` and reached on the 30-min `capturePrompt` timeout — does **not** kill the bash subprocesses a round spawned via subagents: pi-coding-agent's bash tool spawns each shell `detached` (own process group) and only sweeps its tracked detached children on a **process-level** SIGHUP/SIGTERM, which a never-exiting daemon never sends. Those `bash → npm → node` trees would otherwise orphan into launchd (PID 1) still holding `node_modules` handles (which is why `rm -rf` then fails and they sit at ~100% CPU). So `PiRoundExecutionBackend` keeps a `run.id → workspacePath` map and, on abort/timeout/error, calls `reapOrphanedRoundProcesses` (`lib/loop/process-cleanup.ts`): it SIGTERM→SIGKILL every pid in the round's trees — discovered as (a) direct children of the daemon whose cwd is in the workspace, plus (b) launchd-reparented (ppid 1) build/shell processes whose cwd is in the workspace. Pure parsers (`parsePgrepChildren`/`parseLsofCwd`/`parsePsRows`/`isCwdInWorkspace`/`isBuildOrShellCommand`) are tested. Scoped by workspace cwd so concurrent rounds in other workspaces are untouched; never throws (cleanup must not break the abort flow).
 
 ### Session changed-files quick access (SessionChangedFiles)
-"本会话改动 N 个文件" — a compact icon+count button at the end of the ChatInput controls row (right of the sound toggle; on mobile it lives inside the "更多控件" pill; not rendered in `embedded` view mode), opening a slide-in drawer (full-screen list on mobile). **Data source is the message stream, not git**: `deriveSessionChangedFiles` (`lib/session-changed-files.ts`, pure + tested) walks write/edit toolCalls (incl. `isEditToolName` variants) + subagent result `details.displayItems`, plus the streaming message and live `tool_execution_update` partials for **real-time** counting (partials already finalized are de-duped by `toolCallId`). Scope is the **whole session file** (not just the current branch path), deduped **most-recent-first** with a ×N badge; bash-written files (`cat >`, `git commit`) are deliberately not counted. Clicking an entry → `openFile` (existing file-tab pipeline; `/api/files` allow-list already covers session cwds). The list intentionally **survives commits** — it answers "what did this session touch", not "what is uncommitted" (that's the Explorer 改动 tab). Drawer state is not persisted; switching sessions closes it.
+"本会话改动 N 个文件" — a compact icon+count button at the end of the ChatInput controls row (right of the sound toggle; on mobile it lives inside the "更多控件" pill; not rendered in `embedded` view mode), opening a slide-in drawer (full-screen list on mobile). **Data source is the message stream, not git**: `deriveSessionChangedFiles` (`lib/session-changed-files.ts`, pure + tested) walks write/edit toolCalls (incl. `isEditToolName` variants) plus the streaming message for **real-time** counting. Subagent children no longer contribute — community-package children are separate pi processes whose file operations never appear in the parent stream. Scope is the **whole session file** (not just the current branch path), deduped **most-recent-first** with a ×N badge; bash-written files (`cat >`, `git commit`) are deliberately not counted. Clicking an entry → `openFile` (existing file-tab pipeline; `/api/files` allow-list already covers session cwds). The list intentionally **survives commits** — it answers "what did this session touch", not "what is uncommitted" (that's the Explorer 改动 tab). Drawer state is not persisted; switching sessions closes it.
 
 ### Model defaults for new sessions
 `GET /api/models` returns `defaultModel` read from `~/.pi/agent/settings.json`. `ChatWindow` pre-selects this on mount for new sessions.
@@ -671,7 +696,7 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 {"type":"session_info","id":"...","parentId":"...","name":"user-defined name"}
 ```
 
-`entryIds[]` in `SessionContext` is a parallel array to `messages[]` — it maps each displayed message back to its `.jsonl` entry id, used for fork and `navigate_tree` calls. Subagent/loop child sessions use the same format and link back via `parentSession`; their ids are recorded in `~/.pi/agent/subagent-children.txt` so the sidebar hides them.
+`entryIds[]` in `SessionContext` is a parallel array to `messages[]` — it maps each displayed message back to its `.jsonl` entry id, used for fork and `navigate_tree` calls. Community subagent children (`pi-subagent-<uuid>` ids, created by the @henryqw/pi-subagent package's child pi processes) use the same format; the sidebar hides them via the id/name prefix check in `lib/subagent-child.ts` (they carry no `parentSession` link).
 
 ---
 

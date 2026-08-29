@@ -415,16 +415,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   }, [toolExecutionUpdates]);
 
   // Files written/edited in this session — derived purely from the message
-  // stream (incl. the streaming message + live subagent partials) so the count
-  // updates in real time. Full-session scope: `messages` is the complete list,
-  // not the lazy-load `visibleCount` slice.
+  // stream (incl. the streaming message) so the count updates in real time.
+  // Full-session scope: `messages` is the complete list, not the lazy-load
+  // `visibleCount` slice.
   const changedFiles = useMemo(
     () => deriveSessionChangedFiles(messages, {
       streamingMessage: streamState.streamingMessage,
-      partialResults: Array.from(streamingToolResults.values()),
       cwd: messageCwd,
     }),
-    [messages, streamState.streamingMessage, streamingToolResults, messageCwd],
+    [messages, streamState.streamingMessage, messageCwd],
   );
 
   // Drawer open state for the changed-files quick access — lifted here because

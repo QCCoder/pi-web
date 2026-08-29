@@ -1,6 +1,5 @@
-import { existsSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { getRpcSession, startRpcSession } from "../daemon/rpc-manager.ts";
 import type { AgentSessionWrapper } from "../daemon/rpc-manager.ts";
 import { creationTimeoutSignal } from "../abort-race";
@@ -146,10 +145,9 @@ export async function seedExecutionSession(input: SeedExecutionInput): Promise<S
   });
   if (!verdict.allowed) return { seeded: false, reason: verdict.reason };
 
-  // Workspace project agents are a trusted source for the seeded session (no
-  // per-dispatch confirmation gate) — same injection the loop engine used.
-  const agentsDir = join(input.workspacePath, ".pi", "agents");
-  const extraAgentDirs = existsSync(agentsDir) ? [agentsDir] : undefined;
+  // Loop roles need no injection anymore: the seeded execution session's cwd
+  // IS the workspace root, and the community subagent package discovers
+  // workspace roles from `<cwd>/.pi/agents/pi-subagent/` on its own.
   // One-time key so two concurrent seeds never coalesce onto one session.
   // Creation is bounded: on hang/abort nothing is stamped and a session that
   // materializes late is destroyed by startRpcSession (no zombie contract run).
@@ -165,7 +163,7 @@ export async function seedExecutionSession(input: SeedExecutionInput): Promise<S
       "",
       input.workspacePath,
       undefined,
-      { extraAgentDirs, signal: startSignal },
+      { signal: startSignal },
     ));
   } finally {
     disposeStartTimer();

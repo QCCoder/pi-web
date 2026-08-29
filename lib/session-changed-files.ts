@@ -1,11 +1,14 @@
 import { joinFilePath, normalizeFilePathSlashes } from "./file-paths.ts";
-import type { AgentMessage, ToolResultMessage } from "./types";
+import type { AgentMessage } from "./types";
 
 /**
  * "Files changed in this session" — a pure derivation from the session message
  * stream (no git involvement, no backend). The data source is tool calls:
- * every `write` / `edit` (and edit-tool-name variants) plus the write/edit
- * displayItems nested in `subagent` tool results. bash-touched files
+ * every `write` / `edit` (and edit-tool-name variants) in THIS session's
+ * stream. Subagent children no longer contribute: the community
+ * @henryqw/pi-subagent package runs children as separate pi processes whose
+ * file operations never appear in the parent stream (only capped summaries
+ * do) — their own session files list them instead. bash-touched files
  * (`cat >`, `sed -i`, `git commit`, …) are deliberately NOT counted — the
  * detection would be regex guesswork, and commit doesn't change content.
  *
@@ -46,9 +49,8 @@ function isAbsoluteLikePath(p: string): boolean {
 /** Tool-call `file_path` args are frequently RELATIVE to the session cwd (pi's
  *  edit/write accept both). Resolve against cwd so entries are absolute —
  *  openFile → /api/files needs an absolute path under an allowed root, and
- *  dedup must collapse `lib/a.ts` with `/abs/cwd/lib/a.ts`. Best-effort for
- *  subagent displayItems: the child's cwd isn't recorded, so the parent
- *  session cwd is used. Collapses `.`/`..` segments like file-links.ts does. */
+ *  dedup must collapse `lib/a.ts` with `/abs/cwd/lib/a.ts`. Collapses `.`/`..`
+ *  segments like file-links.ts does. */
 function resolveToolPath(raw: string, cwd?: string): string {
   const joined = !cwd || isAbsoluteLikePath(raw) ? raw : joinFilePath(cwd, raw);
   const normalized = normalizeFilePathSlashes(joined);
@@ -117,36 +119,14 @@ function collectFromAssistantMessage(ctx: Ctx, message: AgentMessage): void {
   }
 }
 
-/** Best-effort walk of a `subagent` tool result's `details.displayItems`,
- *  recording nested write/edit tool calls made by worker sessions. The shape
- *  is untyped (`details?: unknown`) — anything unexpected is skipped. */
-function collectFromToolResultDetails(ctx: Ctx, details: unknown): void {
-  if (!details || typeof details !== "object") return;
-  const results = (details as { results?: unknown }).results;
-  if (!Array.isArray(results)) return;
-  for (const r of results) {
-    if (!r || typeof r !== "object") continue;
-    const items = (r as { displayItems?: unknown }).displayItems;
-    if (!Array.isArray(items)) continue;
-    for (const item of items) {
-      if (!item || typeof item !== "object") continue;
-      const it = item as { type?: unknown; name?: unknown; args?: unknown };
-      if (it.type !== "toolCall" || typeof it.name !== "string") continue;
-      if (!isWriteToolName(it.name) && !isEditToolName(it.name)) continue;
-      const p = extractFilePath(it.args as Record<string, unknown> | undefined);
-      if (p) record(ctx.map, ctx.seq.n++, resolveToolPath(p, ctx.cwd), isWriteToolName(it.name) ? "write" : "edit");
-    }
-  }
-}
+/** Best-effort walk of a tool result's nested details was REMOVED with the
+ *  built-in subagent (the community package's children are separate processes —
+ *  see the module header). */
 
 export interface DeriveSessionChangedFilesOptions {
   /** The currently-streaming assistant message (partial) — its toolCall blocks
    *  count immediately (file_path is known at call time, decision: real-time). */
   streamingMessage?: Partial<AgentMessage> | null;
-  /** Partial tool results streamed via tool_execution_update while the agent
-   *  runs (carries subagent displayItems live). Entries whose final result has
-   *  already landed in `messages` are de-duped by toolCallId. */
-  partialResults?: readonly ToolResultMessage[];
   /** Session cwd — tool-call `file_path` args are often relative to it; entries
    *  are resolved to absolute paths so openFile → /api/files passes the
    *  allow-list (a bare relative path is rejected as "Access denied"). */
@@ -165,26 +145,13 @@ export function deriveSessionChangedFiles(
   const seq = { n: 0 };
   const ctx: Ctx = { map, seq, cwd: options?.cwd };
 
-  const finalizedToolCallIds = new Set<string>();
   for (const message of messages) {
-    if (message.role === "toolResult") {
-      finalizedToolCallIds.add(message.toolCallId);
-      collectFromToolResultDetails(ctx, message.details);
-    } else {
-      collectFromAssistantMessage(ctx, message);
-    }
+    collectFromAssistantMessage(ctx, message);
   }
 
   const streaming = options?.streamingMessage;
   if (streaming && streaming.role === "assistant") {
     collectFromAssistantMessage(ctx, streaming as AgentMessage);
-  }
-
-  for (const partial of options?.partialResults ?? []) {
-    // Skip partials already finalized in the message list — their displayItems
-    // were counted from the finalized result above (avoid double counting).
-    if (finalizedToolCallIds.has(partial.toolCallId)) continue;
-    collectFromToolResultDetails(ctx, partial.details);
   }
 
   return Array.from(map.values())
