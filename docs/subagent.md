@@ -75,6 +75,6 @@ link for `subagent` tool results; clicking opens the child session tab
 | `lib/subagent/agents.ts` | Discover + parse agent definitions |
 | `lib/subagent/worker.ts` | Create in-process child sessions, run prompts, stream, parallel runner |
 | `lib/subagent/extension.ts` | `InlineExtension` registering the global `subagent` tool |
-| `lib/rpc-manager.ts` | `startRpcSession` options: `parentSession`, `appendSystemPrompt`, `model`, `extraAgentDirs` |
+| `lib/daemon/rpc-manager.ts` | `startRpcSession` options: `parentSession`, `appendSystemPrompt`, `model`, `extraAgentDirs` |
 | `lib/workspaces/extensions.ts` | Workspace capability registry (note: `subagent` is intentionally NOT registered here — it is global) |
 | `components/MessageView.tsx` | "open subagent →" child-session link in tool results |

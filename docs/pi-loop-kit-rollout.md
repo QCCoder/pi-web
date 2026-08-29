@@ -31,6 +31,8 @@
 
 ## 拆除队列（T2–T6 已在拆除分支完成 ✅，待演练 + 合并）
 
+> **合并回 develop 的冲突预期**：develop 的两个 rollout 文档提交（`47ca239`+`8be9d6c`）是以 cherry-pick（`68db4aa`）方式带上本分支的——cherry-pick 共享内容不共享祖先（merge-base `85a515e` 早于本文件存在），因此并回 develop 时**必在本文档（docs/pi-loop-kit-rollout.md）出现 add/add 冲突**（冲突区域即 `b807569` 编辑的段落）。解法：**取分支侧**（develop 自 `8be9d6c` 后未再改动该文件，分支内容更新）。合并本身仍以 Phase B 演练通过为前置（见 runbook 第 6 步）。
+
 | # | 任务 | 状态 |
 |---|---|---|
 | T2 | loop UI 拆除（ActivityBar/MobileShell/WorkspaceSidebar/WorkspaceOverview/LoopConfig/useAppShellState/HomeLanding + session-tag 消费点，`subagentChild` 保留） | ✅ `3a1611e`→`f6467f8`（含 LoopLaunchOverlay/highlightView/onWorkspaceChanged 追加移除） |

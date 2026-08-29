@@ -1,6 +1,6 @@
 /** Importer runner (design §5). This is the deep-module seam that hides the
  *  full "pull → dedup → create work item → localize images → rewrite README src
- *  → append events" flow behind one entry point. Both the loop-host system timer
+ *  → append events" flow behind one entry point. Both the daemon's system timer
  *  and the web manual-sync endpoint call only `syncImporterForWorkspace`.
  *
  *  The run is deterministic I/O — it is NOT delegated to an LLM (design §5:
