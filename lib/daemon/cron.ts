@@ -18,10 +18,17 @@ function fieldMatches(field: string, value: number): boolean {
 export function cronMatches(expression: string, timezone: string, now: Date): boolean {
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5) return false;
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone, minute: "numeric", hour: "numeric", day: "numeric",
-    month: "numeric", weekday: "short", hourCycle: "h23",
-  }).formatToParts(now);
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone, minute: "numeric", hour: "numeric", day: "numeric",
+      month: "numeric", weekday: "short", hourCycle: "h23",
+    }).formatToParts(now);
+  } catch {
+    // 无效时区（如 Asia/Shanghao）是人写 frontmatter 的现实输入 — 遵守本文件
+    // 「畸形输入返回 false、永不抛」的契约，一个坏声明不得炸掉整个 tick。
+    return false;
+  }
   const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
   const weekdays: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
   const values = [Number(get("minute")), Number(get("hour")), Number(get("day")), Number(get("month")), weekdays[get("weekday")]];

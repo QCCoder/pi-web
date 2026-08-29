@@ -99,7 +99,12 @@ export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps 
     } catch {
       /* 已销毁 */
     }
-    await reaper(declaration.workspacePath);
+    try {
+      await reaper(declaration.workspacePath);
+    } catch (reapError) {
+      // 收割失败不得掩盖原始轮错误
+      console.error("[loop-kit] orphan reap failed:", reapError);
+    }
     throw error;
   }
   await settleRoundBookkeeping(declaration.workspacePath, realSessionId);
@@ -181,6 +186,10 @@ export async function settleRoundBookkeeping(
 // --- 心跳 DaemonJob（Task 6）---------------------------------------------
 
 const SPAWNER_TICK_MS = 30_000;
+/** 去重槽保留窗口：只需覆盖「当前分钟」的去重需求，10 分钟绰绰有余；
+ *  过期按时间戳逐条满除，而不是一次性 clear（那会把仍在当前分钟的槽也抹掉，
+ *  造成同一分钟重复起轮）。 */
+const EMITTED_SLOT_TTL_MS = 10 * 60_000;
 
 export interface SpawnerDeps {
   discover?: typeof discoverWorkspaces;
@@ -197,7 +206,7 @@ export interface SpawnerDeps {
 export class LoopKitSpawner {
   readonly id = "loop-kit-heartbeats";
   private timer?: ReturnType<typeof setInterval>;
-  private readonly emittedSlots = new Set<string>();
+  private readonly emittedSlots = new Map<string, number>();
   private readonly busyWorkspaces = new Set<string>();
   private readonly deps: Required<SpawnerDeps>;
 
@@ -227,6 +236,7 @@ export class LoopKitSpawner {
   async tick(): Promise<void> {
     const now = this.deps.now();
     const minute = now.toISOString().slice(0, 16);
+    this.evictStaleSlots();
     for (const workspace of await this.deps.discover()) {
       if (!workspace.available) continue;
       if (this.busyWorkspaces.has(workspace.id)) continue;
@@ -235,8 +245,7 @@ export class LoopKitSpawner {
         if (!cronMatches(declaration.cron, declaration.timezone, now)) continue;
         const slot = `${workspace.id}:${declaration.loopName}:${minute}`;
         if (this.emittedSlots.has(slot)) continue;
-        this.emittedSlots.add(slot);
-        if (this.emittedSlots.size > 10_000) this.emittedSlots.clear();
+        this.emittedSlots.set(slot, Date.now());
         this.busyWorkspaces.add(workspace.id);
         try {
           await this.deps.runRound(declaration);
@@ -247,6 +256,13 @@ export class LoopKitSpawner {
         }
         break; // phase 1：每 workspace 每 tick 至多一轮
       }
+    }
+  }
+
+  private evictStaleSlots(): void {
+    const cutoff = Date.now() - EMITTED_SLOT_TTL_MS;
+    for (const [slot, stamped] of this.emittedSlots) {
+      if (stamped < cutoff) this.emittedSlots.delete(slot);
     }
   }
 }
