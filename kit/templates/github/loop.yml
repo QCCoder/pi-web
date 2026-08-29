@@ -1,0 +1,18 @@
+name: loop-{{name}}
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # 与 loops/{{name}}/LOOP.md 的 cron 保持一致
+  workflow_dispatch: {}
+jobs:
+  round:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm install -g @earendil-works/pi-coding-agent@latest
+      - name: Run loop round
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.PI_PROVIDER_KEY }}
+        run: |
+          pi -p --approve "读 loop-constraints.md 与 loop-budget.md（绑定，禁改）；读 loops/{{name}}/STATE.md 恢复上下文；执行 /skill:{{pattern}}；结束前更新 loops/{{name}}/STATE.md 并按断路器规则追加 loop-ledger.json。L1 纪律：只读 + 只写 STATE.md/ledger。"
