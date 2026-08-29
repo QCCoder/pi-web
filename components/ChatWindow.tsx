@@ -12,6 +12,7 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { useShell } from "./shell/context";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -181,6 +182,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
+  // Composer prefill epoch from the shell state (run-contract prefill, D11) —
+  // keys the ChatInput mount so a draft written while the input is already
+  // mounted still gets picked up. ChatWindow only renders inside the shell
+  // tree (DesktopShell / MobileShell), so the provider is always present.
+  const { composerEpoch } = useShell();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
   // wrapping handleAgentEventRef because useAgentSession overwrites that ref
@@ -433,6 +439,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const chatInputElement = (
     <ChatInput
+      // Prefill epoch (run-contract, D11): a handler may write the new-session
+      // draft WHILE this input is already mounted on the same draftKey — the
+      // key bump forces a remount so ChatInput re-reads the draft store.
+      key={`composer-${composerEpoch}`}
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}

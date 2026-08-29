@@ -79,9 +79,9 @@ interface Props {
   onClose: () => void;
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
-  /** dev-loop v3: seed a contract execution session for a work item (POST
-   *  run-contract on the daemon). Returns the guard refusal reason, or null on
-   *  success (AppShell opens the session). Throws on transport errors. */
+  /** Kit 时代「按合同执行」（D11）：客户端预填——把 `/skill:<loop> 执行|收养
+   *  <KEY>` 写进该 workspace 新会话 composer 的草稿并切过去，人按发送才起会话。
+   *  恒返回 null（预填不会失败；保留 string|null 签名以兼容拒绝横幅约定）。 */
   onRunContract?: (
     workspace: WorkspaceSummary,
     item: WorkItemRecord,
@@ -251,6 +251,12 @@ export function WorkspaceManager({
   const [contentDraft, setContentDraft] = useState("");
   const [contentEditing, setContentEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Whether the selected workspace declares at least one kit loop
+  // (loops/<name>/LOOP.md with a cron — D5 文件即声明). Gates the
+  // 开始对话/收养续跑 buttons (D11: the retired `loop` capability no longer
+  // decides this). Fetched once per selected workspace, no polling — loops
+  // are authored rarely.
+  const [hasKitLoops, setHasKitLoops] = useState(false);
 
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
@@ -394,6 +400,31 @@ export function WorkspaceManager({
       cancelled = true;
     };
   }, [embedded, open, selectedWorkspace]);
+
+  // Kit-declared loops of the selected workspace (read-only GET /loops —
+  // pure file discovery, no capability involved). Drives only the
+  // run-contract button gate; failure or offline → no loops (buttons hidden).
+  useEffect(() => {
+    if ((!open && !embedded) || !selectedWorkspaceId) {
+      setHasKitLoops(false);
+      return;
+    }
+    let cancelled = false;
+    void fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/loops`)
+      .then(async (response) => {
+        if (!response.ok) return { loops: [] as Array<{ pattern: string }> };
+        return response.json() as Promise<{ loops?: Array<{ pattern: string }> }>;
+      })
+      .then((data) => {
+        if (!cancelled) setHasKitLoops((data.loops?.length ?? 0) > 0);
+      })
+      .catch(() => {
+        if (!cancelled) setHasKitLoops(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [embedded, open, selectedWorkspaceId]);
 
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId || !initialWorkItemKey) return;
@@ -635,10 +666,10 @@ export function WorkspaceManager({
     onWorkItemsChanged,
   ]);
 
-  /** dev-loop v3「按合同执行」/「收养续跑」：daemon deterministic seeder. On
-   *  guard refusal the reason is surfaced via the banner (the run is NOT
-   *  started); on success AppShell has already opened the session — just
-   *  refresh the detail so the new conversation + loop.started show up. */
+  /** 「按合同执行」/「收养续跑」（D11 客户端预填）：onRunContract 写入新会话
+   *  composer 草稿并切到该 workspace 的 chat 视图，恒返回 null（预填不会
+   *  失败）；这里仅刷新详情，保持列表/详情一致（无新会话产生——.jsonl 到首条
+   *  消息才建）。 */
   const runContract = useCallback(async (mode: "execute" | "adopt") => {
     if (!selectedWorkspace || !selectedWorkItem || !onRunContract) return;
     setSaving(true);
@@ -1167,17 +1198,18 @@ export function WorkspaceManager({
                         待裁决
                       </span>
                     )}
-                    {/* The `loop` capability is retired (read-path strip, lib/workspaces/service.ts) —
-                        parsed manifests can no longer carry it, so this gate keeps the run-contract
-                        button hidden until Task 4 of the kit teardown re-gates it on kit-declared loops. */}
-                    {onRunContract && (selectedWorkspace.capabilities as readonly string[]).includes("loop") && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" ? (
+                    {/* D11: the buttons exist when the workspace declares kit
+                        loops (a loops directory entry with a LOOP.md cron —
+                        file-is-declaration, no capability), regardless of the
+                        retired `loop` string. */}
+                    {onRunContract && hasKitLoops && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" ? (
                       selectedWorkItem.item.conversations.length === 0 ? (
                         <button
                           className="workspace-action"
                           style={{ marginLeft: "auto" }}
                           disabled={saving}
                           onClick={() => void runContract("execute")}
-                          title="以 dev-loop skill 合同种子一个执行会话（开场判定→SPEC→maker/checker→合并→验证）"
+                          title="预填 /skill:<loop> 执行合同到新会话 composer（发送后才起会话；开场判定→SPEC→maker/checker→合并→验证）"
                         >
                           开始对话
                         </button>
@@ -1196,7 +1228,7 @@ export function WorkspaceManager({
                               className="workspace-action"
                               disabled={saving}
                               onClick={() => void runContract("adopt")}
-                              title="新会话从派发计划+里程碑缺口续跑（不重做开场判定）——旧会话僵死/重开时用"
+                              title="预填收养提示到新会话 composer：从派发计划+里程碑缺口续跑（不重做开场判定）——旧会话僵死/重开时用"
                             >
                               收养续跑
                             </button>

@@ -127,7 +127,7 @@ export function MobileShell() {
     handleCloseWorkspaceTab,
     handleCreateWorkspace,
     handleReturnHome,
-    handleOpenLoopSession,
+    handleOpenConversation,
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
@@ -276,7 +276,7 @@ export function MobileShell() {
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
               onRunContract={handleRunContract}
-              onOpenConversation={handleOpenLoopSession}
+              onOpenConversation={handleOpenConversation}
               onWorkspaceDeleted={handleWorkspaceDeleted}
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
                 />
@@ -314,7 +314,7 @@ export function MobileShell() {
                 onOpenWorkspace={handleOpenWorkspace}
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
                 onRunContract={handleRunContract}
-                onOpenConversation={handleOpenLoopSession}
+                onOpenConversation={handleOpenConversation}
                 onWorkspaceDeleted={handleWorkspaceDeleted}
                 onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
                     />

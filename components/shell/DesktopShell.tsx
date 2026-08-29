@@ -92,7 +92,7 @@ export function DesktopShell() {
     handleCloseWorkspaceTab,
     handleCreateWorkspace,
     handleReturnHome,
-    handleOpenLoopSession,
+    handleOpenConversation,
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
@@ -187,7 +187,7 @@ const renderMiddleColumn = () => {
                 onOpenWorkspace={handleOpenWorkspace}
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
                 onRunContract={handleRunContract}
-                onOpenConversation={handleOpenLoopSession}
+                onOpenConversation={handleOpenConversation}
                 onWorkspaceDeleted={handleWorkspaceDeleted}
                 onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
                     />
@@ -247,7 +247,7 @@ const renderMiddleColumn = () => {
           onOpenWorkspace={handleOpenWorkspace}
           onOpenWorkItemConversation={handleOpenWorkItemConversation}
           onRunContract={handleRunContract}
-          onOpenConversation={handleOpenLoopSession}
+          onOpenConversation={handleOpenConversation}
           onWorkspaceDeleted={handleWorkspaceDeleted}
           onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
         />

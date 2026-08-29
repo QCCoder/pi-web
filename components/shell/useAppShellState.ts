@@ -9,7 +9,7 @@ import { useGlobalAgentEvents } from "@/hooks/useGlobalAgentEvents";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
-import { clearDraft, getDraft } from "@/lib/draft-store";
+import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "../ChatInput";
@@ -213,6 +213,12 @@ export function useAppShellState() {
   // 全局 SSE：为每个 running session 维护一条事件流，后台 session 事件不丢（决策 8 / B4b）。
   useGlobalAgentEvents(sessionActivity.runningIds);
   const [sessionKey, setSessionKey] = useState(0);
+  // Composer prefill epoch — bumped when a handler writes a NEW-session draft
+  // (run-contract prefill, D11) for a composer that may ALREADY be mounted with
+  // the same draftKey. ChatWindow keys its ChatInput mount on this value, so
+  // the bump forces a remount and the input re-reads the draft store
+  // (ChatInput hydrates from the draft only on mount / draftKey change).
+  const [composerEpoch, setComposerEpoch] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   // The settings panel's subpage (index → workspace/models/skills/plugins/
@@ -656,7 +662,7 @@ export function useAppShellState() {
   // 优先 probe daemon 拿权威元信息（会话在 daemon 进程里，它最先知道），
   // daemon 不可达/旧版本时回退到强制刷新磁盘扫描。两种路径都不依赖 30s 列表缓存，
   // 所以新建的会话能立刻打开，而不是“过一会才出现”。
-  const handleOpenLoopSession = useCallback((sessionId: string) => {
+  const handleOpenConversation = useCallback((sessionId: string) => {
     void fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`)
       .then((r) => (r.ok ? (r.json() as Promise<{ session: SessionInfo }>) : null))
       .then((d) => {
@@ -940,67 +946,48 @@ export function useAppShellState() {
     }, 50);
   }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
 
-  /** dev-loop v3「按合同执行」：POST run-contract → daemon deterministic seeder
-   *  (guard + `/skill:` prompt + bookkeeping), then open the seeded execution
-   *  session as this workspace's chat tab (gate answers happen in its composer).
-   *  Returns the guard's refusal reason when seeding was blocked, or null on
-   *  success; throws on transport errors so the caller can surface them. */
+  /** Kit 时代「按合同执行」/「收养续跑」（D11）：不再 POST daemon seed — 改为
+   *  客户端预填。取该 workspace 的 kit loop 合同（GET /loops，纯文件发现），
+   *  把 `/skill:<pattern> 执行|收养 <KEY>` 写进其新会话 composer 的草稿，再切到
+   *  该 workspace 的 chat 视图；人按发送才真正起会话（pi 到首条消息才建
+   *  .jsonl，不再预建）。离线 / 无 kit loop 时退化为不带 /skill: 前缀的裸提示。
+   *  恒返回 null（预填不会失败；保留 string|null 签名以兼容调用方的拒绝横幅约定）。 */
   const handleRunContract = useCallback(async (
     workspace: WorkspaceSummary,
     item: WorkItemRecord,
     mode: "execute" | "adopt",
   ): Promise<string | null> => {
-    const response = await fetch(
-      `/api/workspaces/${encodeURIComponent(workspace.id)}/work-items/${encodeURIComponent(item.key)}/run-contract`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode }),
-      },
-    );
-    const data = await response.json().catch(() => ({})) as {
-      seeded?: boolean;
-      sessionId?: string;
-      reason?: string;
-      error?: string;
-    };
-    if (!response.ok || !data.seeded) {
-      return data.reason ?? data.error ?? `HTTP ${response.status}`;
-    }
-    const sessionId = data.sessionId!;
-    // The seeded execution session opens as the chat view — hand the right
-    // column over from any open config/work-item detail first.
+    let pattern: string | undefined;
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loops`);
+      if (response.ok) {
+        const data = (await response.json()) as { loops?: Array<{ pattern: string }> };
+        pattern = data.loops?.[0]?.pattern;
+      }
+    } catch { /* offline — degrade to a bare prompt without the /skill: prefix */ }
+    const verb = mode === "adopt" ? "收养" : "执行";
+    const text = pattern
+      ? `/skill:${pattern} ${verb} ${item.key}`
+      : `${verb} ${item.key}`;
+    setDraft(`new:${workspace.path}`, { value: text, images: [] });
+    // The prefill targets a composer that may ALREADY be mounted on the same
+    // draftKey (empty composer already open) — bump the epoch ChatWindow keys
+    // its ChatInput on so the input remounts and re-reads the draft.
+    setComposerEpoch((epoch) => epoch + 1);
+    // Mirror the 新建会话 switch (handleWorkspaceNewSession): hand the right
+    // column back from any open config/work-item detail, land on a fresh
+    // composer bound to the workspace root, reset the per-session chrome.
     setConfigView(null);
     setWorkItemDetail(null);
-    // Resolve the freshly seeded daemon session via locate (probe-first — the
-    // .jsonl may not be flushed into the 30s-cached session list yet).
-    let info: SessionInfo | undefined;
-    try {
-      const locate = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
-      if (locate.ok) {
-        info = ((await locate.json()) as { session?: SessionInfo }).session;
-      }
-    } catch { /* fall through with a minimal info */ }
     ensureTab(workspace);
-    updateTab(workspace.id, {
-      view: "chat",
-      session: info ?? {
-        id: sessionId,
-        path: sessionId,
-        cwd: workspace.path,
-        name: `${item.key} ${item.title}`,
-        created: new Date().toISOString(),
-        modified: new Date().toISOString(),
-        messageCount: 0,
-        firstMessage: `${item.key} ${item.title}`,
-      },
-      newSessionCwd: null,
-    });
+    updateTab(workspace.id, { view: "chat", session: null, newSessionCwd: workspace.path });
     activateTab(workspace.id);
     setSessionKey((key) => key + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
     setSystemPrompt(null);
     focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(sessionId)}`);
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`);
     return null;
   }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
 
@@ -1269,6 +1256,7 @@ export function useAppShellState() {
     setRefreshKey,
     sessionKey,
     setSessionKey,
+    composerEpoch,
     explorerRefreshKey,
     setExplorerRefreshKey,
     modelsRefreshKey,
@@ -1369,7 +1357,7 @@ export function useAppShellState() {
     applyUrlToTabs,
     initialNavDoneRef,
     handleSelectSession,
-    handleOpenLoopSession,
+    handleOpenConversation,
     handleOpenWorkspace,
     handleOpenWorkspaceToChat,
     handleWorkspaceNewSession,

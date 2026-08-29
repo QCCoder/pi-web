@@ -9,8 +9,8 @@ export const dynamic = "force-dynamic";
 
 /** Resolve a session id to a SessionInfo so the UI can open it by id.
  *
- *  Used by `handleOpenLoopSession` (after a Loop round reports its orchestrator
- *  session id) and `handleOpenSessionViewer` (subagent children). Two sources,
+ *  Used by `handleOpenConversation` (work-item linked conversations, opened
+ *  by id) and `handleOpenSessionViewer` (subagent children). Two sources,
  *  in order of authority:
  *    1. daemon probe — the orchestrator session physically lives in the daemon
  *       Host process, which knows its cwd + sessionFile immediately.
