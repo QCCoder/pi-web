@@ -43,3 +43,6 @@ next-env.d.ts
 
 # loop runtime generated outputs
 /outputs
+
+# superpowers scratch reports (process artifacts, not repo content)
+.superpowers/

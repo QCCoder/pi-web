@@ -53,10 +53,20 @@
 - [ ] 同名 loop 槽位键碰撞（parked）：同 workspace 两 loop 同名 → 分钟槽互撞静默饿死；把 slot 键改用 `dir` 或发现期拒绝重名
 - [ ] 清理 kit 建设期评审 Minor：cron.test.mjs 时区注释（"前一日的 2 点"→同日）；slot 标签用 UTC（本地差 8h，纯装饰）；`waitForRoundSettle` 无直接用例；creation-signal 传参无断言；dedup-guard/never-throws 注入用例缺口；`inspectRoundImpact` per-item 静默 continue；archive-only 组合路径未直测
 
+### Route A（phase 2 主线）：切社区 subagent 包
+
+前提：`@henryqw/pi-subagent` peers `^0.84.4`，其子进程启动依赖 pi CLI 的 `--exclude-tools`/`--append-system-prompt`/`--approve` 旗子。三步：
+
+| # | 步骤 | 状态 | 要点 |
+|---|---|---|---|
+| A1 | pi SDK 升级 0.82.1 → 0.84.4 | ✅ 已完成（feature/pi-upgrade） | 旗子已验证存在；唯一 API 破坏是 `Theme` 构造器要求完整色表（`lib/daemon/rpc-manager.ts` PlainTextTheme）；peer 包 `pi-agent-core`/`pi-ai`/`pi-tui` 同步 0.84.4 |
+| A2 | 上游 PR：`@henryqw/pi-subagent` | 待做 | 两点：项目级角色目录（现在只认 `~/.pi/agents`）+ 子会话持久化（去掉 `--no-session`，子会话可被观测/收养）。**提交前需用户批准——不得未经确认 push 任何公开内容** |
+| A3 | pi-web 切包 + 删 `lib/subagent/` | 待做，门禁 A2 合入 | 切换门槛三项全过才动：①工作区角色目录可用（workspace `.pi/agents` 注入）②子会话可观测（落盘、能从 UI 打开、超时/中断不丢）③安静构建安全的超时语义（inactivity 预算，静默长构建不误杀；对齐现有 `lib/subagent/worker.ts` 语义） |
+
 ### 带外（§11.3 / phase 2）
 - [ ] GitHub demo 仓库：Actions cron + `pi -p` + 社区 subagent 包跑 L1 triage；**workflow 模板需补 STATE/ledger 持久化**（ephemeral runner 上写盘会丢——git commit/push 步骤或 artifact 策略）
 - [ ] 社区包审计（§6 清单，第一周）：`@henryqw/pi-subagent` 源码/依赖链（pi-multi-codex 是否必要）/角色发现/并行上限/超时语义；不过则兜底抽 `lib/subagent/` 成包
-- [ ] phase 2：pi-web `lib/subagent/` 切社区包；`npx pi-loop init` CLI；STATE.md viewer；ledger token 对账（D13）
+- [ ] phase 2：pi-web `lib/subagent/` 切社区包（见上方 Route A（A3））；`npx pi-loop init` CLI；STATE.md viewer；ledger token 对账（D13）
 - [ ] phase 2：并发 tick 下 busy 检查竞态（两个 await 间隔，>30s 停顿可击穿；同分钟同 loop 有 emittedSlots 兜底）
 - [ ] phase 2：gate 已答复后会话留存策略（hasPendingGate 只看"盖过"，不管"答没答"——可结合工作项终态或答复里程碑）
 

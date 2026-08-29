@@ -78,13 +78,75 @@ type ExtensionBindingOptions = {
 const CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 // Extensions require a complete Theme, while the web UI applies its own styling.
+//
+// pi 0.84's Theme constructor synthesizes optional colors from fallbacks
+// (e.g. `searchMatchText: fgColors.searchMatchText ?? fgColors.text`) and
+// feeds every resulting entry to fgAnsi()/bgAnsi(), so a partial record
+// crashes on the undefined fallback (0.82 only iterated provided keys).
+// "" is a valid color value that maps to the default fg/bg escape sequence,
+// and every rendering method below is overridden to plain-text passthrough,
+// so these values are never actually rendered. The records are complete
+// literals (no casts) so tsc fails loudly if the SDK adds new required colors.
+const PLAIN_TEXT_FG_COLORS = {
+  accent: "",
+  border: "",
+  borderAccent: "",
+  borderMuted: "",
+  success: "",
+  error: "",
+  warning: "",
+  muted: "",
+  dim: "",
+  text: "",
+  thinkingText: "",
+  userMessageText: "",
+  customMessageText: "",
+  customMessageLabel: "",
+  toolTitle: "",
+  toolOutput: "",
+  mdHeading: "",
+  mdLink: "",
+  mdLinkUrl: "",
+  mdCode: "",
+  mdCodeBlock: "",
+  mdCodeBlockBorder: "",
+  mdQuote: "",
+  mdQuoteBorder: "",
+  mdHr: "",
+  mdListBullet: "",
+  toolDiffAdded: "",
+  toolDiffRemoved: "",
+  toolDiffContext: "",
+  syntaxComment: "",
+  syntaxKeyword: "",
+  syntaxFunction: "",
+  syntaxVariable: "",
+  syntaxString: "",
+  syntaxNumber: "",
+  syntaxType: "",
+  syntaxOperator: "",
+  syntaxPunctuation: "",
+  thinkingOff: "",
+  thinkingMinimal: "",
+  thinkingLow: "",
+  thinkingMedium: "",
+  thinkingHigh: "",
+  thinkingXhigh: "",
+  bashMode: "",
+} satisfies ConstructorParameters<typeof Theme>[0];
+
+const PLAIN_TEXT_BG_COLORS = {
+  selectedBg: "",
+  userMessageBg: "",
+  customMessageBg: "",
+  toolPendingBg: "",
+  toolSuccessBg: "",
+  toolErrorBg: "",
+} satisfies ConstructorParameters<typeof Theme>[1];
+
 class PlainTextTheme extends Theme {
   constructor() {
-    super(
-      { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
-      {} as ConstructorParameters<typeof Theme>[1],
-      "truecolor",
-    );
+    super(PLAIN_TEXT_FG_COLORS, PLAIN_TEXT_BG_COLORS, "truecolor");
   }
 
   override fg(...[, text]: Parameters<Theme["fg"]>): string { return text; }
