@@ -5,9 +5,10 @@ import { creationTimeoutSignal } from "../abort-race.ts";
 import { reapOrphanedRoundProcesses } from "../loop/process-cleanup.ts";
 import { startRpcSession, type AgentSessionWrapper } from "../rpc-manager.ts";
 import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/service.ts";
-import { readWorkspaceManifest } from "../workspaces/service.ts";
+import { discoverWorkspaces, readWorkspaceManifest } from "../workspaces/service.ts";
 import { archiveSession } from "../session-archive.ts";
-import type { LoopDeclaration } from "./loop-kit.ts";
+import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "./loop-kit.ts";
+import { cronMatches } from "./cron.ts";
 
 /** 开场合同：LOOP.md 正文 + spawner 注入的硬规则（含会话 id，供 agent 自行挂
  *  conversations；D9 的事后钩子会兜底回填）。 */
@@ -174,5 +175,78 @@ export async function settleRoundBookkeeping(
   if (!impact.hasPendingGate) {
     await archiver(sessionId).catch((error: unknown) =>
       console.error("[loop-kit] round session archive failed:", error));
+  }
+}
+
+// --- 心跳 DaemonJob（Task 6）---------------------------------------------
+
+const SPAWNER_TICK_MS = 30_000;
+
+export interface SpawnerDeps {
+  discover?: typeof discoverWorkspaces;
+  discoverLoops?: typeof discoverKitLoops;
+  halted?: typeof isWorkspaceHalted;
+  runRound?: (declaration: LoopDeclaration) => Promise<string>;
+  now?: () => Date;
+}
+
+/** 心跳 job：每 30s 扫已注册 workspace 的 loops/<loopName>/LOOP.md，cron 到点且非
+ *  paused → 起一轮。phase 1 每 workspace 串行（spec 开放问题 2）。
+ *  NOTE: 本树无 DaemonJob 接口（lib/daemon/jobs.ts 属未提交布局）— 同形状
+ *  平铺类（id/start/stop/tick），host 以 importerScheduler 同款方式接线。 */
+export class LoopKitSpawner {
+  readonly id = "loop-kit-heartbeats";
+  private timer?: ReturnType<typeof setInterval>;
+  private readonly emittedSlots = new Set<string>();
+  private readonly busyWorkspaces = new Set<string>();
+  private readonly deps: Required<SpawnerDeps>;
+
+  constructor(deps: SpawnerDeps = {}) {
+    this.deps = {
+      discover: deps.discover ?? discoverWorkspaces,
+      discoverLoops: deps.discoverLoops ?? discoverKitLoops,
+      halted: deps.halted ?? isWorkspaceHalted,
+      runRound: deps.runRound ?? ((declaration) => runKitRound(declaration)),
+      now: deps.now ?? (() => new Date()),
+    };
+  }
+
+  start(): void {
+    if (this.timer) return;
+    const tick = () => void this.tick().catch((error) => console.error("[loop-kit] spawner tick failed:", error));
+    tick();
+    this.timer = setInterval(tick, SPAWNER_TICK_MS);
+    this.timer.unref?.();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  async tick(): Promise<void> {
+    const now = this.deps.now();
+    const minute = now.toISOString().slice(0, 16);
+    for (const workspace of await this.deps.discover()) {
+      if (!workspace.available) continue;
+      if (this.busyWorkspaces.has(workspace.id)) continue;
+      if (await Promise.resolve(this.deps.halted(workspace.path))) continue;
+      for (const declaration of await this.deps.discoverLoops(workspace.path)) {
+        if (!cronMatches(declaration.cron, declaration.timezone, now)) continue;
+        const slot = `${workspace.id}:${declaration.loopName}:${minute}`;
+        if (this.emittedSlots.has(slot)) continue;
+        this.emittedSlots.add(slot);
+        if (this.emittedSlots.size > 10_000) this.emittedSlots.clear();
+        this.busyWorkspaces.add(workspace.id);
+        try {
+          await this.deps.runRound(declaration);
+        } catch (error) {
+          console.error(`[loop-kit] round failed for ${workspace.id}/${declaration.loopName}:`, error);
+        } finally {
+          this.busyWorkspaces.delete(workspace.id);
+        }
+        break; // phase 1：每 workspace 每 tick 至多一轮
+      }
+    }
   }
 }

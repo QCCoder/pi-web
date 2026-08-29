@@ -8,6 +8,7 @@ import { LoopHostScheduler } from "./scheduler.ts";
 import { PiWorkspaceResolver } from "./workspace-resolver.ts";
 import { LoopConflictError, LoopNotFoundError, LoopValidationError } from "./store.ts";
 import { ImporterScheduler } from "../importers/scheduler.ts";
+import { LoopKitSpawner } from "../daemon/loop-spawner.ts";
 import { syncImporterForWorkspace } from "../importers/runner.ts";
 import { seedExecutionSession } from "./seed.ts";
 import { WorkItemNotFoundError } from "../work-items/service.ts";
@@ -133,6 +134,9 @@ export function createLoopHost() {
   const runtime = new DefaultLoopRuntime(workspaces, execution);
   const scheduler = new LoopHostScheduler(runtime, workspaces);
   const importerScheduler = new ImporterScheduler();
+  // pi-loop kit spawner（design: docs/pi-loop-kit-design.md）。Phase 1 与 v3
+  // 引擎并存，PI_LOOP_KIT=1 门控（startLoopHost）；拆除 PR 中同槽位转正。
+  const kitSpawner = new LoopKitSpawner(); // id: loop-kit-heartbeats
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -394,7 +398,7 @@ export function createLoopHost() {
       });
     }
   });
-  return { server, scheduler, runtime, importerScheduler };
+  return { server, scheduler, runtime, importerScheduler, kitSpawner };
 }
 
 export async function startLoopHost(options: { host?: string; port?: number } = {}): Promise<void> {
@@ -408,10 +412,12 @@ export async function startLoopHost(options: { host?: string; port?: number } = 
   });
   app.scheduler.start();
   app.importerScheduler.start();
+  if (process.env.PI_LOOP_KIT === "1") app.kitSpawner.start();
   console.log(`[pi-loop] listening on http://${host}:${port}`);
   const stop = () => {
     app.scheduler.stop();
     app.importerScheduler.stop();
+    if (process.env.PI_LOOP_KIT === "1") app.kitSpawner.stop();
     app.server.close(() => process.exit(0));
   };
   process.once("SIGINT", stop);
