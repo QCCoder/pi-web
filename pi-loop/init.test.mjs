@@ -14,7 +14,10 @@ test("init 脚手架：五件套落位（ledger 在 loop 目录）+ frontmatter 
   assert.ok(existsSync(join(root, "loops", "triage", "loop-ledger.json")));
   assert.ok(existsSync(join(root, "loop-constraints.md")));
   assert.ok(existsSync(join(root, "loop-budget.md")));
+  assert.ok(existsSync(join(root, ".agents", "skills", "triage", "SKILL.md")));
   assert.ok(existsSync(join(root, "loops", "triage", ".lastrun")));
+  const skill = readFileSync(join(root, ".agents", "skills", "triage", "SKILL.md"), "utf8");
+  assert.ok(skill.includes("name: triage"));
   const loop = readFileSync(join(root, "loops", "triage", "LOOP.md"), "utf8");
   const front = parse(loop.match(/^---\r?\n([\s\S]*?)\r?\n---/)[1]);
   assert.equal(front.cron, "0 9 * * 1-5");
@@ -22,10 +25,14 @@ test("init 脚手架：五件套落位（ledger 在 loop 目录）+ frontmatter 
   assert.equal(front.name, "triage");
 });
 
-test("init 幂等保护：已存在的 root 宪法文件不覆盖", () => {
+test("init 幂等保护：已存在的 root 宪法文件与 SKILL.md 不覆盖", () => {
   const root = mkdtempSync(join(tmpdir(), "init2-"));
   initLoop(root, { name: "x", cron: "* * * * *" });
   writeFileSync(join(root, "loop-budget.md"), "# 人工改过");
+  writeFileSync(join(root, ".agents", "skills", "x", "SKILL.md"), "# 人工改过的 skill");
   initLoop(root, { name: "y", cron: "* * * * *" });
   assert.equal(readFileSync(join(root, "loop-budget.md"), "utf8"), "# 人工改过");
+  assert.equal(readFileSync(join(root, ".agents", "skills", "x", "SKILL.md"), "utf8"), "# 人工改过的 skill");
+  // x/y pattern 不同（各缺省取 name）：y 得到自己的骨架，x 的既有内容存活
+  assert.ok(readFileSync(join(root, ".agents", "skills", "y", "SKILL.md"), "utf8").includes("name: y"));
 });

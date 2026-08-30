@@ -272,4 +272,4 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 | D13 | constraints/budget/ledger 为根级共享（budget 是全 workspace 总帽），STATE `[BUDGET]` 仅本轮视角自报；phase 2 spawner 对账 |
 | D14 | 拆除清单补全：`lib/loop/` 全部残留文件与测试、daemon client loop 方法、MobileShell/useAppShellState/HomeLanding 触点、run-contract 改造、AGENTS.md 重写、旧版设计文档退役横幅 |
 
-> 修订（2026-08-30，见 docs/pi-loop-host-design.md）D13：ledger 改 per-loop（`loops/<name>/loop-ledger.json`）；constraints/budget 维持根共享（budget 仍是全 workspace 总帽）。
+> 修订（2026-08-30，见 docs/pi-loop-host-design.md）：D13 ledger 改 per-loop（`loops/<name>/loop-ledger.json`）；constraints/budget 维持根共享（budget 仍是全 workspace 总帽）。

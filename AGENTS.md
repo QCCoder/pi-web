@@ -239,8 +239,8 @@ Key behavior:
   WorkspaceManager is kit-loops-driven (`hasKitLoops`, fetched once per selected workspace), not capability-driven.
   「继续对话」 = open the latest conversation as a chat tab (the skill is already in its context).
 - **工作项工具 / importer 不变**；subagent 一律走社区 `@henryqw/pi-subagent` 包（全局挂载，见下节——kit 轮会话 cwd=workspace 根，包自动发现 `<cwd>/.pi/agents/pi-subagent/` 角色，无需 per-session 注入）。
-- **模板**：`kit/templates/basic/{loop,root}/`（D13 两层布局：LOOP/STATE/ledger 在 `loop/`，constraints/budget 在
-  `root/`；`pi-loop init` 由此脚手架）、`kit/templates/github/loop.yml`
+- **模板**：`kit/templates/basic/{loop,root,skill}/`（D13 布局：LOOP/STATE/ledger 在 `loop/`，constraints/budget 在
+  `root/`，SKILL.md 骨架在 `skill/`（spec §4）；`pi-loop init` 由此脚手架）、`kit/templates/github/loop.yml`
   （Actions 场景）；`kit/README.md` 是协议契约（含 L1/L2/L3 分级、宿主/beat 用法与调参指引）。
 
 **轮会话是一次性普通会话**：跑完一轮自然 settle，无状态恢复问题（崩溃 → 下轮冷启动读 STATE.md 接续）；v3 的
@@ -523,11 +523,11 @@ pi-loop/                              THE loop-host package: pure protocol logic
   beat.ts                 beat round runner — spawns `pi --name "<loop> · <slot>" -p --approve "<contract>"` (cwd=root, detached own process group); max_minutes timeout → group SIGTERM→3s→SIGKILL
   cli.ts                  pi-loop CLI entry (bin) — beat/run/stop/pause/resume/status/init/watch commands (host spec §4)
   status.ts               collectStatus — per-loop frontmatter summary + .lastrun + next-due + running (lock alive) / paused for `pi-loop status`
-  init.ts                 initLoop — scaffold the kit/templates/basic five-piece set (D13 layout: loop/ + root/) + SKILL.md skeleton; writes .lastrun = now (first round waits for a natural slot)
+  init.ts                 initLoop — scaffold the kit/templates/basic five-piece set (D13 layout: loop/ + root/ + skill/) + SKILL.md skeleton; writes .lastrun = now (first round waits for a natural slot)
 
 kit/                                  pi-loop kit template library + protocol README (consumed by copy, not imported — see Loop section)
   README.md                       the protocol contract: file layout (incl. host files .lastrun/.round.lock, agent-forbidden), host section (daemon auto / pi-loop beat + crontab, dual-host lock safety, catch-up semantics), L1/L2/L3 levels, breaker + budget rules, GitHub Actions scenario
-  templates/basic/               D13 two-level layout — loop/ {LOOP.md, STATE.md, loop-ledger.json} + root/ {loop-constraints.md, loop-budget.md}; pi-loop init scaffolds from here
+  templates/basic/               D13 two-level layout — loop/ {LOOP.md, STATE.md, loop-ledger.json} + root/ {loop-constraints.md, loop-budget.md} + skill/ {SKILL.md skeleton, spec §4}; pi-loop init scaffolds from here
   templates/github/loop.yml      GitHub Actions cron heartbeat template (pi -p + community subagent package)
 
 components/

@@ -19,6 +19,13 @@ export function initLoop(root: string, opts: {
   for (const file of ["STATE.md", "loop-ledger.json"]) {
     if (!existsSync(join(dir, file))) copyFileSync(join(TEMPLATES, "loop", file), join(dir, file));
   }
+  // SKILL.md 骨架（spec §4）：.agents/skills/<pattern>/，pattern 缺省取 name（protocol.ts 同规则）；存在即跳过
+  const pattern = opts.pattern ?? opts.name;
+  const skillPath = join(root, ".agents", "skills", pattern, "SKILL.md");
+  if (!existsSync(skillPath)) {
+    mkdirSync(dirname(skillPath), { recursive: true });
+    writeFileSync(skillPath, readFileSync(join(TEMPLATES, "skill", "SKILL.md"), "utf8").replaceAll("{{pattern}}", pattern));
+  }
   // LOOP.md：模板 frontmatter + 定制
   const raw = readFileSync(join(TEMPLATES, "loop", "LOOP.md"), "utf8");
   const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
