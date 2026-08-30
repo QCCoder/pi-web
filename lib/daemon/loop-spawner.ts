@@ -8,9 +8,11 @@ import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/servi
 import { discoverWorkspaces, readWorkspaceManifest } from "../workspaces/service.ts";
 import { archiveSession } from "../session-archive.ts";
 import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "../../pi-loop/protocol.ts";
-import { cronMatches } from "../../pi-loop/cron.ts";
+import { runDueRound } from "../../pi-loop/fire.ts";
+import { updateRoundLock } from "../../pi-loop/round-lock.ts";
 import { buildRoundPrompt } from "../../pi-loop/contract.ts";
 import { reapOrphanedRoundProcesses } from "../../pi-loop/reap.ts";
+import { hostname } from "node:os";
 
 /** 跑一条 prompt 并等它 settle（prompt_done）。超时 / prompt_error / destroy 均 reject。
  *  模式承自 v3 引擎的 capturePrompt（随 v3 拆除迁入）。 */
@@ -51,6 +53,9 @@ export interface RoundDeps {
   reaper?: typeof reapOrphanedRoundProcesses;
   /** D9 事后钩子注入点（默认真实现）—— 成功与失败路径都会被调（见 runKitRound）。 */
   bookkeeper?: typeof settleRoundBookkeeping;
+  /** startRpcSession 解构出 realSessionId 后立即回调（先于命名/开场合同）——
+   *  tick 借此把 sessionId 回填进 .round.lock（供 stop 路由用）。 */
+  onSessionStart?: (sessionId: string) => void;
 }
 
 /** 起一轮：一次性会话（cwd=workspace 根 → rpc-manager 自动装 workspace 扩展；
@@ -69,6 +74,7 @@ export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps 
   } finally {
     creation.dispose();
   }
+  deps.onSessionStart?.(realSessionId);
   const slot = new Date().toISOString().slice(0, 16).replace("T", " ");
   try {
     await session.send({ type: "set_session_name", name: `${declaration.loopName} · ${slot}` });
@@ -173,29 +179,24 @@ export async function settleRoundBookkeeping(
   }
 }
 
-// --- 心跳 DaemonJob（Task 6）---------------------------------------------
+// --- 心跳 DaemonJob（Task 6/10）------------------------------------------
 
 const SPAWNER_TICK_MS = 30_000;
-/** 去重槽保留窗口：只需覆盖「当前分钟」的去重需求，10 分钟绰绰有余；
- *  过期按时间戳逐条满除，而不是一次性 clear（那会把仍在当前分钟的槽也抹掉，
- *  造成同一分钟重复起轮）。 */
-const EMITTED_SLOT_TTL_MS = 10 * 60_000;
 
 export interface SpawnerDeps {
   discover?: typeof discoverWorkspaces;
   discoverLoops?: typeof discoverKitLoops;
   halted?: typeof isWorkspaceHalted;
-  runRound?: (declaration: LoopDeclaration) => Promise<string>;
+  runRound?: (declaration: LoopDeclaration, hooks?: { onSessionStart?: (sessionId: string) => void }) => Promise<string>;
   now?: () => Date;
 }
 
-/** 心跳 job（DaemonJob）：每 30s 扫已注册 workspace 的 loops/<loopName>/LOOP.md，
- *  cron 到点且非 paused → 起一轮。phase 1 每 workspace 串行（spec 开放问题 2）。 */
+/** 心跳 job（DaemonJob）：每 30s 扫已注册 workspace 的 loops/<loopName>/LOOP.md；
+ *  due（.lastrun 补跑判定）+ .round.lock 跨宿主互斥 → 起一轮 —— fire 序列与
+ *  beat 共用（pi-loop/fire.ts），多 loop 各自独立 due/锁，不再整 workspace 串行。 */
 export class LoopKitSpawner implements DaemonJob {
   readonly id = "loop-kit-heartbeats";
   private timer?: ReturnType<typeof setInterval>;
-  private readonly emittedSlots = new Map<string, number>();
-  private readonly busyWorkspaces = new Set<string>();
   private readonly deps: Required<SpawnerDeps>;
 
   constructor(deps: SpawnerDeps = {}) {
@@ -203,7 +204,7 @@ export class LoopKitSpawner implements DaemonJob {
       discover: deps.discover ?? discoverWorkspaces,
       discoverLoops: deps.discoverLoops ?? discoverKitLoops,
       halted: deps.halted ?? isWorkspaceHalted,
-      runRound: deps.runRound ?? ((declaration) => runKitRound(declaration)),
+      runRound: deps.runRound ?? ((declaration, hooks) => runKitRound(declaration, hooks)),
       now: deps.now ?? (() => new Date()),
     };
   }
@@ -222,35 +223,26 @@ export class LoopKitSpawner implements DaemonJob {
   }
 
   async tick(): Promise<void> {
-    const now = this.deps.now();
-    const minute = now.toISOString().slice(0, 16);
-    this.evictStaleSlots();
     for (const workspace of await this.deps.discover()) {
       if (!workspace.available) continue;
-      if (this.busyWorkspaces.has(workspace.id)) continue;
       if (await Promise.resolve(this.deps.halted(workspace.path))) continue;
       for (const declaration of await this.deps.discoverLoops(workspace.path)) {
-        if (!cronMatches(declaration.cron, declaration.timezone, now)) continue;
-        const slot = `${workspace.id}:${declaration.loopName}:${minute}`;
-        if (this.emittedSlots.has(slot)) continue;
-        this.emittedSlots.set(slot, Date.now());
-        this.busyWorkspaces.add(workspace.id);
+        const holder = { pid: process.pid, host: hostname(), kind: "daemon" as const };
         try {
-          await this.deps.runRound(declaration);
+          await runDueRound(
+            declaration,
+            holder,
+            async () => {
+              await this.deps.runRound(declaration, {
+                onSessionStart: (sessionId) => updateRoundLock(declaration.dir, { sessionId }),
+              });
+            },
+            { now: this.deps.now },
+          );
         } catch (error) {
           console.error(`[loop-kit] round failed for ${workspace.id}/${declaration.loopName}:`, error);
-        } finally {
-          this.busyWorkspaces.delete(workspace.id);
         }
-        break; // phase 1：每 workspace 每 tick 至多一轮
       }
-    }
-  }
-
-  private evictStaleSlots(): void {
-    const cutoff = Date.now() - EMITTED_SLOT_TTL_MS;
-    for (const [slot, stamped] of this.emittedSlots) {
-      if (stamped < cutoff) this.emittedSlots.delete(slot);
     }
   }
 }
