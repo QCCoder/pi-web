@@ -39,7 +39,7 @@
          GitHub Actions（可直接调 beat，也可沿用裸 pi -p 模板）
 ```
 
-**落位**：pi-web 仓内顶级目录 `pi-loop/`（独立 package.json，包名 `pi-loop`），pi-web 以 `file:` 依赖引入（先例：`@henryqw/pi-subagent` tgz pin）。开源抽仓时只改 publish 配置；npm 命名发布时再定（社区已有 `@bramburn/pi-loop`、`@hank-warren/pi-loop`，均为 scoped，无冲突但命名再议）。测试沿用仓内约定：`node --test`，`.test.mjs` 直接 import `.ts`。
+**落位**：pi-web 仓内顶级目录 `pi-loop/`（独立 package.json 备未来发布，含 bin 入口），pi-web 内部以**相对路径导入**（同 `lib/` 待遇，不经 node_modules——`file:` 符号链接过 Next server bundle 有解析摩擦，实现期裁定改相对路径；发布时另配 exports）。npm 命名发布时再定（社区已有 `@bramburn/pi-loop`、`@hank-warren/pi-loop`，均为 scoped，无冲突但命名再议）。测试沿用仓内约定：`node --test`，`.test.mjs` 直接 import `.ts`。
 
 ## 4. 命令面
 
@@ -161,6 +161,6 @@ beat（一次性进程）
 | H2 | 补跑语义 anacron-lite：`.lastrun` + `nextDue`，错过补一轮；替代分钟槽；daemon 同步升级 |
 | H3 | D13 修订：ledger per-loop（`loops/<name>/loop-ledger.json`）；budget/constraints 维持根共享 |
 | H4 | `stop` = 进程监督，显式修订 T5「无 abort」；run/trigger 的 HTTP/API 面仍不做 |
-| H5 | 包落位 pi-web 仓内 `pi-loop/`（`file:` 依赖），开源抽仓与 npm 命名顺延 |
+| H5 | 包落位 pi-web 仓内 `pi-loop/`（相对路径导入，独立 package.json 备发布），开源抽仓与 npm 命名顺延 |
 | H6 | daemon spawner 反向依赖包内纯逻辑，`emittedSlots`/`busyWorkspaces` 删除，双宿主靠 `.round.lock` 互斥 |
 | H7 | 同名 loop 以目录为键消解；name 仅展示 |
