@@ -120,6 +120,8 @@ Last run: <ISO 时间> · outcome: report-only|escalated|failed
 
 ### 两种心跳，一套协议
 
+> 修订（2026-08-30，见 docs/pi-loop-host-design.md）：心跳宿主新增 `pi-loop beat`（一次性幂等，任意外部 cron 可每分钟调用）；fire 判定改 `.lastrun` + nextDue（错过槽位恢复后至多补一轮），起轮统一 per-loop `.round.lock`（双宿主互斥）。
+
 | 场景 | 心跳 | 轮进程 | 扩展装配 |
 |---|---|---|---|
 | pi-web workspace（本地） | daemon DaemonJob（扫 `loops/*/LOOP.md` 解析 cron） | **daemon 内起一次性 AgentSession**（startRpcSession，cwd=workspace 根） | pi-web workspace 装配保留（work-items/kb_search/skills 过滤/extraAgentDirs） |
@@ -209,6 +211,8 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 - `lib/daemon/loop-spawner.ts`（~150-200 行，含事后钩子）：DaemonJob，每 30s 扫描已注册 workspace 根的 `loops/*/LOOP.md`（frontmatter：cron/level/max_minutes），分钟槽去重复用 `cronMatches`；到点且非 paused（`PAUSED` / `loop-pause-all`）→ `startRpcSession` 起一次性会话（一次性 key + 创建超时等现有机制复用）跑开场合同，`max_minutes` 超时 → `destroy()` + 按该 workspace cwd 收窄收割孤儿进程树。RUNS 记录 = STATE.md + workspace git log，不建新索引。
   **事后钩子（评审决议 D9，gate 可发现性 + 会话列表防污染）**：轮结束后 spawner 扫该 workspace 的 `requirements/*/bugs/*/events.jsonl`，把 `conversationId === 轮会话 id` 的事件对应的工作项回填 `conversations` 链接（待决 gate 的轮会话从工作项详情「继续对话」可达）；本轮**无** `loop.gate` 里程碑 → 自动 `archiveSession()` 归档轮会话（有事在身的留在会话列表）。全部复用现有服务（work-items service / session-archive），不新建状态。
 
+> 修订（2026-08-30，见 docs/pi-loop-host-design.md）：spawner 改用 `pi-loop/` 包内统一 fire 序列（protocol/cron/due/round-lock/contract/reap），删分钟槽 `emittedSlots` 与 `busyWorkspaces`，`.lastrun` + per-loop 锁判定。
+
 **留**：daemon 本体、DaemonJob registry、work-items 全套、importer、`lib/subagent/`（phase 2 切换）、`authoring` 的文件写入逻辑可并入模板库。
 
 **观测**：phase 1 无 web UI（STATE.md 人类可读 + workspace git log）；STATE.md viewer 作为 pi-web 后续可选增强，不在本阶段。
@@ -267,3 +271,5 @@ workspace 轮不走裸 `pi -p` 的原因：需要保留 workspace 域工具装�
 | D12 | 暂停用 `loops/<name>/PAUSED` 标记文件 + 根级 `loop-pause-all`（文件即声明，机器可解析；不用 STATE.md 字段） |
 | D13 | constraints/budget/ledger 为根级共享（budget 是全 workspace 总帽），STATE `[BUDGET]` 仅本轮视角自报；phase 2 spawner 对账 |
 | D14 | 拆除清单补全：`lib/loop/` 全部残留文件与测试、daemon client loop 方法、MobileShell/useAppShellState/HomeLanding 触点、run-contract 改造、AGENTS.md 重写、旧版设计文档退役横幅 |
+
+> 修订（2026-08-30，见 docs/pi-loop-host-design.md）D13：ledger 改 per-loop（`loops/<name>/loop-ledger.json`）；constraints/budget 维持根共享（budget 仍是全 workspace 总帽）。
