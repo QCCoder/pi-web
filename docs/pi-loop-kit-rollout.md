@@ -1,6 +1,6 @@
 # pi-loop kit 推进状态与 TODO
 
-> 活文档：Phase B 演练、拆除队列、所有顺延项的唯一入口。更新于 2026-08-29（晚：T2–T6 已完成，feature/loop-kit-teardown **已并回 develop**——与社区 subagent 切换 Route A 同期落位）。
+> 活文档：Phase B 演练、拆除队列、所有顺延项的唯一入口。更新于 2026-08-29（深夜：终态整合完成——develop@61592e8 已含 kit+拆除+subagent 切换全部；演练直接用主仓 daemon，无需旗子/worktree）。
 > 设计：`docs/pi-loop-kit-design.md`（含 D9–D14）｜计划：`docs/pi-loop-kit-plan-1-build.md`（✅ 已合并）、`docs/pi-loop-kit-plan-2-teardown.md`（T1 Phase A ✅，T2–T6 ✅）
 
 ## 当前状态
@@ -10,7 +10,7 @@
 | pi-web develop | 携 C2 daemon 重构 + kit 建设期合并 + **feature/loop-kit-teardown 已并回**（v3 引擎删除、kit spawner 无条件注册）+ **社区 subagent 切换（Route A A1–A3 代码已合）** |
 | workspace-c | `kit-rehearsal` 分支 `1b9c8ea`（kit 文件落位 + SKILL.md 六点改造，已过评审；v3 `loop.yaml` 保持 `enabled: false` 未动） |
 | 拆除期 worktree | `pi-web-worktrees/loop-kit-teardown`（feature/loop-kit-teardown，T2–T6 全部完成：`f6467f8`→`beb1224` + 文档收口；typecheck/test 全绿）——**已并回 develop，worktree 可清理** |
-| daemon | 仍是旧进程（pid 见 `ps aux | grep pi-daemon`）——**等一次空闲窗口重启**（重启后 spawner 无条件生效，不再需要 PI_LOOP_KIT 旗子） |
+| daemon | 仍是旧进程——重启即得终态栈（主仓 `npm run daemon`，无旗子；重启前先 `npm install`） |
 
 ## 下一步：Phase B 演练轮（人工操作）
 
