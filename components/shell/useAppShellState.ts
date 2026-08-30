@@ -10,6 +10,7 @@ import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
+import { resolveContractPattern } from "@/lib/loops/contract-prefill";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "../ChatInput";
@@ -960,8 +961,8 @@ export function useAppShellState() {
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loops`);
       if (response.ok) {
-        const data = (await response.json()) as { loops?: Array<{ pattern: string; paused?: boolean }> };
-        pattern = data.loops?.find((loop) => !loop.paused)?.pattern;
+        const data = (await response.json()) as { loops?: Array<{ name?: string; pattern: string; paused?: boolean }> };
+        pattern = resolveContractPattern(item.loop, data.loops ?? []);
       }
     } catch { /* offline — degrade to a bare prompt without the /skill: prefix */ }
     const verb = mode === "adopt" ? "收养" : "执行";
