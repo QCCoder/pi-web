@@ -6,6 +6,8 @@ import { hostname } from "node:os";
 import { discoverKitLoops } from "./protocol.ts";
 import { runNow } from "./fire.ts";
 import { beatRoot, beatRoundRunner, stopRound } from "./beat.ts";
+import { initLoop } from "./init.ts";
+import { collectStatus } from "./status.ts";
 
 const [command, ...args] = process.argv.slice(2);
 const opt = (flag: string): string | undefined => {
@@ -57,6 +59,26 @@ async function main(): Promise<void> {
     console.log(`[pi-loop] ${command === "pause" ? "已暂停" : "已恢复"} ${name}`);
     return;
   }
+  if (command === "status") {
+    for (const entry of collectStatus(root)) {
+      const state = entry.running ? "running" : entry.paused ? "paused" : `next ${entry.nextDue ?? "?"}`;
+      console.log(`${entry.name}\t${entry.cron}\t${entry.level}\t${state}\tlast ${entry.lastRun ?? "-"}`);
+    }
+    return;
+  }
+  if (command === "init") {
+    const name = opt("--name") ?? die("用法: pi-loop init --name <n> --cron <expr> [--pattern] [--level] [--max-minutes] [--timezone] [--root]");
+    initLoop(root, {
+      name,
+      cron: opt("--cron") ?? die("--cron 必填"),
+      pattern: opt("--pattern"),
+      level: opt("--level") as "L1" | "L2" | "L3" | undefined,
+      maxMinutes: opt("--max-minutes") ? Number(opt("--max-minutes")) : undefined,
+      timezone: opt("--timezone"),
+    });
+    console.log(`[pi-loop] 已创建 loops/${name}（五件套 + .lastrun=now，首轮等自然槽）`);
+    return;
+  }
   if (command === "watch") {
     console.log(`[pi-loop] watch ${root}（30s tick，Ctrl-C 退出）`);
     const tick = () => void beatRoot(root).catch((e) => console.error("[pi-loop] tick failed:", e));
@@ -64,7 +86,7 @@ async function main(): Promise<void> {
     setInterval(tick, 30_000);
     return;
   }
-  die("用法: pi-loop <beat|watch|run|stop|pause|resume> ...（status/init 随下一任务交付）");
+  die("用法: pi-loop <beat|watch|run|stop|pause|resume|status|init> ...");
 }
 
 void main();

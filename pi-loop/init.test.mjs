@@ -1,0 +1,31 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parse } from "yaml";
+import { initLoop } from "./init.ts";
+
+test("init 脚手架：五件套落位（ledger 在 loop 目录）+ frontmatter 定制 + .lastrun=now", () => {
+  const root = mkdtempSync(join(tmpdir(), "init-"));
+  initLoop(root, { name: "triage", cron: "0 9 * * 1-5", timezone: "Asia/Shanghai", maxMinutes: 20 });
+  assert.ok(existsSync(join(root, "loops", "triage", "LOOP.md")));
+  assert.ok(existsSync(join(root, "loops", "triage", "STATE.md")));
+  assert.ok(existsSync(join(root, "loops", "triage", "loop-ledger.json")));
+  assert.ok(existsSync(join(root, "loop-constraints.md")));
+  assert.ok(existsSync(join(root, "loop-budget.md")));
+  assert.ok(existsSync(join(root, "loops", "triage", ".lastrun")));
+  const loop = readFileSync(join(root, "loops", "triage", "LOOP.md"), "utf8");
+  const front = parse(loop.match(/^---\r?\n([\s\S]*?)\r?\n---/)[1]);
+  assert.equal(front.cron, "0 9 * * 1-5");
+  assert.equal(front.max_minutes, 20);
+  assert.equal(front.name, "triage");
+});
+
+test("init 幂等保护：已存在的 root 宪法文件不覆盖", () => {
+  const root = mkdtempSync(join(tmpdir(), "init2-"));
+  initLoop(root, { name: "x", cron: "* * * * *" });
+  writeFileSync(join(root, "loop-budget.md"), "# 人工改过");
+  initLoop(root, { name: "y", cron: "* * * * *" });
+  assert.equal(readFileSync(join(root, "loop-budget.md"), "utf8"), "# 人工改过");
+});
