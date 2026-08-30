@@ -700,9 +700,12 @@ export function WorkspaceManager({
     }
   }, [loadWorkItems, onRunContract, onWorkItemsChanged, selectedWorkspace, selectedWorkspaceId, selectedWorkItem]);
 
+  // T7: `loop` rides the explicit intersection arm (string | null — null
+  // clears the binding); putting it in the Pick too would intersect away
+  // the null arm and break `patchWorkItem({ loop: value || null })`.
   const patchWorkItem = useCallback(async (
     patch: Partial<Pick<WorkItemRecord, "status" | "phase" | "priority" | "title" | "repositories">>
-      & { archived?: boolean },
+      & { archived?: boolean; loop?: string | null },
   ) => {
     if (!selectedWorkspaceId || !selectedWorkItem) return;
     setSaving(true);
@@ -1181,6 +1184,9 @@ export function WorkspaceManager({
   // (desktop 工作项 panel) the LIST stays mounted in the middle column while
   // the DETAIL portals into the right column's config area — one instance
   // keeps every bit of state (selection, drafts, save flow).
+  // T7: bound kit-loop NAME for the detail 「Loop」 row ("" = 未绑定). Hoisted
+  // so the 未生效 badge check narrows cleanly (item.loop is optional).
+  const boundLoopName = selectedWorkItem?.item.loop ?? "";
   const workItemDetailPane = selectedWorkItem && selectedWorkspace ? (
     <div className="work-item-detail-card">
                   <div className="work-item-detail-header">
@@ -1331,6 +1337,27 @@ export function WorkspaceManager({
                         </div>
                       </div>
                     )}
+                    <div className="workspace-field workspace-field-compact">
+                      <span>Loop</span>
+                      <div style={{ padding: "9px 0", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                        <select
+                          value={boundLoopName}
+                          disabled={saving || kitLoops.length === 0}
+                          onChange={(event) => void patchWorkItem({ loop: event.target.value || null })}
+                          title={kitLoops.length === 0 ? "本工作区没有 kit loop" : "绑定后该工作项只被绑定的 loop 拾取（未绑定项对所有 loop 可见）"}
+                        >
+                          <option value="">未绑定</option>
+                          {kitLoops.map((loop) => (
+                            <option key={loop.name} value={loop.name}>
+                              {loop.name}{loop.paused ? "（已暂停）" : ""}
+                            </option>
+                          ))}
+                        </select>
+                        {boundLoopName && !kitLoops.some((l) => l.name === boundLoopName) && (
+                          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>未生效（loop 不存在）</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                   {selectedWorkspace.repositories.length > 0 && (
                     <div className="work-item-repositories" aria-label="Repository scope">
