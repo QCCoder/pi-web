@@ -131,6 +131,7 @@ export function MobileShell() {
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
+    handleRunLoopRound,
     handleRunContract,
     handleWorkspaceDeleted,
     handleOpenFile,
@@ -275,6 +276,7 @@ export function MobileShell() {
               onClose={() => {}}
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}
+              onRunLoopRound={handleRunLoopRound}
               onRunContract={handleRunContract}
               onOpenConversation={handleOpenConversation}
               onWorkspaceDeleted={handleWorkspaceDeleted}
@@ -313,6 +315,7 @@ export function MobileShell() {
                 onClose={() => {}}
                 onOpenWorkspace={handleOpenWorkspace}
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                onRunLoopRound={handleRunLoopRound}
                 onRunContract={handleRunContract}
                 onOpenConversation={handleOpenConversation}
                 onWorkspaceDeleted={handleWorkspaceDeleted}

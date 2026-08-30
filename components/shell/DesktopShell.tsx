@@ -96,6 +96,7 @@ export function DesktopShell() {
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
+    handleRunLoopRound,
     handleRunContract,
     handleWorkspaceDeleted,
     handleOpenFile,
@@ -186,6 +187,7 @@ const renderMiddleColumn = () => {
                 onClose={() => {}}
                 onOpenWorkspace={handleOpenWorkspace}
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                onRunLoopRound={handleRunLoopRound}
                 onRunContract={handleRunContract}
                 onOpenConversation={handleOpenConversation}
                 onWorkspaceDeleted={handleWorkspaceDeleted}
@@ -246,6 +248,7 @@ const renderMiddleColumn = () => {
           onClose={() => {}}
           onOpenWorkspace={handleOpenWorkspace}
           onOpenWorkItemConversation={handleOpenWorkItemConversation}
+          onRunLoopRound={handleRunLoopRound}
           onRunContract={handleRunContract}
           onOpenConversation={handleOpenConversation}
           onWorkspaceDeleted={handleWorkspaceDeleted}

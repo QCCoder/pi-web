@@ -87,6 +87,10 @@ interface Props {
     item: WorkItemRecord,
     mode: "execute" | "adopt",
   ) => Promise<void>;
+  /** 「立即跑一轮」（B 面，Task 9）：POST run 路由在 daemon 起一轮，成功后把
+   *  新轮会话开成 workspace 的 chat tab（SSE 实时观看）；409（本轮已在跑）
+   *  等错误在 handler 内 alert 直陈。 */
+  onRunLoopRound?: (workspace: WorkspaceSummary, item: WorkItemRecord, loopName: string) => void;
   /** Open one of the item's linked conversation sessions by id (locate
    *  pipeline) — renders the `conversations` list as clickable entries. */
   onOpenConversation?: (sessionId: string) => void;
@@ -213,6 +217,7 @@ export function WorkspaceManager({
   onOpenWorkspace,
   onOpenWorkItemConversation,
   onRunContract,
+  onRunLoopRound,
   onOpenConversation,
   onWorkspaceDeleted,
   onWorkItemsChanged,
@@ -263,6 +268,8 @@ export function WorkspaceManager({
   }>>([]);
   // 按钮门控派生量（D11 语义不变）：存在至少一个未暂停的 kit loop。
   const hasKitLoops = kitLoops.some((loop) => !loop.paused);
+  // 「立即跑一轮」多 active loop 时的手动选择（未绑定且无唯一默认时出现）。
+  const [runLoopPick, setRunLoopPick] = useState("");
 
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
@@ -1252,6 +1259,56 @@ export function WorkspaceManager({
                         {selectedWorkItem.item.conversations.length > 0 ? "继续会话" : "开始会话"}
                       </button>
                     )}
+                    {/* B 面「立即跑一轮」：独立于 conversations 是否为空，仅要求
+                        同样的 phase/status gate（Task 9）。命中绑定或单 active
+                        loop → 单按钮（默认名）；未绑定多 active loop →
+                        select+按钮。前一个兄弟按钮已携带 marginLeft:auto，
+                        不重复加（两个 auto 会在按钮组中间豁出空隙）。 */}
+                    {onRunLoopRound && hasKitLoops && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && (() => {
+                      const activeKitLoops = kitLoops.filter((l) => !l.paused); // kitLoops 存全量（Task 3）
+                      const boundLoopName = selectedWorkItem.item.loop;
+                      const defaultLoop = activeKitLoops.find((l) => l.name === boundLoopName)
+                        ?? (activeKitLoops.length === 1 ? activeKitLoops[0] : undefined);
+                      if (defaultLoop) {
+                        return (
+                          <button
+                            className="workspace-action"
+                            disabled={saving}
+                            onClick={() => void onRunLoopRound(selectedWorkspace, selectedWorkItem.item, defaultLoop.name)}
+                            title={`立即起一轮 ${defaultLoop.name}（daemon 会话，实时观看；本轮优先处理 ${selectedWorkItem.item.key}）`}
+                          >
+                            立即跑一轮
+                          </button>
+                        );
+                      }
+                      if (activeKitLoops.length === 0) return null;
+                      // 未绑定且多 loop：选择菜单（spec §4 入口 gate）
+                      const pick = runLoopPick && activeKitLoops.some((l) => l.name === runLoopPick)
+                        ? runLoopPick : activeKitLoops[0]?.name ?? "";
+                      return (
+                        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <select
+                            value={pick}
+                            disabled={saving}
+                            onChange={(event) => setRunLoopPick(event.target.value)}
+                            style={{ fontSize: 12 }}
+                            title="选择用哪个 loop 起轮"
+                          >
+                            {activeKitLoops.map((l) => (
+                              <option key={l.name} value={l.name}>{l.name}</option>
+                            ))}
+                          </select>
+                          <button
+                            className="workspace-action"
+                            disabled={saving}
+                            onClick={() => void onRunLoopRound(selectedWorkspace, selectedWorkItem.item, pick)}
+                            title={`立即起一轮 ${pick}（daemon 会话，实时观看；本轮优先处理 ${selectedWorkItem.item.key}）`}
+                          >
+                            立即跑一轮
+                          </button>
+                        </span>
+                      );
+                    })()}
                     <button
                       className="workspace-action"
                       onClick={() => setContentEditing((value) => !value)}
