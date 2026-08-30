@@ -28,8 +28,9 @@ const PROBE_TIMEOUT_MS = 2_000;
 /** Metadata + live state for a session physically owned by the daemon.
  *  Pi Web probes this to decide whether to proxy the daemon's event stream
  *  instead of loading the .jsonl into its own process (which would race the
- *  daemon for the same file). */
-export interface DaemonSessionMeta {
+ *  daemon for the same file). Local to this module — consumers go through
+ *  `daemonClient.probeSession()`'s return type. */
+interface DaemonSessionMeta {
   id: string;
   cwd?: string;
   sessionFile?: string;

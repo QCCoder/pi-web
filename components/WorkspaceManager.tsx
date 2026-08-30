@@ -80,13 +80,13 @@ interface Props {
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
   /** Kit 时代「按合同执行」（D11）：客户端预填——把 `/skill:<loop> 执行|收养
-   *  <KEY>` 写进该 workspace 新会话 composer 的草稿并切过去，人按发送才起会话。
-   *  恒返回 null（预填不会失败；保留 string|null 签名以兼容拒绝横幅约定）。 */
+   *  <KEY>` 写进该 workspace 新会话 composer 的草稿并切过去，人按发送才起会话
+   *  （预填不会失败，恒成功）。 */
   onRunContract?: (
     workspace: WorkspaceSummary,
     item: WorkItemRecord,
     mode: "execute" | "adopt",
-  ) => Promise<string | null>;
+  ) => Promise<void>;
   /** Open one of the item's linked conversation sessions by id (locate
    *  pipeline) — renders the `conversations` list as clickable entries. */
   onOpenConversation?: (sessionId: string) => void;
@@ -667,19 +667,14 @@ export function WorkspaceManager({
   ]);
 
   /** 「按合同执行」/「收养续跑」（D11 客户端预填）：onRunContract 写入新会话
-   *  composer 草稿并切到该 workspace 的 chat 视图，恒返回 null（预填不会
-   *  失败）；这里仅刷新详情，保持列表/详情一致（无新会话产生——.jsonl 到首条
-   *  消息才建）。 */
+   *  composer 草稿并切到该 workspace 的 chat 视图（预填不会失败）；这里仅
+   *  刷新详情，保持列表/详情一致（无新会话产生——.jsonl 到首条消息才建）。 */
   const runContract = useCallback(async (mode: "execute" | "adopt") => {
     if (!selectedWorkspace || !selectedWorkItem || !onRunContract) return;
     setSaving(true);
     setError(null);
     try {
-      const refusal = await onRunContract(selectedWorkspace, selectedWorkItem.item, mode);
-      if (refusal) {
-        setError(`未播种：${refusal}`);
-        return;
-      }
+      await onRunContract(selectedWorkspace, selectedWorkItem.item, mode);
       if (selectedWorkspaceId) {
         const detail = await responseJson<WorkItemDetail>(
           await fetch(

@@ -130,8 +130,8 @@ describe("applyAgentEvent — run lifecycle", () => {
   });
 
   it("tool_execution_update without a prior start promotes phase to running_tools (mid-run joiner)", () => {
-    // Loop orchestrator 会话在 subagent 运行中途被打开：观看者没看到
-    // tool_execution_start，只收到 worker 流出的 partial —— 据此升级 phase，
+    // daemon 持有的会话（如 kit 轮）在 subagent 运行中途被打开：观看者没收到
+    // tool_execution_start，只看到 subagent 流出的 partial —— 据此升级 phase，
     // 否则整个 subagent 运行期间 phase 停在 waiting_model（「思考中」）。
     const withToolCall: AgentMessage = {
       role: "assistant",

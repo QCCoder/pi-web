@@ -13,7 +13,7 @@ export async function GET(
     }
 
     // Pure proxy over the session daemon (C2): it owns every live session, so
-    // it is the only place to ask. `loopOwned: true` here means "live in the
+    // it is the only place to ask. `liveInDaemon: true` here means "live in the
     // daemon" (kit round, subagent child, or interactive session) — the
     // client pins such a viewed session so its event stream survives the
     // running-set sweep even while it is idle-warm between turns.
@@ -22,7 +22,7 @@ export async function GET(
     if (meta) {
       return NextResponse.json({
         running: meta.running,
-        loopOwned: true,
+        liveInDaemon: true,
         state: meta.state ?? undefined,
       });
     }

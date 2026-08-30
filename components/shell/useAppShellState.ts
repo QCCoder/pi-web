@@ -950,13 +950,12 @@ export function useAppShellState() {
    *  客户端预填。取该 workspace 的 kit loop 合同（GET /loops，纯文件发现），
    *  把 `/skill:<pattern> 执行|收养 <KEY>` 写进其新会话 composer 的草稿，再切到
    *  该 workspace 的 chat 视图；人按发送才真正起会话（pi 到首条消息才建
-   *  .jsonl，不再预建）。离线 / 无 kit loop 时退化为不带 /skill: 前缀的裸提示。
-   *  恒返回 null（预填不会失败；保留 string|null 签名以兼容调用方的拒绝横幅约定）。 */
+   *  .jsonl，不再预建）。离线 / 无 kit loop 时退化为不带 /skill: 前缀的裸提示。 */
   const handleRunContract = useCallback(async (
     workspace: WorkspaceSummary,
     item: WorkItemRecord,
     mode: "execute" | "adopt",
-  ): Promise<string | null> => {
+  ): Promise<void> => {
     let pattern: string | undefined;
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loops`);
@@ -988,7 +987,6 @@ export function useAppShellState() {
     setSystemPrompt(null);
     focusChat();
     navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`);
-    return null;
   }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
 
   const handleAgentEnd = useCallback(() => {

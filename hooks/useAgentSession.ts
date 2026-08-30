@@ -343,8 +343,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   /** 会话是否由 session daemon 持有（kit 轮会话 / subagent
    *  child / interactive）。drives pin 语义：被查看但未在跑的 daemon 会话
-   *  不被 running-set 清扫断流（见挂载 effect 的 loopOwned 处理）。 */
-  const [loopOwned, setLoopOwned] = useState(false);
+   *  不被 running-set 清扫断流（见挂载 effect 的 liveInDaemon 处理）。 */
+  const [liveInDaemon, setLiveInDaemon] = useState(false);
 
   // data / messages / entryIds 订阅 SessionMessagesCache（阶段 B4a）：后台 session 的
   // message_end 写 cache 也能反映到前台；切回已缓存 session 无空窗。
@@ -368,8 +368,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadSessionAbortRef = useRef<AbortController | null>(null);
   /** L3 earlier-page 单飞锁（loadEarlier 去重）。 */
   const earlierInFlightRef = useRef(false);
-  /** 当前被 pin 住的 daemon 会话 id（见挂载 effect 的 loopOwned 处理）。 */
-  const pinnedLoopSidRef = useRef<string | null>(null);
+  /** 当前被 pin 住的 daemon 会话 id（见挂载 effect 的 liveInDaemon 处理）。 */
+  const pinnedDaemonSidRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const bashRecoveryIdRef = useRef(0);
   const initialScrollDoneRef = useRef(false);
@@ -499,7 +499,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const ac = new AbortController();
     loadSessionAbortRef.current = ac;
     // 切换/重载时先清 pin 语义标记。
-    setLoopOwned(false);
+    setLiveInDaemon(false);
     try {
       // SWR (REQ-0001 决策 2/3): 缓存命中则立即填充 UI 消除空窗；再发条件请求，
       // 304 复用缓存、200 覆盖更新。
@@ -561,7 +561,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal: ac.signal });
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; loopOwned?: boolean };
+        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; liveInDaemon?: boolean };
         if (sessionIdRef.current !== sid) return null;
 
         const liveState = agentState.state;
@@ -577,7 +577,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         } else if (!agentState.running) {
           patchRuntime({ queuedMessages: { steering: [], followUp: [] } });
         }
-        setLoopOwned(Boolean(agentState.loopOwned));
+        setLiveInDaemon(Boolean(agentState.liveInDaemon));
         return agentState;
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return null;
@@ -1383,10 +1383,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     initialScrollDoneRef.current = false;
 
-    // 解除上一个会话的 Loop pin（切走的会话不再需要专属事件流）。
-    const prevPinned = pinnedLoopSidRef.current;
+    // 解除上一个会话的 daemon pin（切走的会话不再需要专属事件流）。
+    const prevPinned = pinnedDaemonSidRef.current;
     if (prevPinned && prevPinned !== session?.id) {
-      pinnedLoopSidRef.current = null;
+      pinnedDaemonSidRef.current = null;
       globalAgentEvents.unpinSession(prevPinned);
     }
 
@@ -1396,8 +1396,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // daemon 拥有的会话（kit 轮 / subagent child）不在 web 进程的
         // running 集里，syncRunningIds 会把它们的 SSE 拆掉。pin 住：观看期间事件流
         // 一直连着（包括 gate 暂停期间，resume 后 agent_start 直接从这条流到达）。
-        if (agentState?.loopOwned) {
-          pinnedLoopSidRef.current = session.id;
+        if (agentState?.liveInDaemon) {
+          pinnedDaemonSidRef.current = session.id;
           globalAgentEvents.pinSession(session.id);
         }
         if (agentState?.running) {
@@ -1409,7 +1409,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
               void waitForPromptSettlement(session.id);
             }
-          } else if (agentState.loopOwned) {
+          } else if (agentState.liveInDaemon) {
             // Host 说 running 但 state 快照不可用（会话还在起动）。agent_start
             // 可能已经发过，不会再来了 —— 直接置 running，靠后续事件推进。
             patchRuntime({ agentRunning: true, agentPhase: { kind: "waiting_model" } });
@@ -1447,10 +1447,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, reloadSignal]);
 
-  // 组件卸载时解除 Loop pin（切换到别的 workspace / 关闭 tab 等）。
+  // 组件卸载时解除 daemon pin（切换到别的 workspace / 关闭 tab 等）。
   useEffect(() => {
     return () => {
-      const pinned = pinnedLoopSidRef.current;
+      const pinned = pinnedDaemonSidRef.current;
       if (pinned) globalAgentEvents.unpinSession(pinned);
     };
   }, []);
@@ -1566,7 +1566,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    loopOwned,
+    liveInDaemon,
     agentRunning, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,

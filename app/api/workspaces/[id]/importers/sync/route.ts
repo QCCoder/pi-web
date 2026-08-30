@@ -30,7 +30,7 @@ export async function POST(
     // Forward to the host first (single source of truth for importer runs).
     const forwarded = await daemonClient.syncImporters(manifest.id);
     if (forwarded) {
-      return NextResponse.json({ summary: forwarded, ranVia: "loop-host" });
+      return NextResponse.json({ summary: forwarded, ranVia: "daemon" });
     }
 
     // Host unreachable — run in-process so a manual click still works.

@@ -139,11 +139,11 @@ class GlobalAgentEventManager {
    *  probe 超时，非确定性失败（网络/5xx）重试几次再放弃；daemon 明确回答
    *  「不持有」才立即解除 pin。 */
   private async reprobePinned(sid: string, attempt = 0): Promise<void> {
-    let data: { loopOwned?: boolean } | null = null;
+    let data: { liveInDaemon?: boolean } | null = null;
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      data = await res.json() as { loopOwned?: boolean };
+      data = await res.json() as { liveInDaemon?: boolean };
     } catch {
       // 探测本身失败（daemon 忙/网络抖动）：重试几次，仍失败才解除 pin。
       if (attempt >= 2) {
@@ -155,7 +155,7 @@ class GlobalAgentEventManager {
       }, 1000);
       return;
     }
-    if (data?.loopOwned) {
+    if (data?.liveInDaemon) {
       setTimeout(() => {
         if (this.pinned.has(sid)) void this.ensureConnected(sid);
       }, 1000);
