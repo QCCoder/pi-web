@@ -18,6 +18,13 @@
  * whose cwd is inside the run's workspace, so concurrent rounds in *other*
  * workspaces are left alone. (Two concurrent rounds in the *same* workspace can
  * still overlap — acceptable and recoverable; see reapOrphanedRoundProcesses.)
+ *
+ * Lives in `pi-loop/` (host-agnostic home): only node builtins, no daemon
+ * imports — daemon code depends on this module, never the reverse. Besides the
+ * daemon-rooted `reapOrphanedRoundProcesses` (kept for the spawner, which knows
+ * the round's process roots), `reapOrphansByCwd` is the generalized entry for
+ * any host (beat CLI `stop`, …): a plain full-table cwd scan with no
+ * assumption about who the parent process is.
  */
 import { spawnSync } from "node:child_process";
 import { sep } from "node:path";
@@ -202,4 +209,57 @@ export async function reapOrphanedRoundProcesses(
   for (const pid of killedPids) tryKill(pid, "SIGKILL");
 
   return { workspacePath, killedPids, targetRoots: [...targetRoots] };
+}
+
+/** Injectable seams of `reapOrphansByCwd` — defaults shell out to ps/lsof/kill
+ *  and swallow their own errors; tests substitute all four. */
+export interface ReapDeps {
+  /** Process-table snapshot (`ps -axo pid,ppid,command`). */
+  lister?: () => PsRow[];
+  /** Best-effort cwd resolver for one pid. */
+  cwdOf?: (pid: number) => string | undefined;
+  /** Signal sender (default: group kill then direct kill, errors swallowed). */
+  killer?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Grace-period sleep — injectable so tests skip the 3s wait. */
+  sleeper?: (ms: number) => Promise<void>;
+}
+
+/** Grace between SIGTERM and the SIGKILL sweep (matches `pi-loop stop`). */
+const REAP_BY_CWD_GRACE_MS = 3_000;
+
+/**
+ * Host-agnostic cwd-convergent reap: full process-table scan, kill every
+ * build/shell process whose cwd is inside `workspacePath` (never this process
+ * itself). Same cwd scoping as `reapOrphanedRoundProcesses`, but with no
+ * assumption about the host process — any beat/CLI host can call it after
+ * aborting a round.
+ *
+ * Matched pids get SIGTERM; after a 3s grace, every pid still present in a
+ * fresh table snapshot gets SIGKILL (liveness is judged from the same process
+ * table the scan came from, so a mock table in tests behaves like the real
+ * one; a lingering zombie row merely earns a no-op SIGKILL). Never throws —
+ * every default dependency swallows its own errors, so a reap failure can
+ * never break the abort/stop flow that calls it.
+ */
+export async function reapOrphansByCwd(
+  workspacePath: string,
+  deps: ReapDeps = {},
+): Promise<ReapResult> {
+  const lister = deps.lister ?? listAllProcesses;
+  const cwdOf = deps.cwdOf ?? pidCwd;
+  const killer = deps.killer ?? tryKill;
+  const sleeper = deps.sleeper ?? sleep;
+
+  const targets = lister().filter((row) =>
+    row.pid !== HOST_PID
+    && isBuildOrShellCommand(row.command)
+    && isCwdInWorkspace(cwdOf(row.pid), workspacePath));
+  const killedPids = targets.map((row) => row.pid);
+
+  for (const row of targets) killer(row.pid, "SIGTERM");
+  if (targets.length > 0) await sleeper(REAP_BY_CWD_GRACE_MS);
+  const survivors = new Set(lister().map((row) => row.pid));
+  for (const row of targets) if (survivors.has(row.pid)) killer(row.pid, "SIGKILL");
+
+  return { workspacePath, killedPids, targetRoots: killedPids };
 }

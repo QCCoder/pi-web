@@ -9,7 +9,8 @@ const {
   parsePsRows,
   isCwdInWorkspace,
   isBuildOrShellCommand,
-} = await jiti.import("./loop-process-cleanup.ts");
+  reapOrphansByCwd,
+} = await jiti.import("./reap.ts");
 
 test("parsePgrepChildren: parses one pid per line, ignores junk", () => {
   assert.deepEqual(parsePgrepChildren("123\n456\n\n789\n"), [123, 456, 789]);
@@ -68,4 +69,52 @@ test("isBuildOrShellCommand: matches first-token basename of known binaries", ()
   assert.equal(isBuildOrShellCommand("/sbin/launchd"), false);
   assert.equal(isBuildOrShellCommand("com.apple.WebKit"), false);
   assert.equal(isBuildOrShellCommand(""), false);
+});
+
+test("reapOrphansByCwd 只杀 cwd 命中且 build/shell 的进程，跳过自己", async () => {
+  const killed = [];
+  const rows = [
+    { pid: 101, command: "npm run build", cwd: "/ws/repositories/x" },
+    { pid: 102, command: "node server.js", cwd: "/elsewhere" },
+    { pid: process.pid, command: "sh -c build", cwd: "/ws" },
+  ];
+  const result = await reapOrphansByCwd("/ws", {
+    lister: () => rows,
+    cwdOf: (pid) => rows.find((r) => r.pid === pid)?.cwd,
+    killer: (pid, signal) => killed.push([pid, signal]),
+    sleeper: async () => {},
+  });
+  // 宽限期后仍“存活”（killer 是 mock，进程表不变）→ SIGTERM + SIGKILL 都落在 101 上
+  assert.deepEqual(killed, [[101, "SIGTERM"], [101, "SIGKILL"]]);
+  // ReapResult 实际形状为 killedPids/targetRoots（无 terminated 字段，按计数适配）
+  assert.deepEqual(result.killedPids, [101]);
+  assert.deepEqual(result.targetRoots, [101]);
+});
+
+test("reapOrphansByCwd: 无目标时不睡不杀、结果为空", async () => {
+  const killed = [];
+  let sleptMs = 0;
+  const result = await reapOrphansByCwd("/ws", {
+    lister: () => [{ pid: 201, command: "npm run build", cwd: "/elsewhere" }],
+    cwdOf: () => undefined,
+    killer: (pid, signal) => killed.push([pid, signal]),
+    sleeper: async (ms) => { sleptMs += ms; },
+  });
+  assert.deepEqual(killed, []);
+  assert.equal(sleptMs, 0);
+  assert.deepEqual(result.killedPids, []);
+  assert.deepEqual(result.targetRoots, []);
+});
+
+test("reapOrphansByCwd: 宽限期内退出（快照里消失）则不再 SIGKILL", async () => {
+  const killed = [];
+  let table = [{ pid: 301, command: "mvn test", cwd: "/ws/repositories/y" }];
+  const result = await reapOrphansByCwd("/ws", {
+    lister: () => table,
+    cwdOf: (pid) => table.find((r) => r.pid === pid)?.cwd,
+    killer: (pid, signal) => { killed.push([pid, signal]); table = []; }, // TERM 后进程从表中消失
+    sleeper: async () => {},
+  });
+  assert.deepEqual(killed, [[301, "SIGTERM"]]);
+  assert.deepEqual(result.killedPids, [301]);
 });

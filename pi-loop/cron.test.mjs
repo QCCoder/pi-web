@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cronMatches } from "./cron.ts";
+import { buildMatcher, cronMatches, nextDue } from "./cron.ts";
 
 const shanghaiMonday15 = new Date("2024-01-15T07:05:00.000Z"); // 15:05 Asia/Shanghai, 周一
 
@@ -44,4 +44,35 @@ test("timezone shifts the match", () => {
   // 07:05 UTC = 15:05 上海 / 02:05 纽约（前一日的 2 点）
   assert.equal(cronMatches("5 15 * * *", "America/New_York", shanghaiMonday15), false);
   assert.equal(cronMatches("5 2 * * *", "America/New_York", shanghaiMonday15), true);
+});
+
+test("nextDue 跨日跨周（周五下午 → 周一 9 点）", () => {
+  const fri = new Date("2024-01-12T10:00:00.000Z"); // 周五 18:00 上海
+  const due = nextDue("0 9 * * 1", "Asia/Shanghai", fri);
+  assert.equal(due?.toISOString(), "2024-01-15T01:00:00.000Z"); // 下周一 09:00 上海
+});
+
+test("nextDue 半小时 cron 的下一个槽", () => {
+  const t = new Date("2024-01-15T07:05:00.000Z"); // 上海 15:05
+  assert.equal(nextDue("*/30 9-22 * * 1-5", "Asia/Shanghai", t)?.toISOString(), "2024-01-15T07:30:00.000Z");
+});
+
+test("nextDue 畸形输入返回 undefined 且不抛", () => {
+  assert.equal(nextDue("bad", "Asia/Shanghai", new Date()), undefined);
+  assert.equal(nextDue("* * * * *", "Asia/Shanghao", new Date()), undefined);
+});
+
+test("buildMatcher 无效表达式返回恒 false 函数（不含时区，按 UTC 评估）", () => {
+  const never = buildMatcher("bad");
+  assert.equal(typeof never, "function");
+  assert.equal(never(new Date("2024-01-15T07:05:00.000Z")), false);
+  const utcMatcher = buildMatcher("5 15 * * 1");
+  // 无时区换算：按 Date 的 UTC 字段评估 —— 15:05 UTC 周一命中；同一时刻的上海时间 23:05 UTC 字段不命中
+  assert.equal(utcMatcher(new Date("2024-01-15T15:05:00.000Z")), true);
+  assert.equal(utcMatcher(new Date("2024-01-15T15:05:00.000+08:00")), false);
+});
+
+test("nextDue after 恰在命中分钟上 → 返回下一个命中", () => {
+  const t = new Date("2024-01-15T07:30:00.000Z"); // 上海 15:30，恰为 */30 命中分钟
+  assert.equal(nextDue("*/30 9-22 * * 1-5", "Asia/Shanghai", t)?.toISOString(), "2024-01-15T08:00:00.000Z");
 });

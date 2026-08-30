@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseLoopDeclaration, discoverKitLoops, isWorkspaceHalted, localTimezone } from "./loop-kit.ts";
+import { parseLoopDeclaration, discoverKitLoops, isWorkspaceHalted, localTimezone } from "./protocol.ts";
 
 const LOOP_MD = `---
 name: smoke
@@ -100,4 +100,18 @@ test("isWorkspaceHalted", () => {
   } finally {
     rmSync(ws, { recursive: true, force: true });
   }
+});
+
+test("discoverKitLoops includePaused 返回暂停 loop 并标记 paused", () => {
+  const root = mkdtempSync(join(tmpdir(), "kit-"));
+  mkdirSync(join(root, "loops", "a"), { recursive: true });
+  writeFileSync(join(root, "loops", "a", "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nbody");
+  mkdirSync(join(root, "loops", "b"), { recursive: true });
+  writeFileSync(join(root, "loops", "b", "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nbody");
+  writeFileSync(join(root, "loops", "b", "PAUSED"), "");
+  assert.equal(discoverKitLoops(root).length, 1);            // 默认：暂停即不存在（D11 门控语义）
+  const all = discoverKitLoops(root, { includePaused: true });
+  assert.equal(all.length, 2);
+  assert.equal(all.find((d) => d.loopName === "b")?.paused, true);
+  assert.equal(all.find((d) => d.loopName === "a")?.paused ?? false, false);
 });

@@ -203,21 +203,34 @@ Key behavior:
   archive **only if no other active work item references them**; restoring brings them back. Sessions are physically
   moved to a `.archived/` subdirectory (`lib/session-archive.ts`) so `SessionManager.listAll()` no longer sees them.
 
-### Loop（pi-loop kit；`lib/daemon/loop-spawner.ts` + `kit/`）
+### Loop（pi-loop kit；`lib/daemon/loop-spawner.ts` + `pi-loop/` + `kit/`）
 
 **Loop = 文件协议 + 心跳。** v3 引擎（orchestrator session / seeder / RUNS.jsonl / gate 机器）已拆除
-（设计：`docs/pi-loop-kit-design.md`）。现行形态：
+（设计：`docs/pi-loop-kit-design.md`；宿主层修订——beat/补跑/锁/D13——见 `docs/pi-loop-host-design.md`）。现行形态：
 
 - **声明**：workspace 根 `loops/<name>/LOOP.md` 存在即 loop（frontmatter：cron/timezone/level/max_minutes/pattern）；
   `PAUSED` 标记文件停单 loop，根 `loop-pause-all` 全停。无 capability、无 manifest 字段。`GET /api/workspaces/[id]/loops`
-  是纯 fs 发现（导入 `lib/daemon/loop-kit.ts`，无 daemon 依赖），供工作项「开始对话/收养续跑」按钮的 kit-loops 门控读取。
-- **心跳**：daemon 的 `LoopKitSpawner`（DaemonJob `loop-kit-heartbeats`，30s tick，分钟槽去重；**无条件注册，无旗子**）
-  扫已注册 workspace，到点 → `startRpcSession` 起一次性会话（cwd=workspace 根 → workspace 装配照常），命名 `<loop> · <slot>`，开场合同 = LOOP.md 正文 + spawner 注入的硬规则 + `/skill:<pattern>` 展开；
-  `max_minutes` 超时 → destroy + `loop-process-cleanup.ts`（`lib/daemon/`）cwd 收敛收割。
-- **运行状态**：只有 `STATE.md`（记忆脊柱：Last run / 优先级分区 / [BUDGET] / 复盘节）+ `loop-ledger.json`（断路器）
-  + workspace git log。宪法文件（LOOP.md 的 level/cron、`loop-constraints.md`、`loop-budget.md`）agent 一律禁改。
+  是纯 fs 发现（导入 `pi-loop/protocol.ts`，无 daemon 依赖），供工作项「开始对话/收养续跑」按钮的 kit-loops 门控读取。
+- **pi-loop 包**（仓内顶级 `pi-loop/`，独立 package.json 备发布，pi-web 以相对路径导入）：loop 宿主的**纯逻辑层 + CLI**——
+  protocol/cron/due/round-lock/contract/reap/fire 全是纯函数，daemon spawner 与 beat CLI 共用同一实现（无双实现）。
+- **心跳宿主有二，可并存**：① 本地 pi-web daemon 的 `LoopKitSpawner`（DaemonJob `loop-kit-heartbeats`，30s tick，
+  **无条件注册，无旗子**）扫已注册 workspace；② **`pi-loop beat`** —— 一次性幂等进程（发现 → 补跑判定 → 锁 → 起轮 →
+  退出），无 pi-web 的 standalone 仓库挂进任意外部 cron 即获心跳（crontab `* * * * * pi-loop beat --root <path>`）。
+  fire 序列统一（`pi-loop/fire.ts`）：acquire `.round.lock` → 锁内复查 `.lastrun` 判定 → 写 `.lastrun` → 起轮 →
+  finally release —— **双宿主并存安全**（daemon 轮的锁写 `kind: "daemon"` + sessionId，beat 看到即跳过，反之亦然）。
+  到点 → `startRpcSession` 起一次性会话（cwd=workspace 根 → workspace 装配照常），命名 `<loop> · <slot>`，
+  开场合同 = LOOP.md 正文 + spawner 注入的硬规则 + `/skill:<pattern>` 展开；
+  `max_minutes` 超时 → destroy + `pi-loop/reap.ts` cwd 收敛收割。
+- **补跑语义（anacron-lite）**：fire 判定 = `now >= nextDue(cron, tz, .lastrun)`——宿主睡眠/停机错过的槽位恢复后
+  至多**补一轮**（旧分钟槽语义是静默丢失；A 轮在跑也不再丢 B 的槽，`.lastrun` per-loop）。`.lastrun` / `.round.lock`
+  是宿主文件，agent 禁改禁删（与 `PAUSED` 同级，写进协议条款与开场合同）。
+- **运行状态**：只有 `STATE.md`（记忆脊柱：Last run / 优先级分区 / [BUDGET] / 复盘节）+ `loop-ledger.json`（断路器，
+  **per-loop**：`loops/<name>/loop-ledger.json`，D13 修订——断路计数跨 loop 混算无意义）+ workspace git log。
+  宪法文件（LOOP.md 的 level/cron、`loop-constraints.md`、`loop-budget.md`）agent 一律禁改；constraints/budget 维持
+  根共享（budget 是全 workspace 总帽）。
 - **事后钩子（D9）**：轮结束（成功与失败路径都跑）扫工作项 events.jsonl 的 conversationId 回填 conversations；
   无待决 `loop.gate` 里程碑 → 自动归档轮会话（会话列表防污染；有待决 gate 的留在列表供人在 composer 答复）。
+  （beat 轮无此钩子——standalone 根没有 work-items 域工具；轮会话自然沉淀为普通 pi 会话。）
 - **run-contract**：工作项「开始对话/收养续跑」= 客户端预填（D11，无 daemon seed 路由）——`handleRunContract` in
   `useAppShellState` reads the workspace's kit loops (`GET /api/workspaces/[id]/loops`, first loop's pattern), writes
   `/skill:<pattern> 执行|收养 <KEY>` into the new-session draft (`setDraft("new:<wsPath>")`), bumps `composerEpoch`
@@ -226,8 +239,9 @@ Key behavior:
   WorkspaceManager is kit-loops-driven (`hasKitLoops`, fetched once per selected workspace), not capability-driven.
   「继续对话」 = open the latest conversation as a chat tab (the skill is already in its context).
 - **工作项工具 / importer 不变**；subagent 一律走社区 `@henryqw/pi-subagent` 包（全局挂载，见下节——kit 轮会话 cwd=workspace 根，包自动发现 `<cwd>/.pi/agents/pi-subagent/` 角色，无需 per-session 注入）。
-- **模板**：`kit/templates/basic/`（LOOP/STATE/constraints/budget/ledger 五件套）、`kit/templates/github/loop.yml`
-  （Actions 场景）；`kit/README.md` 是协议契约（含 L1/L2/L3 分级与调参指引）。
+- **模板**：`kit/templates/basic/{loop,root,skill}/`（D13 布局：LOOP/STATE/ledger 在 `loop/`，constraints/budget 在
+  `root/`，SKILL.md 骨架在 `skill/`（spec §4）；`pi-loop init` 由此脚手架）、`kit/templates/github/loop.yml`
+  （Actions 场景）；`kit/README.md` 是协议契约（含 L1/L2/L3 分级、宿主/beat 用法与调参指引）。
 
 **轮会话是一次性普通会话**：跑完一轮自然 settle，无状态恢复问题（崩溃 → 下轮冷启动读 STATE.md 接续）；v3 的
 双开 guard / `loop.active_session` 戳 / 僵尸收割在「每轮短进程」模型下天然消失。
@@ -409,7 +423,7 @@ app/api/
   workspaces/[id]/work-items/[key]/route.ts      GET | PATCH (revision-safe) | DELETE trash
   workspaces/[id]/work-items/[key]/events/route.ts   POST record milestone
   workspaces/[id]/work-items/[key]/content/route.ts  PUT update README body
-  workspaces/[id]/loops/route.ts                  GET kit-declared loops (pure fs discovery via lib/daemon/loop-kit.ts; D5 文件即声明 — no capability)
+  workspaces/[id]/loops/route.ts                  GET kit-declared loops (pure fs discovery via pi-loop/protocol.ts; D5 文件即声明 — no capability)
   workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
   workspaces/[id]/importers/test/route.ts        POST test chandao connection (listAssigned)
   workspaces/[id]/importers/sync/route.ts        POST manual importer sync (forward to host / in-process fallback)
@@ -471,10 +485,7 @@ lib/
     session-heartbeat.ts    stall classify/warn/kill snapshot (moved with rpc-manager)
     pi-subagent-host.ts     community @henryqw/pi-subagent host adapter — jiti-imports the package's extension entry, presents the pi CLI process identity its ephemeral executor requires, pins the kill-based timeout policy (idle 30min / max 120min, wins over the package's config)
     pi-subagent-roles.test.mjs  role discovery + precedence tests against the package's loadRoles
-    loop-spawner.ts          pi-loop kit heartbeat spawner — LoopKitSpawner (DaemonJob loop-kit-heartbeats, 30s tick, minute-slot dedup, unconditional): discover kit loops → runKitRound (one-shot AgentSession, cwd=workspace root, opening contract + /skill:<pattern>) + waitForRoundSettle (max_minutes timeout → destroy + orphan reap) + D9 settleRoundBookkeeping (conversations backfill + auto-archive rounds without pending loop.gate)
-    loop-kit.ts              kit protocol pure parse layer — parseLoopDeclaration/discoverKitLoops (loops/*/LOOP.md frontmatter; PAUSED skipped) / isWorkspaceHalted (loop-pause-all). Pure fs+yaml, no daemon deps — the web loops route imports it too
-    loop-process-cleanup.ts  reapOrphanedRoundProcesses — SIGTERM→SIGKILL bash/npm/mvn trees a destroyed round leaves behind (scoped by workspace cwd); pure parsers tested
-    cron.ts                  cronMatches — Vixie-cron matcher with timezone (never throws on bad input); the kit spawner's only consumer
+    loop-spawner.ts          pi-loop kit heartbeat spawner — LoopKitSpawner (DaemonJob loop-kit-heartbeats, 30s tick, unconditional): imports the pi-loop package's pure logic (protocol/fire/round-lock/contract/reap) and runs the unified due+lock fire sequence per workspace — runKitRound (one-shot AgentSession, cwd=workspace root, opening contract + /skill:<pattern>) + waitForRoundSettle (max_minutes timeout → destroy + orphan reap) + D9 settleRoundBookkeeping (conversations backfill + auto-archive rounds without pending loop.gate); no in-memory slot/busy maps — .lastrun + .round.lock are the truth
   session-daemon/                   sidecar lifecycle for the session daemon (C2)
     sidecar.ts               ensureSessionDaemonStarted (probe→attach / spawn detached) + pure guards (decideSidecarAction, spawnableDaemonUrl, sidecarSpawnEnv)
   subagent-child.ts          subagentChild tagging for community @henryqw/pi-subagent children
@@ -502,9 +513,21 @@ lib/
   patch.ts, project-trust.ts, request-security.ts, path-security.ts, http-dispatcher.ts   security + routing
   npx.ts, skill-lock.ts, skill-message.ts, skills-service.ts, skill-updates.ts   skills/plugins plumbing (skill-message.ts also powers session titles: `skillMessageTitle` reduces pi's `/skill:` expansion wrapper — `header + SKILL.md body + </skill> + args` — back to the args or `/skill:name`, incl. a truncated-wrapper fallback for pre-v2 index clips; used by the session index, session-reader, locate route, auto-name, MessageView)
 
+pi-loop/                              THE loop-host package: pure protocol logic + beat CLI (design: docs/pi-loop-host-design.md; independent package.json for future publish, imported by relative path like lib/ — see Loop section)
+  protocol.ts             LoopDeclaration / parseLoopDeclaration / discoverKitLoops (loops/*/LOOP.md frontmatter; PAUSED skipped) / isWorkspaceHalted (loop-pause-all) — pure fs+yaml, no daemon deps; the web loops route imports it too
+  cron.ts                 cronMatches (Vixie-cron matcher with timezone, never throws on bad input) + nextDue (first cron hit after a moment, minute granularity) — the fire judgment's clock
+  round-lock.ts           .round.lock cross-host round mutex — acquire/read/update/releaseRoundLock; O_EXCL atomic create, stale = dead pid or past maxMinutes+15min
+  due.ts                  .lastrun machine truth (host-written ISO timestamp; STATE.md Last run stays narrative) + shouldFire = now >= nextDue(cron, tz, .lastrun) — anacron-lite catch-up (at most one round after downtime)
+  contract.ts             buildRoundPrompt — opening-contract assembly shared by daemon spawner (with sessionId, D9) and beat (without); D13 ledger path is per-loop
+  fire.ts                 runDueRound/runNow — the unified fire sequence (acquire lock → re-check shouldFire in-lock → write .lastrun → run → finally release); daemon tick and beat share it, cross-host TOCTOU-safe
+  beat.ts                 beat round runner — spawns `pi --name "<loop> · <slot>" -p --approve "<contract>"` (cwd=root, detached own process group); max_minutes timeout → group SIGTERM→3s→SIGKILL
+  cli.ts                  pi-loop CLI entry (bin) — beat/run/stop/pause/resume/status/init/watch commands (host spec §4)
+  status.ts               collectStatus — per-loop frontmatter summary + .lastrun + next-due + running (lock alive) / paused for `pi-loop status`
+  init.ts                 initLoop — scaffold the kit/templates/basic five-piece set (D13 layout: loop/ + root/ + skill/) + SKILL.md skeleton; writes .lastrun = now (first round waits for a natural slot)
+
 kit/                                  pi-loop kit template library + protocol README (consumed by copy, not imported — see Loop section)
-  README.md                       the protocol contract: file layout, LOOP.md frontmatter, L1/L2/L3 levels, breaker + budget rules, GitHub Actions scenario
-  templates/basic/               {LOOP.md, STATE.md, loop-constraints.md, loop-budget.md, loop-ledger.json} starter five-piece set
+  README.md                       the protocol contract: file layout (incl. host files .lastrun/.round.lock, agent-forbidden), host section (daemon auto / pi-loop beat + crontab, dual-host lock safety, catch-up semantics), L1/L2/L3 levels, breaker + budget rules, GitHub Actions scenario
+  templates/basic/               D13 two-level layout — loop/ {LOOP.md, STATE.md, loop-ledger.json} + root/ {loop-constraints.md, loop-budget.md} + skill/ {SKILL.md skeleton, spec §4}; pi-loop init scaffolds from here
   templates/github/loop.yml      GitHub Actions cron heartbeat template (pi -p + community subagent package)
 
 components/
@@ -638,7 +661,7 @@ The pi-daemon process (`npm run daemon` → `bin/pi-daemon.js` → `lib/daemon/h
 **Sidecar lifecycle (`lib/session-daemon/sidecar.ts`)**: `ensureSessionDaemonStarted()` — probe `/health` (attach if healthy), else spawn `node bin/pi-daemon.js` detached+unref'd and wait (≤15s) for health. Wired fire-and-forget from `instrumentation.ts` (`PI_SESSION_DAEMON_DISABLED=1` opts out). In-flight guard on `globalThis` dedupes concurrent callers and retries after failure. Guards: `spawnableDaemonUrl` refuses to spawn for non-local `PI_DAEMON_URL` (legacy `PI_LOOP_URL` still honored; a remote URL means the daemon is managed elsewhere); `sidecarSpawnEnv` translates the URL → the child's `PI_DAEMON_HOST`/`PI_DAEMON_PORT` (explicit env wins, legacy `PI_LOOP_HOST/PORT` spellings honored) — without this a URL-only config spawns a daemon on the default port while the web polls the URL's port forever. Spawn races resolve quietly: the EADDRINUSE loser exits 0 (`bin/pi-daemon.js`). The "web owns no unattended timers" rule is preserved — daemon timers live in the daemon process and survive web restarts; the web only ever re-attaches by port probe.
 
 ### Loop heartbeats run in the daemon; the web server has no loop surface
-`npm run daemon` starts the pi-daemon (`lib/daemon/host.ts`; `npm run loop` is a deprecated alias pointing at the same `bin/pi-daemon.js`). The web server never starts loop timers (`instrumentation.ts`). The only loop surface left in the web layer is the read-only `GET /api/workspaces/[id]/loops` (pure fs discovery, no daemon call) feeding the work-item 「开始对话/收养续跑」prefill gate. The daemon hosts background jobs via the `DaemonJob` registry (`lib/daemon/jobs.ts`): the kit spawner (`LoopKitSpawner` → `loop-kit-heartbeats`, **unconditional** — the `PI_LOOP_KIT` gate was removed together with the v3 engine) and importer sync (`ImporterScheduler`) are registered peers. Kit round sessions are normal one-shot daemon sessions — indistinguishable from user chats in the interactive registry; their run record is `STATE.md` + the workspace git log, and there is no run/trigger/abort API.
+`npm run daemon` starts the pi-daemon (`lib/daemon/host.ts`; `npm run loop` is a deprecated alias pointing at the same `bin/pi-daemon.js`). The web server never starts loop timers (`instrumentation.ts`). The only loop surface left in the web layer is the read-only `GET /api/workspaces/[id]/loops` (pure fs discovery, no daemon call) feeding the work-item 「开始对话/收养续跑」prefill gate. The daemon hosts background jobs via the `DaemonJob` registry (`lib/daemon/jobs.ts`): the kit spawner (`LoopKitSpawner` → `loop-kit-heartbeats`, **unconditional** — the `PI_LOOP_KIT` gate was removed together with the v3 engine) and importer sync (`ImporterScheduler`) are registered peers. Kit round sessions are normal one-shot daemon sessions — indistinguishable from user chats in the interactive registry; their run record is `STATE.md` + the workspace git log. The daemon is not the only host: standalone roots (no pi-web) get heartbeats from the `pi-loop` CLI's `beat` (any external cron; see the Loop section) — dual-host coexistence is safe because both run the same `pi-loop/fire.ts` sequence and mutual-exclude via `loops/<name>/.round.lock`. There is no run/trigger/abort HTTP API — 「立即跑一轮 / 终止本轮」 are `pi-loop run` / `pi-loop stop` CLI commands (host spec §4/§10; process supervision, explicitly revising T5's blanket "no abort"), and daemon-held rounds are torn down via the existing session teardown surface.
 
 **Watching a live session (any session — interactive or kit loop round) is one mechanism now (C2).** The daemon owns every session; `/api/agent/[id]/events` is a pure pipe onto `/v1/sessions/:id/events`, which resolves via `findLiveSession` (the ordinary registry, where kit rounds live alongside interactive sessions) and cold-starts idle sessions for viewing. (Community subagent children run as separate pi processes — they're watched from their on-disk `.jsonl`, cold, not via live SSE.) Two subtleties remain:
 
@@ -650,7 +673,7 @@ The pi-daemon process (`npm run daemon` → `bin/pi-daemon.js` → `lib/daemon/h
 **Running badges come from one server-side set.** `/api/agent/running/events` pipes the daemon's `/v1/sessions/running/events`; because the daemon registry holds interactive sessions + kit loop rounds alike (keyed by real session id), the sidebar/tab badges need no client-side merge anymore (the old `loopRunningSnapshot` merge existed only because the web set could never contain Loop sessions). Subagent children never show a running badge — they're not daemon sessions.
 **The daemon's session SSE ends on destroy.** `serveSessionSse` registers `session.onDestroy(cleanup)` — when a wrapper is destroyed (kit round `max_minutes` timeout, session delete/teardown) the stream closes, the browser's pinned EventSource fails fatally, `reprobePinned` sees the daemon no longer holds the session, unpins and clears the badge. Without this a destroyed round leaves the pinned runtime `agentRunning=true` forever (no `agent_end` is ever emitted after destroy), spinning the tab badge indefinitely.
 
-**Orphan-process reaping on kit-round timeout.** `session.destroy()` — reached from the spawner's `max_minutes` timeout path — does **not** kill the bash subprocesses a round spawned via subagents: pi-coding-agent's bash tool spawns each shell `detached` (own process group) and only sweeps its tracked detached children on a **process-level** SIGHUP/SIGTERM, which a never-exiting daemon never sends. Those `bash → npm → node` trees would otherwise orphan into launchd (PID 1) still holding `node_modules` handles (which is why `rm -rf` then fails and they sit at ~100% CPU). So `runKitRound` (`lib/daemon/loop-spawner.ts`) calls `reapOrphanedRoundProcesses` (`lib/daemon/loop-process-cleanup.ts`, scoped to the round's workspace cwd) after destroying the session: it SIGTERM→SIGKILL every pid in the round's trees — discovered as (a) direct children of the daemon whose cwd is in the workspace, plus (b) launchd-reparented (ppid 1) build/shell processes whose cwd is in the workspace. Pure parsers (`parsePgrepChildren`/`parseLsofCwd`/`parsePsRows`/`isCwdInWorkspace`/`isBuildOrShellCommand`) are tested. Scoped by workspace cwd so concurrent rounds in other workspaces are untouched; never throws (cleanup must not break the round flow — a reap failure is logged, never masks the round error).
+**Orphan-process reaping on kit-round timeout.** `session.destroy()` — reached from the spawner's `max_minutes` timeout path — does **not** kill the bash subprocesses a round spawned via subagents: pi-coding-agent's bash tool spawns each shell `detached` (own process group) and only sweeps its tracked detached children on a **process-level** SIGHUP/SIGTERM, which a never-exiting daemon never sends. Those `bash → npm → node` trees would otherwise orphan into launchd (PID 1) still holding `node_modules` handles (which is why `rm -rf` then fails and they sit at ~100% CPU). So `runKitRound` (`lib/daemon/loop-spawner.ts`) calls `reapOrphanedRoundProcesses` (`pi-loop/reap.ts`, scoped to the round's workspace cwd) after destroying the session: it SIGTERM→SIGKILL every pid in the round's trees — discovered as (a) direct children of the daemon whose cwd is in the workspace, plus (b) launchd-reparented (ppid 1) build/shell processes whose cwd is in the workspace. Pure parsers (`parsePgrepChildren`/`parseLsofCwd`/`parsePsRows`/`isCwdInWorkspace`/`isBuildOrShellCommand`) are tested. Scoped by workspace cwd so concurrent rounds in other workspaces are untouched; never throws (cleanup must not break the round flow — a reap failure is logged, never masks the round error).
 
 ### Session changed-files quick access (SessionChangedFiles)
 "本会话改动 N 个文件" — a compact icon+count button at the end of the ChatInput controls row (right of the sound toggle; on mobile it lives inside the "更多控件" pill; not rendered in `embedded` view mode), opening a slide-in drawer (full-screen list on mobile). **Data source is the message stream, not git**: `deriveSessionChangedFiles` (`lib/session-changed-files.ts`, pure + tested) walks write/edit toolCalls (incl. `isEditToolName` variants) plus the streaming message for **real-time** counting. Subagent children no longer contribute — community-package children are separate pi processes whose file operations never appear in the parent stream. Scope is the **whole session file** (not just the current branch path), deduped **most-recent-first** with a ×N badge; bash-written files (`cat >`, `git commit`) are deliberately not counted. Clicking an entry → `openFile` (existing file-tab pipeline; `/api/files` allow-list already covers session cwds). The list intentionally **survives commits** — it answers "what did this session touch", not "what is uncommitted" (that's the Explorer 改动 tab). Drawer state is not persisted; switching sessions closes it.
