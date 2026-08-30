@@ -23,6 +23,7 @@ test("init 脚手架：五件套落位（ledger 在 loop 目录）+ frontmatter 
   assert.equal(front.cron, "0 9 * * 1-5");
   assert.equal(front.max_minutes, 20);
   assert.equal(front.name, "triage");
+  assert.ok(!loop.includes("{{"), "LOOP.md 正文 {{pattern}} 占位符应已替换");
 });
 
 test("init 幂等保护：已存在的 root 宪法文件与 SKILL.md 不覆盖", () => {
@@ -35,4 +36,9 @@ test("init 幂等保护：已存在的 root 宪法文件与 SKILL.md 不覆盖",
   assert.equal(readFileSync(join(root, ".agents", "skills", "x", "SKILL.md"), "utf8"), "# 人工改过的 skill");
   // x/y pattern 不同（各缺省取 name）：y 得到自己的骨架，x 的既有内容存活
   assert.ok(readFileSync(join(root, ".agents", "skills", "y", "SKILL.md"), "utf8").includes("name: y"));
+  // LOOP.md 同幂等规则：已存在则整体跳过（含 frontmatter 定制）— 不得清写
+  const customLoop = "---\ncron: \"0 3 * * *\"\n---\n# 人工改过的 loop";
+  writeFileSync(join(root, "loops", "x", "LOOP.md"), customLoop);
+  initLoop(root, { name: "x", cron: "* * * * *" });
+  assert.equal(readFileSync(join(root, "loops", "x", "LOOP.md"), "utf8"), customLoop);
 });

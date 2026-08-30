@@ -20,6 +20,8 @@
   "files": [
     "bin",
     "lib",
+    "pi-loop",
+    "kit",
     ".next",
     "!.next/cache",
     "!.next/dev",

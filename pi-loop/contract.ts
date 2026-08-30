@@ -20,6 +20,7 @@ export function buildRoundPrompt(
   rules.push(`你的 cwd 是工作区根目录；所有相对路径相对这里解析。`);
   rules.push(`纪律：L1 只读 + 只写 STATE.md/ledger，不动代码不做 git 操作；L2 允许 worktree + draft 分支，禁止合并主分支；宪法文件（LOOP.md 的 level/cron、loop-constraints.md、loop-budget.md）一律禁改。`);
   rules.push(`若发现 ${declaration.dir}/PAUSED 或根目录 loop-pause-all 存在，立即收尾退出本轮。`);
+  rules.push(`\`.lastrun\` 与 \`.round.lock\` 是宿主文件，一律禁改禁删（与 PAUSED 同级）。`);
   rules.push(`结束前：更新 ${declaration.dir}/STATE.md（Last run / outcome / 复盘节必填）并按断路器规则追加 ${declaration.dir}/loop-ledger.json。`);
   if (opts.extraInstructions) rules.push(opts.extraInstructions);
   return [

@@ -49,8 +49,8 @@ async function main(): Promise<void> {
   }
   if (command === "pause" || command === "resume") {
     const name = args[0] ?? die(`用法: pi-loop ${command} <name>`);
-    // pause 写标记会 ENOENT 崩溃（resume 的 unlink 本就 try/catch，不动）
-    if (command === "pause" && !existsSync(join(root, "loops", name))) {
+    // pause 写标记会 ENOENT 崩溃；resume 对不存在的 loop 会误报「已恢复」exit 0 — 同一目录守卫
+    if (!existsSync(join(root, "loops", name))) {
       die(`未找到 loop「${name}」（${join(root, "loops", name)}）`, 1);
     }
     const marker = join(root, "loops", name, "PAUSED");

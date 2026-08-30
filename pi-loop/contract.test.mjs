@@ -10,6 +10,7 @@ test("daemon 形态：含 sessionId 与 per-loop ledger 路径", () => {
   const prompt = buildRoundPrompt(DECL, { sessionId: "sess-123" });
   assert.ok(prompt.includes("/skill:dev-loop"));
   assert.ok(prompt.includes("sess-123"));
+  assert.ok(prompt.includes(".lastrun") && prompt.includes(".round.lock")); // 宿主文件禁改条款（spec §6）
   assert.ok(prompt.includes("/ws/loops/dev-loop/loop-ledger.json"));
   assert.ok(!prompt.includes("loop-ledger.json（宪法文件，你禁改），再读 /ws/loops/dev-loop/loop-ledger.json".replace("/ws/loops/dev-loop/loop-ledger.json（", "XX"))); // 仅路径断言，防双写
   assert.ok(prompt.includes("L2"));
@@ -20,6 +21,7 @@ test("beat 形态：无 sessionId 行、无裸 ledger 引用", () => {
   assert.ok(!prompt.includes("sess-"));
   assert.ok(prompt.includes("/ws/loops/dev-loop/loop-ledger.json"));
   assert.ok(prompt.includes("PAUSED"));
+  assert.ok(prompt.includes(".lastrun") && prompt.includes(".round.lock")); // 宿主文件禁改条款（spec §6）
 });
 
 test("extraInstructions 进入规则尾部", () => {
