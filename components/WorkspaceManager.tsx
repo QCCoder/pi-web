@@ -251,12 +251,18 @@ export function WorkspaceManager({
   const [contentDraft, setContentDraft] = useState("");
   const [contentEditing, setContentEditing] = useState(false);
   const [saving, setSaving] = useState(false);
-  // Whether the selected workspace declares at least one kit loop
-  // (loops/<name>/LOOP.md with a cron — D5 文件即声明). Gates the
-  // 开始对话/收养续跑 buttons (D11: the retired `loop` capability no longer
-  // decides this). Fetched once per selected workspace, no polling — loops
-  // are authored rarely.
-  const [hasKitLoops, setHasKitLoops] = useState(false);
+  // Kit loops of the selected workspace (read-only GET /loops — pure file
+  // discovery + run status, no capability involved). Stores the FULL list
+  // INCLUDING paused loops (T7's binding dropdown needs them — binding to a
+  // paused loop is a soft no-op, S1/S5); the button gate filters via the
+  // derived `hasKitLoops` below (D11: paused = not there). Fetched once per
+  // selected workspace, no polling — loops are authored rarely.
+  const [kitLoops, setKitLoops] = useState<Array<{
+    name: string; pattern: string; level: string; cron: string;
+    paused?: boolean; running?: boolean;
+  }>>([]);
+  // 按钮门控派生量（D11 语义不变）：存在至少一个未暂停的 kit loop。
+  const hasKitLoops = kitLoops.some((loop) => !loop.paused);
 
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
@@ -402,24 +408,25 @@ export function WorkspaceManager({
   }, [embedded, open, selectedWorkspace]);
 
   // Kit-declared loops of the selected workspace (read-only GET /loops —
-  // pure file discovery, no capability involved). Drives only the
-  // contract-execution button gate; failure or offline → no loops (buttons hidden).
+  // pure file discovery, no capability involved). Stores the full list
+  // (incl. paused); the 开始对话/收养续跑 button gate derives from it
+  // (`hasKitLoops` = some(!paused)); failure or offline → no loops (buttons hidden).
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId) {
-      setHasKitLoops(false);
+      setKitLoops([]);
       return;
     }
     let cancelled = false;
     void fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/loops`)
       .then(async (response) => {
-        if (!response.ok) return { loops: [] as Array<{ pattern: string }> };
-        return response.json() as Promise<{ loops?: Array<{ pattern: string }> }>;
+        if (!response.ok) return { loops: [] as Array<{ name: string; pattern: string; level: string; cron: string; paused?: boolean; running?: boolean }> };
+        return response.json() as Promise<{ loops?: Array<{ name: string; pattern: string; level: string; cron: string; paused?: boolean; running?: boolean }> }>;
       })
       .then((data) => {
-        if (!cancelled) setHasKitLoops((data.loops?.length ?? 0) > 0);
+        if (!cancelled) setKitLoops(data.loops ?? []);
       })
       .catch(() => {
-        if (!cancelled) setHasKitLoops(false);
+        if (!cancelled) setKitLoops([]);
       });
     return () => {
       cancelled = true;

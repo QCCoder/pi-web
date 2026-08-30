@@ -960,8 +960,8 @@ export function useAppShellState() {
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loops`);
       if (response.ok) {
-        const data = (await response.json()) as { loops?: Array<{ pattern: string }> };
-        pattern = data.loops?.[0]?.pattern;
+        const data = (await response.json()) as { loops?: Array<{ pattern: string; paused?: boolean }> };
+        pattern = data.loops?.find((loop) => !loop.paused)?.pattern;
       }
     } catch { /* offline — degrade to a bare prompt without the /skill: prefix */ }
     const verb = mode === "adopt" ? "收养" : "执行";
