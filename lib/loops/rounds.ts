@@ -2,7 +2,16 @@
  *  纯逻辑，无 daemon 新路由。依赖全部可注入（.test.mjs 直 import 测试）。 */
 import { hostname } from "node:os";
 import type { LoopDeclaration } from "../../pi-loop/protocol.ts";
-import { isProcessAlive, readRoundLock, releaseRoundLock } from "../../pi-loop/round-lock.ts";
+import {
+  acquireRoundLock,
+  isProcessAlive,
+  readRoundLock,
+  releaseRoundLock,
+  updateRoundLock,
+  type RoundLockHolder,
+} from "../../pi-loop/round-lock.ts";
+import { writeLastrun } from "../../pi-loop/due.ts";
+import { buildRoundPrompt } from "../../pi-loop/contract.ts";
 
 export interface StopRoundDeps {
   /** daemonProxy().destroySession —— DELETE /v1/sessions/:id（wrapper destroy，
@@ -36,4 +45,64 @@ export async function stopRound(
   }
   releaseRoundLock(declaration.dir);
   return "stopped";
+}
+
+export class RoundBusyError extends Error {
+  constructor(loopName: string) {
+    super(`loop ${loopName} 的本轮已在运行`);
+    this.name = "RoundBusyError";
+  }
+}
+
+export interface LaunchRoundDeps {
+  /** daemonProxy().createSession —— POST /v1/sessions（不带 command：sessionId
+   *  要进开场合同第 3 条，而它建完会话才知道 → 两步走）。 */
+  createSession: (input: { cwd: string }) => Promise<{ sessionId: string; cwd?: string; sessionFile?: string }>;
+  /** daemonProxy().sendSessionCommand —— POST /v1/sessions/:id/commands。 */
+  sendCommand: (sessionId: string, command: { type: string; [key: string]: unknown }) => Promise<unknown>;
+  destroySession: (sessionId: string) => Promise<unknown>;
+}
+
+/** 手动起一轮（spec §4，S3）：acquire 锁（kind daemon，pid=web 进程）→ 写
+ *  .lastrun（避免下一心跳立即重跑，host §4）→ 建会话 → 回填锁内 sessionId →
+ *  命名 → 发合同（daemon 形态，含 sessionId 行）。成功后锁**保持持有**——无人
+ *  await 轮结束，靠 stale 窗口（maxMinutes+15min）兜底回收，至多丢一个后续
+ *  心跳槽（anacron-lite 不放大）；stop 路由会主动释放。失败路径释放锁 +
+ *  best-effort destroy 半建会话。无 D9 钩子（人在场，不自动归档）。 */
+export async function launchManualRound(
+  declaration: LoopDeclaration,
+  opts: { itemKey?: string } = {},
+  deps: LaunchRoundDeps,
+): Promise<{ sessionId: string; cwd?: string; sessionFile?: string }> {
+  const holder: RoundLockHolder = { pid: process.pid, host: hostname(), kind: "daemon" };
+  if (!acquireRoundLock(declaration.dir, holder, { maxStaleMs: declaration.maxMinutes * 60_000 + 15 * 60_000 })) {
+    throw new RoundBusyError(declaration.loopName);
+  }
+  let sessionId: string | undefined;
+  try {
+    writeLastrun(declaration.dir, new Date());
+    const created = await deps.createSession({ cwd: declaration.workspacePath });
+    sessionId = created.sessionId;
+    updateRoundLock(declaration.dir, { sessionId });
+    const slot = new Date().toISOString().slice(0, 16).replace("T", " ");
+    try {
+      await deps.sendCommand(sessionId, { type: "set_session_name", name: `${declaration.loopName} · 手动 ${slot}` });
+    } catch {
+      /* 命名是装饰性的——会话照常跑（spawner 既有口径） */
+    }
+    await deps.sendCommand(sessionId, {
+      type: "prompt",
+      message: buildRoundPrompt(declaration, {
+        sessionId,
+        ...(opts.itemKey ? { extraInstructions: `本轮优先处理工作项 ${opts.itemKey}（人手动指定）。` } : {}),
+      }),
+    });
+    return { sessionId, cwd: created.cwd, sessionFile: created.sessionFile };
+  } catch (error) {
+    if (sessionId) {
+      try { await deps.destroySession(sessionId); } catch { /* 尽力 */ }
+    }
+    releaseRoundLock(declaration.dir);
+    throw error;
+  }
 }
