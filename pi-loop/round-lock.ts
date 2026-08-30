@@ -52,3 +52,14 @@ export function updateRoundLock(dir: string, patch: Partial<RoundLockHolder>): v
   if (!current) return;
   try { writeFileSync(join(dir, LOCK_FILE), JSON.stringify({ ...current, ...patch }, null, 2)); } catch { /* 尽力 */ }
 }
+
+/** 无条件写入（upsert）锁记录 — beat runner 起子进程后把锁指向真实子 pid：
+ *  detached 子进程自成进程组，宿主 pid 定位不到组，stopRound 必须按子 pid 组杀。
+ *  已有记录（fire.ts 先 acquire 的宿主锁）保留 startedAt。 */
+export function writeRoundLock(dir: string, holder: RoundLockHolder): void {
+  const current = readRoundLock(dir);
+  const record: RoundLockRecord = { ...current, ...holder, startedAt: current?.startedAt ?? Date.now() };
+  try {
+    writeFileSync(join(dir, LOCK_FILE), JSON.stringify(record, null, 2));
+  } catch { /* 尽力 */ }
+}

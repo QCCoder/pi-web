@@ -55,3 +55,15 @@ test("runNow 无视 due，同样写 .lastrun + 释放锁", async () => {
   assert.equal(result, "fired");
   assert.equal(readLastrunIso(dir) > "2024-01-15T10:00", true); // 真实 now 前进
 });
+
+test("锁内复查：等锁期间他宿主已 fire → skipped，runner 不跑，锁释放", async () => {
+  const { dir, decl } = setup();
+  writeLastrun(dir, new Date("2024-01-15T10:00:00Z"));
+  // 预检时 due（.lastrun=10:00, now=10:31）；锁内复查前把 .lastrun 推进到他宿主刚 fire 过
+  const clock = { calls: 0, now: () => { clock.calls++; if (clock.calls === 1) return new Date("2024-01-15T10:31:00Z"); writeLastrun(dir, new Date("2024-01-15T10:31:00Z")); return new Date("2024-01-15T10:31:00Z"); } };
+  let ran = 0;
+  const result = await runDueRound(decl, holder, async () => { ran++; }, { now: clock.now });
+  assert.equal(result, "skipped");
+  assert.equal(ran, 0);
+  assert.equal(exists(join(dir, ".round.lock")), false);
+});
