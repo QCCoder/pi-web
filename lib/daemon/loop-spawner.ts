@@ -2,7 +2,6 @@
  *  一轮 = 一次性 AgentSession：开场合同（含 /skill: 展开）→ settle → 事后钩子。
  *  无 RUNS.jsonl、无 orchestrator 索引 — 运行记录 = STATE.md + workspace git log。 */
 import { creationTimeoutSignal } from "../abort-race.ts";
-import { reapOrphanedRoundProcesses } from "./loop-process-cleanup.ts";
 import { startRpcSession, type AgentSessionWrapper } from "./rpc-manager.ts";
 import type { DaemonJob } from "./jobs.ts";
 import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/service.ts";
@@ -11,6 +10,7 @@ import { archiveSession } from "../session-archive.ts";
 import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "../../pi-loop/protocol.ts";
 import { cronMatches } from "../../pi-loop/cron.ts";
 import { buildRoundPrompt } from "../../pi-loop/contract.ts";
+import { reapOrphanedRoundProcesses } from "../../pi-loop/reap.ts";
 
 /** 跑一条 prompt 并等它 settle（prompt_done）。超时 / prompt_error / destroy 均 reject。
  *  模式承自 v3 引擎的 capturePrompt（随 v3 拆除迁入）。 */
