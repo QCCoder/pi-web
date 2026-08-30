@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 import type { LoopDeclaration } from "../../pi-loop/protocol.ts";
 import {
   acquireRoundLock,
-  isProcessAlive,
+  isRoundLockStale,
   readRoundLock,
   releaseRoundLock,
   updateRoundLock,
@@ -29,14 +29,14 @@ export async function stopRound(
 ): Promise<StopOutcome> {
   const lock = readRoundLock(declaration.dir);
   if (!lock) return "not-running";
-  const alive = isProcessAlive(lock.pid)
-    && Date.now() - lock.startedAt <= declaration.maxMinutes * 60_000 + 15 * 60_000;
-  if (!alive) {
+  // stale 判定与抢占/状态同公式（sessionId 感知）：带 sessionId 的手动轮锁
+  // （pid=web 进程）在 web 重启后仍可被正确停止——destroy 其 daemon 会话。
+  if (isRoundLockStale(lock, declaration.maxMinutes * 60_000 + 15 * 60_000)) {
     releaseRoundLock(declaration.dir); // stale 锁顺手清理（与 stale-takeover 同效果）
     return "not-running";
   }
   if (lock.kind === "beat") return "beat-held";
-  if (!lock.sessionId) return "not-running"; // 锁先于会话建立的启动窗口——等它 settle
+  if (!lock.sessionId) return "not-running"; // 锁先于会话建立——轮可能仍在启动，不释放
   await deps.destroySession(lock.sessionId);
   try {
     await deps.reap(declaration.workspacePath);
