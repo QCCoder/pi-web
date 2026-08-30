@@ -9,7 +9,7 @@ import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/servi
 import { discoverWorkspaces, readWorkspaceManifest } from "../workspaces/service.ts";
 import { archiveSession } from "../session-archive.ts";
 import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "../../pi-loop/protocol.ts";
-import { cronMatches } from "./cron.ts";
+import { cronMatches } from "../../pi-loop/cron.ts";
 
 /** 开场合同：LOOP.md 正文 + spawner 注入的硬规则（含会话 id，供 agent 自行挂
  *  conversations；D9 的事后钩子会兜底回填）。 */
