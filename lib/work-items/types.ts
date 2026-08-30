@@ -30,6 +30,10 @@ export interface WorkItemRecord {
   relatedItems: string[];
   designs: string[];
   plans: string[];
+  /** Optional kit-loop binding by loop NAME (not pattern — names are stable,
+   *  patterns can change; spec §3.1). Soft-validated: an unresolvable name is
+   *  treated as unbound, never an error. */
+  loop?: string;
   /** Importer-written external link; absent for manually created items. */
   external?: WorkItemExternalRef;
   archivedAt: string | null;
@@ -85,6 +89,8 @@ export interface CreateWorkItemInput {
   conversationId?: string;
   /** Importer-only: stamps the external dedup link at creation. */
   external?: WorkItemExternalRef;
+  /** Optional kit-loop binding by loop name (soft — existence not checked). */
+  loop?: string;
 }
 
 export interface UpdateWorkItemInput {
@@ -102,6 +108,8 @@ export interface UpdateWorkItemInput {
   archived?: boolean;
   actor?: WorkItemActor;
   conversationId?: string;
+  /** Kit-loop binding by name; null clears it. */
+  loop?: string | null;
 }
 
 export interface UpdateWorkItemContentInput {

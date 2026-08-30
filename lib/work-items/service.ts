@@ -166,6 +166,7 @@ function serializeWorkItem(item: WorkItemRecord): string {
     related_items: item.relatedItems,
     designs: item.designs,
     plans: item.plans,
+    ...(item.loop ? { loop: item.loop } : {}),
     ...(item.external
       ? {
           external: {
@@ -211,6 +212,7 @@ export function parseWorkItem(value: unknown): WorkItemRecord {
     relatedItems: requireStringArray(record.related_items, "related_items"),
     designs: requireStringArray(record.designs, "designs"),
     plans: requireStringArray(record.plans, "plans"),
+    ...(typeof record.loop === "string" && record.loop.trim() ? { loop: record.loop.trim() } : {}),
     ...(record.external !== undefined && record.external !== null
       ? { external: parseExternalRef(record.external) }
       : {}),
@@ -408,6 +410,7 @@ export async function createWorkItem(
   const repositories = requireStringArray(input.repositories, "repositories");
   validateRepositorySelection(manifest, repositories);
   const tags = requireStringArray(input.tags, "tags");
+  const loop = typeof input.loop === "string" && input.loop.trim() ? input.loop.trim() : undefined;
   const external = input.external === undefined ? undefined : parseExternalRef(input.external);
   const priority = input.priority === undefined
     ? "P2"
@@ -433,6 +436,7 @@ export async function createWorkItem(
     relatedItems: [],
     designs: [],
     plans: [],
+    ...(loop ? { loop } : {}),
     ...(external ? { external } : {}),
     archivedAt: null,
     createdAt: now,
@@ -477,6 +481,7 @@ function changedFields(before: WorkItemRecord, after: WorkItemRecord): Record<st
     "relatedItems",
     "designs",
     "plans",
+    "loop",
     "archivedAt",
   ] as const) {
     if (JSON.stringify(before[field]) !== JSON.stringify(after[field])) {
@@ -514,6 +519,11 @@ export async function updateWorkItem(
     if (input.relatedItems !== undefined) next.relatedItems = requireStringArray(input.relatedItems, "relatedItems");
     if (input.designs !== undefined) next.designs = requireStringArray(input.designs, "designs");
     if (input.plans !== undefined) next.plans = requireStringArray(input.plans, "plans");
+    if (input.loop !== undefined) {
+      next.loop = input.loop === null
+        ? undefined
+        : (requireText(input.loop, "loop").trim() || undefined);
+    }
     if (input.archived !== undefined) {
       if (typeof input.archived !== "boolean") {
         throw new WorkItemValidationError("archived must be a boolean");
