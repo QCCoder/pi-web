@@ -71,3 +71,8 @@ test("buildMatcher 无效表达式返回恒 false 函数（不含时区，按 UT
   assert.equal(utcMatcher(new Date("2024-01-15T15:05:00.000Z")), true);
   assert.equal(utcMatcher(new Date("2024-01-15T15:05:00.000+08:00")), false);
 });
+
+test("nextDue after 恰在命中分钟上 → 返回下一个命中", () => {
+  const t = new Date("2024-01-15T07:30:00.000Z"); // 上海 15:30，恰为 */30 命中分钟
+  assert.equal(nextDue("*/30 9-22 * * 1-5", "Asia/Shanghai", t)?.toISOString(), "2024-01-15T08:00:00.000Z");
+});
