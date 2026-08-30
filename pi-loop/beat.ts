@@ -27,19 +27,22 @@ export function beatRoundRunner(declaration: LoopDeclaration, opts: { extraInstr
     const child = spawn(piBinary(), ["--name", `${declaration.loopName} · ${slot}`, "-p", "--approve", prompt], {
       cwd: declaration.workspacePath, detached: true, stdio: "ignore",
     });
-    if (!child.pid) { reject(new Error("spawn failed")); return; }
-    writeRoundLock(declaration.dir, { pid: child.pid, host: hostname(), kind: "beat" });
-    const timer = setTimeout(() => {
-      killGroup(child.pid!, "SIGTERM");
-      setTimeout(() => killGroup(child.pid!, "SIGKILL"), 3_000).unref?.();
-    }, declaration.maxMinutes * 60_000);
-    timer.unref?.();
+    // 监听必须在 !child.pid 早退之前挂上：spawn 同步失败时 libuv 仍会异步派发 'error'，
+    // 无监听 → uncaught exception 杀死整个 beat/watch 宿主；已 settle 的 promise 上再 reject/resolve 是 no-op。
+    let timer: NodeJS.Timeout | undefined;
     child.on("error", (error) => { clearTimeout(timer); reject(error); });
     child.on("exit", (code, signal) => {
       clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error(`round exited code=${code ?? "-"} signal=${signal ?? "-"}`));
     });
+    if (!child.pid) { reject(new Error("spawn failed")); return; }
+    writeRoundLock(declaration.dir, { pid: child.pid, host: hostname(), kind: "beat" });
+    timer = setTimeout(() => {
+      killGroup(child.pid!, "SIGTERM");
+      setTimeout(() => killGroup(child.pid!, "SIGKILL"), 3_000).unref?.();
+    }, declaration.maxMinutes * 60_000);
+    timer.unref?.();
   });
 }
 

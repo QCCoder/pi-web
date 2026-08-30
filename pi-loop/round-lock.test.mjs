@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireRoundLock, releaseRoundLock, readRoundLock, updateRoundLock, isProcessAlive } from "./round-lock.ts";
+import { acquireRoundLock, releaseRoundLock, readRoundLock, updateRoundLock, writeRoundLock, isProcessAlive } from "./round-lock.ts";
 
 const dir = () => { const d = mkdtempSync(join(tmpdir(), "lock-")); return d; };
 const holder = { pid: process.pid, host: "t", kind: "beat" };
@@ -38,6 +38,19 @@ test("updateRoundLock 回填 sessionId", () => {
   acquireRoundLock(d, { ...holder, kind: "daemon" });
   updateRoundLock(d, { sessionId: "sess-1" });
   assert.equal(readRoundLock(d)?.sessionId, "sess-1");
+});
+
+test("writeRoundLock 换 holder（pid/host/kind）但保留已有 startedAt", () => {
+  const d = dir();
+  acquireRoundLock(d, holder);
+  const startedAt = readRoundLock(d)?.startedAt;
+  assert.ok(typeof startedAt === "number");
+  writeRoundLock(d, { pid: 424242, host: "other-host", kind: "daemon" });
+  const after = readRoundLock(d);
+  assert.equal(after?.pid, 424242);          // holder 已换
+  assert.equal(after?.host, "other-host");
+  assert.equal(after?.kind, "daemon");
+  assert.equal(after?.startedAt, startedAt);  // 起始时间不动 —— fire.ts 先 acquire 的宿主锁换手成子 pid 锁时不重置轮龄
 });
 
 test("isProcessAlive：自己活、999999 死", () => {
