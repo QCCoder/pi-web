@@ -541,7 +541,7 @@ lib/
 pi-loop/                              THE loop-host package: pure protocol logic + beat CLI (design: docs/pi-loop-host-design.md; independent package.json for future publish, imported by relative path like lib/ — see Loop section)
   protocol.ts             LoopDeclaration / parseLoopDeclaration / discoverKitLoops (loops/*/LOOP.md frontmatter; PAUSED skipped) / isWorkspaceHalted (loop-pause-all) — pure fs+yaml, no daemon deps; the web loops route imports it too
   cron.ts                 cronMatches (Vixie-cron matcher with timezone, never throws on bad input) + nextDue (first cron hit after a moment, minute granularity) — the fire judgment's clock
-  round-lock.ts           .round.lock cross-host round mutex — acquire/read/update/releaseRoundLock; O_EXCL atomic create, stale = dead pid or past maxMinutes+15min
+  round-lock.ts           .round.lock cross-host round mutex — acquire/read/update/releaseRoundLock + isRoundLockStale（唯一权威公式）; O_EXCL atomic create, stale = 无 sessionId 且 pid 死（启动窗口/beat 轮）或超 maxMinutes+15min 窗（带 sessionId 的锁一律窗口治理——web 手动轮锁 pid=web 进程，web 重启不得触发心跳双发）
   due.ts                  .lastrun machine truth (host-written ISO timestamp; STATE.md Last run stays narrative) + shouldFire = now >= nextDue(cron, tz, .lastrun) — anacron-lite catch-up (at most one round after downtime)
   contract.ts             buildRoundPrompt — opening-contract assembly shared by daemon spawner (with sessionId, D9) and beat (without); D13 ledger path is per-loop
   fire.ts                 runDueRound/runNow — the unified fire sequence (acquire lock → re-check shouldFire in-lock → write .lastrun → run → finally release); daemon tick and beat share it, cross-host TOCTOU-safe
