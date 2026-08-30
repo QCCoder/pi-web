@@ -1,0 +1,9 @@
+{
+  "name": "pi-loop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "pi-loop kit host: pure protocol logic + beat CLI (design: docs/pi-loop-host-design.md)",
+  "bin": { "pi-loop": "./cli.ts" },
+  "dependencies": { "yaml": "^2.9.0" }
+}

@@ -1,4 +1,5 @@
-/** pi-loop kit 协议的纯解析层（design: docs/pi-loop-kit-design.md §4）。
+/** pi-loop kit 协议的纯解析层（design: docs/pi-loop-host-design.md §5 纯逻辑层；
+ *  协议契约见 docs/pi-loop-kit-design.md §4）。
  *  纯 fs + yaml，无 daemon 依赖 —— web 进程（kit-loops 列表路由）亦可导入。 */
 import { existsSync, readFileSync, readdirSync, type Dirent } from "node:fs";
 import { basename, join } from "node:path";
@@ -19,6 +20,8 @@ export interface LoopDeclaration {
   maxMinutes: number;
   /** frontmatter 之下的正文 — 开场合同（人类/模型可读）。 */
   body: string;
+  /** 仅 includePaused 发现路径置 true（PAUSED 标记存在）。 */
+  paused?: boolean;
 }
 
 export const DEFAULT_MAX_MINUTES = 30;
@@ -58,7 +61,10 @@ export function parseLoopDeclaration(
   return { workspacePath, loopName, dir, pattern, cron, timezone, level, maxMinutes, body: match[2].trim() };
 }
 
-export function discoverKitLoops(workspacePath: string): LoopDeclaration[] {
+export function discoverKitLoops(
+  workspacePath: string,
+  opts: { includePaused?: boolean } = {},
+): LoopDeclaration[] {
   const loopsDir = join(workspacePath, "loops");
   // NOTE (task-3 deviation): brief annotated this as ReturnType<typeof readdirSync>,
   // which resolves the wrong overload (Dirent<NonSharedBuffer>[]) under @types/node 25.
@@ -73,7 +79,8 @@ export function discoverKitLoops(workspacePath: string): LoopDeclaration[] {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const dir = join(loopsDir, entry.name);
-    if (existsSync(join(dir, "PAUSED"))) continue;
+    const paused = existsSync(join(dir, "PAUSED"));
+    if (paused && !opts.includePaused) continue;
     let raw: string;
     try {
       raw = readFileSync(join(dir, "LOOP.md"), "utf8");
@@ -81,7 +88,10 @@ export function discoverKitLoops(workspacePath: string): LoopDeclaration[] {
       continue;
     }
     const declaration = parseLoopDeclaration(raw, dir, workspacePath);
-    if (declaration) result.push(declaration);
+    if (declaration) {
+      if (paused) declaration.paused = true;
+      result.push(declaration);
+    }
   }
   return result;
 }

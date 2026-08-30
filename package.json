@@ -37,7 +37,7 @@
     "daemon": "node bin/pi-daemon.js",
     "loop": "node bin/pi-daemon.js",
     "lint": "eslint .",
-    "test": "node --test \"lib/**/*.test.mjs\"",
+    "test": "node --test \"lib/**/*.test.mjs\" \"pi-loop/**/*.test.mjs\"",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {
