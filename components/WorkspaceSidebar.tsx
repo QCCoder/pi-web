@@ -42,6 +42,9 @@ interface Props {
   onImportDirectory: () => void;
   /** Knowledge panel ＋ — switches to settings › workspace › repository form. */
   onAddRepository: () => void;
+  /** 工作台 PanelHeader「总览」— Overview 仪表盘的回头路（桌面：主区切 overview；
+   *  移动端：工作台 tab 内推入总览栈）。仅在 workbench 视图渲染。 */
+  onShowOverview?: () => void;
   onNewSession: () => void;
   onSelectSession: (session: SessionInfo) => void;
   onOpenFile: (path: string, name: string) => void;
@@ -348,6 +351,7 @@ export function WorkspaceSidebar({
   onCreateWorkspace,
   onImportDirectory,
   onAddRepository,
+  onShowOverview,
   onNewSession,
   onSelectSession,
   onOpenFile,
@@ -686,6 +690,11 @@ export function WorkspaceSidebar({
                   activeWorkspace={activeWorkspace}
                   onSelect={onSelectWorkspace}
                 />
+                {onShowOverview && (
+                  <PanelHeaderButton onClick={onShowOverview} title="工作区总览（活跃工作项 / 仓库 / Loops 管理）">
+                    总览
+                  </PanelHeaderButton>
+                )}
                 <PanelHeaderButton onClick={onNewSession} title="新建会话" primary>
                   ＋ 新建会话
                 </PanelHeaderButton>

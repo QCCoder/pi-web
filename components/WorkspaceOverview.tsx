@@ -498,7 +498,15 @@ export function WorkspaceOverview({
                   </span>
                   <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 4, background: "var(--bg-hover)" }}>{loop.level}</span>
                   <span style={{ fontSize: 12, color: loop.running ? "#15803d" : loop.paused ? "var(--text-dim)" : "var(--text-muted)" }}>
-                    {loop.running ? "● 运行中" : loop.paused ? "已暂停" : loop.nextDue ? `下次 ${formatLoopClock(loop.nextDue)}` : "空闲"}
+                    {loop.running
+                      ? "● 运行中"
+                      : loop.paused
+                        ? "已暂停"
+                        : loop.nextDue
+                          ? (new Date(loop.nextDue).getTime() > Date.now()
+                              ? `下次 ${formatLoopClock(loop.nextDue)}`
+                              : "已到期 · 待心跳")
+                          : "空闲"}
                   </span>
                   <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
                     <button

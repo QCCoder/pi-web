@@ -685,6 +685,18 @@ export function useAppShellState() {
     navigateUrl(existing ? buildTabQuery(existing) : `workspace=${encodeURIComponent(id)}&view=overview`);
   }, [ensureTab, activateTab, tabs, buildTabQuery, navigateUrl]);
 
+  /** Overview 仪表盘的回头路：view 只在新 tab 首落时为 overview，此后 9 处切换全部设 chat——
+   *  tab 一旦进过 chat，Overview（含 Loops 管理区块、快速操作、活跃工作项）便再无入口。
+   *  工作台 PanelHeader「总览」按钮 → 桌面把主区切回 overview（会话绑定保留，回去路径
+   *  照旧：新建会话/选会话/工作项）；移动端由 MobileShell 用本地栈接管（onShowOverview prop）。 */
+  const handleShowOverview = useCallback(() => {
+    if (!activeTabId) return;
+    setConfigView(null);
+    setWorkItemDetail(null);
+    updateTab(activeTabId, { view: "overview" });
+    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=overview`);
+  }, [activeTabId, updateTab, navigateUrl]);
+
   // The tab-bar ＋ picker: open (or switch to) a workspace and land in its
   // CHAT view. An already-open tab keeps its session binding (continue the
   // conversation); a fresh one gets the new-session composer. Mirrors
@@ -1408,6 +1420,7 @@ export function useAppShellState() {
     handleOpenConversation,
     handleOpenWorkspace,
     handleOpenWorkspaceToChat,
+    handleShowOverview,
     handleWorkspaceNewSession,
     handleReturnHome,
     handleCloseWorkspaceTab,
