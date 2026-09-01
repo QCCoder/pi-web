@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireRoundLock, releaseRoundLock, readRoundLock, updateRoundLock, writeRoundLock, isProcessAlive } from "./round-lock.ts";
+import { acquireRoundLock, releaseRoundLock, readRoundLock, updateRoundLock, writeRoundLock, isProcessAlive, isRoundLockStale } from "./round-lock.ts";
 
 const dir = () => { const d = mkdtempSync(join(tmpdir(), "lock-")); return d; };
 const holder = { pid: process.pid, host: "t", kind: "beat" };
@@ -51,6 +51,29 @@ test("writeRoundLock 换 holder（pid/host/kind）但保留已有 startedAt", ()
   assert.equal(after?.host, "other-host");
   assert.equal(after?.kind, "daemon");
   assert.equal(after?.startedAt, startedAt);  // 起始时间不动 —— fire.ts 先 acquire 的宿主锁换手成子 pid 锁时不重置轮龄
+});
+
+test("isRoundLockStale 三态（唯一权威公式）：死 pid 仅在无 sessionId 时 stale；带 sessionId 只看时间窗", () => {
+  const fresh = Date.now();
+  // ① 死 pid + sessionId（web 手动轮锁，轮会话活在 daemon）→ 不 stale（时间窗治理）
+  assert.equal(isRoundLockStale({ pid: 999999, host: "x", kind: "daemon", sessionId: "s-1", startedAt: fresh }, 60_000), false);
+  // ② 死 pid 无 sessionId（启动窗口/beat 轮）→ pid 死即 stale（持有进程死=轮死）
+  assert.equal(isRoundLockStale({ pid: 999999, host: "x", kind: "beat", startedAt: fresh }, 60_000), true);
+  // ③ 活 pid 超窗 → stale（带不带 sessionId 都一样，时间窗是常归治理）
+  assert.equal(isRoundLockStale({ pid: process.pid, host: "x", kind: "daemon", sessionId: "s-1", startedAt: fresh - 120_000 }, 60_000), true);
+  assert.equal(isRoundLockStale({ pid: process.pid, host: "x", kind: "beat", startedAt: fresh - 120_000 }, 60_000), true);
+  // 活 pid + 未超窗 → 不 stale（基线）
+  assert.equal(isRoundLockStale({ pid: process.pid, host: "x", kind: "daemon", startedAt: fresh }, 60_000), false);
+});
+
+test("死 pid + sessionId 的锁不被抢占（web 重启后心跳不双发）；去掉 sessionId 则可抢占", () => {
+  const d = dir();
+  writeFileSync(join(d, ".round.lock"), JSON.stringify({ pid: 999999, host: "x", kind: "daemon", sessionId: "s-1", startedAt: Date.now() }));
+  assert.equal(acquireRoundLock(d, holder, { maxStaleMs: 60_000 }), false); // 带 sessionId：pid 死也不抢
+  assert.equal(readRoundLock(d)?.pid, 999999);                              // 原锁不动
+  writeFileSync(join(d, ".round.lock"), JSON.stringify({ pid: 999999, host: "x", kind: "daemon", startedAt: Date.now() }));
+  assert.equal(acquireRoundLock(d, holder, { maxStaleMs: 60_000 }), true);  // 无 sessionId：pid 死即 stale，抢占
+  assert.equal(readRoundLock(d)?.pid, process.pid);
 });
 
 test("isProcessAlive：自己活、999999 死", () => {

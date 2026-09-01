@@ -87,6 +87,10 @@ interface Props {
     item: WorkItemRecord,
     mode: "execute" | "adopt",
   ) => Promise<void>;
+  /** 「立即跑一轮」（B 面，Task 9）：POST run 路由在 daemon 起一轮，成功后把
+   *  新轮会话开成 workspace 的 chat tab（SSE 实时观看）；409（本轮已在跑）
+   *  等错误在 handler 内 alert 直陈。 */
+  onRunLoopRound?: (workspace: WorkspaceSummary, item: WorkItemRecord, loopName: string) => void;
   /** Open one of the item's linked conversation sessions by id (locate
    *  pipeline) — renders the `conversations` list as clickable entries. */
   onOpenConversation?: (sessionId: string) => void;
@@ -213,6 +217,7 @@ export function WorkspaceManager({
   onOpenWorkspace,
   onOpenWorkItemConversation,
   onRunContract,
+  onRunLoopRound,
   onOpenConversation,
   onWorkspaceDeleted,
   onWorkItemsChanged,
@@ -251,12 +256,20 @@ export function WorkspaceManager({
   const [contentDraft, setContentDraft] = useState("");
   const [contentEditing, setContentEditing] = useState(false);
   const [saving, setSaving] = useState(false);
-  // Whether the selected workspace declares at least one kit loop
-  // (loops/<name>/LOOP.md with a cron — D5 文件即声明). Gates the
-  // 开始对话/收养续跑 buttons (D11: the retired `loop` capability no longer
-  // decides this). Fetched once per selected workspace, no polling — loops
-  // are authored rarely.
-  const [hasKitLoops, setHasKitLoops] = useState(false);
+  // Kit loops of the selected workspace (read-only GET /loops — pure file
+  // discovery + run status, no capability involved). Stores the FULL list
+  // INCLUDING paused loops (T7's binding dropdown needs them — binding to a
+  // paused loop is a soft no-op, S1/S5); the button gate filters via the
+  // derived `hasKitLoops` below (D11: paused = not there). Fetched once per
+  // selected workspace, no polling — loops are authored rarely.
+  const [kitLoops, setKitLoops] = useState<Array<{
+    name: string; pattern: string; level: string; cron: string;
+    paused?: boolean; running?: boolean;
+  }>>([]);
+  // 按钮门控派生量（D11 语义不变）：存在至少一个未暂停的 kit loop。
+  const hasKitLoops = kitLoops.some((loop) => !loop.paused);
+  // 「立即跑一轮」多 active loop 时的手动选择（未绑定且无唯一默认时出现）。
+  const [runLoopPick, setRunLoopPick] = useState("");
 
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
@@ -402,24 +415,25 @@ export function WorkspaceManager({
   }, [embedded, open, selectedWorkspace]);
 
   // Kit-declared loops of the selected workspace (read-only GET /loops —
-  // pure file discovery, no capability involved). Drives only the
-  // contract-execution button gate; failure or offline → no loops (buttons hidden).
+  // pure file discovery, no capability involved). Stores the full list
+  // (incl. paused); the 开始对话/收养续跑 button gate derives from it
+  // (`hasKitLoops` = some(!paused)); failure or offline → no loops (buttons hidden).
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId) {
-      setHasKitLoops(false);
+      setKitLoops([]);
       return;
     }
     let cancelled = false;
     void fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/loops`)
       .then(async (response) => {
-        if (!response.ok) return { loops: [] as Array<{ pattern: string }> };
-        return response.json() as Promise<{ loops?: Array<{ pattern: string }> }>;
+        if (!response.ok) return { loops: [] as Array<{ name: string; pattern: string; level: string; cron: string; paused?: boolean; running?: boolean }> };
+        return response.json() as Promise<{ loops?: Array<{ name: string; pattern: string; level: string; cron: string; paused?: boolean; running?: boolean }> }>;
       })
       .then((data) => {
-        if (!cancelled) setHasKitLoops((data.loops?.length ?? 0) > 0);
+        if (!cancelled) setKitLoops(data.loops ?? []);
       })
       .catch(() => {
-        if (!cancelled) setHasKitLoops(false);
+        if (!cancelled) setKitLoops([]);
       });
     return () => {
       cancelled = true;
@@ -693,9 +707,12 @@ export function WorkspaceManager({
     }
   }, [loadWorkItems, onRunContract, onWorkItemsChanged, selectedWorkspace, selectedWorkspaceId, selectedWorkItem]);
 
+  // T7: `loop` rides the explicit intersection arm (string | null — null
+  // clears the binding); putting it in the Pick too would intersect away
+  // the null arm and break `patchWorkItem({ loop: value || null })`.
   const patchWorkItem = useCallback(async (
     patch: Partial<Pick<WorkItemRecord, "status" | "phase" | "priority" | "title" | "repositories">>
-      & { archived?: boolean },
+      & { archived?: boolean; loop?: string | null },
   ) => {
     if (!selectedWorkspaceId || !selectedWorkItem) return;
     setSaving(true);
@@ -1174,6 +1191,9 @@ export function WorkspaceManager({
   // (desktop 工作项 panel) the LIST stays mounted in the middle column while
   // the DETAIL portals into the right column's config area — one instance
   // keeps every bit of state (selection, drafts, save flow).
+  // T7: bound kit-loop NAME for the detail 「Loop」 row ("" = 未绑定). Hoisted
+  // so the 未生效 badge check narrows cleanly (item.loop is optional).
+  const boundLoopName = selectedWorkItem?.item.loop ?? "";
   const workItemDetailPane = selectedWorkItem && selectedWorkspace ? (
     <div className="work-item-detail-card">
                   <div className="work-item-detail-header">
@@ -1239,6 +1259,56 @@ export function WorkspaceManager({
                         {selectedWorkItem.item.conversations.length > 0 ? "继续会话" : "开始会话"}
                       </button>
                     )}
+                    {/* B 面「立即跑一轮」：独立于 conversations 是否为空，仅要求
+                        同样的 phase/status gate（Task 9）。命中绑定或单 active
+                        loop → 单按钮（默认名）；未绑定多 active loop →
+                        select+按钮。前一个兄弟按钮已携带 marginLeft:auto，
+                        不重复加（两个 auto 会在按钮组中间豁出空隙）。 */}
+                    {onRunLoopRound && hasKitLoops && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && (() => {
+                      const activeKitLoops = kitLoops.filter((l) => !l.paused); // kitLoops 存全量（Task 3）
+                      const boundLoopName = selectedWorkItem.item.loop;
+                      const defaultLoop = activeKitLoops.find((l) => l.name === boundLoopName)
+                        ?? (activeKitLoops.length === 1 ? activeKitLoops[0] : undefined);
+                      if (defaultLoop) {
+                        return (
+                          <button
+                            className="workspace-action"
+                            disabled={saving}
+                            onClick={() => void onRunLoopRound(selectedWorkspace, selectedWorkItem.item, defaultLoop.name)}
+                            title={`立即起一轮 ${defaultLoop.name}（daemon 会话，实时观看；本轮优先处理 ${selectedWorkItem.item.key}）`}
+                          >
+                            立即跑一轮
+                          </button>
+                        );
+                      }
+                      if (activeKitLoops.length === 0) return null;
+                      // 未绑定且多 loop：选择菜单（spec §4 入口 gate）
+                      const pick = runLoopPick && activeKitLoops.some((l) => l.name === runLoopPick)
+                        ? runLoopPick : activeKitLoops[0]?.name ?? "";
+                      return (
+                        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <select
+                            value={pick}
+                            disabled={saving}
+                            onChange={(event) => setRunLoopPick(event.target.value)}
+                            style={{ fontSize: 12 }}
+                            title="选择用哪个 loop 起轮"
+                          >
+                            {activeKitLoops.map((l) => (
+                              <option key={l.name} value={l.name}>{l.name}</option>
+                            ))}
+                          </select>
+                          <button
+                            className="workspace-action"
+                            disabled={saving}
+                            onClick={() => void onRunLoopRound(selectedWorkspace, selectedWorkItem.item, pick)}
+                            title={`立即起一轮 ${pick}（daemon 会话，实时观看；本轮优先处理 ${selectedWorkItem.item.key}）`}
+                          >
+                            立即跑一轮
+                          </button>
+                        </span>
+                      );
+                    })()}
                     <button
                       className="workspace-action"
                       onClick={() => setContentEditing((value) => !value)}
@@ -1324,6 +1394,27 @@ export function WorkspaceManager({
                         </div>
                       </div>
                     )}
+                    <div className="workspace-field workspace-field-compact">
+                      <span>Loop</span>
+                      <div style={{ padding: "9px 0", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                        <select
+                          value={boundLoopName}
+                          disabled={saving || kitLoops.length === 0}
+                          onChange={(event) => void patchWorkItem({ loop: event.target.value || null })}
+                          title={kitLoops.length === 0 ? "本工作区没有 kit loop" : "绑定后该工作项只被绑定的 loop 拾取（未绑定项对所有 loop 可见）"}
+                        >
+                          <option value="">未绑定</option>
+                          {kitLoops.map((loop) => (
+                            <option key={loop.name} value={loop.name}>
+                              {loop.name}{loop.paused ? "（已暂停）" : ""}
+                            </option>
+                          ))}
+                        </select>
+                        {boundLoopName && !kitLoops.some((l) => l.name === boundLoopName) && (
+                          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>未生效（loop 不存在）</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                   {selectedWorkspace.repositories.length > 0 && (
                     <div className="work-item-repositories" aria-label="Repository scope">

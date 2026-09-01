@@ -77,6 +77,15 @@ CLI 命令面（宿主包 `pi-loop/`，照 host spec §4；发布前可直接 `n
   即使 L3 也只允许自动合并白名单路径（docs/测试）。
 - 晋级与"agent 禁自改宪法"写进每份 SKILL.md 硬条款。
 
+## 工作项绑定（item.yaml 的 loop 字段）
+
+工作项（pi-web 工作项域）可声明 `loop: <loop名>` 绑定（详情下拉 / `workspace_update_work_item` 工具透传）：
+
+- **绑定 = 路由收窄**：loop 轮拾取候选 = 「绑给我的项 + 未绑定项」——绑定只收窄、不放大；未绑定项维持现状（轮的开场三重判断自主决定）。
+- **软校验**：字段存 loop **名**（非 pattern——名字稳定，pattern 可改）。不校验存在性：loop 可能后建/暂删，未命中的绑定按未绑定处理。
+- **STATE.md = 执行状态**：工作集、进度、gate 全在 loop 侧 STATE.md；绑定只影响「谁能捡」，不影响「怎么跑」。
+- SKILL.md 的选择段应声明该过滤语义（候选 = 绑定项 ∪ 未绑定项）。
+
 ## 断路器（loop-ledger.json，per-loop）
 
 `{ "attempts": [{ "at": "...", "item": "REQ-0042", "error": "...", "digest": "..." }], "consecutiveFailures": 0 }`

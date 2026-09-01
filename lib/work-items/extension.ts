@@ -83,6 +83,9 @@ export function createWorkspaceWorkItemExtension(
           ])),
           repositories: Type.Optional(Type.Array(Type.String())),
           tags: Type.Optional(Type.Array(Type.String())),
+          loop: Type.Optional(Type.String({
+            description: "绑定的 kit loop 名（loops/<name> 目录声明的 loop）；留空表示未绑定",
+          })),
         }),
         execute: async (_callId, params, _signal, _update, ctx) => result(
           await createWorkItem(workspaceId, {
@@ -92,6 +95,7 @@ export function createWorkspaceWorkItemExtension(
             ...(params.priority ? { priority: params.priority as WorkItemPriority } : {}),
             ...(params.repositories ? { repositories: params.repositories } : {}),
             ...(params.tags ? { tags: params.tags } : {}),
+            ...(params.loop ? { loop: params.loop } : {}),
             actor: "agent",
             conversationId: ctx.sessionManager.getSessionId(),
           }),
@@ -136,6 +140,9 @@ export function createWorkspaceWorkItemExtension(
           repositories: Type.Optional(Type.Array(Type.String())),
           tags: Type.Optional(Type.Array(Type.String())),
           archived: Type.Optional(Type.Boolean()),
+          loop: Type.Optional(Type.Union([Type.String(), Type.Null()], {
+            description: "绑定的 kit loop 名；null 清除绑定",
+          })),
         }),
         execute: async (_callId, params, _signal, _update, ctx) => {
           const conversationId = ctx.sessionManager.getSessionId();
@@ -149,6 +156,7 @@ export function createWorkspaceWorkItemExtension(
             ...(params.repositories !== undefined ? { repositories: params.repositories } : {}),
             ...(params.tags !== undefined ? { tags: params.tags } : {}),
             ...(params.archived !== undefined ? { archived: params.archived } : {}),
+            ...(params.loop !== undefined ? { loop: params.loop } : {}),
             conversations: [...new Set([...current.item.conversations, conversationId])],
             actor: "agent",
             conversationId,

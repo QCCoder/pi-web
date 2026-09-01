@@ -10,6 +10,7 @@ import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
+import { resolveContractPattern } from "@/lib/loops/contract-prefill";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "../ChatInput";
@@ -946,6 +947,55 @@ export function useAppShellState() {
     }, 50);
   }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
 
+  /** 「立即跑一轮」（spec §4 B 按钮）：POST run 路由（daemon 现有会话面起轮），
+   *  成功后把新轮会话开成 workspace 的 chat tab（SSE 实时观看；locate 直接命中
+   *  ——run 路由已播种 cacheSessionPath）。409（本轮已在跑）等错误用 alert 直陈。 */
+  const handleRunLoopRound = useCallback(async (
+    workspace: WorkspaceSummary,
+    item: WorkItemRecord,
+    loopName: string,
+  ): Promise<void> => {
+    let sessionId: string | undefined;
+    try {
+      const response = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspace.id)}/loops/${encodeURIComponent(loopName)}/run`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ itemKey: item.key }),
+        },
+      );
+      const body = (await response.json().catch(() => ({}))) as { sessionId?: string; error?: string };
+      if (!response.ok || !body.sessionId) {
+        window.alert(body.error || `起轮失败（HTTP ${response.status}）`);
+        return;
+      }
+      sessionId = body.sessionId;
+    } catch (error) {
+      window.alert(`起轮失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    setConfigView(null);
+    setWorkItemDetail(null);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
+      if (response.ok) {
+        const data = await response.json() as { session?: SessionInfo };
+        if (data.session) {
+          ensureTab(workspace);
+          updateTab(workspace.id, { view: "chat", session: data.session, newSessionCwd: null });
+          activateTab(workspace.id);
+          setSessionKey((key) => key + 1);
+          setSystemPrompt(null);
+          focusChat();
+          navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(sessionId)}`);
+          return;
+        }
+      }
+    } catch { /* fall through */ }
+    window.alert("轮已启动，但打开会话视图失败——请从会话列表进入。");
+  }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
+
   /** Kit 时代「按合同执行」/「收养续跑」（D11）：不再 POST daemon seed — 改为
    *  客户端预填。取该 workspace 的 kit loop 合同（GET /loops，纯文件发现），
    *  把 `/skill:<pattern> 执行|收养 <KEY>` 写进其新会话 composer 的草稿，再切到
@@ -960,8 +1010,8 @@ export function useAppShellState() {
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loops`);
       if (response.ok) {
-        const data = (await response.json()) as { loops?: Array<{ pattern: string }> };
-        pattern = data.loops?.[0]?.pattern;
+        const data = (await response.json()) as { loops?: Array<{ name?: string; pattern: string; paused?: boolean }> };
+        pattern = resolveContractPattern(item.loop, data.loops ?? []);
       }
     } catch { /* offline — degrade to a bare prompt without the /skill: prefix */ }
     const verb = mode === "adopt" ? "收养" : "执行";
@@ -1369,6 +1419,7 @@ export function useAppShellState() {
     hydrateSelectedSession,
     handleSessionCreated,
     handleOpenWorkItemConversation,
+    handleRunLoopRound,
     handleRunContract,
     handleAgentEnd,
     handleAutoName,

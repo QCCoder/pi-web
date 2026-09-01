@@ -29,7 +29,15 @@ export function beatRoundRunner(declaration: LoopDeclaration, opts: { extraInstr
     });
     // 监听必须在 !child.pid 早退之前挂上：spawn 同步失败时 libuv 仍会异步派发 'error'，
     // 无监听 → uncaught exception 杀死整个 beat/watch 宿主；已 settle 的 promise 上再 reject/resolve 是 no-op。
-    let timer: NodeJS.Timeout | undefined;
+    // timer 同样无条件先建（const，prefer-const）：spawn 失败路径由下面两个监听 clearTimeout
+    // 收掉；回调内快照 child.pid 为空即返回，不杀。
+    const timer: NodeJS.Timeout = setTimeout(() => {
+      const pid = child.pid;
+      if (!pid) return;
+      killGroup(pid, "SIGTERM");
+      setTimeout(() => killGroup(pid, "SIGKILL"), 3_000).unref?.();
+    }, declaration.maxMinutes * 60_000);
+    timer.unref?.();
     child.on("error", (error) => { clearTimeout(timer); reject(error); });
     child.on("exit", (code, signal) => {
       clearTimeout(timer);
@@ -38,11 +46,6 @@ export function beatRoundRunner(declaration: LoopDeclaration, opts: { extraInstr
     });
     if (!child.pid) { reject(new Error("spawn failed")); return; }
     writeRoundLock(declaration.dir, { pid: child.pid, host: hostname(), kind: "beat" });
-    timer = setTimeout(() => {
-      killGroup(child.pid!, "SIGTERM");
-      setTimeout(() => killGroup(child.pid!, "SIGKILL"), 3_000).unref?.();
-    }, declaration.maxMinutes * 60_000);
-    timer.unref?.();
   });
 }
 

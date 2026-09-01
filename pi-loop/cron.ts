@@ -76,3 +76,29 @@ export function nextDue(expression: string, timezone: string, after: Date): Date
   }
   return undefined;
 }
+
+/** 结构校验：5 字段、每段 `*|n|m-n`（可带 /step）、数值在字段范围内。
+ *  供 frontmatter 编辑（web PATCH）与 init CLI 干跑校验——避免对垃圾表达式
+ *  跑 366 天的 nextDue 扫描。纯语法，不判「永不命中」（如 0 0 31 2 *）。 */
+const CRON_FIELD_RANGES: Array<[number, number]> = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+
+export function isValidCronExpression(expression: string): boolean {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  return fields.every((field, index) => {
+    if (!field) return false;
+    const [min, max] = CRON_FIELD_RANGES[index];
+    return field.split(",").every((part) => {
+      if (!part) return false;
+      const [range, stepRaw] = part.split("/");
+      const step = stepRaw === undefined ? 1 : Number(stepRaw);
+      if (!Number.isInteger(step) || step < 1) return false;
+      if (range === "*") return true;
+      const [startRaw, endRaw] = range.split("-");
+      const start = Number(startRaw);
+      const end = endRaw === undefined ? start : Number(endRaw);
+      return Number.isInteger(start) && Number.isInteger(end)
+        && start >= min && start <= max && end >= min && end <= max && start <= end;
+    });
+  });
+}

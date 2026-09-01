@@ -5,7 +5,7 @@ import {
   WorkspaceNotFoundError,
   WorkspaceValidationError,
 } from "@/lib/workspaces/service";
-import { discoverKitLoops } from "../../../../../pi-loop/protocol.ts";
+import { collectStatus } from "../../../../../pi-loop/status.ts";
 
 function errorResponse(error: unknown): NextResponse {
   const status = error instanceof WorkspaceNotFoundError
@@ -21,11 +21,12 @@ function errorResponse(error: unknown): NextResponse {
   );
 }
 
-/** Kit-declared loops of a workspace (read-only). Discovery is pure fs+yaml
- *  (`pi-loop/protocol.ts` has no daemon dependencies — safe to import in
+/** Kit-declared loops of a workspace with per-loop run status (read-only).
+ *  Status collection (`pi-loop/status.ts` is pure fs+yaml — safe to import in
  *  the web process): a loop EXISTS by its `loops/<name>/LOOP.md` frontmatter
- *  (D5 文件即声明), no manifest capability involved. The work-item contract
- *  prefill (D11) and the 开始对话/收养续跑 button gate read this list. */
+ *  (D5 文件即声明), no manifest capability involved. Returns the FULL set
+ *  including paused loops (管理面全量, web spec §5.1) — consumers filter
+ *  `paused` themselves (D11 gate semantics: paused = not there). */
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -33,13 +34,10 @@ export async function GET(
   try {
     const { id } = await params;
     const { path } = await getWorkspace(id);
-    const loops = discoverKitLoops(path).map((declaration) => ({
-      name: declaration.loopName,
-      pattern: declaration.pattern,
-      level: declaration.level,
-      cron: declaration.cron,
-    }));
-    return NextResponse.json({ loops });
+    // 管理面数据（web spec §5.1）：includePaused 发现 + 每 loop 的运行状态
+    // （.round.lock 活性 + .lastrun + nextDue，与 pi-loop status CLI 同一口径）。
+    // 消费方自行过滤 paused（D11 门控语义：暂停即不存在）。
+    return NextResponse.json({ loops: collectStatus(path) });
   } catch (error) {
     return errorResponse(error);
   }

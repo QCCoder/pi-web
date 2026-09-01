@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMatcher, cronMatches, nextDue } from "./cron.ts";
+import { buildMatcher, cronMatches, isValidCronExpression, nextDue } from "./cron.ts";
 
 const shanghaiMonday15 = new Date("2024-01-15T07:05:00.000Z"); // 15:05 Asia/Shanghai, 周一
 
@@ -75,4 +75,18 @@ test("buildMatcher 无效表达式返回恒 false 函数（不含时区，按 UT
 test("nextDue after 恰在命中分钟上 → 返回下一个命中", () => {
   const t = new Date("2024-01-15T07:30:00.000Z"); // 上海 15:30，恰为 */30 命中分钟
   assert.equal(nextDue("*/30 9-22 * * 1-5", "Asia/Shanghai", t)?.toISOString(), "2024-01-15T08:00:00.000Z");
+});
+
+test("isValidCronExpression accepts valid and rejects garbage", () => {
+  assert.equal(isValidCronExpression("*/30 9-22 * * 1-5"), true);
+  assert.equal(isValidCronExpression("0 8 * * 1-5"), true);
+  assert.equal(isValidCronExpression("15 9,12,18 * * *"), true);
+  assert.equal(isValidCronExpression("abc * * * *"), false);
+  assert.equal(isValidCronExpression("*/30 9-22 * *"), false);   // 4 字段
+  assert.equal(isValidCronExpression("60 * * * *"), false);      // 分钟越界
+  assert.equal(isValidCronExpression("* 24 * * *"), false);      // 小时越界
+  assert.equal(isValidCronExpression("* * 0 * *"), false);       // dom 越界（1-31）
+  assert.equal(isValidCronExpression("* * * 0 *"), false);       // 月越界（1-12）
+  assert.equal(isValidCronExpression("* * * * 8"), false);       // dow 越界（0-7）
+  assert.equal(isValidCronExpression("*/0 * * * *"), false);     // step 0
 });
