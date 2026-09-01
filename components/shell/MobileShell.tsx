@@ -7,6 +7,7 @@ import { TabBar } from "../TabBar";
 import { ArchiveModal } from "../ArchiveModal";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
+import { WorkspaceOverview } from "../WorkspaceOverview";
 import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
 import { HomeLanding } from "../HomeLanding";
@@ -128,6 +129,7 @@ export function MobileShell() {
     handleCreateWorkspace,
     handleReturnHome,
     handleOpenConversation,
+    handleCreateWorkItem,
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
@@ -197,6 +199,17 @@ export function MobileShell() {
     if (tab !== "settings") setArchiveOpen(false);
   }, [tab]);
 
+  // 工作台 tab 的总览栈（D2）：工作台 PanelHeader「总览」推入 WorkspaceOverview
+  // （组件内已有 useIsMobile 自适应）。离开工作台 tab 或切换工作区即丢弃。
+  const [overviewOpen, setOverviewOpen] = useState(false);
+  useEffect(() => {
+    if (tab !== "workbench") setOverviewOpen(false);
+  }, [tab]);
+  const overviewWorkspaceId = activeWorkspace?.id;
+  useEffect(() => {
+    setOverviewOpen(false);
+  }, [overviewWorkspaceId]);
+
   // The knowledge panel's ＋ (add knowledge repo) routes to the settings tab's
   // 工作区 subpage with the repository form open — the mobile equivalent of the
   // desktop middle-column switch.
@@ -211,10 +224,42 @@ export function MobileShell() {
       case "chat":
         return null; // rendered separately (persistent mount)
       case "workbench":
+        if (overviewOpen && activeWorkspace) {
+          return (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title="总览"
+                meta={activeWorkspace.name}
+                onBack={() => setOverviewOpen(false)}
+                backLabel="工作台"
+              />
+              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                <WorkspaceOverview
+                  workspace={activeWorkspace}
+                  onNewSession={handleWorkspaceNewSession}
+                  onOpenSettings={() => {
+                    setSettingsPage("workspace");
+                    setTab("settings");
+                  }}
+                  onOpenWorkItems={() => setTab("work-items")}
+                  onCreateWorkItem={handleCreateWorkItem}
+                  onSelectSession={handleSelectSession}
+                  onSwitchSidebarView={(view) => setTab(view === "knowledge" ? "knowledge" : "workbench")}
+                  onAddRepository={handleKnowledgeAddRepository}
+                  onSessionDeleted={(id) => {
+                    setRefreshKey((key) => key + 1);
+                    updateActiveTab((current) => (current.session?.id === id ? { session: null } : {}));
+                  }}
+                />
+              </div>
+            </div>
+          );
+        }
         return (
           <WorkspaceSidebar
             activeWorkspace={activeWorkspace}
             activeView="workbench"
+            onShowOverview={() => setOverviewOpen(true)}
             workspaces={workspaces}
             selectedSessionId={selectedSession?.id ?? null}
             runningSessionIds={sessionActivity.runningIds}

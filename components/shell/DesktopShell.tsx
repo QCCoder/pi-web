@@ -88,6 +88,7 @@ export function DesktopShell() {
     handleSidebarSwitchView,
     handleWorkspaceSettingsSelection,
     handleOpenWorkspace,
+    handleShowOverview,
     handleOpenWorkspaceToChat,
     handleCloseWorkspaceTab,
     handleCreateWorkspace,
@@ -270,6 +271,7 @@ const renderMiddleColumn = () => {
       refreshKey={refreshKey}
       explorerRefreshKey={explorerRefreshKey}
       onSelectWorkspace={handleOpenWorkspace}
+      onShowOverview={handleShowOverview}
       onCreateWorkspace={handleCreateWorkspace}
       onImportDirectory={() => setImportPickerOpen(true)}
       onAddRepository={() => {
