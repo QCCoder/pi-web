@@ -1,6 +1,4 @@
 import { createServer } from "node:http";
-import { ImporterScheduler } from "../work-items/importers/scheduler.ts";
-import { createImporterRoutes } from "../work-items/importers/http.ts";
 import { LoopKitSpawner } from "./loop-spawner.ts";
 import { createSessionsRoutes } from "./http-sessions.ts";
 import { daemonErrorStatus, sendJson, type DaemonRouteHandler } from "./http.ts";
@@ -10,7 +8,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 30142;
 
 /** The pi-daemon: THE single session-owning process, plus a host for
- *  registered background jobs (loop kit heartbeats, importer sync).
+ *  registered background jobs (loop kit heartbeats).
  *
  *  The core is deliberately thin and domain-free. It provides exactly three
  *  things:
@@ -23,21 +21,17 @@ const DEFAULT_PORT = 30142;
  *       from its own directory and gets chained here.
  *
  *  Domains mounted today: the loop kit spawner (cron heartbeats — the sole
- *  successor of the removed v3 loop engine) and importers (requirement-source
- *  sync job + sync route). Adding a fourth module means registering it here
- *  — one line each for routes and jobs. */
+ *  successor of the removed v3 loop engine). Adding a fourth module means
+ *  registering it here — one line each for routes and jobs. */
 export function createDaemon() {
   // ---- Background jobs ----------------------------------------------------
   const jobs = new DaemonJobRegistry();
   // pi-loop kit spawner（design: docs/pi-loop-kit-design.md）— 转正为唯一的
   // loop 心跳（v3 loop-triggers cron 已随 v3 引擎拆除，生产翻转后无旗子门控）。
   jobs.register(new LoopKitSpawner()); // id: loop-kit-heartbeats
-  jobs.register(new ImporterScheduler()); // id: importer-sync
 
   // ---- Route chain --------------------------------------------------------
-  const sessionsRoutes = createSessionsRoutes();
-  const importerRoutes = createImporterRoutes();
-  const routes: DaemonRouteHandler[] = [sessionsRoutes, importerRoutes];
+  const routes: DaemonRouteHandler[] = [createSessionsRoutes()];
 
   const server = createServer(async (request, response) => {
     try {

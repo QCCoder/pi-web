@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { MarkdownBody } from "./MarkdownBody";
-import { ImporterConfig } from "./ImporterConfig";
 import type {
   WorkspaceCapability,
   WorkspaceRepositoryState,
@@ -1463,7 +1462,7 @@ export function WorkspaceManager({
                     </>
                   ) : (
                     <div className="work-item-content">
-                      {/* cwd = work-item dir so relative image refs (e.g. importer-written
+                      {/* cwd = work-item dir so relative image refs (e.g. external-source-script-written
                           `attachments/chandao-<id>.png`) resolve to /api/files and actually render;
                           without it the browser 404s the relative src and images vanish. */}
                       <MarkdownBody cwd={selectedWorkItem.path}>{selectedWorkItem.content}</MarkdownBody>
@@ -1968,10 +1967,6 @@ export function WorkspaceManager({
                       </div>
                     </section>
                     )}
-                    <ImporterConfig
-                      workspace={selectedWorkspace}
-                      onWorkspaceChanged={() => void loadWorkspaces()}
-                    />
                   </>
                 ) : (
                   <div className="workspace-summary-card">

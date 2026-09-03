@@ -136,8 +136,6 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
   "repositories",
   "knowledge",
   "workflows",
-  // Module capabilities (toggled per-workspace, not surfaced in the init checklist):
-  "requirement-sources",
 ];
 
 /** Retired capability values that legacy manifests may still carry. They are
@@ -148,8 +146,11 @@ const ALL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
  *  retirement: `loop` was replaced by the pi-loop kit (file protocol,
  *  docs/pi-loop-kit-design.md D5 — kit loops are declared by a
  *  loops/<loopId>/LOOP.md file, no capability gate). Existing manifests listing it
- *  are stripped on read and physically lose the value at the next manifest write. */
-const LEGACY_READ_CAPABILITIES = new Set(["overview", "loop"]);
+ *  are stripped on read and physically lose the value at the next manifest write.
+ *  `requirement-sources` followed the same path: the importer machinery was
+ *  retired from pi-web (external-source sync now lives in workspace scripts,
+ *  e.g. cxin scripts/chandao-sync.py stamping `external` over the HTTP API). */
+const LEGACY_READ_CAPABILITIES = new Set(["overview", "loop", "requirement-sources"]);
 
 export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   if (!Array.isArray(value)) {
@@ -171,25 +172,16 @@ export function parseCapabilities(value: unknown): WorkspaceCapability[] {
   return result;
 }
 
-/** Capability dependencies enforced on update (PATCH). Each entry maps a
- *  capability to the prerequisite it silently force-includes — mirroring the
- *  init path's `normalizeInitCapabilities` pattern (normalize, never reject,
- *  so a partial UI toggle cannot produce a broken manifest):
- *  - `requirement-sources` needs `work-items`: the importer runner
- *    materializes bug/task as REQ-/BUG- items and reserves their keys from
- *    `manifest.work_items`, which only exists when work-items is on.
- *  - the mandatory core (`sessions`, `explorer`) can never be dropped. */
-const CAPABILITY_PREREQUISITES: Partial<Record<WorkspaceCapability, WorkspaceCapability>> = {
-  "requirement-sources": "work-items",
-};
-
+/** Capability normalization enforced on update (PATCH) — mirrors the init
+ *  path's `normalizeInitCapabilities` pattern (normalize, never reject, so a
+ *  partial UI toggle cannot produce a broken manifest): the mandatory core
+ *  (`sessions`, `explorer`) can never be dropped. (A capability-specific
+ *  prerequisite map used to live here for the retired `requirement-sources`
+ *  capability; it was removed with it.) */
 export function normalizeUpdateCapabilities(
   selected: readonly WorkspaceCapability[],
 ): WorkspaceCapability[] {
   const seen = new Set<WorkspaceCapability>(selected);
-  for (const [capability, prerequisite] of Object.entries(CAPABILITY_PREREQUISITES)) {
-    if (seen.has(capability as WorkspaceCapability)) seen.add(prerequisite as WorkspaceCapability);
-  }
   seen.add("sessions");
   seen.add("explorer");
   // Preserve a stable order: caller's order first, then anything force-added.

@@ -4,8 +4,8 @@ import { WorkspaceNotFoundError } from "../workspaces/service.ts";
 
 /** Shared HTTP plumbing for the daemon's route modules.
  *
- *  The daemon core composes route handlers from domains (sessions /
- *  importers): each domain exports `createXxxRoutes(deps)` returning this
+ *  The daemon core composes route handlers from domains (currently just
+ *  sessions): each domain exports `createXxxRoutes(deps)` returning this
  *  handler shape, and the host chains them — first handler to claim the
  *  request (returns true) wins; falling through all of them is a 404.
  *  Registration is the mount point: a domain's routes live in the domain's

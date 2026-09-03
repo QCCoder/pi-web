@@ -1,4 +1,3 @@
-import type { ImporterRunSummary } from "../work-items/importers/runner.ts";
 
 /** Daemon base URL. PI_DAEMON_URL is the canonical name; PI_LOOP_URL is the
  *  legacy fallback kept so existing shells/systemd units keep working. */
@@ -61,7 +60,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return value;
 }
 
-/** HTTP client for the pi-daemon process (sessions + importers). */
+/** HTTP client for the pi-daemon process (sessions). */
 export const daemonClient = {
   /** Session-daemon surface (C2 Phase 1): create a new session in the daemon
    *  process. Response carries the real pi session id plus the session cwd so
@@ -137,21 +136,4 @@ export const daemonClient = {
    *  proxy (pipe) its body straight to the browser. */
   sessionEvents: (sessionId: string, signal?: AbortSignal) =>
     fetch(`${baseUrl()}/v1/sessions/${encodeURIComponent(sessionId)}/events`, { signal }),
-  /** Trigger a manual Importer sync on the daemon (a background system job).
-   *  Returns null when the daemon is unreachable so the web route can fall back to
-   *  an in-process run (a one-shot sync is not a timer — see instrumentation.ts). */
-  syncImporters: async (workspaceId: string): Promise<ImporterRunSummary | null> => {
-    let response: Response;
-    try {
-      response = await fetch(
-        `${baseUrl()}/v1/workspaces/${encodeURIComponent(workspaceId)}/importers/sync`,
-        { method: "POST" },
-      );
-    } catch {
-      return null;
-    }
-    if (!response.ok) return null;
-    const value = (await response.json().catch(() => ({}))) as { summary?: ImporterRunSummary };
-    return value.summary ?? null;
-  },
 };

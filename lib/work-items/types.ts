@@ -34,7 +34,7 @@ export interface WorkItemRecord {
    *  patterns can change; spec §3.1). Soft-validated: an unresolvable name is
    *  treated as unbound, never an error. */
   loop?: string;
-  /** Importer-written external link; absent for manually created items. */
+  /** 外部源脚本经 HTTP API 盖章的外部链接；手动创建的项无此字段。 */
   external?: WorkItemExternalRef;
   archivedAt: string | null;
   createdAt: string;
@@ -50,10 +50,10 @@ export interface WorkItemEvent {
   data?: Record<string, unknown>;
 }
 
-/** Optional link to an external source (Importer-written). `source` + `sourceId`
- *  form the dedup key so re-importing the same Chandao item never duplicates the
- *  work item (design §4/§5). Written at creation by an Importer; not mutated by
- *  the LLM tools. */
+/** Optional link to an external source, stamped by a workspace script via
+ *  the HTTP API (e.g. cxin scripts/chandao-sync.py). `source` + `sourceId`
+ *  form the dedup key so re-syncing the same external item never duplicates
+ *  the work item. Not mutated by the LLM tools. */
 export interface WorkItemExternalRef {
   /** Source adapter id, e.g. "chandao". */
   source: string;
@@ -87,7 +87,7 @@ export interface CreateWorkItemInput {
   tags?: string[];
   actor?: WorkItemActor;
   conversationId?: string;
-  /** Importer-only: stamps the external dedup link at creation. */
+  /** 外部源脚本经 HTTP API 盖章（如 cxin scripts/chandao-sync.py）；LLM 工具不透传。 */
   external?: WorkItemExternalRef;
   /** Optional kit-loop binding by loop name (soft — existence not checked). */
   loop?: string;

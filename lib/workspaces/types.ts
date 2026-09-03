@@ -7,7 +7,6 @@ export type WorkspaceCapability =
   | "repositories"
   | "knowledge"
   | "workflows"
-  | "requirement-sources"
   | "subagent";
 export type WorkspaceRepositoryKind = "code" | "knowledge";
 export type WorkspaceRepositoryStatus = "active" | "removed";

@@ -105,11 +105,10 @@ repository `kind` to a first-class capability — redesign decision 4, type laye
 `lib/workspaces/service.ts` is the validation registry (the source of truth for which capabilities can be persisted):
 
 ```
-sessions, explorer, work-items, repositories, knowledge, workflows,
-requirement-sources
+sessions, explorer, work-items, repositories, knowledge, workflows
 ```
 
-(PATCH capabilities are normalized by `normalizeUpdateCapabilities`: `requirement-sources` force-includes `work-items` (the runner reserves REQ/BUG keys from `manifest.work_items`), and the mandatory `sessions`+`explorer` core can never be dropped. `parseCapabilities` REJECTS retired capability values (`feishu-transport`, `feishu-channel`, `wecom-channel`, the retired `overview` — the overview dashboard is now the unconditional landing view — and the retired `loop`, replaced by the pi-loop kit: loops are declared by `loops/<name>/LOOP.md` files, no capability gate; `docs/pi-loop-kit-design.md` D5) — `WorkspaceValidationError` → HTTP 400. For the channel values the v2 index migration has already rewritten them out of existing manifests. `overview` and `loop` share the one **read-path exception** (`LEGACY_READ_CAPABILITIES`): `parseWorkspaceManifest` strips it from `manifest.capabilities` BEFORE `parseCapabilities` validation, so legacy manifests that still list it keep parsing and normalize on every read — the value disappears from the file at the next manifest write.)
+(PATCH capabilities are normalized by `normalizeUpdateCapabilities`: the mandatory `sessions`+`explorer` core can never be dropped. `parseCapabilities` REJECTS retired capability values (`feishu-transport`, `feishu-channel`, `wecom-channel`, the retired `overview` — the overview dashboard is now the unconditional landing view — the retired `loop`, replaced by the pi-loop kit: loops are declared by `loops/<name>/LOOP.md` files, no capability gate; `docs/pi-loop-kit-design.md` D5 — and the retired `requirement-sources`, 已随 importer 退役照 overview/loop 先例：外部源同步下放工作区脚本，见「外部源适配」节) — `WorkspaceValidationError` → HTTP 400. For the channel values the v2 index migration has already rewritten them out of existing manifests. `overview`, `loop` and `requirement-sources` share the one **read-path exception** (`LEGACY_READ_CAPABILITIES`): `parseWorkspaceManifest` strips it from `manifest.capabilities` BEFORE `parseCapabilities` validation, so legacy manifests that still list it keep parsing and normalize on every read — the value disappears from the file at the next manifest write.)
 
 - `manifest.capabilities` is required and always present (see "Workspace index v2" above). Read it directly; there is no derivation helper.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
@@ -201,15 +200,15 @@ File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage und
 - `events.jsonl` — **append-only** timeline (id/at/type/actor/optional conversationId/data). Never rewrite it.
 
 Key behavior:
-- `listWorkItems()` reads ONLY `item.yaml` per directory (README/events are detail payloads — reading them here was the list hotspot) and returns `{ items, archivedItems, invalid }` in ONE pass — the sidebar's active+archived fetches and the importer dedup index (active ∪ archived) both consume this single result.
+- `listWorkItems()` reads ONLY `item.yaml` per directory (README/events are detail payloads — reading them here was the list hotspot) and returns `{ items, archivedItems, invalid }` in ONE pass — the sidebar's active+archived fetches and external-source sync scripts' dedup scans (active ∪ archived) both consume this single result.
 - The `KEY` counter lives in `manifest.work_items.next{Requirement,Bug}Number` and is incremented under the workspace
   write lock (`reserveWorkItemKey`).
 - Updates take `expectedRevision` (optimistic concurrency); appending a milestone via `recordWorkItemMilestone` does
   **not** bump the revision.
 - The pi extension (`work-items/extension.ts`) registers `workspace_list_work_items`, `workspace_get_work_item`,
   `workspace_create_work_item`, `workspace_update_work_item`, `workspace_record_milestone`. create/update **透传可选 `loop` 绑定字段**（string；update 接受 null 清除——S1，软校验：存 loop 名、不验存在性，未命中按未绑定处理）。UI 入口 = 详情「Loop」下拉（WorkspaceManager，空=未绑定）。
-- **来源展示**: items carrying `external` (importer-written) render their provenance — 详情「来源」行（禅道 #id ↗ + 最近同步时间）+ 列表 KEY 旁「禅道」小徽章（`source-labels.ts` 的标签映射；手动创建的项无此字段，不加徽章）。
-- **附件（attachments）**: `addWorkItemAttachments`（service.ts）把上传文件落 `<item>/attachments/`（basename 剥离路径、去控制字符、磁盘/批内重名自动 `-1` 后缀，中文名保留）并在 README 维护单个 `## 附件` 小节（图片 `![]()`、其余 `[]()`，目标 URL 编码，重复引用不追加；README 变更时与 content 更新同构地 bump revision）。事件类型 `work_item.attachment_added`（data.files）。路由 `POST …/work-items/[key]/attachments`（multipart `files`，限额同 /api/files：单文件 25MB / 总 100MB）；创建表单（WorkspaceManager）在创建成功后上传，失败不静默丢——报错并保留已建工作项。详情页 `MarkdownBody cwd` 直接渲染这些相对引用（与 importer 先例同机制）。
+- **来源展示**: items carrying `external` (外部源脚本经 HTTP API 盖章) render their provenance — 详情「来源」行（禅道 #id ↗ + 最近同步时间）+ 列表 KEY 旁「禅道」小徽章（`source-labels.ts` 的标签映射；手动创建的项无此字段，不加徽章）。
+- **附件（attachments）**: `addWorkItemAttachments`（service.ts）把上传文件落 `<item>/attachments/`（basename 剥离路径、去控制字符、磁盘/批内重名自动 `-1` 后缀，中文名保留）并在 README 维护单个 `## 附件` 小节（图片 `![]()`、其余 `[]()`，目标 URL 编码，重复引用不追加；README 变更时与 content 更新同构地 bump revision）。事件类型 `work_item.attachment_added`（data.files）。路由 `POST …/work-items/[key]/attachments`（multipart `files`，限额同 /api/files：单文件 25MB / 总 100MB）；创建表单（WorkspaceManager）在创建成功后上传，失败不静默丢——报错并保留已建工作项。详情页 `MarkdownBody cwd` 直接渲染这些相对引用（与外部源脚本同机制）。
 - **Archive cascade** (`lib/archive-cascade.ts`): archiving a work item tucks its conversations into the session
   archive **only if no other active work item references them**; restoring brings them back. Sessions are physically
   moved to a `.archived/` subdirectory (`lib/session-archive.ts`) so `SessionManager.listAll()` no longer sees them.
@@ -273,7 +272,7 @@ Key behavior:
   绑定项二次确认 / SKILL 与宪法不删）。**不编辑 SKILL.md**。服务端逻辑全在 `lib/loops/manage.ts`
   （唯一 PUT 写入口 + 文件名白名单 + mtime 乐观并发 + 原子写），路由薄壳
   （`POST /loops`、`GET|PUT /loops/[name]/docs`、`DELETE /loops/[name]`）。
-- **工作项工具**新增 `loop` 绑定透传（见上）；importer 不变；subagent 一律走社区 `@henryqw/pi-subagent` 包（全局挂载，见下节——kit 轮会话 cwd=workspace 根，包自动发现 `<cwd>/.pi/agents/pi-subagent/` 角色，无需 per-session 注入）。
+- **工作项工具**新增 `loop` 绑定透传（见上）；外部源同步已下放工作区脚本（见「外部源适配」节）；subagent 一律走社区 `@henryqw/pi-subagent` 包（全局挂载，见下节——kit 轮会话 cwd=workspace 根，包自动发现 `<cwd>/.pi/agents/pi-subagent/` 角色，无需 per-session 注入）。
 - **模板**：`kit/templates/basic/{loop,root,skill}/`（D13 布局：LOOP/STATE/ledger 在 `loop/`，constraints/budget 在
   `root/`，SKILL.md 骨架在 `skill/`（spec §4）；`pi-loop init` 由此脚手架；LOOP.md 指针含「本目录说明文件」步骤——人写
   知识文档约定，如 chandao.md/selection.md，agent 只读、改知识不改 SKILL）、`kit/templates/github/loop.yml`
@@ -341,20 +340,9 @@ reproducible where a `file:` directory pin would live-track the upstream tree �
   scope; `ChangesPanel` itself is unchanged. Tab choice persists in `localStorage` key `pi-explorer-tab:<wsId>`;
   non-git directories hide the "改动" tab. `SessionSidebar` keeps its own standalone Changes section.
 
-### Importer (`lib/work-items/importers/`)
+### 外部源适配 = 工作区脚本（importer 已退役）
 
-**Inbound work-item source adapter** (design: `docs/autonomous-dev-loop.md`). The first (and currently only) adapter is **Chandao (禅道)**. This is the P0+P1 slice; the dev Loop (now the pi-loop kit) and evolution cycles are **not** here.
-
-- **Capability**: `requirement-sources` (registered in `ALL_WORKSPACE_CAPABILITIES`; toggled per-workspace, NOT in the init checklist). It gates the config UI + the cron runner. It is **not** an LLM extension (the runner is deterministic I/O, no tools).
-- **Importer SPI** (`types.ts`): `listAssigned/getDetail/getAttachment` — the deep-module seam hiding REST+token+image-binary behind three methods. Swapping Chandao for Jira changes one adapter, not the runner.
-- **`ChandaoImporter`** (`chandao-importer.ts`): REST+Token (`POST /api.php/v1/tokens`, **not** the web-login md5 flow). Token cached in-memory, **re-signed once on 401** via account+password. Field differences hidden (bug `steps` vs task `desc`; task list title is `name`). `fetch` is injectable for tests.
-- **Credentials** (`config.ts`): `~/.pi/agent/importers/<workspaceId>.json` (mode `0600`); `toPublicConfig` never leaks password/token. Shape `{chandao:{base,account,password,token?,assignee,productId,executionId}}`.
-- **Images** (`images.ts`, pure): `extractChandaoFileIds` / `rewriteChandaoImageSources` / `detectImageExt` (magic-byte sniffing). The runner downloads each `fileID` via `GET /api.php/v1/files/{id}` and rewrites README `<img src>` to a relative `attachments/<kind>-<id>.<ext>` so the work item renders offline and travels into git.
-- **Runner** (`runner.ts`): `syncImporterForWorkspace(id)` is the deep-module seam hiding pull→dedup→create→localize-images→event. Per item: dedup by `external.source:sourceId`; not-exists→create (bug→`BUG-####`, task→`REQ-####`, KEY from `manifest.work_items.next{Bug,Requirement}Number`), download+persist images, append `imported` milestone; exists&open→`imported` sync heartbeat; archived→skip. Per-item errors recorded, never abort the run. **Deterministic I/O — never delegated to an LLM.**
-- **Work-item `external` field**: `WorkItemExternalRef {source, sourceId, url?, lastSyncedAt}` added as an **optional** field on `WorkItemRecord`/`CreateWorkItemInput` (design §4/§5). Serialized as a snake_case `external:` block in `item.yaml`. Stamped at creation by the Importer only; the LLM work-item tools don't touch it. The dedup key.
-- **Runner lives in the daemon, NOT the web server**: `ImporterScheduler` (`scheduler.ts`) is a **non-loop system job** (30min) registered into the daemon's `DaemonJob` registry (`lib/daemon/jobs.ts`) — a registered peer of the kit spawner (`loop-kit-heartbeats`), independent of the loop kit. **`instrumentation.ts` is untouched** (web server holds no timers — design §5). The daemon also exposes `POST /v1/workspaces/:id/importers/sync` for manual/webhook. The importer is the work-item domain's inbound adapter: SPI + adapter registry (`adapters.ts`), cron, runner, HTTP route all live under `lib/work-items/importers/`; swapping Chandao for Jira = one adapter + one line in `adapters.ts`. Work items render their source (详情「来源」行 + 列表 KEY 旁徽章, label map in `source-labels.ts`).
-- **Web manual sync** (`app/api/workspaces/[id]/importers/sync/route.ts`): forwards to the host; **falls back to an in-process run if the host is down** (a one-shot sync is not a timer, so this does not violate "web owns no timers").
-- **Config UI**: `components/ImporterConfig.tsx` (capability toggle + credential form + "测试连接"), mounted in `WorkspaceManager`.
+**pi-web 不再内置 importer**：`lib/work-items/importers/`、`app/api/workspaces/[id]/importers/**`、`components/ImporterConfig.tsx`、daemon 的 `ImporterScheduler`/`/v1/importers/sync` 路由及 `requirement-sources` capability 已全部删除（strangler 计划；capability 照 `overview`/`loop` 先例退役——读路径剥离，新写入 400）。外部需求/bug 源（禅道等）的同步 = **工作区自己的脚本**，参考实例 cxin（workspace-c 仓内）`scripts/chandao-sync.py`：纯 stdlib、凭据存工作区本地（0600 且 gitignored）、日志不打印密码/token，由工作区自己的 cron/loop 触发；脚本直接调 pi-web HTTP API 创建/更新工作项，`external: {source, sourceId, ...}` 章即去重键（重新同步同一条不重复建项），LLM 工作项工具不透传该字段。同步摘要语义（脚本层继承自原 runner 约定）：单条 item 失败不中断同步（failed[] 记录）；结构性失败（登录失败/API 不可达/凭据缺失）退出码 2；已存在未归档项不盖 `imported` 里程碑（防 events 洪水，REQ-0012 教训），仅在摘要计数 synced。工作项的「来源」展示（`lib/work-items/source-labels.ts` 标签映射）保持不变。
 
 ### Dev Loop (pi-loop kit 实例；reference: workspace-c)
 
@@ -406,7 +394,7 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrate
   `cargo-knowledge/standards/dev-loop-modules.md`; consolidated process lessons in `cargo-knowledge/learnings/`
   (contentHash'd).
 - **Host wiring**: the daemon's job registry (`lib/daemon/jobs.ts`) registers `LoopKitSpawner` (`loop-kit-heartbeats`,
-  unconditional) alongside `ImporterScheduler` (`importer-sync`). None runs in the web server (`instrumentation.ts` untouched).
+  unconditional). None runs in the web server (`instrumentation.ts` untouched).
 
 ### Workspace directory layout (reference)
 
@@ -429,7 +417,6 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrate
   agent/                                 (~/.pi/agent)
     sessions/<encoded-cwd>/*.jsonl
     agents/*.md                          legacy built-in subagent agents (retired; see lib/subagent-child.ts)
-    importers/<workspaceId>.json         chandao importer credentials (0600)
     config/pi-subagent/pi-subagent.json  community subagent config (effective keys: maxSubagents / childSessions — timeouts are pinned in pi-subagent-host.ts)
     config/pi-subagent/*.md               community subagent user-level roles (frontmatter: name/description/tools/extensions/skills)
     config/pi-task-models.json           task-model profiles required by delegate_task
@@ -468,9 +455,6 @@ app/api/
   workspaces/[id]/loops/[name]/resume/route.ts    POST 删 PAUSED 标记（幂等）
   workspaces/[id]/loops/[name]/stop/route.ts      POST 终止本轮（daemon 持有 → destroy+reap+释放锁；beat 持有 → 409 提示走 pi-loop stop）
   workspaces/[id]/loops/[name]/docs/route.ts      GET 配置面板数据包 | PUT 唯一写入口（doc|body|constitution，mtime 乐观并发）
-  workspaces/[id]/importers/route.ts             GET/PUT/DELETE chandao importer credentials
-  workspaces/[id]/importers/test/route.ts        POST test chandao connection (listAssigned)
-  workspaces/[id]/importers/sync/route.ts        POST manual importer sync (forward to host / in-process fallback)
   git/status/route.ts                    GET ?cwd= — per-repo changed files + totals
   git/diff/route.ts                      GET ?cwd=&path= — unified patch for one file
   auth/all-providers|providers/route.ts  GET provider lists (OAuth)
@@ -508,17 +492,7 @@ lib/
     service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation
     extension.ts            pi extension: list/get/create/update/record-milestone tools
     web.ts                  error → HTTP mapping
-    importers/              requirement-sources inbound adapter (design: autonomous-dev-loop.md) — the work-item domain's data inlet
-      types.ts              Importer SPI (listAssigned/getDetail/getAttachment) + config shapes
-      adapters.ts           adapter registry (chandao → ChandaoImporter) — add Jira here
-      source-labels.ts      UI-safe source→中文标签 map (禅道)
-      config.ts             chandao credentials ~/.pi/agent/importers/<wsId>.json (0600)
-      images.ts             PURE extractChandaoFileIds / rewriteChandaoImageSources / detectImageExt
-      chandao-importer.ts   ChandaoImporter: REST+Token API (POST /tokens, 401 re-sign), injectable fetch
-      mapping.ts            PURE mapSourceKindToWorkItemType + buildExternalIndex (dedup)
-      runner.ts             syncImporterForWorkspace — pull->dedup->work item->images->event (deep seam)
-      scheduler.ts          ImporterScheduler — non-loop 30min system job (DaemonJob) registered into the daemon
-      http.ts               /v1/workspaces/:id/importers/sync daemon route (DaemonRouteHandler)
+    source-labels.ts        UI-safe source→中文标签 map (禅道) — 外部源脚本盖章的来源展示
   loops/                             web-side loop control + prefill resolution (loop-surface spec §3–§5; imports pi-loop pure logic, no daemon deps of its own)
     lookup.ts              findKitLoopByName — loop 名→declaration（name 字段优先，回落目录名；绑定存名，文件操作以 dir 为准）
     rounds.ts              stopRound / launchManualRound（依赖全注入：daemon 会话面 + reap）+ RoundBusyError —— 无 daemon 新路由，经现有 POST /v1/sessions 两步建会话；手动轮锁保持持有靠 stale 窗（maxMinutes+15min）回收，无 D9 钩子
@@ -526,11 +500,11 @@ lib/
     cron-summary.ts        summarizeCron（纯函数）：cron 人话摘要（常见形态；其它 → null，UI 回落原始 cron）
     manage.ts               loop 配置面服务端逻辑：getLoopDocs/writeLoopFile/createLoop/deleteLoop + 守卫（白名单/原子写/mtime 并发/锁活/绑定扫描）
   daemon/                           THE pi-daemon: session-owning process + job registry (C2)
-    host.ts                 createDaemon() composition root — /health, route chain (sessions → importers), jobs (loop-kit-heartbeats + importer-sync), startDaemon (PI_DAEMON_HOST/PORT, legacy PI_LOOP_* fallbacks)
+    host.ts                 createDaemon() composition root — /health, route chain (sessions), jobs (loop-kit-heartbeats), startDaemon (PI_DAEMON_HOST/PORT, legacy PI_LOOP_* fallbacks)
     http-sessions.ts        /v1/sessions/** surface (create/commands/probe/SSE/running/live/busy/reload-cwd/auto-name/teardown)
     jobs.ts                 DaemonJob {id,start,stop} + registry — domains register background jobs here
     http.ts                 shared route plumbing (DaemonRouteHandler, body/json, error→status)
-    client.ts               daemonClient — HTTP client to the daemon (PI_DAEMON_URL, legacy PI_LOOP_URL fallback): session-daemon surface + importer sync
+    client.ts               daemonClient — HTTP client to the daemon (PI_DAEMON_URL, legacy PI_LOOP_URL fallback): session-daemon surface
     rpc-manager.ts          DAEMON-ONLY session registry + AgentSessionWrapper + startRpcSession (moved here from lib/ root — the daemon domain's core; attaches the global piSubagentExtension)
     session-heartbeat.ts    stall classify/warn/kill snapshot (moved with rpc-manager)
     pi-subagent-host.ts     community @henryqw/pi-subagent host adapter — jiti-imports the package's extension entry, presents the pi CLI process identity its ephemeral executor requires, pins the kill-based timeout policy (idle 30min / max 120min, wins over the package's config)
@@ -602,7 +576,6 @@ components/
   FileExplorer.tsx          file tree inside sidebar
   FileViewer.tsx            file content in a tab
   CapabilityToggle.tsx      the capability on/off switch used in settings panels
-  ImporterConfig.tsx        requirement-sources (chandao importer) credential + test panel
   LoopsConfig.tsx           loop 配置视图（创建向导 + frontmatter/指针正文/知识文档/宪法编辑 + STATE 只读 + 删除）——桌面右栏 / 移动 overview 栈页共用
   LoopRow.tsx               loop 单行（name/cron 摘要/级别/状态 + 配置/暂停/停止）——总览 Loops 区块与 LoopsPanel 共用
   LoopsPanel.tsx            中栏 Loops 模块面板（rail 第四模块视图 body；配置/新建 → 右栏 loopConfig 视图）
@@ -706,7 +679,7 @@ The `delegate_task` tool (community `@henryqw/pi-subagent`) is attached to **eve
 
 The pi-daemon process (`npm run daemon` → `bin/pi-daemon.js` → `lib/daemon/host.ts`) — formerly the "loop host" — is **THE single session-owning daemon**, and a generic host for registered background jobs (`lib/daemon/jobs.ts`). Motivation for the original strangler: the old split — web process and loop host each holding AgentSessions, with the UI needing to answer "who owns session X" in six places (state probe, pin/reprobe, client-side badge merge, host probe, locate bypass, reducer promotion) — accreted a patch cluster that this redesign eliminates at the source. Strangler phases:
 
-- **Phase 0 (done)**: all outbound/inbound channels removed (feishu/wecom/notify/exporters). The daemon surface is now purely sessions + importer (loop heartbeats are a DaemonJob, not a route).
+- **Phase 0 (done)**: all outbound/inbound channels removed (feishu/wecom/notify/exporters). The daemon surface is now purely sessions (loop heartbeats are a DaemonJob, not a route).
 - **Phase 1 (done)**: daemon command surface + sidecar lifecycle (below). Web routes still own interactive sessions locally — nothing flipped yet.
 - **Phase 2**: flip `/api/agent/new`, `/api/agent/[id]` (GET/POST), `/api/agent/[id]/events`, and the session lifecycle routes to pure proxies over the daemon client. The pin/reprobe/loop-badge-merge hacks retire here. The web proxy for create-session must call `allowFileRoot(cwd)` with the daemon's returned cwd (the files/git routes' allow-list lives in the web process).
 - **Phase 3 (done)**: the web-side session registry is gone — no `app/`/`components/` code imports `lib/daemon/rpc-manager` (its header now declares it daemon-process-only; `notifyRunningChange` is module-private). The probe-404-fallback double-writer race is structurally impossible: the web process never constructs an AgentSession, so it cannot race the daemon for a .jsonl.
@@ -715,7 +688,7 @@ The pi-daemon process (`npm run daemon` → `bin/pi-daemon.js` → `lib/daemon/h
 **Sidecar lifecycle (`lib/session-daemon/sidecar.ts`)**: `ensureSessionDaemonStarted()` — probe `/health` (attach if healthy), else spawn `node bin/pi-daemon.js` detached+unref'd and wait (≤15s) for health. Wired fire-and-forget from `instrumentation.ts` (`PI_SESSION_DAEMON_DISABLED=1` opts out). In-flight guard on `globalThis` dedupes concurrent callers and retries after failure. Guards: `spawnableDaemonUrl` refuses to spawn for non-local `PI_DAEMON_URL` (legacy `PI_LOOP_URL` still honored; a remote URL means the daemon is managed elsewhere); `sidecarSpawnEnv` translates the URL → the child's `PI_DAEMON_HOST`/`PI_DAEMON_PORT` (explicit env wins, legacy `PI_LOOP_HOST/PORT` spellings honored) — without this a URL-only config spawns a daemon on the default port while the web polls the URL's port forever. Spawn races resolve quietly: the EADDRINUSE loser exits 0 (`bin/pi-daemon.js`). The "web owns no unattended timers" rule is preserved — daemon timers live in the daemon process and survive web restarts; the web only ever re-attaches by port probe.
 
 ### Loop heartbeats run in the daemon; the web layer adds a management surface over the existing session surface
-`npm run daemon` starts the pi-daemon (`lib/daemon/host.ts`; `npm run loop` is a deprecated alias pointing at the same `bin/pi-daemon.js`). The web server never starts loop timers (`instrumentation.ts`) — heartbeats are daemon-only. The web layer's loop surface (`app/api/workspaces/[id]/loops/**` + `lib/loops/`) is file-reads (`pi-loop/status.ts`) plus operations that reuse the **existing daemon session surface**: 「立即跑一轮」= `POST /v1/sessions` two-step create + prompt (manual round, no D9 auto-archive); 「终止本轮」= `DELETE /v1/sessions/:id` + package reap + lock release — **the daemon gains no loop routes**. The daemon hosts background jobs via the `DaemonJob` registry (`lib/daemon/jobs.ts`): the kit spawner (`LoopKitSpawner` → `loop-kit-heartbeats`, **unconditional** — the `PI_LOOP_KIT` gate was removed together with the v3 engine) and importer sync (`ImporterScheduler`) are registered peers. Kit round sessions are normal one-shot daemon sessions — indistinguishable from user chats in the interactive registry; their run record is `STATE.md` + the workspace git log. The daemon is not the only host: standalone roots (no pi-web) get heartbeats from the `pi-loop` CLI's `beat` (any external cron; see the Loop section) — dual-host coexistence is safe because both run the same `pi-loop/fire.ts` sequence and mutual-exclude via `loops/<name>/.round.lock`. `pi-loop run` / `pi-loop stop` CLI commands remain for standalone hosts (host spec §4/§10); the web run/stop routes are their pi-web-side counterparts over daemon-held rounds.
+`npm run daemon` starts the pi-daemon (`lib/daemon/host.ts`; `npm run loop` is a deprecated alias pointing at the same `bin/pi-daemon.js`). The web server never starts loop timers (`instrumentation.ts`) — heartbeats are daemon-only. The web layer's loop surface (`app/api/workspaces/[id]/loops/**` + `lib/loops/`) is file-reads (`pi-loop/status.ts`) plus operations that reuse the **existing daemon session surface**: 「立即跑一轮」= `POST /v1/sessions` two-step create + prompt (manual round, no D9 auto-archive); 「终止本轮」= `DELETE /v1/sessions/:id` + package reap + lock release — **the daemon gains no loop routes**. The daemon hosts background jobs via the `DaemonJob` registry (`lib/daemon/jobs.ts`): the kit spawner (`LoopKitSpawner` → `loop-kit-heartbeats`, **unconditional** — the `PI_LOOP_KIT` gate was removed together with the v3 engine) is registered alone. Kit round sessions are normal one-shot daemon sessions — indistinguishable from user chats in the interactive registry; their run record is `STATE.md` + the workspace git log. The daemon is not the only host: standalone roots (no pi-web) get heartbeats from the `pi-loop` CLI's `beat` (any external cron; see the Loop section) — dual-host coexistence is safe because both run the same `pi-loop/fire.ts` sequence and mutual-exclude via `loops/<name>/.round.lock`. `pi-loop run` / `pi-loop stop` CLI commands remain for standalone hosts (host spec §4/§10); the web run/stop routes are their pi-web-side counterparts over daemon-held rounds.
 
 **Watching a live session (any session — interactive or kit loop round) is one mechanism now (C2).** The daemon owns every session; `/api/agent/[id]/events` is a pure pipe onto `/v1/sessions/:id/events`, which resolves via `findLiveSession` (the ordinary registry, where kit rounds live alongside interactive sessions) and cold-starts idle sessions for viewing. (Community subagent children run as separate pi processes — they're watched from their on-disk `.jsonl`, cold, not via live SSE.) Two subtleties remain:
 
