@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar } from "../TabBar";
@@ -13,6 +14,7 @@ import { SettingsPanel, PreferencesPage } from "../SettingsPanel";
 import { ModelsConfig } from "../ModelsConfig";
 import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
+import { LoopsConfig } from "../LoopsConfig";
 import { HomeLanding } from "../HomeLanding";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { useI18n } from "@/hooks/useI18n";
@@ -50,6 +52,8 @@ export function DesktopShell() {
     setConfigPortalNode,
     workItemDetail,
     setWorkItemDetail,
+    loopConfig,
+    setLoopConfig,
     handleCloseWorkItemDetail,
     closeWorkItemDetailTick,
     settingsPage,
@@ -116,6 +120,9 @@ export function DesktopShell() {
     setRefreshKey,
     setImportPickerOpen,
   } = s;
+
+  // Loop 配置变更 → 总览 Loops 区块刷新信号（创建/删除/frontmatter 保存后 bump）。
+  const [loopsRefreshKey, setLoopsRefreshKey] = useState(0);
 
   // ---- Middle column content (three-column layout) ----------------------------
 // One `sidebarView` drives everything: module views (workbench/knowledge/
@@ -361,7 +368,7 @@ const renderMiddleColumn = () => {
           list stays in the middle column, the detail opens here (× or any
           chat/panel intent hands the column back). */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {(configView || workItemDetail || (sidebarView === "settings" && settingsPage !== "index")) ? (
+        {(configView || workItemDetail || loopConfig || (sidebarView === "settings" && settingsPage !== "index")) ? (
           configView ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
               <PanelHeader
@@ -385,6 +392,25 @@ const renderMiddleColumn = () => {
                 ref={setConfigPortalNode}
                 style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", padding: "14px 16px" }}
               />
+            </div>
+          ) : loopConfig ? (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title={loopConfig.kind === "new" ? "新建 Loop" : loopConfig.name}
+                meta="Loop 配置"
+                onClose={() => setLoopConfig(null)}
+              />
+              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                {activeWorkspace && (
+                  <LoopsConfig
+                    workspace={activeWorkspace}
+                    target={loopConfig}
+                    onClose={() => setLoopConfig(null)}
+                    onOpenLoop={(name) => setLoopConfig({ kind: "loop", name })}
+                    onChanged={() => setLoopsRefreshKey((key) => key + 1)}
+                  />
+                )}
+              </div>
             </div>
           ) : sidebarView === "settings" && settingsPage === "workspace" ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -442,6 +468,8 @@ const renderMiddleColumn = () => {
               setRefreshKey((key) => key + 1);
               updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
             }}
+            onOpenLoopConfig={(target) => setLoopConfig(target)}
+            loopsRefreshKey={loopsRefreshKey}
           />
         ) : showChat ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>

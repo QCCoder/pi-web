@@ -5,6 +5,7 @@ import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar } from "../TabBar";
 import { ArchiveModal } from "../ArchiveModal";
+import { LoopsConfig, type LoopConfigTarget } from "../LoopsConfig";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
 import { WorkspaceOverview } from "../WorkspaceOverview";
@@ -200,14 +201,16 @@ export function MobileShell() {
   }, [tab]);
 
   // 工作台 tab 的总览栈（D2）：工作台 PanelHeader「总览」推入 WorkspaceOverview
-  // （组件内已有 useIsMobile 自适应）。离开工作台 tab 或切换工作区即丢弃。
-  const [overviewOpen, setOverviewOpen] = useState(false);
+  // （组件内已有 useIsMobile 自适应）；Loops「配置/新建」再推 loop 配置栈页。
+  // 离开工作台 tab 或切换工作区即丢弃。
+  type OverviewPage = { page: "overview" } | { page: "loop-config"; target: LoopConfigTarget };
+  const [overviewStack, setOverviewStack] = useState<OverviewPage | null>(null);
   useEffect(() => {
-    if (tab !== "workbench") setOverviewOpen(false);
+    if (tab !== "workbench") setOverviewStack(null);
   }, [tab]);
   const overviewWorkspaceId = activeWorkspace?.id;
   useEffect(() => {
-    setOverviewOpen(false);
+    setOverviewStack(null);
   }, [overviewWorkspaceId]);
 
   // The knowledge panel's ＋ (add knowledge repo) routes to the settings tab's
@@ -224,13 +227,33 @@ export function MobileShell() {
       case "chat":
         return null; // rendered separately (persistent mount)
       case "workbench":
-        if (overviewOpen && activeWorkspace) {
+        if (overviewStack && activeWorkspace) {
+          if (overviewStack.page === "loop-config") {
+            return (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+                <PanelHeader
+                  title={overviewStack.target.kind === "new" ? "新建 Loop" : overviewStack.target.name}
+                  meta="Loop 配置"
+                  onBack={() => setOverviewStack({ page: "overview" })}
+                  backLabel="总览"
+                />
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                  <LoopsConfig
+                    workspace={activeWorkspace}
+                    target={overviewStack.target}
+                    onClose={() => setOverviewStack({ page: "overview" })}
+                    onOpenLoop={(name) => setOverviewStack({ page: "loop-config", target: { kind: "loop", name } })}
+                  />
+                </div>
+              </div>
+            );
+          }
           return (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
               <PanelHeader
                 title="总览"
                 meta={activeWorkspace.name}
-                onBack={() => setOverviewOpen(false)}
+                onBack={() => setOverviewStack(null)}
                 backLabel="工作台"
               />
               <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
@@ -250,6 +273,7 @@ export function MobileShell() {
                     setRefreshKey((key) => key + 1);
                     updateActiveTab((current) => (current.session?.id === id ? { session: null } : {}));
                   }}
+                  onOpenLoopConfig={(target) => setOverviewStack({ page: "loop-config", target })}
                 />
               </div>
             </div>
@@ -259,7 +283,7 @@ export function MobileShell() {
           <WorkspaceSidebar
             activeWorkspace={activeWorkspace}
             activeView="workbench"
-            onShowOverview={() => setOverviewOpen(true)}
+            onShowOverview={() => setOverviewStack({ page: "overview" })}
             workspaces={workspaces}
             selectedSessionId={selectedSession?.id ?? null}
             runningSessionIds={sessionActivity.runningIds}

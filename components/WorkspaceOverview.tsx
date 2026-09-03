@@ -5,6 +5,7 @@ import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
 import { summarizeCron } from "@/lib/loops/cron-summary";
+import type { LoopConfigTarget } from "./LoopsConfig";
 import { STATUS_LABELS } from "./WorkspaceManager";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
@@ -20,6 +21,10 @@ interface Props {
   /** Open the workspace settings' add-repository form (AppShell wires it). */
   onAddRepository: () => void;
   onSessionDeleted?: (id: string) => void;
+  /** 打开 loop 配置（桌面右栏 / 移动端 overview 栈）；新建走 { kind: "new" }。 */
+  onOpenLoopConfig: (target: LoopConfigTarget) => void;
+  /** loop 变更刷新信号（创建/删除/frontmatter 保存后由 shell bump）。 */
+  loopsRefreshKey?: number;
 }
 
 /** Loop 行（GET /api/workspaces/:id/loops —— pi-loop/status.ts 的 LoopStatusEntry）。 */
@@ -111,6 +116,8 @@ export function WorkspaceOverview({
   onSwitchSidebarView,
   onAddRepository,
   onSessionDeleted,
+  onOpenLoopConfig,
+  loopsRefreshKey,
 }: Props) {
   const isMobile = useIsMobile();
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
@@ -118,9 +125,6 @@ export function WorkspaceOverview({
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loops, setLoops] = useState<LoopRow[]>([]);
   const [loopsBusy, setLoopsBusy] = useState(false);
-  const [editingLoop, setEditingLoop] = useState<LoopRow | null>(null);
-  const [loopForm, setLoopForm] = useState({ cron: "", timezone: "", level: "L1", maxMinutes: 30 });
-  const [loopError, setLoopError] = useState<string | null>(null);
 
   const refreshLoops = useCallback(async () => {
     try {
@@ -131,7 +135,7 @@ export function WorkspaceOverview({
     } catch { /* offline — keep last */ }
   }, [workspace.id]);
 
-  useEffect(() => { void refreshLoops(); }, [refreshLoops]);
+  useEffect(() => { void refreshLoops(); }, [refreshLoops, loopsRefreshKey]);
 
   const loopAction = useCallback(async (name: string, action: "pause" | "resume" | "stop") => {
     if (action === "stop" && !window.confirm("终止本轮进程？未完成的工作由下轮补跑。")) return;
@@ -150,36 +154,6 @@ export function WorkspaceOverview({
       setLoopsBusy(false);
     }
   }, [refreshLoops, workspace.id]);
-
-  const saveLoopEdit = useCallback(async () => {
-    if (!editingLoop) return;
-    setLoopsBusy(true);
-    setLoopError(null);
-    try {
-      const response = await fetch(
-        `/api/workspaces/${encodeURIComponent(workspace.id)}/loops/${encodeURIComponent(editingLoop.name)}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            cron: loopForm.cron,
-            timezone: loopForm.timezone,
-            level: loopForm.level,
-            max_minutes: Number(loopForm.maxMinutes),
-          }),
-        },
-      );
-      if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as { error?: string };
-        setLoopError(body.error || `保存失败（HTTP ${response.status}）`);
-        return;
-      }
-      setEditingLoop(null);
-      await refreshLoops();
-    } finally {
-      setLoopsBusy(false);
-    }
-  }, [editingLoop, loopForm, refreshLoops, workspace.id]);
 
   const hasWorkItems = workspace.capabilities.includes("work-items");
   const hasRepositories = workspace.capabilities.includes("repositories");
@@ -482,10 +456,16 @@ export function WorkspaceOverview({
           </section>
         )}
 
-        {/* Loops 管理（spec §5.3：状态总览 / 暂停恢复 / frontmatter 编辑 / 停止本轮；有 loop 才渲染） */}
-        {loops.length > 0 && (
-          <section style={sectionStyle}>
-            <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px" }}>Loops</h2>
+        {/* Loops 管理（仪表盘职责：状态/暂停恢复/停止；配置与新建走 onOpenLoopConfig；
+            常驻渲染——无 loop 也有「新建」入口，spec §4.2） */}
+        <section style={sectionStyle}>
+          <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px" }}>Loops</h2>
+          {loops.length === 0 ? (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", color: "var(--text-muted)", fontSize: 12 }}>
+              <span>暂无 loop（文件即声明：loops/&lt;name&gt;/LOOP.md）</span>
+              <button onClick={() => onOpenLoopConfig({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
+            </div>
+          ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {loops.map((loop) => (
                 <div
@@ -509,23 +489,15 @@ export function WorkspaceOverview({
                           : "空闲"}
                   </span>
                   <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+                    <button disabled={loopsBusy} onClick={() => onOpenLoopConfig({ kind: "loop", name: loop.name })} style={sectionHeaderLinkStyle}>
+                      配置
+                    </button>
                     <button
                       disabled={loopsBusy}
                       onClick={() => void loopAction(loop.name, loop.paused ? "resume" : "pause")}
                       style={sectionHeaderLinkStyle}
                     >
                       {loop.paused ? "恢复" : "暂停"}
-                    </button>
-                    <button
-                      disabled={loopsBusy}
-                      onClick={() => {
-                        setEditingLoop(loop);
-                        setLoopForm({ cron: loop.cron, timezone: loop.timezone, level: loop.level, maxMinutes: loop.maxMinutes });
-                        setLoopError(null);
-                      }}
-                      style={sectionHeaderLinkStyle}
-                    >
-                      编辑
                     </button>
                     {loop.running && (
                       <button disabled={loopsBusy} onClick={() => void loopAction(loop.name, "stop")} style={sectionHeaderLinkStyle}>
@@ -535,39 +507,12 @@ export function WorkspaceOverview({
                   </span>
                 </div>
               ))}
-            </div>
-            {editingLoop && (
-              <div style={{ marginTop: 10, padding: 12, border: "1px solid var(--border)", borderRadius: 8, display: "grid", gap: 8, maxWidth: 420 }}>
-                <strong style={{ fontSize: 13 }}>编辑 {editingLoop.name}</strong>
-                <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-                  cron
-                  <input value={loopForm.cron} onChange={(e) => setLoopForm({ ...loopForm, cron: e.target.value })} style={{ fontFamily: "var(--font-mono)" }} />
-                </label>
-                <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-                  timezone
-                  <input value={loopForm.timezone} onChange={(e) => setLoopForm({ ...loopForm, timezone: e.target.value })} />
-                </label>
-                <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-                  level
-                  <select value={loopForm.level} onChange={(e) => setLoopForm({ ...loopForm, level: e.target.value })}>
-                    <option value="L1">L1</option>
-                    <option value="L2">L2</option>
-                    <option value="L3">L3</option>
-                  </select>
-                </label>
-                <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-                  max_minutes
-                  <input type="number" min={1} value={loopForm.maxMinutes} onChange={(e) => setLoopForm({ ...loopForm, maxMinutes: Number(e.target.value) })} />
-                </label>
-                {loopError && <div style={{ color: "#b91c1c", fontSize: 12 }}>{loopError}</div>}
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button disabled={loopsBusy} onClick={() => void saveLoopEdit()}>保存</button>
-                  <button disabled={loopsBusy} onClick={() => setEditingLoop(null)}>取消</button>
-                </div>
+              <div>
+                <button onClick={() => onOpenLoopConfig({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
               </div>
-            )}
-          </section>
-        )}
+            </div>
+          )}
+        </section>
 
         {/* Recent sessions */}
         <section style={sectionStyle}>
