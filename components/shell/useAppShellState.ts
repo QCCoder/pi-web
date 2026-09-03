@@ -15,6 +15,7 @@ import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "../ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { LoopConfigTarget } from "@/components/LoopsConfig";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import type { Tab } from "../TabBar";
@@ -125,9 +126,13 @@ export function useAppShellState() {
   // (panel switch / session select / new session / workspace switch): those
   // are all “show me something else in the right column” intents.
   const [workItemDetail, setWorkItemDetail] = useState<{ key: string; title: string } | null>(null);
+  // Loop 配置视图（spec §4.1）：镜像 workItemDetail 的生命周期——
+  // panel 切换 / 会话选择 / 工作区切换 / configView 打开时一并清空。
+  const [loopConfig, setLoopConfig] = useState<LoopConfigTarget | null>(null);
   const [closeWorkItemDetailTick, setCloseWorkItemDetailTick] = useState(0);
   const handleCloseWorkItemDetail = useCallback(() => {
     setWorkItemDetail(null);
+    setLoopConfig(null);
     setCloseWorkItemDetailTick((tick) => tick + 1);
   }, []);
   const handleOpenConfig = useCallback((view: ConfigView) => {
@@ -135,6 +140,7 @@ export function useAppShellState() {
     // The config view takes over the right column — drop a stale work-item
     // detail so closing the config view doesn't resurrect it.
     setWorkItemDetail(null);
+    setLoopConfig(null);
     // The config LIST lives in the middle column — make sure the column is
     // visible when a config view opens (desktop-only entry point; mobile
     // serves the same content via the settings subpages and never gets here).
@@ -143,6 +149,7 @@ export function useAppShellState() {
   useEffect(() => {
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     if (!activeWorkspace) {
       const storedGlobal = localStorage.getItem(GLOBAL_PANEL_KEY) as SidebarView | null;
       setSidebarView(storedGlobal === "settings" ? "settings" : "workbench");
@@ -168,6 +175,7 @@ export function useAppShellState() {
     // there) — any panel switch must hand the column back.
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     setSidebarView(view);
     if (GLOBAL_ACTIVITY_VIEWS.includes(view)) {
       try { localStorage.setItem(GLOBAL_PANEL_KEY, view); } catch { /* ignore */ }
@@ -650,6 +658,7 @@ export function useAppShellState() {
     // right-column config view so the chat is actually visible.
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     updateTab(activeTabId, { session, newSessionCwd: null, view: "chat" });
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
@@ -693,6 +702,7 @@ export function useAppShellState() {
     if (!activeTabId) return;
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     updateTab(activeTabId, { view: "overview" });
     navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=overview`);
   }, [activeTabId, updateTab, navigateUrl]);
@@ -705,6 +715,7 @@ export function useAppShellState() {
   const handleOpenWorkspaceToChat = useCallback((workspace: WorkspaceSummary) => {
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     const id = ensureTab(workspace);
     const existing = tabs.find((t) => t.id === id);
     updateTab(id, existing?.session
@@ -721,6 +732,7 @@ export function useAppShellState() {
     if (!activeTabId) return;
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     updateTab(activeTabId, { view: "chat", session: null, newSessionCwd: activeWorkspace?.path ?? null });
     setSessionKey((k) => k + 1);
     setBranchTree([]);
@@ -910,6 +922,7 @@ export function useAppShellState() {
     // (the button itself lives inside the portaled work-item detail).
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     // Latest conversation first: a kit round (or run-contract prefill) session is
     // APPENDED to `conversations`, so the most recent entry is the live/latest
     // contract run. Resolve via /locate (daemon probe + forced disk scan) — never the
@@ -989,6 +1002,7 @@ export function useAppShellState() {
     }
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
       if (response.ok) {
@@ -1040,6 +1054,7 @@ export function useAppShellState() {
     // composer bound to the workspace root, reset the per-session chrome.
     setConfigView(null);
     setWorkItemDetail(null);
+    setLoopConfig(null);
     ensureTab(workspace);
     updateTab(workspace.id, { view: "chat", session: null, newSessionCwd: workspace.path });
     activateTab(workspace.id);
@@ -1310,6 +1325,8 @@ export function useAppShellState() {
     setConfigPortalNode,
     workItemDetail,
     setWorkItemDetail,
+    loopConfig,
+    setLoopConfig,
     handleCloseWorkItemDetail,
     closeWorkItemDetailTick,
     refreshKey,
