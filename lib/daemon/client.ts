@@ -1,4 +1,3 @@
-
 /** Daemon base URL. PI_DAEMON_URL is the canonical name; PI_LOOP_URL is the
  *  legacy fallback kept so existing shells/systemd units keep working. */
 const baseUrl = () =>

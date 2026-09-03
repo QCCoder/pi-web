@@ -1,7 +1,7 @@
 /** Daemon background-job registry.
  *
  *  A DaemonJob is any long-lived background task the daemon process hosts on
- *  behalf of a domain (loop trigger cron, importer sync, future exporters /
+ *  behalf of a domain (loop trigger cron, future exporters /
  *  webhooks / cleanups). The daemon core knows ONLY this interface — it never
  *  imports domain logic, and domains never touch the daemon's server
  *  lifecycle. Registration is static composition (compile-time): no runtime

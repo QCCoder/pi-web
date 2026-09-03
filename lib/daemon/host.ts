@@ -21,7 +21,7 @@ const DEFAULT_PORT = 30142;
  *       from its own directory and gets chained here.
  *
  *  Domains mounted today: the loop kit spawner (cron heartbeats — the sole
- *  successor of the removed v3 loop engine). Adding a fourth module means
+ *  successor of the removed v3 loop engine). Adding a third module means
  *  registering it here — one line each for routes and jobs. */
 export function createDaemon() {
   // ---- Background jobs ----------------------------------------------------

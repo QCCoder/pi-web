@@ -4,7 +4,7 @@ export async function register(): Promise<void> {
   const { configureHttpDispatcher } = await import("@/lib/http-dispatcher");
   configureHttpDispatcher();
 
-  // Background jobs (loop kit heartbeats, importer sync) and every live session
+  // Background jobs (loop kit heartbeats) and every live session
   // belong to the independent pi-daemon process. The web server is only a
   // management adapter and must never own unattended timers.
 
