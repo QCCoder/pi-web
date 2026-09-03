@@ -15,6 +15,7 @@ import { ModelsConfig } from "../ModelsConfig";
 import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
 import { LoopsConfig } from "../LoopsConfig";
+import { LoopsPanel } from "../LoopsPanel";
 import { HomeLanding } from "../HomeLanding";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { useI18n } from "@/hooks/useI18n";
@@ -261,6 +262,23 @@ const renderMiddleColumn = () => {
           onOpenConversation={handleOpenConversation}
           onWorkspaceDeleted={handleWorkspaceDeleted}
           onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+        />
+      </div>
+    );
+  }
+  // Loops 模块视图（rail 第四模块视图）：中栏常驻管理列表（LoopsPanel，与总览
+  // Loops 区块共用 LoopRow）；配置/新建 → 右栏 loopConfig 视图（setLoopConfig
+  // 已接好）——与 模型/Skills/插件/工作项 相同的三列模式。
+  if (activeWorkspace && sidebarView === "loops") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+        <PanelHeader
+          title="Loops"
+          meta={activeWorkspace.name}
+        />
+        <LoopsPanel
+          workspace={activeWorkspace}
+          onOpenLoopConfig={(target) => setLoopConfig(target)}
         />
       </div>
     );

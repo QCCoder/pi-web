@@ -8,12 +8,12 @@ import type { WorkspaceCapability } from "@/lib/workspaces/types";
  * (the left icon rail on desktop / the bottom tab bar on mobile).
  *
  * Two groups with different scopes:
- * - MODULE views (workbench / knowledge / work-items) are
- *   workspace-scoped and capability-gated — their icons appear only when the
- *   active workspace has the capability. Order: workbench → knowledge
- *   → work-items. (The former standalone 仓库 view was removed — repo browsing
- *   lives in the workbench file tree, add/manage in settings. The Loop view
- *   was removed with the loop-kit teardown.)
+ * - MODULE views (workbench / knowledge / work-items / loops) are
+ *   workspace-scoped — knowledge and work-items are capability-gated, while
+ *   workbench and loops are always-on. Order: workbench → knowledge
+ *   → work-items → loops. (The former standalone 仓库 view was removed — repo browsing
+ *   lives in the workbench file tree, add/manage in settings. The Loops view
+ *   is the rail-side management face of the kit loops — 无能力门，与总览 Loops 区块一致.)
  * - GLOBAL views are app-scoped. The desktop rail shows 模型/Skills/插件 (config
  *   views — LIST in the middle column + DETAIL in the right column, see
  *   `ConfigView`), then 归档
@@ -43,6 +43,7 @@ export type SidebarView =
   | "workbench"
   | "knowledge"
   | "work-items"
+  | "loops"
   | ConfigView
   | "archive"
   | "settings";
@@ -69,9 +70,11 @@ const ICON_PROPS = {
 };
 
 /**
- * Canonical module-view order: workbench → knowledge → work-items.
- * `workbench` is always-on (`capability: null`) — it merges the former
- * sessions + explorer views into one stacked layout (会话 above, 文件 below).
+ * Canonical module-view order: workbench → knowledge → work-items → loops
+ * (`loops` closes the module group; capability: null — kit loops have no
+ * capability gate, same posture as the overview Loops block). `workbench` is
+ * always-on (`capability: null`) — it merges the former sessions + explorer
+ * views into one stacked layout (会话 above, 文件 below).
  */
 export const ACTIVITY_VIEW_ORDER: ActivityViewDef[] = [
   {
@@ -108,6 +111,21 @@ export const ACTIVITY_VIEW_ORDER: ActivityViewDef[] = [
       <svg {...ICON_PROPS}>
         <path d="M9 11l3 3L22 4" />
         <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+      </svg>
+    ),
+  },
+  {
+    view: "loops",
+    capability: null,
+    label: "Loops",
+    title: "Loops",
+    icon: (
+      <svg {...ICON_PROPS}>
+        {/* A repeat/cycle: two arrows forming a loop. */}
+        <path d="M17 2l4 4-4 4" />
+        <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+        <path d="M7 22l-4-4 4-4" />
+        <path d="M21 13v1a4 4 0 0 1-4 4H3" />
       </svg>
     ),
   },

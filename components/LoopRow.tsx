@@ -62,7 +62,8 @@ export function LoopRow({ loop, busy, onConfigure, onAction }: LoopRowProps) {
   );
 }
 
-const rowLinkButton: React.CSSProperties = { fontSize: 12, color: "var(--accent)", background: "none", border: "none", padding: 0, cursor: "pointer" };
+// fix(task1-review): 与 sectionHeaderLinkStyle 等价（原抽取丢失 fontWeight）
+const rowLinkButton: React.CSSProperties = { fontSize: 12, fontWeight: 500, color: "var(--accent)", background: "transparent", border: 0, padding: 0, cursor: "pointer" };
 
 /** loop 行的本地时间格式化（从 WorkspaceOverview 原样迁入）。 */
 export function formatLoopClock(iso: string): string {
