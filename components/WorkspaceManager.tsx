@@ -19,7 +19,7 @@ import type {
   WorkItemStatus,
   WorkItemType,
 } from "@/lib/work-items/types";
-import { sourceLabel } from "@/lib/work-items/importers/source-labels";
+import { sourceLabel } from "@/lib/work-items/source-labels";
 import type { SkillInfo } from "@/lib/api-types";
 
 interface WorkspaceListResponse {
