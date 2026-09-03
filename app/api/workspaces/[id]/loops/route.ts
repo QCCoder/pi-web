@@ -6,8 +6,15 @@ import {
   WorkspaceValidationError,
 } from "@/lib/workspaces/service";
 import { collectStatus } from "../../../../../pi-loop/status.ts";
+import { createLoop, LoopManageError, type CreateLoopInput } from "@/lib/loops/manage";
 
 function errorResponse(error: unknown): NextResponse {
+  if (error instanceof LoopManageError) {
+    return NextResponse.json(
+      { error: error.message, ...error.details },
+      { status: error.status },
+    );
+  }
   const status = error instanceof WorkspaceNotFoundError
     ? 404
     : error instanceof WorkspaceConflictError
@@ -38,6 +45,23 @@ export async function GET(
     // （.round.lock 活性 + .lastrun + nextDue，与 pi-loop status CLI 同一口径）。
     // 消费方自行过滤 paused（D11 门控语义：暂停即不存在）。
     return NextResponse.json({ loops: collectStatus(path) });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/** 创建 loop（spec §5.1）：向导表单 → 校验 → pi-loop initLoop 脚手架
+ *  （五件套 + SKILL 骨架 + .lastrun=now，首轮等自然槽）。 */
+export async function POST(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const { id } = await params;
+    const { path } = await getWorkspace(id);
+    const input = (await req.json().catch(() => ({}))) as CreateLoopInput;
+    const created = await createLoop(path, input);
+    return NextResponse.json(created, { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

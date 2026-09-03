@@ -6,10 +6,17 @@ import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
 import { applyLoopFrontmatterPatch, LoopFrontmatterError } from "../../../../../../pi-loop/frontmatter.ts";
 import { collectStatus } from "../../../../../../pi-loop/status.ts";
+import { deleteLoop, LoopManageError } from "@/lib/loops/manage";
 
 const EDITABLE = new Set(["cron", "timezone", "level", "max_minutes"]);
 
 function errorResponse(error: unknown): NextResponse {
+  if (error instanceof LoopManageError) {
+    return NextResponse.json(
+      { error: error.message, ...error.details },
+      { status: error.status },
+    );
+  }
   const status = error instanceof WorkspaceNotFoundError ? 404
     : error instanceof LoopFrontmatterError ? 400
     : 500;
@@ -74,6 +81,22 @@ export async function PATCH(
     return NextResponse.json({
       loop: collectStatus(workspacePath).find((entry) => entry.name === declaration.loopName),
     });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/** 删除 loop（spec §5.3）：锁活 409；有绑定工作项需 {confirmBound:true} 二次确认；
+ *  整目录删除（git 历史即审计），SKILL 与根宪法不动。 */
+export async function DELETE(
+  req: Request,
+  { params }: { params: Promise<{ id: string; name: string }> },
+) {
+  try {
+    const { id, name } = await params;
+    const { path } = await getWorkspace(id);
+    const body = (await req.json().catch(() => ({}))) as { confirmBound?: boolean };
+    return NextResponse.json(await deleteLoop(path, name, { confirmBound: body.confirmBound }));
   } catch (error) {
     return errorResponse(error);
   }
