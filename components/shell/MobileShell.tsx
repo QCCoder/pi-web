@@ -409,7 +409,7 @@ export function MobileShell() {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)" }}>
       <ChatToolbar />
       <WorkspaceTabBar
         workspaces={workspaces}
@@ -520,6 +520,7 @@ export function MobileShell() {
         <nav
           role="tablist"
           aria-label="工作区导航"
+          className="mobile-bottom-tabbar"
           style={{
             display: "flex", flexDirection: "row", flexShrink: 0,
             height: 52, paddingBottom: "env(safe-area-inset-bottom)",

@@ -152,7 +152,10 @@ The panel bodies: 工作台/知识库 render in `WorkspaceSidebar` (module views
 **Persistence**: module views per workspace (`pi-active-view:<wsId>`), global panels under one `pi-active-panel` key (settings survives workspace switches; archive is transient). Legacy URL views (settings/work-items/loops) map onto panel switches in `applyUrlToTabs` by writing the storage key BEFORE activating the tab (the activeWorkspace effect re-derives `sidebarView` from storage and would clobber an immediate setState); `buildTabQuery` only emits overview/chat.
 
 - **工作台** — the merged 会话 + Explorer view: two stacked collapsible sections. Upper **会话** (chevron + label + count header;
-  fixed 40% share with internal scroll while 文件 is open — NOT content-driven, the split stays stable; flexes to fill when 文件 is
+  drag-resizable share with internal scroll while 文件 is open — default 40%, adjustable via the `workbench-split-handle` pointer-drag
+  separator between the sections (percent persisted per workspace in `pi-workbench-split:<wsId>`, clamped 15–85%, double-click resets to
+  40%; pointer events + `touch-action:none` so touch drags resize instead of scroll) — NOT content-driven, the split stays stable; flexes
+  to fill when 文件 is
   collapsed); lower **文件** is collapsible too and **collapsed by default** — when collapsed only its header bar shows, pinned to the
   panel bottom (`marginTop:auto` on the files container absorbs leftover free space AFTER flexing, so it is a no-op while the body
   grows), and the `[ 文件 | 改动(N) ]` segmented tabs (`pi-explorer-tab:<wsId>`, git repos only) render only while open. Both
@@ -160,6 +163,11 @@ The panel bodies: 工作台/知识库 render in `WorkspaceSidebar` (module views
   workspace in `localStorage` key `pi-workbench-sections:<wsId>` (per-key defaults: 会话 open, 文件 collapsed;
   `WorkbenchSectionHeader` has no `collapsible` prop anymore — both headers are chevron-togglable). The panel header carries a **WorkspaceSwitcher**
   (current workspace name + ▾ → workspace dropdown, select to switch) plus the ＋ 新建会话 button.
+  **文件 header ⟳ manual refresh**: bumps a local key stacked onto the shell-driven `explorerRefreshKey` (`explorerRefreshKey +
+  manualExplorerKey`), feeding BOTH `FileExplorer.refreshKey` and `useGitStatus` — external deletions/edits have no event (only agent
+  turns auto-refresh at `agent_end`), so the button is the manual escape hatch. `FileExplorer`'s refresh effect invalidates the WHOLE
+  cached directory subtree under cwd (`invalidateUnderPrefix`) — invalidating only the root left expanded subdirectories serving
+  stale cached entries, so deleted/renamed files kept showing in the tree.
 - **知识库** — **only `kind === "knowledge"`** repositories; each is an **OKF (Open Knowledge Format v0.2)** bundle
   (Markdown + YAML frontmatter) browsed via a `FileExplorer` pointed at `knowledge/<alias>` (flat layout — sibling of `repositories/`, per `workspaceRepositoryPath`). A newly
   `init`'d bundle is seeded with `index.md` (progressive-disclosure entry), `log.md`, and a `concepts/welcome.md`
@@ -173,6 +181,8 @@ Mobile is a **separate shell with real bottom-tab navigation** (see "Shell split
 are fine — they are view content, not navigation.)
 
 **Shell split (mobile tab refactor):** `AppShell` is a thin dispatcher — `useAppShellState()` (`components/shell/useAppShellState.ts`) owns ALL shared state (workspace tabs, sessions, SSE wiring, panel selection, persistence) and provides it via `components/shell/context.tsx` (`useShell()`); the state layer has **no `isMobile` branches** — cross-shell navigation intents travel as focus signals (`chatFocusKey` bumped by every chat-opening handler, `panelFocus` for the work-items create flow) that only MobileShell reacts to. **The shell choice must be correct in the FIRST HTML response**: `app/page.tsx` (async server component) sniffs the User-Agent into `initialIsMobile` and passes it to `AppShell`, which seeds `useViewportIsMobile(initial)` — the value drives BOTH the SSR render and the hydration render (no mismatch), then a mount effect corrects a wrong UA guess against `matchMedia(≤640px)`. `AppShell` provides the resolved flag via `IsMobileContext`; every `useIsMobile()` caller reads that context (zero per-caller subscriptions, one source of truth) and falls back to a standalone viewport hook only outside the shell tree. Without the server seed phones SSR the desktop shell and flip only after full hydration — seconds on a slow device. `DesktopShell.tsx` renders the three-column layout (rail + resizable middle column + center/right columns) migrated verbatim; `MobileShell.tsx` renders the bottom-tab navigation. `ChatToolbar.tsx` is the shared 36px tool strip (theme/language/history/auto-name/branch/system/token stats + dropdown panels) rendered by both shells. Shell-agnostic overlays (home create-workspace wizard, DirectoryPicker, ProjectTrustDialog) render in AppShell for both.
+
+**Mobile keyboard（键盘↔输入框空白修复）：** `useVisualViewportKeyboard`（`hooks/useVisualViewportKeyboard.ts`，AppShell 挂载一次，`pointer: coarse` 门控）是唯一的键盘适配层：可编辑元素聚焦且 visualViewport 比 **`documentElement.clientHeight` 基准**（绝不用 `window.innerHeight` —— iOS 键盘弹出时它也跟着缩；基准只在“前后部不在键盘态”时采样，开着/刚关时 html 还挂着 --app-height，live 不可信）小 ≥150px 时，给 `<html>` 加 `.pi-keyboard-open` + `--app-height=<vv.height>`。CSS（globals.css）把 **html+body（正常流，不用 fixed —— fixed 锚定语义在各内核键盘场景下不一致）压到该高度**，文档总高 = 可视区，输入框贴住键盘；键盘开启时底部 tab 栏直接 `display:none`（微信式：tab 栏“固定在屏幕底部”的语义由键盘盖住它来表达，不给它浮上键盘上方占地方，输入框直接贴键盘顶，也省出 52px 给消息区；键盘收起自动回来）。**reveal 平移补偿**：浏览器为露出聚焦输入框会把页面顶起一段（scroll 型能从 scrollY 读到；iOS content-inset 型 scrollY/offsetTop 都是 0），hook 每帧实测 `-html.getBoundingClientRect().top` 设 `--app-lift`，body `translateY(var(--app-lift))` 反向抵消 —— 两种机制都量得到，键盘上方不可能再有空白；开启/关闭后 350/800ms 延迟补测追末晚发生的平移。配套：应用根（layout.tsx body / MobileShell / DesktopShell）统一 `height: var(--app-vh)` —— `--app-vh` 在 globals.css 上定义（`:root { --app-vh: var(--app-height, 100%) }` + `@supports (height: 100dvh)` 升级为 `var(--app-height, 100dvh)`）。**绝不直接写 `height: var(--app-height, 100dvh)`**：不支持 dvh 的老内核（Windows 微信/企微内置浏览器，Chromium<108）里 var() 的 fallback 在【计算值阶段】整体失效（invalid at computed-value time → height:auto），整条高度链塌成内容高度 —— 输入框悬在半空、下方大片空白（PC 端“键盘位置和底部有非常大间距”的老内核成因）；直写 `100dvh` 是解析期丢弃、能回落到 `html,body{height:100%}`，反而无害，所以用 @supports 分层 + % 回落保证任何内核拿到的都是合法值，hook 写的 --app-height 是纯 px、老触屏内核（X5）同样能压短；`@media (pointer: coarse)` 输入控件 ≥16px（iOS 对 <16px 输入框聚焦会自动放大页面）；**不设** `interactive-widget` meta —— 键盘适配统一走 JS 路径，避免 Android 上布局视口与 dvh 是否跟随键盘收缩的各版本差异；双判据（vv 缩了 **或 clientHeight 自己缩了** ≥150px，后者覆盖微信 XWeb 等原生 resizes-content 但 dvh 不跟随的内核）+ **scale 双向窗 [0.95, 1.05]**（zoom-out 也要拦：手机上“电脑版网站”缩放显示时 vv 天然只是布局视口的窗口，gap 恒>0 却没有键盘，不设下界会把应用错误压短，宽屏触屏设备上表现为输入区与窗口底部凭空多出大片空白；真键盘弹出时 scale 恒为 1）、无 visualViewport 的老内核回退 innerHeight、聚焦期间及关闭后 1.2s 内 250ms 轮询实测（不少内核键盘/平移不发事件），URL `?kbdebug=1`（存 localStorage，`?kbdebug=0` 关）在左上角显示实时指标用于真机定位。聊天流式期间的上滑停跟随修复是 PC+手机端的姊妹修复，决策逻辑在 `lib/chat-scroll-follow.ts`（纯逻辑，与 `useAgentSession` 及测试共用同一实现）：**用户上滑判定先于 120px 近底恢复分支**（旧顺序里小幅上滑先撞上“恢复跟随”，下一个流式增量又拽回底部 —— “AI 回复时上滑一点就抖动”）、单事件上滑阈值 0.5px（慢触控板/高刷触屏每帧 delta 常仅 1~4px）、**touchmove 也刷新滚动意图窗口**（否则长按拖动 >1.2s 窗口过期，跟随中途恢复，拖到一半被拽回）、**近底恢复跟随需要佐证**（二轮修复：本就跟随 / 意图新鲜 / scrollTop 在增大，三选一 —— 输入事件覆盖不到的滚动路径【滚动条/最小地图长拖超过 1.2s 意图窗、抬指后 >1.2s 的惯性滚动】会持续产生带内 scroll 事件却无意图佐证，旧逻辑无条件在带内恢复跟随，流式增量贴底与未停稳的上滑逐帧拉锯；“ scrollTop 增大”是安全佐证：allowed=false 期间程序化贴底已被 gate 拦住，增大只能是用户向下滚回）。
 
 **Desktop middle column is drag-resizable.** The width is a CSS var (`--pi-sidebar-width`, default `260px`) set inline on
 `.sidebar-container` from the shared `sidebarWidth` state; a thin `.sidebar-resize-handle` strip (sibling of the
@@ -199,6 +209,7 @@ Key behavior:
 - The pi extension (`work-items/extension.ts`) registers `workspace_list_work_items`, `workspace_get_work_item`,
   `workspace_create_work_item`, `workspace_update_work_item`, `workspace_record_milestone`. create/update **透传可选 `loop` 绑定字段**（string；update 接受 null 清除——S1，软校验：存 loop 名、不验存在性，未命中按未绑定处理）。UI 入口 = 详情「Loop」下拉（WorkspaceManager，空=未绑定）。
 - **来源展示**: items carrying `external` (importer-written) render their provenance — 详情「来源」行（禅道 #id ↗ + 最近同步时间）+ 列表 KEY 旁「禅道」小徽章（`source-labels.ts` 的标签映射；手动创建的项无此字段，不加徽章）。
+- **附件（attachments）**: `addWorkItemAttachments`（service.ts）把上传文件落 `<item>/attachments/`（basename 剥离路径、去控制字符、磁盘/批内重名自动 `-1` 后缀，中文名保留）并在 README 维护单个 `## 附件` 小节（图片 `![]()`、其余 `[]()`，目标 URL 编码，重复引用不追加；README 变更时与 content 更新同构地 bump revision）。事件类型 `work_item.attachment_added`（data.files）。路由 `POST …/work-items/[key]/attachments`（multipart `files`，限额同 /api/files：单文件 25MB / 总 100MB）；创建表单（WorkspaceManager）在创建成功后上传，失败不静默丢——报错并保留已建工作项。详情页 `MarkdownBody cwd` 直接渲染这些相对引用（与 importer 先例同机制）。
 - **Archive cascade** (`lib/archive-cascade.ts`): archiving a work item tucks its conversations into the session
   archive **only if no other active work item references them**; restoring brings them back. Sessions are physically
   moved to a `.archived/` subdirectory (`lib/session-archive.ts`) so `SessionManager.listAll()` no longer sees them.
@@ -235,7 +246,8 @@ Key behavior:
 - **run-contract**：工作项「开始对话/收养续跑」= 客户端预填（D11，无 daemon seed 路由）——`handleRunContract` in
   `useAppShellState` reads the workspace's kit loops (`GET /api/workspaces/[id]/loops`) and resolves the pattern via
   `resolveContractPattern`（`lib/loops/contract-prefill.ts`：绑定名命中 → 该 loop 的 pattern；paused = 不存在；未命中/未绑定
-  → 首个 active loop）, writes `/skill:<pattern> 执行|收养 <KEY>` into the new-session draft (`setDraft("new:<wsPath>")`), bumps
+  且恰有 1 个 active loop → 该 loop；≥2 个 active loop → undefined 不猜——可能存在不消费工作项的 loop，盲取首个会误路由，
+  调用方降级为裸 prompt，精确路由靠工作项的显式绑定）, writes `/skill:<pattern> 执行|收养 <KEY>` into the new-session draft (`setDraft("new:<wsPath>")`), bumps
   `composerEpoch` (ChatWindow keys its ChatInput mount on it so an already-mounted composer re-reads the draft) and switches to the
   fresh chat view — nothing is sent or created until the human presses send. The buttons' visibility gate in
   WorkspaceManager is kit-loops-driven (`hasKitLoops`, fetched once per selected workspace), not capability-driven.
@@ -254,7 +266,8 @@ Key behavior:
   状态总览（cron 人话摘要 `summarizeCron`）/ 暂停恢复（写删 PAUSED）/ ③ / 停止本轮。
 - **工作项工具**新增 `loop` 绑定透传（见上）；importer 不变；subagent 一律走社区 `@henryqw/pi-subagent` 包（全局挂载，见下节——kit 轮会话 cwd=workspace 根，包自动发现 `<cwd>/.pi/agents/pi-subagent/` 角色，无需 per-session 注入）。
 - **模板**：`kit/templates/basic/{loop,root,skill}/`（D13 布局：LOOP/STATE/ledger 在 `loop/`，constraints/budget 在
-  `root/`，SKILL.md 骨架在 `skill/`（spec §4）；`pi-loop init` 由此脚手架）、`kit/templates/github/loop.yml`
+  `root/`，SKILL.md 骨架在 `skill/`（spec §4）；`pi-loop init` 由此脚手架；LOOP.md 指针含「本目录说明文件」步骤——人写
+  知识文档约定，如 chandao.md/selection.md，agent 只读、改知识不改 SKILL）、`kit/templates/github/loop.yml`
   （Actions 场景）；`kit/README.md` 是协议契约（含 L1/L2/L3 分级、宿主/beat 用法与调参指引）。
 
 **轮会话是一次性普通会话**：跑完一轮自然 settle，无状态恢复问题（崩溃 → 下轮冷启动读 STATE.md 接续）；v3 的
@@ -437,6 +450,7 @@ app/api/
   workspaces/[id]/work-items/route.ts            GET list | POST create
   workspaces/[id]/work-items/[key]/route.ts      GET | PATCH (revision-safe) | DELETE trash
   workspaces/[id]/work-items/[key]/events/route.ts   POST record milestone
+  workspaces/[id]/work-items/[key]/attachments/route.ts  POST multipart attachments upload（service.addWorkItemAttachments：attachments/ 落盘 + README「## 附件」小节 + attachment_added 事件）
   workspaces/[id]/work-items/[key]/content/route.ts  PUT update README body
   workspaces/[id]/loops/route.ts                  GET kit loops 全量状态（collectStatus：frontmatter 摘要 + .lastrun/next-due/锁活性/paused，含 paused，管理面全量；web spec §5.1；D5 文件即声明 — no capability）
   workspaces/[id]/loops/[name]/route.ts           PATCH frontmatter 四字段（cron/timezone/level/max_minutes）round-trip — 正文 byte 保留（「人的手」，S5；纯逻辑 pi-loop/frontmatter.ts，tmp+rename 原子写）
@@ -498,7 +512,7 @@ lib/
   loops/                             web-side loop control + prefill resolution (loop-surface spec §3–§5; imports pi-loop pure logic, no daemon deps of its own)
     lookup.ts              findKitLoopByName — loop 名→declaration（name 字段优先，回落目录名；绑定存名，文件操作以 dir 为准）
     rounds.ts              stopRound / launchManualRound（依赖全注入：daemon 会话面 + reap）+ RoundBusyError —— 无 daemon 新路由，经现有 POST /v1/sessions 两步建会话；手动轮锁保持持有靠 stale 窗（maxMinutes+15min）回收，无 D9 钩子
-    contract-prefill.ts    resolveContractPattern（纯函数）：工作项绑定 loop 名 → pattern（paused = 不存在，未命中/未绑定 → 首个 active loop）
+    contract-prefill.ts    resolveContractPattern（纯函数）：工作项绑定 loop 名 → pattern（paused = 不存在；未命中/未绑定且恰 1 个 active → 该 loop；≥2 个 active → undefined 不猜，防误路由到不消费工作项的 loop）
     cron-summary.ts        summarizeCron（纯函数）：cron 人话摘要（常见形态；其它 → null，UI 回落原始 cron）
   daemon/                           THE pi-daemon: session-owning process + job registry (C2)
     host.ts                 createDaemon() composition root — /health, route chain (sessions → importers), jobs (loop-kit-heartbeats + importer-sync), startDaemon (PI_DAEMON_HOST/PORT, legacy PI_LOOP_* fallbacks)
@@ -519,6 +533,7 @@ lib/
   git-status.ts             porcelain-v1 parse, status classify, buildRepoGroups (pure)
   git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index)
   git-types.ts              GitFileStatus / RepoGroup / response shapes
+  chat-scroll-follow.ts     聊天流式跟随的滚动决策状态机（纯逻辑 + 测试，`useAgentSession` 挂监听共用）：上滑判定先于近底恢复 / 0.5px 阈值 / touchmove 刷新意图窗 / 近底恢复需佐证（跟随中 ∣ 意图新鲜 ∣ scrollTop 增大）
   session-reader.ts         index-backed SessionInfo mapping + buildSessionContext (tail window) + buildEarlierContext + path caches
   session-index.ts          persistent mtime-incremental session index (~/.pi/agent/sessions/.index.json, active + .archived; rebuildable cache)
   session-changed-files.ts  PURE deriveSessionChangedFiles — files written/edited in a session from the message stream (write/edit toolCalls; relative `file_path` args resolved against session cwd so openFile passes the /api/files allow-list; NOT git state; survives commits); isEditToolName consolidated here
@@ -567,7 +582,7 @@ components/
   ActivityBar.tsx           the icon rail (desktop left strip / mobile fixed bottom bar): module group 工作台→知识库→工作项 + separator + global group 模型→Skills→插件→归档→设置(bottom-pinned; the config trio renders in the RIGHT column, not the middle column); defines `SidebarView` + `ConfigView`/`isConfigView` + `ACTIVITY_VIEW_ORDER` + `RAIL_GLOBAL_VIEWS` (rail icon order) + `GLOBAL_ACTIVITY_VIEWS` (middle-column persistence surface: archive/settings only) + `visibleActivityViews()`
   PanelHeader.tsx           unified ~36px middle-column panel header (title + back + context actions + mobile ×) + PanelHeaderButton
   SettingsPanel.tsx         the 设置 panel — iOS-settings index → 工作区/模型/Skills/插件/偏好 subpages (mounts the config bodies in `embedded` mode)
-  WorkspaceSidebar.tsx      middle-column content for module views (workbench/knowledge under a PanelHeader) + the home workspace-list panel; 工作台 = stacked collapsible 会话 (fixed 40% share) + 文件 sections with [ 文件 | 改动(N) ] tabs (`pi-workbench-sections:<wsId>` persistence)
+  WorkspaceSidebar.tsx      middle-column content for module views (workbench/knowledge under a PanelHeader) + the home workspace-list panel; 工作台 = stacked collapsible 会话 (drag-resizable share, default 40%, `pi-workbench-split:<wsId>`) + 文件 sections with [ 文件 | 改动(N) ] tabs + ⟳ manual refresh (`pi-workbench-sections:<wsId>` persistence)
   WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant, `split` = desktop three-column mode: rail list inline + settings detail portaled into the right column's config area); remaining modal = home create-workspace wizard
   WorkspaceOverview.tsx     workspace dashboard — the unconditional landing view (quick actions, 活跃工作项 with 「立即跑一轮」B-button + Loop 绑定下拉, 仓库/知识库 rows that navigate the sidebar, recent sessions with delete, and a Loops 管理区块 rendered only when kit loops exist: 状态总览 cron 摘要 / 暂停恢复 / frontmatter 编辑 / 停止本轮)
   WorkspaceTabBar.tsx       workspace switcher tabs (shortest-unique labels) + ＋ workspace picker (body-portal dropdown; select → open/switch workspace and land in chat view — handleOpenWorkspaceToChat; creating/importing workspaces lives on HomeLanding only)

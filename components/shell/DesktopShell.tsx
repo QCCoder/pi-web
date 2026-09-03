@@ -292,7 +292,7 @@ const renderMiddleColumn = () => {
 
   return (
     <>
-<div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)", boxSizing: "border-box" }}>
+<div style={{ display: "flex", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)", boxSizing: "border-box" }}>
     {/* Left icon rail (desktop) — module views + separator + global group
         (模型/Skills/插件 config icons + archive + bottom-pinned settings).
         A config icon highlights while its split view is open (configView
