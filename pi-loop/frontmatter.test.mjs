@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyLoopFrontmatterPatch, LoopFrontmatterError } from "./frontmatter.ts";
+import { applyLoopFrontmatterPatch, LoopFrontmatterError, splitLoopFile } from "./frontmatter.ts";
 import { parseLoopDeclaration } from "./protocol.ts";
 
 const RAW = [
@@ -50,4 +50,24 @@ test("applyLoopFrontmatterPatch rejects invalid values", () => {
 
 test("applyLoopFrontmatterPatch throws on input without frontmatter", () => {
   assert.throws(() => applyLoopFrontmatterPatch("no frontmatter here", { cron: "* * * * *" }), LoopFrontmatterError);
+});
+
+test("splitLoopFile 拆出 frontmatter 与正文（字节保真）", () => {
+  const raw = '---\nname: dev-loop\ncron: "*/30 * * * *"\n---\n# 指针\n\n1. 步骤\n';
+  const parts = splitLoopFile(raw);
+  assert.ok(parts);
+  assert.equal(parts.front, '---\nname: dev-loop\ncron: "*/30 * * * *"\n---\n');
+  assert.equal(parts.body, "# 指针\n\n1. 步骤\n");
+  assert.equal(parts.front + parts.body, raw);
+});
+
+test("splitLoopFile 无 frontmatter 返回 null", () => {
+  assert.equal(splitLoopFile("# 只有正文\n"), null);
+});
+
+test("splitLoopFile 空 frontmatter 块", () => {
+  const parts = splitLoopFile("---\n---\nbody");
+  assert.ok(parts);
+  assert.equal(parts.front, "---\n---\n");
+  assert.equal(parts.body, "body");
 });

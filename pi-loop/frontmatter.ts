@@ -67,3 +67,15 @@ export function applyLoopFrontmatterPatch(raw: string, patch: LoopFrontmatterPat
   }
   return `---\n${stringify(record, { lineWidth: 0 }).trimEnd()}\n---\n${match[2]}`;
 }
+
+/** 拆分 LOOP.md 原始字节：front = 含 --- 定界线的 frontmatter 块（原样字节），
+ *  body = 其后全部。无 frontmatter 块 → null。供 lib/loops/manage.ts 读正文，
+ *  以及写正文时用 raw.slice(0, raw.length - body.length) + newBody 保前缀字节
+ *  （与 applyLoopFrontmatterPatch 的“正文 byte 保留”互为反向）。 */
+export function splitLoopFile(raw: string): { front: string; body: string } | null {
+  // 注：内容行可选（(?:…)?）——空 frontmatter 块（---\n---\n）无内容行，
+  // brief 原始正则 [\s\S]*?\r?\n--- 要求闭合定界线前至少一个换行，空块匹配不到。
+  const match = raw.match(/^---\r?\n(?:[\s\S]*?\r?\n)?---\r?\n?/);
+  if (!match) return null;
+  return { front: match[0], body: raw.slice(match[0].length) };
+}
