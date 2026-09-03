@@ -4,8 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
-import { summarizeCron } from "@/lib/loops/cron-summary";
 import type { LoopConfigTarget } from "./LoopsConfig";
+import { LoopRow, type LoopStatus } from "./LoopRow";
 import { STATUS_LABELS } from "./WorkspaceManager";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
@@ -27,20 +27,6 @@ interface Props {
   loopsRefreshKey?: number;
 }
 
-/** Loop 行（GET /api/workspaces/:id/loops —— pi-loop/status.ts 的 LoopStatusEntry）。 */
-interface LoopRow {
-  name: string;
-  pattern: string;
-  level: string;
-  cron: string;
-  timezone: string;
-  maxMinutes: number;
-  paused: boolean;
-  running: boolean;
-  lastRun?: string;
-  nextDue?: string;
-}
-
 function formatRelativeTime(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   if (diff < 0) return "刚刚"; // clock skew / future
@@ -52,12 +38,6 @@ function formatRelativeTime(dateStr: string): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days} 天前`;
   return new Date(dateStr).toLocaleDateString();
-}
-
-function formatLoopClock(iso: string): string {
-  const date = new Date(iso);
-  const hhmm = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-  return date.toDateString() === new Date().toDateString() ? hhmm : `${date.getMonth() + 1}月${date.getDate()}日 ${hhmm}`;
 }
 
 const sectionStyle: React.CSSProperties = { marginTop: 26 };
@@ -123,14 +103,14 @@ export function WorkspaceOverview({
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [loops, setLoops] = useState<LoopRow[]>([]);
+  const [loops, setLoops] = useState<LoopStatus[]>([]);
   const [loopsBusy, setLoopsBusy] = useState(false);
 
   const refreshLoops = useCallback(async () => {
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loops`);
       if (!response.ok) return;
-      const data = (await response.json()) as { loops?: LoopRow[] };
+      const data = (await response.json()) as { loops?: LoopStatus[] };
       setLoops(data.loops ?? []);
     } catch { /* offline — keep last */ }
   }, [workspace.id]);
@@ -468,44 +448,13 @@ export function WorkspaceOverview({
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {loops.map((loop) => (
-                <div
+                <LoopRow
                   key={loop.name}
-                  style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}
-                >
-                  <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>{loop.name}</span>
-                  <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
-                    {summarizeCron(loop.cron) ?? loop.cron}
-                  </span>
-                  <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 4, background: "var(--bg-hover)" }}>{loop.level}</span>
-                  <span style={{ fontSize: 12, color: loop.running ? "#15803d" : loop.paused ? "var(--text-dim)" : "var(--text-muted)" }}>
-                    {loop.running
-                      ? "● 运行中"
-                      : loop.paused
-                        ? "已暂停"
-                        : loop.nextDue
-                          ? (new Date(loop.nextDue).getTime() > Date.now()
-                              ? `下次 ${formatLoopClock(loop.nextDue)}`
-                              : "已到期 · 待心跳")
-                          : "空闲"}
-                  </span>
-                  <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
-                    <button disabled={loopsBusy} onClick={() => onOpenLoopConfig({ kind: "loop", name: loop.name })} style={sectionHeaderLinkStyle}>
-                      配置
-                    </button>
-                    <button
-                      disabled={loopsBusy}
-                      onClick={() => void loopAction(loop.name, loop.paused ? "resume" : "pause")}
-                      style={sectionHeaderLinkStyle}
-                    >
-                      {loop.paused ? "恢复" : "暂停"}
-                    </button>
-                    {loop.running && (
-                      <button disabled={loopsBusy} onClick={() => void loopAction(loop.name, "stop")} style={sectionHeaderLinkStyle}>
-                        停止
-                      </button>
-                    )}
-                  </span>
-                </div>
+                  loop={loop}
+                  busy={loopsBusy}
+                  onConfigure={(name) => onOpenLoopConfig({ kind: "loop", name })}
+                  onAction={(name, action) => void loopAction(name, action)}
+                />
               ))}
               <div>
                 <button onClick={() => onOpenLoopConfig({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
