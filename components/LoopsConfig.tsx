@@ -113,10 +113,16 @@ function LoopCreateForm({ workspace, onOpenLoop, onChanged }: Props) {
           pattern: form.pattern.trim() || undefined,
         }),
       });
-      const body = (await response.json().catch(() => ({}))) as { name?: string; error?: string };
+      // fix(final-review F2): 响应携带 skillReused —— 既有 SKILL.md 被复用（未覆盖）时
+      // 明示用户，表单 footer 不再无条件谎称「骨架已生成」。
+      const body = (await response.json().catch(() => ({}))) as
+        { name?: string; skillReused?: boolean; error?: string };
       if (!response.ok || !body.name) {
         setError(body.error ?? `创建失败（HTTP ${response.status}）`);
         return;
+      }
+      if (body.skillReused) {
+        window.alert("已复用既有 SKILL.md（未覆盖）—— 如需全新骨架请先处理 .agents/skills/<pattern>/SKILL.md");
       }
       onChanged?.();
       onOpenLoop(body.name);
@@ -163,7 +169,8 @@ function LoopCreateForm({ workspace, onOpenLoop, onChanged }: Props) {
         <button disabled={busy || !form.name.trim() || !form.cron.trim()} style={primaryButton} onClick={() => void submit()}>
           创建（脚手架五件套 + SKILL 骨架 + .lastrun=now，首轮等自然槽）
         </button>
-        <div style={muted}>创建后请在配置视图改写 LOOP.md 指针正文与知识文档；SKILL.md 骨架在 .agents/skills/&lt;pattern&gt;/，按本 loop 职责手改。</div>
+        {/* fix(final-review F2): SKILL 既有即复用不覆盖——footer 措辞与真实行为一致 */}
+        <div style={muted}>创建后请在配置视图改写 LOOP.md 指针正文与知识文档；SKILL 位于 .agents/skills/&lt;pattern&gt;/（已存在即复用、不覆盖）。</div>
       </div>
     </div>
   );

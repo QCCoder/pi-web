@@ -175,6 +175,12 @@ export async function writeLoopFile(
     const next = raw.slice(0, raw.length - parts.body.length) + content; // frontmatter 前缀字节保真
     return { mtimeMs: await atomicWrite(path, next) };
   }
+  // fix(final-review F1): 畸形 target（未知 kind / constitution 非法 file）此前落入宪法
+  // 路径使 CONSTITUTION_FILES[target.file] === undefined → join(path, undefined) TypeError →
+  // HTTP 500；路由层壳无法从 500 还原语义，按写面收窄原则在此显式 400。
+  if (target.kind !== "constitution" || (target.file !== "constraints" && target.file !== "budget")) {
+    throw new LoopManageError("未知的写入 target", 400);
+  }
   const fileName = CONSTITUTION_FILES[target.file];
   const path = join(workspacePath, fileName);
   const existing = await readIfExists(path);
@@ -196,7 +202,10 @@ export interface CreateLoopInput {
   pattern?: string;
 }
 
-export async function createLoop(workspacePath: string, input: CreateLoopInput): Promise<{ name: string }> {
+export async function createLoop(
+  workspacePath: string,
+  input: CreateLoopInput,
+): Promise<{ name: string; skillReused: boolean }> {
   if (typeof input.name !== "string" || !LOOP_NAME_RE.test(input.name)) {
     throw new LoopManageError("name 必须是小写字母/数字/连字符的 slug（如 dev-loop）", 400);
   }
@@ -218,6 +227,11 @@ export async function createLoop(workspacePath: string, input: CreateLoopInput):
   if (existsSync(join(workspacePath, "loops", input.name))) {
     throw new LoopManageError(`loop 已存在：${input.name}`, 409);
   }
+  // fix(final-review F2): initLoop 对既有 .agents/skills/<pattern>/SKILL.md 不覆盖——
+  // 先记下复用事实，随响应返回让表单提示诚实化（此前 footer 谎称「骨架已生成」）。
+  const skillExisted = existsSync(
+    join(workspacePath, ".agents", "skills", input.pattern ?? input.name, "SKILL.md"),
+  );
   initLoop(workspacePath, {
     name: input.name,
     cron: input.cron,
@@ -226,7 +240,7 @@ export async function createLoop(workspacePath: string, input: CreateLoopInput):
     maxMinutes: input.maxMinutes,
     timezone: input.timezone,
   });
-  return { name: input.name };
+  return { name: input.name, skillReused: skillExisted };
 }
 
 export async function deleteLoop(
