@@ -6,6 +6,7 @@ import { FileViewer } from "../FileViewer";
 import { TabBar } from "../TabBar";
 import { ArchiveModal } from "../ArchiveModal";
 import { LoopsConfig, type LoopConfigTarget } from "../LoopsConfig";
+import { LoopsPanel } from "../LoopsPanel";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
 import { WorkspaceOverview } from "../WorkspaceOverview";
@@ -28,11 +29,11 @@ import type { WorkspaceCapability } from "@/lib/workspaces/types";
  * per-tab stack with a ‹返回 header (Q6); the settings and work-items panels
  * manage their own in-panel subpage navigation.
  */
-type MobileTab = "chat" | "workbench" | "knowledge" | "work-items" | "settings";
+type MobileTab = "chat" | "workbench" | "knowledge" | "work-items" | "loops" | "settings";
 
-const TAB_ORDER: MobileTab[] = ["chat", "workbench", "knowledge", "work-items", "settings"];
+const TAB_ORDER: MobileTab[] = ["chat", "workbench", "knowledge", "work-items", "loops", "settings"];
 
-/** Capability gating for the module tabs (workbench/chat/settings are always on). */
+/** Capability gating for the module tabs (workbench/chat/loops/settings are always on). */
 const TAB_CAPABILITY: Partial<Record<MobileTab, WorkspaceCapability>> = {
   knowledge: "knowledge",
   "work-items": "work-items",
@@ -208,9 +209,17 @@ export function MobileShell() {
   useEffect(() => {
     if (tab !== "workbench") setOverviewStack(null);
   }, [tab]);
+
+  // Loops tab 的本地配置页（D2 栈模式镜像）：配置/新建推入，‹Loops 返回；离开 tab 即丢弃。
+  const [loopsPage, setLoopsPage] = useState<LoopConfigTarget | null>(null);
+  useEffect(() => {
+    if (tab !== "loops") setLoopsPage(null);
+  }, [tab]);
+
   const overviewWorkspaceId = activeWorkspace?.id;
   useEffect(() => {
     setOverviewStack(null);
+    setLoopsPage(null);
   }, [overviewWorkspaceId]);
 
   // The knowledge panel's ＋ (add knowledge repo) routes to the settings tab's
@@ -351,6 +360,34 @@ export function MobileShell() {
               onWorkspaceDeleted={handleWorkspaceDeleted}
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
                 />
+          </div>
+        );
+      case "loops":
+        if (!activeWorkspace) return null;
+        if (loopsPage) {
+          return (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title={loopsPage.kind === "new" ? "新建 Loop" : loopsPage.name}
+                meta="Loop 配置"
+                onBack={() => setLoopsPage(null)}
+                backLabel="Loops"
+              />
+              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                <LoopsConfig
+                  workspace={activeWorkspace}
+                  target={loopsPage}
+                  onClose={() => setLoopsPage(null)}
+                  onOpenLoop={(name) => setLoopsPage({ kind: "loop", name })}
+                />
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+            <PanelHeader title="Loops" meta={activeWorkspace.name} />
+            <LoopsPanel workspace={activeWorkspace} onOpenLoopConfig={(target) => setLoopsPage(target)} />
           </div>
         );
       case "settings":
