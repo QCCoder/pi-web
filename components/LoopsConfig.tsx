@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { summarizeCron } from "@/lib/loops/cron-summary";
 import { MarkdownBody } from "./MarkdownBody";
@@ -120,6 +120,9 @@ function LoopCreateForm({ workspace, onOpenLoop, onChanged }: Props) {
       }
       onChanged?.();
       onOpenLoop(body.name);
+    } catch (cause) {
+      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
+      setError(String(cause));
     } finally {
       setBusy(false);
     }
@@ -197,7 +200,14 @@ function LoopConfigDetail({
   const [conDraft, setConDraft] = useState<{ constraints: string | null; budget: string | null }>({ constraints: null, budget: null });
   const [delError, setDelError] = useState<string | null>(null);
 
+  // fix(review F2): refresh 的 useCallback deps 必须保持 [api, name]——把 bundle/selectedDoc 加进 deps 会让
+  // 每次状态变更都重建 refresh 并触发 useEffect 重 fetch。因此用 refs 快照“上次已加载 bundle + 当前选中
+  // 文档”，在 refresh 内配合 functional setState：只收敛不携带未保存编辑的草稿，保留携带编辑的草稿。
+  const bundleRef = useRef<LoopDocsBundle | null>(null);
+  const selectedDocRef = useRef<string | null>(null);
+
   const refresh = useCallback(async () => {
+    const prev = bundleRef.current;
     try {
       const response = await fetch(api(`/${encodeURIComponent(name)}/docs`));
       if (!response.ok) {
@@ -206,18 +216,39 @@ function LoopConfigDetail({
         return;
       }
       const data = (await response.json()) as LoopDocsBundle;
+      bundleRef.current = data;
       setBundle(data);
+      setLoadError(null); // fix(review F1): 成功路径必须清 loadError——render 在 loadError 上 early-return，残留错误会永久砖死视图
       setFm({
         cron: data.frontmatter.cron,
         timezone: data.frontmatter.timezone,
         level: data.frontmatter.level,
         maxMinutes: data.frontmatter.maxMinutes,
       });
-      setBodyDraft(null);
-      setDocDraft(null);
+      // fix(review F2): 草稿仅在与新旧服务器内容都不同（= 携带未保存用户编辑）时保留，否则收敛回服务器内容。
+      setBodyDraft((cur) => (cur === null || cur === prev?.loopBody || cur === data.loopBody ? null : cur));
+      setSelectedDoc((current) => {
+        const next = current && data.docs.some((d) => d.name === current) ? current : null;
+        selectedDocRef.current = next;
+        return next;
+      });
+      setDocDraft((cur) => {
+        const sel = selectedDocRef.current;
+        const oldC = prev?.docs.find((d) => d.name === sel)?.content;
+        const newC = data.docs.find((d) => d.name === sel)?.content;
+        return cur === null || cur === oldC || cur === newC ? null : cur;
+      });
       setNewDocName("");
-      setConDraft({ constraints: null, budget: null });
-      setSelectedDoc((current) => (current && data.docs.some((d) => d.name === current) ? current : null));
+      setConDraft((cur) => {
+        const next = { ...cur };
+        for (const k of ["constraints", "budget"] as const) {
+          const oldC = prev?.constitution[k]?.content;
+          const newC = data.constitution[k]?.content ?? data.constitutionTemplates[k];
+          const v = cur[k];
+          if (v === null || v === oldC || v === newC) next[k] = null;
+        }
+        return next;
+      });
     } catch (cause) {
       setLoadError(String(cause));
     }
@@ -241,6 +272,9 @@ function LoopConfigDetail({
       }
       await refresh();
       onChanged?.();
+    } catch (cause) {
+      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
+      setError(String(cause));
     } finally {
       setBusy(false);
     }
@@ -254,6 +288,9 @@ function LoopConfigDetail({
       const result = await put(name, { kind: "body" }, bodyDraft, bundle.loopBodyMtimeMs);
       if (!result.ok) { setError(result.error ?? "保存失败"); return; }
       await refresh();
+    } catch (cause) {
+      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
+      setError(String(cause));
     } finally { setBusy(false); }
   }, [bundle, bodyDraft, name, put, refresh]);
 
@@ -267,10 +304,15 @@ function LoopConfigDetail({
       const result = await put(name, { kind: "doc", file: selectedDocEntry.name }, docDraft, selectedDocEntry.mtimeMs);
       if (!result.ok) { setError(result.error ?? "保存失败"); return; }
       await refresh();
+    } catch (cause) {
+      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
+      setError(String(cause));
     } finally { setBusy(false); }
   }, [docDraft, name, put, refresh, selectedDocEntry]);
 
   const createDoc = useCallback(async () => {
+    // fix(review F3): 重名守卫——输入既有文档名直接拒绝，否则 PUT 会静默覆盖该文档全部内容
+    if (bundle?.docs.some((d) => d.name === newDocName)) return;
     if (!DOC_NAME_RE.test(newDocName) || newDocName === "LOOP.md" || newDocName === "STATE.md") return;
     setBusy(true);
     setError(null);
@@ -278,10 +320,15 @@ function LoopConfigDetail({
       const result = await put(name, { kind: "doc", file: newDocName }, `# ${newDocName.replace(/\.md$/, "")}\n\n`);
       if (!result.ok) { setError(result.error ?? "创建失败"); return; }
       setSelectedDoc(newDocName);
+      selectedDocRef.current = newDocName; // fix(review F2): ref 与 state 同步，refresh 的草稿判定读它
+      setDocDraft(null); // fix(review F2): 选中已切换到新文档，旧草稿不属于它（与 chip 点击弃草稿一致）
       setDocPreview(false);
       await refresh();
+    } catch (cause) {
+      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
+      setError(String(cause));
     } finally { setBusy(false); }
-  }, [name, newDocName, put, refresh]);
+  }, [bundle, name, newDocName, put, refresh]);
 
   const saveConstitution = useCallback(async (which: "constraints" | "budget") => {
     if (!bundle) return;
@@ -294,6 +341,9 @@ function LoopConfigDetail({
       const result = await put(name, { kind: "constitution", file: which }, value, existing?.mtimeMs);
       if (!result.ok) { setError(result.error ?? "保存失败"); return; }
       await refresh();
+    } catch (cause) {
+      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
+      setError(String(cause));
     } finally { setBusy(false); }
   }, [bundle, conDraft, name, put, refresh]);
 
@@ -333,6 +383,9 @@ function LoopConfigDetail({
       }
       onChanged?.();
       onClose();
+    } catch (cause) {
+      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
+      setDelError(String(cause));
     } finally { setBusy(false); }
   }, [api, bundle, name, onChanged, onClose]);
 
@@ -392,14 +445,15 @@ function LoopConfigDetail({
           <button
             key={doc.name}
             style={selectedDoc === doc.name ? chipActive : chip}
-            onClick={() => { setSelectedDoc(doc.name); setDocDraft(null); setDocPreview(false); }}
+            onClick={() => { setSelectedDoc(doc.name); selectedDocRef.current = doc.name; setDocDraft(null); setDocPreview(false); }}
           >
             {doc.name}
           </button>
         ))}
         <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
           <input style={{ ...input, width: 140 }} placeholder="新文档名.md" value={newDocName} onChange={(e) => setNewDocName(e.target.value)} />
-          <button disabled={busy || !DOC_NAME_RE.test(newDocName) || newDocName === "LOOP.md" || newDocName === "STATE.md"} style={linkButton} onClick={() => void createDoc()}>
+          {/* fix(review F3): 重名时禁用新建，避免静默覆盖既有文档 */}
+          <button disabled={busy || !DOC_NAME_RE.test(newDocName) || newDocName === "LOOP.md" || newDocName === "STATE.md" || (bundle?.docs.some((d) => d.name === newDocName) ?? false)} style={linkButton} onClick={() => void createDoc()}>
             ＋新建
           </button>
         </span>
