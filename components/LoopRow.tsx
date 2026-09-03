@@ -35,15 +35,7 @@ export function LoopRow({ loop, busy, onConfigure, onAction }: LoopRowProps) {
       </span>
       <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 4, background: "var(--bg-hover)" }}>{loop.level}</span>
       <span style={{ fontSize: 12, color: loop.running ? "#15803d" : loop.paused ? "var(--text-dim)" : "var(--text-muted)" }}>
-        {loop.running
-          ? "● 运行中"
-          : loop.paused
-            ? "已暂停"
-            : loop.nextDue
-              ? (new Date(loop.nextDue).getTime() > Date.now()
-                  ? `下次 ${formatLoopClock(loop.nextDue)}`
-                  : "已到期 · 待心跳")
-              : "空闲"}
+        {loop.running ? "● 运行中" : loop.paused ? "已暂停" : formatNextDueLabel(loop)}
       </span>
       <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
         <button disabled={busy} onClick={() => onConfigure(loop.name)} style={rowLinkButton}>
@@ -70,4 +62,14 @@ export function formatLoopClock(iso: string): string {
   const date = new Date(iso);
   const hhmm = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   return date.toDateString() === new Date().toDateString() ? hhmm : `${date.getMonth() + 1}月${date.getDate()}日 ${hhmm}`;
+}
+
+// fix(lint purity)：react-hooks/purity 禁渲染期直接调 Date.now()（useMemo 回调同样算渲染期）——
+// 与 WorkspaceOverview/HomeLanding 的 formatRelativeTime 同款：抽模块级 helper，每次渲染现取时钟，
+// 语义与原内联一致（“下次/已到期”标签只需分钟级精度，组件随列表数据刷新重新渲染）。
+function formatNextDueLabel(loop: LoopStatus): string {
+  if (!loop.nextDue) return "空闲";
+  return new Date(loop.nextDue).getTime() > Date.now()
+    ? `下次 ${formatLoopClock(loop.nextDue)}`
+    : "已到期 · 待心跳";
 }
