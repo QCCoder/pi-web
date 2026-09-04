@@ -186,6 +186,10 @@ export function useAppShellState() {
       try { localStorage.setItem(GLOBAL_PANEL_KEY, view); } catch { /* ignore */ }
       if (view === "settings") setSettingsPage("index");
     } else {
+      // 离开全局面板（如设置）切到模块视图 = 终结粘性：否则工作区切换 effect
+      // 里 storedGlobal==="settings" 的分支永远劫持每工作区视图（用户点过
+      // 工作台也无效）。停留在设置时切工作区的粘性由进入设置时写入的键保留。
+      try { localStorage.removeItem(GLOBAL_PANEL_KEY); } catch { /* ignore */ }
       if (activeWorkspace) {
         try { localStorage.setItem(`pi-active-view:${activeWorkspace.id}`, view); } catch { /* ignore */ }
       }
