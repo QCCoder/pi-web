@@ -465,15 +465,18 @@ export function WorkspaceSidebar({
   }, [activeWorkspace]);
 
   // openFilesRequest（计数器信号，如 Loops 面板 loop 名点击的跨视图定位）：bump 时
-  // 展开文件 section——复用上面的折叠持久化路径（只翻 files 键，会话 section 状态
-  // 不动）。nonce 守卫确保 effect 因 activeWorkspace / 折叠状态变化重跑时，旧意图
-  // 不会误开新工作区的文件段。
+  // 无条件 ensure-open 文件 section——不读 workbenchSections（restore 前的初态闭包
+  // 恒为 initializer 的 files: true，条件展开会跳过、nonce 守卫又拦掉 restore 后的重跑；
+  // toggleWorkbenchSection(_, current=false) → next=true，幂等展开），并切回「文件」
+  // 分段（用户停在「改动」时 section 打开也看不见 reveal 结果）。nonce 守卫确保 effect
+  // 因 activeWorkspace 变化重跑时，旧意图不会误开新工作区的文件段。
   const lastOpenFilesRequestRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (openFilesRequest === undefined || openFilesRequest === lastOpenFilesRequestRef.current) return;
     lastOpenFilesRequestRef.current = openFilesRequest;
-    if (!workbenchSections.files) toggleWorkbenchSection("files", false);
-  }, [openFilesRequest, workbenchSections.files, toggleWorkbenchSection]);
+    toggleWorkbenchSection("files", false); // fix(review F1): ensure-open——restore 前初态不可信，幂等翻转
+    setExplorerTab("files"); // fix(review F2): 持久化的「改动」分段会吞掉 reveal，联动切回「文件」
+  }, [openFilesRequest, toggleWorkbenchSection, setExplorerTab]);
 
   // Knowledge bundles are the panel-facing repo list — code repos have no
   // standalone view anymore (browse in the workbench file tree, manage in
