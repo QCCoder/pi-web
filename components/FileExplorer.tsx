@@ -40,6 +40,9 @@ interface Props {
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
   onUploadTargetChange?: (relativePath: string) => void;
+  /** Loops 面板定位用：把 reveal.path（相对 cwd 的目录路径，如 `loops/dev-loop`）的全部
+   *  祖先目录（含目标本身）一次性展开；nonce 变化即可对同一路径重复触发。 */
+  reveal?: { path: string; nonce: number };
 }
 
 export interface FileExplorerHandle {
@@ -280,15 +283,19 @@ function TreeNode({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken]);
 
+  // 展开即加载：目录被展开（含 reveal 预置祖先路径后的级联挂载）时自动拉取子项。
+  useEffect(() => {
+    if (open) void loadChildren();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   const handleClick = useCallback(() => {
     if (node.isDir) {
-      const next = !open;
-      onToggleExpanded(node.fullPath, next);
-      if (next && !loaded) loadChildren();
+      onToggleExpanded(node.fullPath, !open);
     } else {
       onOpenFile(node.fullPath, node.name);
     }
-  }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onOpenFile, onToggleExpanded]);
+  }, [node.isDir, node.fullPath, node.name, open, onOpenFile, onToggleExpanded]);
 
   return (
     <div>
@@ -490,6 +497,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   gitStatusByPath,
   changedDirectoryPaths,
   onUploadTargetChange,
+  reveal,
 }, ref) {
   const { t } = useI18n();
   const [roots, setRoots] = useState<FileNode[]>([]);
@@ -669,6 +677,32 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [cwd, refreshToken]);
+
+  // reveal（Loops 面板定位）：把目标目录的全部祖先（含其本身）的绝对路径逐级算出，
+  // 一次性并入展开集（保留既有展开项）；各级 TreeNode 的「展开即加载」effect 级联拉取子项。
+  // 声明在 cwd 主 effect 之后：切 cwd 时先重置展开集，再按新 cwd 重新定位。
+  useEffect(() => {
+    if (!reveal) return;
+    const segments = reveal.path.split("/").filter(Boolean);
+    if (segments.length === 0) return;
+    const ancestors: string[] = [];
+    let acc = cwd;
+    for (const seg of segments) {
+      acc = joinFilePath(acc, seg);
+      ancestors.push(acc);
+    }
+    setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const p of ancestors) {
+        if (!next.has(p)) {
+          next.add(p);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [reveal, cwd]);
 
   const showUploadFeedback = uploadBusy || pendingConflict !== null || uploadError !== null || uploadSummary !== null;
 
