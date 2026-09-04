@@ -66,7 +66,7 @@ export function GrillMessageContent({ grill, before, after, messageTimestamp, cw
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", color: "var(--accent)" }}>
-            {t("grill.title")}
+            {grill.stage ? `${t("grill.title")} · ${grill.stage}` : t("grill.title")}
           </span>
           {grill.n !== undefined && (
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>

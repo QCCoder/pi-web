@@ -11,6 +11,8 @@
  */
 
 export interface GrillQuestion {
+  /** 阶段标签（会话直供人话，卡片照显；如「需求确认」「方案确认」） */
+  stage?: string;
   /** 题号（1 起） */
   n?: number;
   /** 总题数 */
@@ -56,6 +58,7 @@ export function parseGrillMessage(text: string): ParsedGrillMessage | null {
     : [];
   const normalized: GrillQuestion = {
     ...grill,
+    stage: typeof grill.stage === "string" && grill.stage.trim() ? grill.stage.trim() : undefined,
     options: options.length > 0 ? options : ["是", "否"],
     recommended: typeof grill.recommended === "string" ? grill.recommended : undefined,
     deadlineMin: typeof grill.deadlineMin === "number" && grill.deadlineMin > 0 ? grill.deadlineMin : GRILL_TIMEOUT_MIN_DEFAULT,
