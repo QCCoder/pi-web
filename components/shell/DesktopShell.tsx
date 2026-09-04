@@ -286,9 +286,7 @@ const renderMiddleColumn = () => {
             handleSidebarSwitchView("workbench");
             setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
           }}
-          onRunRound={(name) => {
-            handleRunLoopDirect(activeWorkspace, name);
-          }}
+          onRunRound={(name) => handleRunLoopDirect(activeWorkspace, name)}
         />
       </div>
     );
