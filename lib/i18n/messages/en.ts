@@ -443,5 +443,12 @@ export const enLocale: LocalePlugin = {
     "i18n.thinkingUnavailable": "Thinking content unavailable",
     "i18n.before": "Before",
     "i18n.after": "After",
+    "grill.title": "Confirm",
+    "grill.recommended": "recommended",
+    "grill.countdown": "continues with recommendation in {sec}s",
+    "grill.expired": "Timed out — will continue with recommendation (you can still answer)",
+    "grill.answered": "Answered:",
+    "grill.placeholder": "Or type your own answer…",
+    "grill.send": "Send",
   },
 };

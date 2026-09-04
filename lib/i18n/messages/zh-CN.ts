@@ -443,5 +443,12 @@ export const zhCNLocale: LocalePlugin = {
     "i18n.thinkingUnavailable": "思考内容不可用",
     "i18n.before": "之前",
     "i18n.after": "之后",
+    "grill.title": "待确认",
+    "grill.recommended": "推荐",
+    "grill.countdown": "{sec} 秒后按推荐继续",
+    "grill.expired": "已超时，未答时将按推荐继续（仍可作答）",
+    "grill.answered": "已答复：",
+    "grill.placeholder": "或输入你的意见…",
+    "grill.send": "发送",
   },
 };
