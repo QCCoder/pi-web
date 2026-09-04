@@ -23,8 +23,10 @@ export function LoopsPanel({
   /** loop 名点击 → 跨视图定位：shell 切到工作台并把文件区 reveal 到 loops/<name>。 */
   onOpenFiles: (name: string) => void;
   /** 「运行」→ 手动起一轮并打开轮会话（useAppShellState 的 handleRunLoopDirect，
-   *  自己处理开 tab 与错误 alert；本面板只负责 busy 态与起轮后刷新列表）。 */
-  onRunRound: (name: string) => void;
+   *  自己处理开 tab 与错误 alert；本面板只负责 busy 态与起轮后刷新列表）。
+ *  返回 Promise：doRun await 起轮完成后才刷新——运行中徽章即时出现，
+ *  busy 覆盖全程，双击不会再撞上锁 409。 */
+  onRunRound: (name: string) => void | Promise<unknown>;
 }) {
   const [loops, setLoops] = useState<LoopStatus[]>([]);
   const [busy, setBusy] = useState(false);
@@ -63,7 +65,7 @@ export function LoopsPanel({
   const doRun = useCallback(async (name: string) => {
     setBusy(true);
     try {
-      onRunRound(name);
+      await Promise.resolve(onRunRound(name));
       await refresh();
     } finally {
       setBusy(false);

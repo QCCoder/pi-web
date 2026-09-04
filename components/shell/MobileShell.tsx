@@ -400,7 +400,7 @@ export function MobileShell() {
                 setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
               }}
               onRunRound={(name) => {
-                void handleRunLoopDirect(activeWorkspace, name);
+                handleRunLoopDirect(activeWorkspace, name);
               }}
             />
           </div>
