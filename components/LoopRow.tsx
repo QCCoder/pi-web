@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { summarizeCron } from "@/lib/loops/cron-summary";
 
 /** pi-loop/status.ts LoopStatusEntry 的 UI 侧镜像（GET /api/workspaces/:id/loops 行）。 */
@@ -24,19 +25,64 @@ export interface LoopRowProps {
   /** 可选：名字点击回调（LoopsPanel 传入 → 跨视图 reveal 到工作台文件区；
    *  总览区块不传，名字保持纯展示 span）。 */
   onNameClick?: () => void;
+  /** 可选：整行点击（LoopsPanel 传入 → 右栏 loopConfig 视图；总览不传，行为不变）。 */
+  onRowClick?: () => void;
+  /** 可选：「运行」按钮回调（手动起一轮；总览不传，不渲染该按钮）。 */
+  onRun?: () => void;
+  /** 「配置」按钮是否渲染（LoopsPanel 行点击已开配置，隐藏按钮；默认 true 供总览）。 */
+  showConfigureButton?: boolean;
 }
 
 /** loop 单行（总览 Loops 区块与中栏 LoopsPanel 共用，避免两处漂移）。 */
-export function LoopRow({ loop, busy, onConfigure, onAction, onNameClick }: LoopRowProps) {
+export function LoopRow({
+  loop,
+  busy,
+  onConfigure,
+  onAction,
+  onNameClick,
+  onRowClick,
+  onRun,
+  showConfigureButton = true,
+}: LoopRowProps) {
+  const [hovered, setHovered] = useState(false);
   return (
     <div
-      style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}
+      onClick={onRowClick}
+      onMouseEnter={onRowClick ? () => setHovered(true) : undefined}
+      onMouseLeave={onRowClick ? () => setHovered(false) : undefined}
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 10,
+        alignItems: "center",
+        padding: "10px 12px",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        cursor: onRowClick ? "pointer" : undefined,
+        background: hovered ? "var(--bg-hover)" : undefined,
+        transition: "background 0.12s",
+      }}
     >
       {onNameClick ? (
         <button
           type="button"
-          onClick={onNameClick}
-          style={{ fontFamily: "var(--font-mono)", fontWeight: 600, background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", textAlign: "left" }}
+          onClick={(event) => {
+            // 行点击=开配置（onRowClick）——名字按钮自己的 reveal 语义不能连带触发它。
+            event.stopPropagation();
+            onNameClick();
+          }}
+          title="在工作台文件区定位此 loop 的文件"
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontWeight: 600,
+            background: "none",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+            color: "inherit",
+            textAlign: "left",
+            textDecorationLine: "underline dotted",
+          }}
         >
           {loop.name}
         </button>
@@ -51,14 +97,49 @@ export function LoopRow({ loop, busy, onConfigure, onAction, onNameClick }: Loop
         {loop.running ? "● 运行中" : loop.paused ? "已暂停" : formatNextDueLabel(loop)}
       </span>
       <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
-        <button disabled={busy} onClick={() => onConfigure(loop.name)} style={rowLinkButton}>
-          配置
-        </button>
-        <button disabled={busy} onClick={() => onAction(loop.name, loop.paused ? "resume" : "pause")} style={rowLinkButton}>
+        {onRun && (
+          <button
+            disabled={busy || loop.running}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRun();
+            }}
+            style={rowLinkButton}
+          >
+            运行
+          </button>
+        )}
+        {showConfigureButton && (
+          <button
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation();
+              onConfigure(loop.name);
+            }}
+            style={rowLinkButton}
+          >
+            配置
+          </button>
+        )}
+        <button
+          disabled={busy}
+          onClick={(event) => {
+            event.stopPropagation();
+            onAction(loop.name, loop.paused ? "resume" : "pause");
+          }}
+          style={rowLinkButton}
+        >
           {loop.paused ? "恢复" : "暂停"}
         </button>
         {loop.running && (
-          <button disabled={busy} onClick={() => onAction(loop.name, "stop")} style={rowLinkButton}>
+          <button
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation();
+              onAction(loop.name, "stop");
+            }}
+            style={rowLinkButton}
+          >
             停止
           </button>
         )}

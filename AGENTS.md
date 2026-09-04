@@ -578,7 +578,7 @@ components/
   CapabilityToggle.tsx      the capability on/off switch used in settings panels
   LoopsConfig.tsx           loop 配置视图（创建向导 + frontmatter/指针正文/知识文档/宪法编辑 + STATE 只读 + 删除）——桌面右栏 / 移动 overview 栈页共用
   LoopRow.tsx               loop 单行（name/cron 摘要/级别/状态 + 配置/暂停/停止）——总览 Loops 区块与 LoopsPanel 共用
-  LoopsPanel.tsx            中栏 Loops 模块面板（rail 第四模块视图 body；配置/新建 → 右栏 loopConfig 视图；loop 名点击 → 工作台文件区 reveal 到 loops/<name>）
+  LoopsPanel.tsx            中栏 Loops 模块面板（rail 第四模块视图 body；行点击=右栏配置、「运行」=手动起轮并打开轮会话、名字点击=文件区 reveal 到 loops/<name>，配置/新建 → 右栏 loopConfig 视图）
   ChatWindow.tsx            chat composition + completion sound wrapper
   SessionChangedFiles.tsx   "本会话改动 N 个文件" toolbar button (right of the sound toggle in ChatInput) + slide-in drawer (desktop) / full-screen list (mobile); entries open the file via the openFile/file-tab pipeline
   ChatInput.tsx             input bar + model/thinking/tools/compact controls

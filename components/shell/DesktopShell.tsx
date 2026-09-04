@@ -105,6 +105,7 @@ export function DesktopShell() {
     handleSelectSession,
     handleOpenWorkItemConversation,
     handleRunLoopRound,
+    handleRunLoopDirect,
     handleRunContract,
     handleWorkspaceDeleted,
     handleOpenFile,
@@ -284,6 +285,9 @@ const renderMiddleColumn = () => {
           onOpenFiles={(name) => {
             handleSidebarSwitchView("workbench");
             setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
+          }}
+          onRunRound={(name) => {
+            void handleRunLoopDirect(activeWorkspace, name);
           }}
         />
       </div>

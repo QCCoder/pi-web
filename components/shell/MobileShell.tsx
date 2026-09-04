@@ -136,6 +136,7 @@ export function MobileShell() {
     handleSelectSession,
     handleOpenWorkItemConversation,
     handleRunLoopRound,
+    handleRunLoopDirect,
     handleRunContract,
     handleWorkspaceDeleted,
     handleOpenFile,
@@ -397,6 +398,9 @@ export function MobileShell() {
               onOpenFiles={(name) => {
                 setTab("workbench");
                 setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
+              }}
+              onRunRound={(name) => {
+                void handleRunLoopDirect(activeWorkspace, name);
               }}
             />
           </div>

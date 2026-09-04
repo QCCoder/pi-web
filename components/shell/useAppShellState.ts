@@ -977,13 +977,15 @@ export function useAppShellState() {
     }, 50);
   }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
 
-  /** 「立即跑一轮」（spec §4 B 按钮）：POST run 路由（daemon 现有会话面起轮），
-   *  成功后把新轮会话开成 workspace 的 chat tab（SSE 实时观看；locate 直接命中
-   *  ——run 路由已播种 cacheSessionPath）。409（本轮已在跑）等错误用 alert 直陈。 */
-  const handleRunLoopRound = useCallback(async (
+  /** 「立即跑一轮」的公共主体（WorkspaceOverview B 按钮与 LoopsPanel「运行」
+   *  共用）：POST run 路由（daemon 现有会话面起轮；itemKey 存在时才带优
+   *  先工作项），成功后把新轮会话开成 workspace 的 chat tab（SSE 实时观
+   *  看；locate 直接命中——run 路由已播种 cacheSessionPath）。409（本轮流
+   *  已在跑）等错误用 alert 直陈。 */
+  const runLoopAndOpen = useCallback(async (
     workspace: WorkspaceSummary,
-    item: WorkItemRecord,
     loopName: string,
+    itemKey?: string,
   ): Promise<void> => {
     let sessionId: string | undefined;
     try {
@@ -992,7 +994,7 @@ export function useAppShellState() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ itemKey: item.key }),
+          body: JSON.stringify(itemKey ? { itemKey } : {}),
         },
       );
       const body = (await response.json().catch(() => ({}))) as { sessionId?: string; error?: string };
@@ -1026,6 +1028,23 @@ export function useAppShellState() {
     } catch { /* fall through */ }
     window.alert("轮已启动，但打开会话视图失败——请从会话列表进入。");
   }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
+
+  /** 「立即跑一轮」（spec §4 B 按钮）：带工作项优先键起轮并打开轮会话 tab。 */
+  const handleRunLoopRound = useCallback(async (
+    workspace: WorkspaceSummary,
+    item: WorkItemRecord,
+    loopName: string,
+  ): Promise<void> => {
+    await runLoopAndOpen(workspace, loopName, item.key);
+  }, [runLoopAndOpen]);
+
+  /** LoopsPanel「运行」按钮：不带工作项直接手动起一轮并打开轮会话 tab。 */
+  const handleRunLoopDirect = useCallback(async (
+    workspace: WorkspaceSummary,
+    loopName: string,
+  ): Promise<void> => {
+    await runLoopAndOpen(workspace, loopName);
+  }, [runLoopAndOpen]);
 
   /** Kit 时代「按合同执行」/「收养续跑」（D11）：不再 POST daemon seed — 改为
    *  客户端预填。取该 workspace 的 kit loop 合同（GET /loops，纯文件发现），
@@ -1457,6 +1476,7 @@ export function useAppShellState() {
     handleSessionCreated,
     handleOpenWorkItemConversation,
     handleRunLoopRound,
+    handleRunLoopDirect,
     handleRunContract,
     handleAgentEnd,
     handleAutoName,
