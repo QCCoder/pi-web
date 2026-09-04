@@ -5,9 +5,10 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecuti
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
-import { MessageView } from "./MessageView";
+import { MessageView, anyToolCallBlockExpanded } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { SessionChangedFilesDrawer } from "./SessionChangedFiles";
+import { SessionSubagentsDrawer } from "./SessionSubagents";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
@@ -17,6 +18,7 @@ import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { deriveSessionChangedFiles } from "@/lib/session-changed-files";
+import { deriveSessionSubagents } from "@/lib/session-subagents";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
   captureScrollDistance,
@@ -135,8 +137,14 @@ function withAssistantBlocks(
   return next;
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { messageCount: number; toolCallCount: number; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, children, t }: { messageCount: number; toolCallCount: number; hasExpandedChild?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(false);
+  // 分组内的块在流式气泡里被展开过（如盯着看长 bash 输出），message_end 后块移入
+  // 分组 —— 分组要跟着张开一次，否则展开的块藏进折叠头里，看起来仍是被收起。
+  // 用户手动收起仍优先（只在 hasExpandedChild 翻 true 的那一次张开）。
+  useEffect(() => {
+    if (hasExpandedChild) setExpanded(true);
+  }, [hasExpandedChild]);
   const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
 
@@ -427,14 +435,25 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     [messages, streamState.streamingMessage, messageCwd],
   );
 
+  // Subagent children delegated in this session (delegate_task transport) —
+  // the durable entry into child sessions, which are hidden from every
+  // session list. Includes RUNNING delegations via the streaming partials.
+  const sessionSubagents = useMemo(
+    () => deriveSessionSubagents(messages, { streamingToolResults }),
+    [messages, streamingToolResults],
+  );
+
   // Drawer open state for the changed-files quick access — lifted here because
   // the entry button lives in ChatInput while the drawer overlay renders at
   // ChatWindow level. Not persisted; switching sessions closes it (agreed).
   const [changedFilesOpen, setChangedFilesOpen] = useState(false);
+  const [subagentsOpen, setSubagentsOpen] = useState(false);
   useEffect(() => {
     setChangedFilesOpen(false);
+    setSubagentsOpen(false);
   }, [session?.id]);
   const toggleChangedFiles = useCallback(() => setChangedFilesOpen((v) => !v), []);
+  const toggleSubagents = useCallback(() => setSubagentsOpen((v) => !v), []);
 
   const chatInputElement = (
     <ChatInput
@@ -478,6 +497,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
       changedFiles={!embedded && onOpenFile ? { count: changedFiles.length, open: changedFilesOpen, onToggle: toggleChangedFiles } : undefined}
+      subagents={!embedded && onOpenSession ? { count: sessionSubagents.length, open: subagentsOpen, onToggle: toggleSubagents } : undefined}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
     />
@@ -688,9 +708,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                   }
                 }
                 if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
+                // key 用 entryId（兼容 entryIds 缺位时退回 idx）：尾窗滑动 / loadEarlier
+                // 前插会让 idx 整体平移，idx-key 会导致同一条消息被当成新元素重挂，
+                // ToolCallBlock / ProcessDetailsGroup 的展开状态全部丢失。
+                const entryKey = entryIds[idx] ?? idx;
                 const view = (
                   <MessageView
-                    key={`${keyPrefix}-view-${idx}`}
+                    key={`${keyPrefix}-view-${entryKey}`}
                     message={msg}
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
@@ -710,7 +734,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 );
                 if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${keyPrefix}-${idx}`} ref={attachVisibleRef(idx, currentRefIdx)}>
+                  <div key={`${keyPrefix}-${entryKey}`} ref={attachVisibleRef(idx, currentRefIdx)}>
                     {view}
                   </div>
                 );
@@ -774,6 +798,22 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     <ProcessDetailsGroup
                        messageCount={processCount}
                        t={t}
+                      hasExpandedChild={(() => {
+                        // 分组内是否有用户展开着的 toolCall（含从流式气泡移入的）。
+                        const ids: string[] = [];
+                        for (const processIdx of visibleProcessIndices) {
+                          const pm = messages[processIdx];
+                          if (pm.role === "assistant") {
+                            for (const b of (pm as AssistantMessage).content) {
+                              if (b.type === "toolCall") ids.push((b as { toolCallId: string }).toolCallId);
+                            }
+                          }
+                        }
+                        for (const b of finalSplit.processBlocks) {
+                          if (b.type === "toolCall") ids.push((b as { toolCallId: string }).toolCallId);
+                        }
+                        return anyToolCallBlockExpanded(ids);
+                      })()}
                       toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
                     >
                       {visibleProcessIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
@@ -782,7 +822,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                   );
                   rendered.push(
                     <div
-                      key={`process-group-${userIdx}-${finalAssistantIdx}`}
+                      // 同 renderMessage 的 entryKey：key 用 entryId，尾窗滑动 / loadEarlier
+                      // 前插时 idx 平移不再重挂分组，展开状态不丢。只锚定 user 消息的
+                      // entryId —— 不能带 finalAssistantIdx/其 entryId：回合进行中每完成
+                      // 一条新 assistant 消息“最后一条”就换人，key 跟着变 → 整组重挂
+                      // → 用户展开着的处理详情在 AI 每次回复时都被收起。一个 user 锚点
+                      // 在一个窗口里只产生一个分组，key 唯一且整回合稳定。
+                      key={`process-group-${entryIds[userIdx] ?? userIdx}`}
                       ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       {processGroup}
@@ -878,6 +924,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             onClose={() => setChangedFilesOpen(false)}
             cwd={messageCwd}
             onOpenFile={onOpenFile}
+            variant={isMobile ? "mobile" : "desktop"}
+          />
+        ) : null}
+        {!embedded && onOpenSession ? (
+          <SessionSubagentsDrawer
+            subs={sessionSubagents}
+            open={subagentsOpen}
+            onClose={() => setSubagentsOpen(false)}
+            onOpenSession={onOpenSession}
             variant={isMobile ? "mobile" : "desktop"}
           />
         ) : null}

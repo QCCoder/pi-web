@@ -42,6 +42,11 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
+  // 不设 interactive-widget（默认 resizes-visual）：键盘适配统一走
+  // useVisualViewportKeyboard 的 --app-height/--app-vh 机制（--app-vh 见 globals.css：
+  // @supports 分层，老内核回落 100%，避免 var(…,100dvh) 在不支持 dvh 的内核里
+  // 计算值阶段整体失效），避免 Android 上布局视口与 dvh 是否跟随键盘收缩的各版本
+  // 差异（两条路径行为不一致）。
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
     { media: "(prefers-color-scheme: dark)", color: "#1a1a1a" },
@@ -63,7 +68,7 @@ export default function RootLayout({
           }}
         />
       </head>
-      <body translate="no" className="notranslate" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+      <body translate="no" className="notranslate" style={{ height: "var(--app-vh)", display: "flex", flexDirection: "column" }}>
         {children}
         <PwaRegistration />
       </body>

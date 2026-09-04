@@ -15,6 +15,8 @@
     loops/<loop-name>/.lastrun         # 上次起轮时间戳（宿主写的机器真相；agent 禁改禁删）
     loops/<loop-name>/.round.lock      # 轮互斥锁（宿主写；agent 禁改禁删）
     loops/<loop-name>/PAUSED           # 暂停标记（存在即跳过起轮，D12）
+    loops/<loop-name>/<任意名>.md       # 可选说明文件（如 chandao.md 来源说明 / selection.md 选品规则）：人写的知识文档，
+                                       #   agent 只读——LOOP.md 指针点名则必读；改知识/规则改这里，不碰 SKILL
     loop-constraints.md                # 绑定约束（宪法文件，agent 禁改；根共享）
     loop-budget.md                     # token/轮数预算（宪法文件，agent 禁改；根共享）
     .agents/skills/<pattern>/SKILL.md  # 模式合同（本轮做什么、产出什么、如何写 STATE）

@@ -20,9 +20,9 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
   try { process.kill(-pid, signal); } catch { /* 组已消失 */ }
 }
 
-export function beatRoundRunner(declaration: LoopDeclaration, opts: { extraInstructions?: string } = {}): Promise<void> {
+export function beatRoundRunner(declaration: LoopDeclaration, opts: { extraInstructions?: string; manual?: boolean } = {}): Promise<void> {
   const slot = new Date().toISOString().slice(0, 16).replace("T", " ");
-  const prompt = buildRoundPrompt(declaration, { extraInstructions: opts.extraInstructions });
+  const prompt = buildRoundPrompt(declaration, { extraInstructions: opts.extraInstructions, manual: opts.manual });
   return new Promise<void>((resolve, reject) => {
     const child = spawn(piBinary(), ["--name", `${declaration.loopName} · ${slot}`, "-p", "--approve", prompt], {
       cwd: declaration.workspacePath, detached: true, stdio: "ignore",

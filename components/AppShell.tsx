@@ -1,6 +1,7 @@
 "use client";
 
 import { useViewportIsMobile } from "@/hooks/useIsMobile";
+import { useVisualViewportKeyboard } from "@/hooks/useVisualViewportKeyboard";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
@@ -30,6 +31,9 @@ import { MobileShell } from "./shell/MobileShell";
 export function AppShell({ initialIsMobile = false }: { initialIsMobile?: boolean }) {
   const state = useAppShellState();
   const isMobile = useViewportIsMobile(initialIsMobile);
+  // 移动端键盘高度同步（--app-height）：触屏设备上键盘弹起时把应用根压到
+  // visualViewport 高度，输入框贴住键盘，消除键盘与输入框之间的大片空白。
+  useVisualViewportKeyboard();
   const {
     workspaceManagerOpen,
     setWorkspaceManagerOpen,

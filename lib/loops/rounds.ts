@@ -94,6 +94,7 @@ export async function launchManualRound(
       type: "prompt",
       message: buildRoundPrompt(declaration, {
         sessionId,
+        manual: true,
         ...(opts.itemKey ? { extraInstructions: `本轮优先处理工作项 ${opts.itemKey}（人手动指定）。` } : {}),
       }),
     });

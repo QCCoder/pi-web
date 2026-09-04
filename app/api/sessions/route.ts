@@ -28,28 +28,44 @@ export async function GET(req: Request) {
     // this it would be missing from the (cached) disk scan until the cache
     // expires — making the sidebar list lag behind a freshly created session.
     // (Registry access is daemon-side now — C2.)
-    const client = await daemonProxy();
-    const [liveMetas, runningIds] = await Promise.all([
-      client.liveSessions(),
-      client.runningSessionIds(),
-    ]);
-    const presentIds = new Set(sessions.map((session) => session.id));
-    const liveSynthesized: SessionInfo[] = [];
-    for (const live of liveMetas.sessions) {
-      if (!live.id || presentIds.has(live.id)) continue;
-      presentIds.add(live.id);
-      liveSynthesized.push({
-        path: live.sessionFile || "",
-        id: live.id,
-        cwd: live.cwd,
-        created: new Date().toISOString(),
-        modified: new Date().toISOString(),
-        messageCount: 0,
-        firstMessage: "(no messages)",
-        projectRoot: live.cwd,
-      });
+    //
+    // Best-effort ONLY: the daemon merge is a freshness enhancement on top of
+    // the persistent session index (the list's source of truth). When the
+    // daemon is unreachable (or its sidecar cannot start), serve the disk list
+    // with an empty running set instead of failing the whole route — a 500
+    // here rendered the sidebar as an EMPTY session list, which read as data
+    // loss to the user. `daemonProxy()` still attempts a sidecar revive, so
+    // the next successful spawn re-enables the merge automatically.
+    let merged = sessions;
+    let runningIds: string[] = [];
+    let daemonDown = false;
+    try {
+      const client = await daemonProxy();
+      const [liveMetas, running] = await Promise.all([
+        client.liveSessions(),
+        client.runningSessionIds(),
+      ]);
+      const presentIds = new Set(sessions.map((session) => session.id));
+      const liveSynthesized: SessionInfo[] = [];
+      for (const live of liveMetas.sessions) {
+        if (!live.id || presentIds.has(live.id)) continue;
+        presentIds.add(live.id);
+        liveSynthesized.push({
+          path: live.sessionFile || "",
+          id: live.id,
+          cwd: live.cwd,
+          created: new Date().toISOString(),
+          modified: new Date().toISOString(),
+          messageCount: 0,
+          firstMessage: "(no messages)",
+          projectRoot: live.cwd,
+        });
+      }
+      merged = liveSynthesized.length > 0 ? [...liveSynthesized, ...sessions] : sessions;
+      runningIds = running.ids;
+    } catch {
+      daemonDown = true;
     }
-    const merged = liveSynthesized.length > 0 ? [...liveSynthesized, ...sessions] : sessions;
 
     // Tag subagent worker sessions so the sidebar hides them. They stay in the
     // response so the parent's "open child" action can still resolve by id.
@@ -64,7 +80,7 @@ export async function GET(req: Request) {
         : session
     );
 
-    return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: runningIds.ids });
+    return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: runningIds, daemonDown });
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },

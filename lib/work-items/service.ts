@@ -622,6 +622,167 @@ export async function recordWorkItemMilestone(
   });
 }
 
+/** One attachment to persist into a work item's `attachments/` directory. */
+export interface WorkItemAttachmentFile {
+  name: string;
+  bytes: Uint8Array;
+}
+
+export interface AddWorkItemAttachmentsInput {
+  files: WorkItemAttachmentFile[];
+  actor?: WorkItemActor;
+  conversationId?: string;
+}
+
+const ATTACHMENT_SECTION_HEADING = "## 附件";
+const ATTACHMENT_IMAGE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".svg",
+]);
+
+function attachmentExtensionIndex(name: string): number {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? dot : name.length;
+}
+
+/** Keep the basename only; strip control characters and leading dots so the
+ * name is a safe flat file name (CJK names survive). Falls back when empty. */
+function sanitizeAttachmentName(raw: string, fallback: string): string {
+  const base = basename(raw.replaceAll("\\", "/"))
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/^\.+/, "")
+    .trim();
+  return base || fallback;
+}
+
+/** `report.png` colliding on disk (or within the batch) becomes `report-1.png`. */
+function dedupeAttachmentName(name: string, used: Set<string>): string {
+  if (!used.has(name)) return name;
+  const dot = attachmentExtensionIndex(name);
+  for (let suffix = 1; ; suffix++) {
+    const candidate = `${name.slice(0, dot)}-${suffix}${name.slice(dot)}`;
+    if (!used.has(candidate)) return candidate;
+  }
+}
+
+function attachmentMarkdownLink(name: string): string {
+  const extension = name.slice(attachmentExtensionIndex(name)).toLowerCase();
+  const label = name.replace(/[\[\]]/g, "");
+  const target = `attachments/${encodeURIComponent(name)}`;
+  return ATTACHMENT_IMAGE_EXTENSIONS.has(extension)
+    ? `![${label}](${target})`
+    : `[${label}](${target})`;
+}
+
+/** Maintain a single `## 附件` section at the README tail: create it when
+ * absent, otherwise append the new links inside it (before the next `## `
+ * heading). Already-listed links are not duplicated. */
+function upsertAttachmentSection(content: string, links: string[]): string {
+  if (links.length === 0) return content;
+  const lines = content.split("\n");
+  const headingIndex = lines.findIndex((line) => line.trim() === ATTACHMENT_SECTION_HEADING);
+  if (headingIndex === -1) {
+    const body = content.replace(/\n+$/, "");
+    return `${body}\n\n${ATTACHMENT_SECTION_HEADING}\n\n${links.join("\n")}\n`;
+  }
+  let sectionEnd = lines.length;
+  for (let index = headingIndex + 1; index < lines.length; index++) {
+    if (/^##\s/.test(lines[index])) {
+      sectionEnd = index;
+      break;
+    }
+  }
+  const before = lines.slice(0, headingIndex);
+  const existing = lines
+    .slice(headingIndex + 1, sectionEnd)
+    .filter((line) => line.trim() !== "" && !links.includes(line.trim()));
+  const after = lines.slice(sectionEnd);
+  const assembled = [
+    ...before,
+    ATTACHMENT_SECTION_HEADING,
+    "",
+    ...existing,
+    ...links,
+    ...(after.length ? [""] : []),
+    ...after,
+  ].join("\n");
+  return assembled.endsWith("\n") ? assembled : `${assembled}\n`;
+}
+
+/** Persist uploaded attachments into `<item>/attachments/` and reference them
+ * from a maintained `## 附件` section in README.md (the importer precedent:
+ * relative links render in the detail view and stay readable for the agent).
+ * Bumps the item revision when README changes, like updateWorkItemContent. */
+export async function addWorkItemAttachments(
+  workspaceId: string,
+  key: string,
+  input: AddWorkItemAttachmentsInput,
+): Promise<WorkItemDetail> {
+  const { path: workspacePath } = await getWorkspace(workspaceId);
+  if (!Array.isArray(input.files) || input.files.length === 0) {
+    throw new WorkItemValidationError("files must be a non-empty array");
+  }
+  input.files.forEach((file, index) => {
+    if (
+      !file
+      || typeof file.name !== "string"
+      || !file.name.trim()
+      || !(file.bytes instanceof Uint8Array)
+    ) {
+      throw new WorkItemValidationError(`files[${index}] must carry a name and bytes`);
+    }
+  });
+  return withWorkspaceWriteLock(workspacePath, async () => {
+    const current = await readWorkItem(workspacePath, key);
+    const attachmentsPath = join(current.path, "attachments");
+    await mkdir(attachmentsPath, { recursive: true });
+    const usedNames = new Set<string>(
+      await readdir(attachmentsPath).catch(() => [] as string[]),
+    );
+    const pending: Array<{ name: string; bytes: Uint8Array }> = [];
+    const writtenNames: string[] = [];
+    input.files.forEach((file, index) => {
+      const name = dedupeAttachmentName(
+        sanitizeAttachmentName(file.name, `attachment-${index + 1}`),
+        usedNames,
+      );
+      usedNames.add(name);
+      pending.push({ name, bytes: file.bytes });
+      writtenNames.push(name);
+    });
+    await Promise.all(
+      pending.map(({ name, bytes }) => writeFile(join(attachmentsPath, name), bytes)),
+    );
+    const nextContent = upsertAttachmentSection(
+      current.content,
+      writtenNames.map(attachmentMarkdownLink),
+    );
+    if (nextContent !== current.content) {
+      const next = structuredClone(current.item);
+      next.revision += 1;
+      next.updatedAt = new Date().toISOString();
+      await writeAtomic(join(current.path, "README.md"), nextContent);
+      await writeAtomic(join(current.path, "item.yaml"), serializeWorkItem(next));
+    }
+    await appendEvent(
+      current.path,
+      eventFor(
+        "work_item.attachment_added",
+        input.actor ?? "user",
+        input.conversationId,
+        { files: writtenNames },
+      ),
+    );
+    await commitWorkspaceChanges(workspacePath, `workspace: attach ${key}`);
+    return readWorkItem(workspacePath, key);
+  });
+}
+
 export async function trashWorkItem(
   workspaceId: string,
   key: string,

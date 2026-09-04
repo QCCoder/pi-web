@@ -10,7 +10,7 @@ import {
 } from "@/lib/file-paths";
 import type { GitFileStatus } from "@/lib/git-types";
 import { GitStatusBadge, type OpenFileOptions } from "./git-ui";
-import { getDirectoryCache, setDirectoryCache, invalidateDirectory } from "@/lib/stores/file-resource-cache";
+import { getDirectoryCache, setDirectoryCache, invalidateDirectory, invalidateUnderPrefix } from "@/lib/stores/file-resource-cache";
 import { useI18n } from "@/hooks/useI18n";
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -650,12 +650,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   useEffect(() => {
     const cwdChanged = prevCwdRef.current !== cwd;
     prevCwdRef.current = cwd;
-    // refreshKey/treeRefreshKey 变化时失效当前目录缓存（强制下次重新拉取）；
-    // cwd 变化（切 workspace）时不失效，以便切回时命中缓存。
+    // refreshKey/treeRefreshKey 变化时失效 cwd 整棵缓存子树（强制下次重新拉取）；
+    // 只失效根目录会让已展开的子目录继续命中旧缓存——删除/改名的文件一直挂在
+    // 树上（「删了不刷新」）。cwd 变化（切 workspace）时不失效，以便切回时命中缓存。
     const refreshChanged = prevRefreshTokenRef.current !== refreshToken;
     prevRefreshTokenRef.current = refreshToken;
     if (!cwdChanged && refreshChanged) {
-      invalidateDirectory(cwd);
+      invalidateUnderPrefix(cwd);
     }
 
     // Reset expanded state only when cwd changes, not on refreshKey bumps

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo } from "react";
+import { memo, useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { SkillMessageContent } from "./SkillMessageContent";
 import { copyText } from "@/lib/clipboard";
@@ -612,6 +612,45 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent
   return <MarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</MarkdownBody>;
 }
 
+/**
+ * 处理详情/思考块的展开状态按稳定 id 记在模块级。
+ *
+ * 同一个 toolCall / thinking 块在一次回合里会换多次 React 身份：流式气泡里的
+ * `stream-<i>` key → message_end 后进历史列表的 `<entryId>-<i>` key；“当前最后
+ * 一条 assistant”从 `process-final-*` 变成 `process-*`；分组容器 key 变化重挂。
+ * 组件内部 useState 在每次重挂时归零 —— 用户展开着的处理详情在 AI 每次新
+ * message_end 时都被收起。把展开态放到 id 键控的模块 Map 里，重挂后初始化时
+ * 读回，展开状态跟着内容走而不是跟着组件实例走。
+ */
+const blockExpandedStates = new Map<string, boolean>();
+const BLOCK_EXPANDED_STATES_CAP = 4000;
+
+function rememberBlockExpanded(key: string, next: boolean): void {
+  if (blockExpandedStates.size >= BLOCK_EXPANDED_STATES_CAP) blockExpandedStates.clear();
+  blockExpandedStates.set(key, next);
+}
+
+function usePersistentExpanded(stateKey: string | undefined): [boolean, (v: boolean | ((prev: boolean) => boolean)) => void] {
+  const [expanded, setExpanded] = useState(() => (stateKey !== undefined ? blockExpandedStates.get(stateKey) : undefined) ?? false);
+  const update = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    setExpanded((prev) => {
+      const next = typeof v === "function" ? v(prev) : v;
+      if (stateKey !== undefined) rememberBlockExpanded(stateKey, next);
+      return next;
+    });
+  }, [stateKey]);
+  return [expanded, update];
+}
+
+/** ChatWindow 用：这组 toolCall 里是否有用户展开着的（流式气泡里展开、message_end
+ *  后块移入分组时，分组需要跟着张开，否则内容“藏进”折叠头里看起来仍是被收起）。 */
+export function anyToolCallBlockExpanded(toolCallIds: string[]): boolean {
+  for (const id of toolCallIds) {
+    if (blockExpandedStates.get(id)) return true;
+  }
+  return false;
+}
+
 function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
@@ -620,7 +659,11 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
   blockIndex: number;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
+  // 展开状态持久到 `${sessionId}:${entryId}:${blockIndex}`（流式阶段无 entryId 时
+  // 退化为普通 state）：气泡→历史重挂后不再被收起。
+  const [expanded, setExpanded] = usePersistentExpanded(
+    sessionId && entryId !== undefined ? `${sessionId}:${entryId}:${blockIndex}` : undefined,
+  );
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -811,7 +854,9 @@ function DelegateTaskEntryRow({ entry, onOpenSession }: { entry: DelegateTaskEnt
 }
 
 function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
-  const [expanded, setExpanded] = useState(false);
+  // 展开状态持久到 toolCallId（流式气泡与历史列表里同一次调用的 id 一致）：
+  // AI 继续回复时块从气泡移进历史/分组，展开不丢。
+  const [expanded, setExpanded] = usePersistentExpanded(block.toolCallId);
   const inputStr = JSON.stringify(block.input, null, 2);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;

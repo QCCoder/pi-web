@@ -41,7 +41,7 @@ loop-engineering 的解法是**文件即程序**：协议文件（LOOP.md/STATE.
 - **第二阶段（kit 验证后另行设计）**：
   1. pi-web 的 `lib/subagent/` 切换到同一社区包，删除自有实现；
   2. `npx pi-loop init` CLI 与模式库打磨、开源发布；
-  3. work-items / kb_search 可选打包下沉为 pi package（域工具外溢）。
+  3. ~~work-items / kb_search 可选打包下沉为 pi package（域工具外溢）~~ —— **已裁定不做（2026-08-30，见 rollout 文档）**：域工具即 pi-web 的存在价值（对齐 D6「通用能力下沉、域工具保留」），边界即终态。
 
 ## 4. Kit 文件规范
 

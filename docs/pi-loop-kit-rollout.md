@@ -76,6 +76,7 @@
 - [x] 社区包审计（§6 清单，第一周）：`@henryqw/pi-subagent` **PASS-with-notes**（报告 `docs/pi-loop-kit-subagent-audit.md`；超时杀静默构建 → 已由 `pi-subagent-host.ts` 显式超时策略缓解，角色目录/`pi-task-models.json` 前置已在切换中处理；pi peer 前置已由 A1 满足）
 - [ ] npm swap（**用户裁定顺延，2026-08-30**：tgz 钉住为稳定工件、不发布远端，上游 PR 与 npm 替换未来再决策）：若重启该决策，把 `package.json` 的 `file:` tgz pin 换回 npm 版本（A3 收尾）
 - [ ] phase 2 其余：`npx pi-loop init` CLI；STATE.md viewer；ledger token 对账（D13）
+- [x] ~~phase 2 第 3 项：work-items / kb_search 可选打包下沉为 pi package~~ **裁定不做（2026-08-30 用户裁定）**：域工具即 pi-web 的存在价值——work-items 耦合 workspace manifest/归档级联/装配层，禅道 importer 组织私有，kb_search 有 L0（read/ls/grep）兜底；对齐 D6「通用能力下沉、域工具保留」，边界即终态，不再漂移
 - [ ] phase 2：并发 tick 下 busy 检查竞态（两个 await 间隔，>30s 停顿可击穿；同分钟同 loop 有 emittedSlots 兜底）
 - [ ] phase 2：gate 已答复后会话留存策略（hasPendingGate 只看"盖过"，不管"答没答"——可结合工作项终态或答复里程碑）
 

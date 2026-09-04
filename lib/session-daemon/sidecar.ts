@@ -72,15 +72,64 @@ async function probeHealth(baseUrl: string, timeoutMs: number): Promise<boolean>
 
 type StartState = "attached" | "spawned";
 
+/** How long a spawned daemon gets to answer /health before the spawn is
+ *  declared failed. 15s covers a cold jiti-compile start of bin/pi-daemon.js. */
+const SPAWN_HEALTH_TIMEOUT_MS = 15_000;
+/** After a failed spawn, block retries for this long so a daemon that cannot
+ *  start (broken checkout, port hijack) fails requests fast instead of
+ *  stalling every caller for the full spawn-health window. */
+const SPAWN_RETRY_COOLDOWN_MS = 10_000;
+/** /health probe timeout on the attach path — the daemon answers in
+ *  single-digit ms when healthy (see lib/daemon/client.ts). */
+const PROBE_TIMEOUT_MS = 1_000;
+/** Poll interval while waiting for a spawned daemon to come up. */
+const SPAWN_POLL_INTERVAL_MS = 250;
+
 interface SidecarGlobals {
-  __piSessionDaemonStart?: Promise<StartState>;
+  /** In-flight spawn attempt — dedupes CONCURRENT callers only; it is cleared
+   *  on settle so success is never cached (a daemon that dies later must be
+   *  re-detected by the next call's probe, not papered over by a stale
+   *  "started" promise). */
+  __piSessionDaemonSpawn?: Promise<StartState>;
+  /** Last spawn failure + when, for the retry cooldown. */
+  __piSidecarLastFailure?: { at: number; error: unknown };
 }
 
 const globals = globalThis as typeof globalThis & SidecarGlobals;
 
-async function startOnce(): Promise<StartState> {
-  const baseUrl = daemonBaseUrl();
-  if (await probeHealth(baseUrl, 1_000)) return "attached";
+/** Injectable seams for the lifecycle tests (lib/session-daemon/sidecar.test.mjs):
+ *  probe/spawn/clock/sleep are the real world, defaults are production. */
+export interface EnsureSidecarDeps {
+  probe?: (baseUrl: string, timeoutMs: number) => Promise<boolean>;
+  spawnDaemon?: (entry: string, baseUrl: string) => void;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  spawnHealthTimeoutMs?: number;
+  spawnRetryCooldownMs?: number;
+}
+
+function defaultSpawnDaemon(entry: string, baseUrl: string): void {
+  const child = spawn(process.execPath, [entry], {
+    detached: true,
+    stdio: "ignore",
+    env: sidecarSpawnEnv(baseUrl),
+  });
+  child.unref();
+}
+
+async function attemptSpawn(baseUrl: string, deps: EnsureSidecarDeps): Promise<StartState> {
+  const {
+    probe = probeHealth,
+    spawnDaemon = defaultSpawnDaemon,
+    now = Date.now,
+    sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+    spawnHealthTimeoutMs = SPAWN_HEALTH_TIMEOUT_MS,
+    spawnRetryCooldownMs = SPAWN_RETRY_COOLDOWN_MS,
+  } = deps;
+
+  // Fail fast inside the cooldown after a recent spawn failure.
+  const lastFailure = globals.__piSidecarLastFailure;
+  if (lastFailure && now() - lastFailure.at < spawnRetryCooldownMs) throw lastFailure.error;
 
   if (!spawnableDaemonUrl(baseUrl)) {
     throw new Error(
@@ -98,34 +147,50 @@ async function startOnce(): Promise<StartState> {
     throw new Error("bin/pi-daemon.js not found — cannot spawn the session daemon sidecar");
   }
 
-  const child = spawn(process.execPath, [entry], {
-    detached: true,
-    stdio: "ignore",
-    env: sidecarSpawnEnv(baseUrl),
-  });
-  child.unref();
+  spawnDaemon(entry, baseUrl);
 
   // Wait for the spawned daemon to become healthy before declaring success.
   // The losing side of a spawn race exits quietly on EADDRINUSE (see bin).
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (await probeHealth(baseUrl, 1_000)) return "spawned";
-    await new Promise((resolve) => setTimeout(resolve, 250));
+  const deadline = now() + spawnHealthTimeoutMs;
+  while (now() < deadline) {
+    if (await probe(baseUrl, PROBE_TIMEOUT_MS)) return "spawned";
+    await sleep(SPAWN_POLL_INTERVAL_MS);
   }
-  throw new Error(`session daemon sidecar spawned (${entry}) but did not become healthy at ${baseUrl} within 15s`);
+  throw new Error(
+    `session daemon sidecar spawned (${entry}) but did not become healthy at ${baseUrl}` +
+    ` within ${spawnHealthTimeoutMs}ms`,
+  );
 }
 
-/** Ensure the session daemon is running: attach if healthy, otherwise spawn a
- *  detached sidecar and wait for its /health. Concurrent callers share one
- *  in-flight promise; a failed start clears the guard so the next caller
- *  retries. Set PI_SESSION_DAEMON_DISABLED=1 to opt out entirely. */
-export async function ensureSessionDaemonStarted(): Promise<StartState> {
+/** Ensure the session daemon is running. EVERY call probes /health first and
+ *  attaches when healthy (single-digit ms on localhost); only an unhealthy
+ *  probe leads to a spawn — so a daemon that crashes is revived by the next
+ *  request through here instead of leaving the web UI 500ing until a manual
+ *  restart. Concurrent callers share one in-flight spawn attempt; a failed
+ *  spawn is remembered for a short cooldown so requests fail fast while the
+ *  daemon cannot start, then retried. Success is never cached. Set
+ *  PI_SESSION_DAEMON_DISABLED=1 to opt out entirely. */
+export async function ensureSessionDaemonStarted(deps: EnsureSidecarDeps = {}): Promise<StartState> {
   if (process.env.PI_SESSION_DAEMON_DISABLED === "1") return "attached";
-  if (!globals.__piSessionDaemonStart) {
-    globals.__piSessionDaemonStart = startOnce().catch((error: unknown) => {
-      globals.__piSessionDaemonStart = undefined;
+  const { probe = probeHealth } = deps;
+  const baseUrl = daemonBaseUrl();
+  if (await probe(baseUrl, PROBE_TIMEOUT_MS)) return "attached";
+  if (globals.__piSessionDaemonSpawn) return globals.__piSessionDaemonSpawn;
+
+  const attempt = attemptSpawn(baseUrl, deps)
+    .catch((error: unknown) => {
+      globals.__piSidecarLastFailure = { at: (deps.now ?? Date.now)(), error };
       throw error;
+    })
+    .finally(() => {
+      if (globals.__piSessionDaemonSpawn === attempt) globals.__piSessionDaemonSpawn = undefined;
     });
-  }
-  return globals.__piSessionDaemonStart;
+  globals.__piSessionDaemonSpawn = attempt;
+  return attempt;
+}
+
+/** Reset module-global sidecar state between lifecycle tests. */
+export function resetSidecarStateForTest(): void {
+  globals.__piSessionDaemonSpawn = undefined;
+  globals.__piSidecarLastFailure = undefined;
 }

@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import { createPortal } from "react-dom";
 import { MarkdownBody } from "./MarkdownBody";
 import type {
@@ -112,6 +113,18 @@ const PHASE_OPTIONS: WorkItemPhase[] = [
   "complete",
 ];
 const PRIORITY_OPTIONS: WorkItemPriority[] = ["P0", "P1", "P2", "P3"];
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
 
 const CAPABILITY_LABELS: Record<string, string> = {
   sessions: "会话",
@@ -252,6 +265,9 @@ export function WorkspaceManager({
   const [workItemDescription, setWorkItemDescription] = useState("");
   const [workItemPriority, setWorkItemPriority] = useState<WorkItemPriority>("P2");
   const [workItemRepositories, setWorkItemRepositories] = useState<string[]>([]);
+  // 新建表单的待上传附件（File 对象，创建成功后走 work-items attachments 路由）。
+  const [workItemFiles, setWorkItemFiles] = useState<File[]>([]);
+  const workItemFileInputRef = useRef<HTMLInputElement>(null);
   const [contentDraft, setContentDraft] = useState("");
   const [contentEditing, setContentEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -276,6 +292,7 @@ export function WorkspaceManager({
 
   const openCreateWorkItem = useCallback((type?: WorkItemType) => {
     if (type) setWorkItemType(type);
+    setWorkItemFiles([]);
     setWorkItemRepositories(
       selectedWorkspace?.repositories
         .filter((repository) => repository.status === "active" && repository.kind === "code")
@@ -642,7 +659,7 @@ export function WorkspaceManager({
     setSaving(true);
     setError(null);
     try {
-      const detail = await responseJson<WorkItemDetail>(
+      let detail = await responseJson<WorkItemDetail>(
         await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/work-items`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -655,10 +672,31 @@ export function WorkspaceManager({
           }),
         }),
       );
+      if (workItemFiles.length > 0) {
+        // 附件上到刚建的工作项下（attachments/ + README 引用）。失败不静默丢：
+        // 工作项已创建——报错并保留它，附件可后续在工作台·文件里补传。
+        try {
+          const formData = new FormData();
+          for (const file of workItemFiles) {
+            formData.append("files", file, file.name);
+          }
+          detail = await responseJson<WorkItemDetail>(
+            await fetch(
+              `/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/work-items/${encodeURIComponent(detail.item.key)}/attachments`,
+              { method: "POST", body: formData },
+            ),
+          );
+        } catch (attachmentError) {
+          setError(
+            `工作项 ${detail.item.key} 已创建，但附件上传失败：${attachmentError instanceof Error ? attachmentError.message : String(attachmentError)}`,
+          );
+        }
+      }
       setCreateWorkItemOpen(false);
       setWorkItemTitle("");
       setWorkItemDescription("");
       setWorkItemRepositories([]);
+      setWorkItemFiles([]);
       setSelectedWorkItem(detail);
       setContentDraft(detail.content);
       await loadWorkItems(selectedWorkspaceId);
@@ -672,12 +710,22 @@ export function WorkspaceManager({
     loadWorkItems,
     selectedWorkspaceId,
     workItemDescription,
+    workItemFiles,
     workItemPriority,
     workItemRepositories,
     workItemTitle,
     workItemType,
     onWorkItemsChanged,
   ]);
+
+  /** 附件选择：允许多次点击叠加；清空 value 使同名文件移除后可重选。 */
+  const handleWorkItemFilesPicked = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(event.target.files ?? []);
+    if (picked.length > 0) {
+      setWorkItemFiles((current) => [...current, ...picked]);
+    }
+    event.target.value = "";
+  }, []);
 
   /** 「按合同执行」/「收养续跑」（D11 客户端预填）：onRunContract 写入新会话
    *  composer 草稿并切到该 workspace 的 chat 视图（预填不会失败）；这里仅
@@ -809,9 +857,9 @@ export function WorkspaceManager({
   const workItemSplitMode = workItemSplit != null;
 
   // Shared narrow-layout compaction (single-column form grids, wrapping
-  // toolbars, 2-line work-item rows, stacked detail header). Used by BOTH the
-  // mobile media query and — in `panel` mode — a container query, because the
-  // desktop middle column is drag-resizable (200–560px) while the full
+  // toolbars, phase-badge-hidden work-item meta line, stacked detail header).
+  // Used by BOTH the mobile media query and — in `panel` mode — a container
+  // query, because the desktop middle column is drag-resizable (200–560px) while the full
   // work-item grid alone needs ~410px.
   const compactStyles = `
           .workspace-form-grid { grid-template-columns: 1fr; }
@@ -827,12 +875,7 @@ export function WorkspaceManager({
           .work-item-filter .workspace-manager-tab { flex: 0 0 auto; }
           .work-item-toolbar > .workspace-action { flex: 0 0 auto; }
           .workspace-search { max-width: none; order: 3; margin-left: 0; flex: 1 1 100%; }
-          .work-item-row {
-            grid-template-columns: auto minmax(0, 1fr) auto;
-            gap: 7px;
-          }
           .work-item-row .work-item-badge + .work-item-badge { display: none; }
-          .work-item-row time { grid-column: 2; color: var(--text-dim); font-size: 10px; }
           .work-item-fields { display: grid; grid-template-columns: 1fr 1fr; }
           .workspace-field-compact select { min-width: 0; }
           .work-item-event { grid-template-columns: 92px 1fr; }
@@ -1061,15 +1104,14 @@ export function WorkspaceManager({
         .work-item-list { display: grid; gap: 7px; }
         .work-item-row {
           display: grid;
-          grid-template-columns: 88px minmax(0, 1fr) 88px 100px 70px;
-          align-items: center;
-          gap: 10px;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 5px;
           width: 100%;
           border: 1px solid var(--border);
           border-radius: 9px;
           background: var(--bg);
           color: var(--text);
-          padding: 10px 12px;
+          padding: 9px 12px;
           text-align: left;
           cursor: pointer;
         }
@@ -1088,6 +1130,8 @@ export function WorkspaceManager({
           background: color-mix(in srgb, var(--accent) 6%, var(--bg));
         }
         .work-item-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+        .work-item-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+        .work-item-meta time { margin-left: auto; color: var(--text-dim); font-size: 10px; white-space: nowrap; }
         .work-item-badge {
           display: inline-flex;
           justify-content: center;
@@ -1568,6 +1612,55 @@ export function WorkspaceManager({
                             </div>
                           </div>
                         )}
+                        <div className="workspace-field" style={{ gridColumn: "1 / -1" }}>
+                          <span>附件</span>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                            <button
+                              type="button"
+                              className="workspace-action"
+                              onClick={() => workItemFileInputRef.current?.click()}
+                            >
+                              + 添加附件
+                            </button>
+                            {workItemFiles.map((file, index) => (
+                              <span
+                                key={`${file.name}-${file.size}-${index}`}
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 4,
+                                  border: "1px solid var(--border)",
+                                  borderRadius: 999,
+                                  padding: "2px 8px",
+                                  fontSize: 12,
+                                  color: "var(--text-muted)",
+                                  maxWidth: "100%",
+                                }}
+                              >
+                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {file.name} · {formatFileSize(file.size)}
+                                </span>
+                                <button
+                                  type="button"
+                                  aria-label={`移除附件 ${file.name}`}
+                                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text-dim)", lineHeight: 1 }}
+                                  onClick={() =>
+                                    setWorkItemFiles((current) => current.filter((_, i) => i !== index))
+                                  }
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+                            <input
+                              ref={workItemFileInputRef}
+                              type="file"
+                              multiple
+                              hidden
+                              onChange={handleWorkItemFilesPicked}
+                            />
+                          </div>
+                        </div>
                       </div>
                       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
                         <button className="workspace-action" onClick={() => setCreateWorkItemOpen(false)}>取消</button>
@@ -1620,18 +1713,20 @@ export function WorkspaceManager({
                         onClick={() => void loadWorkItem(selectedWorkspace.id, item.key)}
                         data-active={selectedWorkItem?.item.key === item.key}
                       >
-                        <span className="work-item-key">
-                          {item.key}
-                          {item.external && (
-                            <span className="work-item-source" title={`来自${sourceLabel(item.external.source)} #${item.external.sourceId}`}>
-                              {sourceLabel(item.external.source)}
-                            </span>
-                          )}
-                        </span>
                         <span className="work-item-title">{item.title}</span>
-                        <span className="work-item-badge">{STATUS_LABELS[item.status]}</span>
-                        <span className="work-item-badge">{PHASE_LABELS[item.phase]}</span>
-                        <time>{formatDate(item.updatedAt)}</time>
+                        <span className="work-item-meta">
+                          <span className="work-item-key">
+                            {item.key}
+                            {item.external && (
+                              <span className="work-item-source" title={`来自${sourceLabel(item.external.source)} #${item.external.sourceId}`}>
+                                {sourceLabel(item.external.source)}
+                              </span>
+                            )}
+                          </span>
+                          <span className="work-item-badge">{STATUS_LABELS[item.status]}</span>
+                          <span className="work-item-badge">{PHASE_LABELS[item.phase]}</span>
+                          <time>{formatDate(item.updatedAt)}</time>
+                        </span>
                       </button>
                     ))}
                     {!itemsLoading && visibleWorkItems.length === 0 && (

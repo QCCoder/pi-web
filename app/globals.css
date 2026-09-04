@@ -92,8 +92,61 @@ html, body {
   overscroll-behavior: none;
 }
 
+/* 应用根高度统一走 --app-vh（唯一消费点，见下）：
+   - 现代内核：var(--app-height, 100dvh) —— 键盘开启时压到可视区高度，其余时候 dvh；
+   - 不支持 dvh 的老内核（Windows 微信/企业微信内置浏览器等 Chromium<108）：回落
+     var(--app-height, 100%)。不能直接写 height: var(--app-height, 100dvh) —— 老内核
+     里 var() 的 fallback 在【计算值阶段】失效（invalid at computed-value time →
+     height:auto），整条高度链塌成内容高度，输入框悬在半空、下方大片空白（旧代码
+     直写 100dvh 是解析期丢弃，能回落到 html,body{height:100%}，反而是好的）；
+     用 @supports 分层 + % 回落，老内核拿到的一定是合法值。
+   - hook 在 --app-height 上写的是纯 px，老触屏内核（X5 无 visualViewport 走
+     innerHeight 轮询）同样能压短。 */
+:root {
+  --app-vh: var(--app-height, 100%);
+}
+@supports (height: 100dvh) {
+  :root {
+    --app-vh: var(--app-height, 100dvh);
+  }
+}
+
 body {
-  height: 100dvh;
+  /* 移动端键盘弹起时由 useVisualViewportKeyboard 设 --app-height（经 --app-vh
+     间接消费）压到可视区高度（消除键盘与输入框之间的空白）；其余时候回到
+     100dvh（老内核 100%）。 */
+  height: var(--app-vh);
+}
+
+/* 键盘开启时：html+body（正常流，不用 fixed —— fixed 锚定语义在各内核键盘
+   场景下不一致）压到可视区高度，文档总高 = 可视区；body 再用 translateY 抵消
+   浏览器 reveal 平移顶起的量（--app-lift，由 hook 实测 html.getBoundingClientRect
+   得出 —— content-inset 平移下 scrollY/offsetTop 都是 0，只有 rect 量得到）。
+   两者叠加后应用精确覆盖可视区：键盘上方不可能再有空白。
+   height 必须 !important：压过 html 的 100% 和 body 的内联样式。 */
+html.pi-keyboard-open,
+html.pi-keyboard-open body {
+  height: var(--app-vh) !important;
+  overflow: hidden;
+}
+html.pi-keyboard-open body {
+  transform: translateY(var(--app-lift, 0px));
+}
+/* 键盘开启时底部 tab 栏直接隐藏（微信式）：不给它“顶上去”浮在键盘上方 ——
+   tab 栏固定在屏幕底部的语义由键盘盖住它来表达，输入框直接贴键盘顶，
+   也省出 52px 给消息区；键盘收起自动回来。 */
+html.pi-keyboard-open .mobile-bottom-tabbar {
+  display: none !important;
+}
+
+/* iOS Safari 聚焦 font-size<16px 的输入框时会自动放大页面（viewport scale 变化
+   导致布局错乱）。触屏设备上把文本输入控件统一抬到 ≥16px。 */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
 }
 
 ::-webkit-scrollbar {
@@ -915,6 +968,44 @@ span.linenumber {
   background: var(--accent);
   width: 2px;
   margin-left: -1px;
+  opacity: 1;
+}
+
+/* Workbench 会话/文件 vertical split handle (workbench view, both sections
+   open). Same pattern as the sidebar handle: ::before is the invisible grab
+   zone, ::after the visible guide line that brightens on hover/drag.
+   touch-action:none keeps touch drags from scrolling instead of resizing. */
+.workbench-split-handle {
+  flex-shrink: 0;
+  height: 7px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+  z-index: 5;
+  touch-action: none;
+}
+.workbench-split-handle::before {
+  content: "";
+  position: absolute;
+  inset: -5px 0;             /* 17px grab zone straddling the boundary */
+}
+.workbench-split-handle::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 50%;
+  height: 1px;
+  margin-top: -0.5px;
+  background: var(--border);
+  transition: background 0.12s ease, height 0.12s ease, opacity 0.12s ease;
+  opacity: 0.7;
+}
+.workbench-split-handle:hover::after,
+.workbench-split-handle:active::after {
+  background: var(--accent);
+  height: 2px;
+  margin-top: -1px;
   opacity: 1;
 }
 

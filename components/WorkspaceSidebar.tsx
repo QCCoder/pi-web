@@ -71,6 +71,26 @@ interface WorkbenchSectionState {
 
 const WORKBENCH_SECTIONS_DEFAULT: WorkbenchSectionState = { sessions: true, files: false };
 
+/** 会话/文件高度分割（占工作台主体高度的百分比）。未拖动过时为 null → 默认 40%。 */
+const WORKBENCH_SPLIT_DEFAULT_PCT = 40;
+const WORKBENCH_SPLIT_MIN_PCT = 15;
+const WORKBENCH_SPLIT_MAX_PCT = 85;
+
+/** Read `pi-workbench-split:<wsId>` defensively: bad values fall back to the
+ *  default 40% (null). Dragging the split handle writes the percentage;
+ *  double-clicking it clears the key and resets. */
+function readWorkbenchSplit(workspaceId: string): number | null {
+  const raw = localStorage.getItem(`pi-workbench-split:${workspaceId}`);
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.min(WORKBENCH_SPLIT_MAX_PCT, Math.max(WORKBENCH_SPLIT_MIN_PCT, parsed));
+}
+
+function clampWorkbenchSplit(pct: number): number {
+  return Math.min(WORKBENCH_SPLIT_MAX_PCT, Math.max(WORKBENCH_SPLIT_MIN_PCT, pct));
+}
+
 /** Read `pi-workbench-sections:<wsId>` defensively: bad JSON or missing keys fall
  *  back to the per-key default (会话 open, 文件 collapsed — the file tree is
  *  opt-in and collapsed by default, pinned to the panel bottom). */
@@ -391,6 +411,13 @@ export function WorkspaceSidebar({
     files: true,
   });
   const [selectedKnowledgeRepoId, setSelectedKnowledgeRepoId] = useState<string | null>(null);
+  // 会话/文件分割高度（百分比，null → 默认 40%）与拖拽测量用的两个 ref。
+  const [splitPct, setSplitPct] = useState<number | null>(null);
+  const workbenchBodyRef = useRef<HTMLDivElement>(null);
+  const sessionsBodyRef = useRef<HTMLDivElement>(null);
+  // 文件头部 ⟳ 手动刷新：叠加在 shell 驱动的 explorerRefreshKey 上，同时刷
+  // 文件树缓存与 git 状态（外部删除/编辑等无事件的变化只能靠它）。
+  const [manualExplorerKey, setManualExplorerKey] = useState(0);
 
   const hasCapability = useCallback(
     (capability: WorkspaceSummary["capabilities"][number]) =>
@@ -399,7 +426,7 @@ export function WorkspaceSidebar({
   );
   const { status: gitStatus, gitStatusByPath, changedDirectoryPaths } = useGitStatus(
     activeWorkspace?.path ?? null,
-    explorerRefreshKey,
+    explorerRefreshKey + manualExplorerKey,
   );
   const changesCount = gitStatus ? gitStatus.groups.reduce((total, group) => total + group.files.length, 0) : 0;
   const isGitRepo = Boolean(gitStatus?.isGitRepository);
@@ -438,9 +465,11 @@ export function WorkspaceSidebar({
   useEffect(() => {
     if (!activeWorkspace) {
       setWorkbenchSections(WORKBENCH_SECTIONS_DEFAULT);
+      setSplitPct(null);
       return;
     }
     setWorkbenchSections(readWorkbenchSections(activeWorkspace.id));
+    setSplitPct(readWorkbenchSplit(activeWorkspace.id));
   }, [activeWorkspace]);
 
   const handleSelectExplorerTab = useCallback((tab: "files" | "changes") => {
@@ -477,6 +506,51 @@ export function WorkspaceSidebar({
     toggleWorkbenchSection("files", false); // fix(review F1): ensure-open——restore 前初态不可信，幂等翻转
     setExplorerTab("files"); // fix(review F2): 持久化的「改动」分段会吞掉 reveal，联动切回「文件」
   }, [openFilesRequest, toggleWorkbenchSection, setExplorerTab]);
+
+  // —— 会话/文件分割拖拽（pointer 事件，鼠标/触屏同路径；双击重置为默认 40%）——
+  // 起拖时实测会话列表当前高度得出起始百分比，拖动中按 ΔY/容器高换算，避免
+  // 头部高度换算；结束时才写 localStorage（拖动中只改内存态）。
+  const resetWorkbenchSplit = useCallback(() => {
+    setSplitPct(null);
+    if (activeWorkspace) {
+      localStorage.removeItem(`pi-workbench-split:${activeWorkspace.id}`);
+    }
+  }, [activeWorkspace]);
+
+  const startWorkbenchSplitDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const body = workbenchBodyRef.current;
+    const sessionsBody = sessionsBodyRef.current;
+    if (!body || !sessionsBody) return;
+    event.preventDefault();
+    const bodyHeight = body.getBoundingClientRect().height;
+    if (bodyHeight <= 0) return;
+    const startY = event.clientY;
+    const startPct = (sessionsBody.getBoundingClientRect().height / bodyHeight) * 100;
+    let latest = clampWorkbenchSplit(startPct);
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (move: PointerEvent) => {
+      latest = clampWorkbenchSplit(startPct + ((move.clientY - startY) / bodyHeight) * 100);
+      setSplitPct(latest);
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+      if (activeWorkspace) {
+        localStorage.setItem(`pi-workbench-split:${activeWorkspace.id}`, String(Math.round(latest * 10) / 10));
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  }, [activeWorkspace]);
+
 
   // Knowledge bundles are the panel-facing repo list — code repos have no
   // standalone view anymore (browse in the workbench file tree, manage in
@@ -554,11 +628,12 @@ export function WorkspaceSidebar({
   const renderActiveView = (): ReactNode => {
     switch (activeView) {
       case "workbench":
-        // 工作台：会话（上）+ 文件（下）两个可折叠分段。两段都展开时会话固定 40%
-        // 占比内部滚动（不随内容伸缩，保证两段高度稳定）；文件默认收起——收起时只剩
+        // 工作台：会话（上）+ 文件（下）两个可折叠分段。两段都展开时会话占
+        // 分割高度（默认 40%，可拖中间的分割手柄调整，双击重置）内部滚动
+        // （不随内容伸缩，保证两段高度稳定）；文件默认收起——收起时只剩
         // 头部贴在面板底部（marginTop:auto 吸收剩余空间），会话列表占满剩余高度。
         return (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+          <div ref={workbenchBodyRef} style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <WorkbenchSectionHeader
               label="会话"
               count={sessions.length}
@@ -566,7 +641,14 @@ export function WorkspaceSidebar({
               onToggle={() => toggleWorkbenchSection("sessions", workbenchSections.sessions)}
             />
             {workbenchSections.sessions && (
-              <div style={{ flex: workbenchSections.files ? "0 0 40%" : "1 1 0", minHeight: 0, overflowY: "auto" }}>
+              <div
+                ref={sessionsBodyRef}
+                style={{
+                  flex: workbenchSections.files ? `0 0 ${splitPct ?? WORKBENCH_SPLIT_DEFAULT_PCT}%` : "1 1 0",
+                  minHeight: 0,
+                  overflowY: "auto",
+                }}
+              >
                 {sessions.map((session) => (
                   <SessionRow
                     key={session.id}
@@ -585,6 +667,16 @@ export function WorkspaceSidebar({
                 )}
               </div>
             )}
+            {workbenchSections.sessions && workbenchSections.files && (
+              <div
+                className="workbench-split-handle"
+                role="separator"
+                aria-orientation="horizontal"
+                title="拖动调整会话/文件高度（双击重置）"
+                onPointerDown={startWorkbenchSplitDrag}
+                onDoubleClick={resetWorkbenchSplit}
+              />
+            )}
             <div
               style={{
                 flex: workbenchSections.files ? "1 1 0" : "0 0 auto",
@@ -595,21 +687,51 @@ export function WorkspaceSidebar({
                 overflow: "hidden",
               }}
             >
-              {/* 文件段可折叠、默认收起：展开时占余下 ~60%，头部带 [ 文件 | 改动 ]
-                  分段（收起时不渲染分段，只剩标题条贴底）。 */}
+              {/* 文件段可折叠、默认收起：展开时占余下高度，头部带 [ 文件 | 改动 ]
+                  分段（非 git 目录无分段）+ ⟳ 手动刷新（外部删除/编辑无事件，
+                  agent 回合结束才会自动刷新一次）。收起时不渲染，只剩标题条贴底。 */}
               <WorkbenchSectionHeader
                 label="文件"
                 open={workbenchSections.files}
                 onToggle={() => toggleWorkbenchSection("files", workbenchSections.files)}
               >
-                {isGitRepo && workbenchSections.files && (
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <ExplorerSegmentedTabs
-                      active={effectiveExplorerTab}
-                      changesCount={changesCount}
-                      onSelect={handleSelectExplorerTab}
-                    />
-                  </div>
+                {workbenchSections.files && (
+                  <>
+                    {isGitRepo && (
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <ExplorerSegmentedTabs
+                          active={effectiveExplorerTab}
+                          changesCount={changesCount}
+                          onSelect={handleSelectExplorerTab}
+                        />
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setManualExplorerKey((key) => key + 1)}
+                      title="刷新文件树与改动状态"
+                      aria-label="刷新文件树与改动状态"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 24,
+                        height: 24,
+                        padding: 0,
+                        flexShrink: 0,
+                        border: "1px solid var(--border)",
+                        borderRadius: 6,
+                        background: "transparent",
+                        color: "var(--text-dim)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M23 4v6h-6" />
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                      </svg>
+                    </button>
+                  </>
                 )}
               </WorkbenchSectionHeader>
               {workbenchSections.files && (
@@ -624,7 +746,7 @@ export function WorkspaceSidebar({
                     <FileExplorer
                       cwd={activeWorkspace.path}
                       onOpenFile={onOpenFile}
-                      refreshKey={explorerRefreshKey}
+                      refreshKey={explorerRefreshKey + manualExplorerKey}
                       gitStatusByPath={gitStatusByPath}
                       changedDirectoryPaths={changedDirectoryPaths}
                       reveal={filesReveal ?? undefined}
@@ -683,7 +805,7 @@ export function WorkspaceSidebar({
                     <FileExplorer
                       cwd={joinFilePath(activeWorkspace.path, effectiveKnowledgeRepo.path)}
                       onOpenFile={onOpenFile}
-                      refreshKey={explorerRefreshKey}
+                      refreshKey={explorerRefreshKey + manualExplorerKey}
                       gitStatusByPath={EMPTY_GIT_STATUS_BY_PATH}
                       changedDirectoryPaths={EMPTY_CHANGED_DIRECTORY_PATHS}
                     />

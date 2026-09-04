@@ -10,6 +10,13 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import { sendAgentCommand } from "@/lib/agent-client";
+import {
+  createScrollFollowState,
+  handleScrollEvent,
+  noteProgrammaticScroll,
+  noteUserScrollIntent,
+  shouldFollowStream,
+} from "@/lib/chat-scroll-follow";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { getCachedSession, setCachedSession, dropCachedSession, sessionMessagesCache, updateCachedSessionData, makeMinimalSessionData } from "@/lib/stores/session-messages-cache";
@@ -157,10 +164,9 @@ export interface UseAgentSessionOptions {
 
 export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
-const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
+/** 滚动跟随判定常量与决策逻辑在 lib/chat-scroll-follow.ts（纯逻辑，与测试共用）。 */
 /** 缓存命中且距上次加载不足此值时，纯用缓存不发请求（疯狂切换去重）。 */
 const SESSION_REFETCH_THRESHOLD_MS = 1200;
-const USER_SCROLL_INTENT_MS = 1200;
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
@@ -170,6 +176,12 @@ const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
+/** subagent 子会话观看轮询：文件活跃时的间隔。 */
+const SUBAGENT_CHILD_POLL_MS = 3_000;
+/** 子会话文件长时间无变化后的降频间隔（静默构建期不断流也不轰炸）。 */
+const SUBAGENT_CHILD_POLL_IDLE_MS = 30_000;
+/** 连续无变化超过此时长后降频。 */
+const SUBAGENT_CHILD_POLL_DECAY_AFTER_MS = 120_000;
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 
@@ -375,10 +387,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const initialScrollDoneRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
-  const completionScrollAllowedRef = useRef(true);
+  /** 流式跟随决策状态（allowed / lastScrollTop / 意图窗 / 忽略窗）——见 lib/chat-scroll-follow.ts。 */
+  const scrollFollowRef = useRef(createScrollFollowState());
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
-  const userScrollIntentUntilRef = useRef(0);
-  const ignoreProgrammaticScrollUntilRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
@@ -492,6 +503,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setError(null);
   }, [patchRuntime]);
 
+  // 刷新（SWR 复访 / 子会话观看轮询）重解析 .jsonl 会生成全新 message 对象：
+  // MessageView 的 memo 全部失效，整列表重渲染（观看中每 3s 一次可见闪烁）。
+  // entry 追加写、entryId 唯一，id 相同即内容相同 → 复用旧对象保 memo，只让新增
+  // entry 拿新对象。分支切换 / 窗口滑动时 id 对不上，自然全量换新。
+  const reuseStableMessages = useCallback((prev: SessionData | undefined, next: SessionData): SessionData => {
+    if (!prev || prev.context.entryIds.length === 0) return next;
+    const byId = new Map<string, AgentMessage>();
+    for (let i = 0; i < prev.context.entryIds.length; i++) {
+      byId.set(prev.context.entryIds[i], prev.context.messages[i]);
+    }
+    const { entryIds, messages } = next.context;
+    const merged = messages.map((m, i) => byId.get(entryIds[i]) ?? m);
+    return { ...next, context: { ...next.context, messages: merged } };
+  }, []);
+
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     let messagesLoaded = false;
     // 取消上一次未完成的加载，防止快速切换 Tab 时请求堆积（浏览器并发连接有限）。
@@ -547,8 +573,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!revision && d.context.messages.length === 0 && getCachedSession(sid)) {
             if (showLoading) setLoading(false);
           } else {
-            applySessionData(d);
-            setCachedSession(sid, d, revision);
+            const merged = reuseStableMessages(getCachedSession(sid)?.data, d);
+            applySessionData(merged);
+            setCachedSession(sid, merged, revision);
             messagesLoaded = true;
             if (showLoading) setLoading(false);
           }
@@ -592,7 +619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (loadSessionAbortRef.current === ac) loadSessionAbortRef.current = null;
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applySessionData, patchRuntime]);
+  }, [applySessionData, reuseStableMessages, patchRuntime]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -972,7 +999,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     patchRuntime({ agentRunning: true, agentPhase: isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" } });
     dispatch({ type: "start" });
     pendingScrollToUserRef.current = true;
-    completionScrollAllowedRef.current = true;
+    scrollFollowRef.current.allowed = true;
 
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 
@@ -1103,6 +1130,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
     patchRuntime({ activeLeafId: entryId });
+    // 显式分支导航 = 用户要求看该分支尾部：重置首滚标记，新窗口到达时直接贴底
+    // （不依赖 allowed gate —— 用户可能刚在上面阅读过，gate 可能是关的）。
+    initialScrollDoneRef.current = false;
     await loadContext(sid, entryId);
   }, [loadContext, patchRuntime]);
 
@@ -1346,7 +1376,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [setToolPresetState]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+    noteProgrammaticScroll(scrollFollowRef.current, Date.now());
     messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
@@ -1355,14 +1385,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!SCROLL_KEYS.has(event.key)) return;
       if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
     }
-    userScrollIntentUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS;
+    noteUserScrollIntent(scrollFollowRef.current, Date.now());
   }, []);
 
+  // 决策逻辑在 lib/chat-scroll-follow.ts（纯逻辑，与测试共用；判定顺序与不变量见其注释）。
+  // 不限 agentRunning：subagent 子会话观看（poll 追加，agentRunning 恒 false）
+  // 里滚上去阅读同样要停跟随，否则每轮轮询都被拽回底部。
   const handleScrollPositionChange = useCallback(() => {
-    if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
-    if (Date.now() < ignoreProgrammaticScrollUntilRef.current) return;
-    if (Date.now() > userScrollIntentUntilRef.current) return;
-    completionScrollAllowedRef.current = false;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    handleScrollEvent(
+      scrollFollowRef.current,
+      container.scrollTop,
+      container.scrollHeight - container.scrollTop - container.clientHeight,
+      Date.now(),
+    );
   }, []);
 
   // Load session whenever the active session id or reloadSignal changes. ChatWindow is
@@ -1380,6 +1417,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // into the new one before loadSession applies fresh data.
       patchRuntime({ agentRunning: false, bashRunning: false, pendingBash: null, forkingEntryId: null, retryInfo: null });
       dispatch({ type: "reset" });
+      // 滚动跟随状态同样属于“上一会话的瞬态”：换会话回到默认跟随。
+      scrollFollowRef.current = createScrollFollowState();
     }
     initialScrollDoneRef.current = false;
 
@@ -1455,6 +1494,47 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, []);
 
+  // ── subagent 子会话观看轮询 ──
+  // 社区包子会话是独立 pi 进程：不在 daemon 注册表里（/state 永远 running:false、
+  // 无 SSE 可连），它持续把内容写进自己的 .jsonl，而观看端只 loadSession 一次 →
+  // 视图冻结在打开瞬间。观看期间按 ETag 条件 GET 轮询（304 极廉价）：文件增长
+  // → 200 → 刷新尾窗，消息实时追加。文件持续变化时 3s 一轮；2 分钟无变化退到
+  // 30s（静默长构建不会漏，后台 tab 暂停）；切会话/关 tab 停，会话被删（404
+  // 丢了缓存）也停。其它会话不轮询：daemon 会话走 SSE，普通历史会话没有并发写者。
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || !sid.startsWith("pi-subagent-")) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unchangedMs = 0;
+    const schedule = (delay: number) => {
+      timer = setTimeout(tick, delay);
+    };
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        if (!document.hidden) {
+          const before = getCachedSession(sid)?.revision;
+          await loadSession(sid, false, false);
+          if (stopped) return;
+          const entry = getCachedSession(sid);
+          if (!entry) return; // 404：会话已删，停轮询
+          unchangedMs = before && entry.revision && entry.revision !== before ? 0 : unchangedMs + SUBAGENT_CHILD_POLL_MS;
+        }
+      } catch {
+        // 单次轮询失败不致命，下轮重试
+      }
+      if (!stopped) {
+        schedule(unchangedMs >= SUBAGENT_CHILD_POLL_DECAY_AFTER_MS ? SUBAGENT_CHILD_POLL_IDLE_MS : SUBAGENT_CHILD_POLL_MS);
+      }
+    };
+    schedule(SUBAGENT_CHILD_POLL_MS);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [session?.id, loadSession]);
+
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
   }, [systemPrompt, onSystemPromptChange]);
@@ -1478,13 +1558,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!container) return;
     container.addEventListener("wheel", markUserScrollIntent, { passive: true });
     container.addEventListener("touchstart", markUserScrollIntent, { passive: true });
+    // touchmove 也刷新意图：意图窗口只有 1.2s，若只在 touchstart 记一次，长按拖动
+    // 超过 1.2s 后窗口过期，跟随中途恢复 —— 手指还在拖就被流式增量拽回底部（抖动）。
+    container.addEventListener("touchmove", markUserScrollIntent, { passive: true });
     container.addEventListener("scroll", handleScrollPositionChange, { passive: true });
     return () => {
       container.removeEventListener("wheel", markUserScrollIntent);
       container.removeEventListener("touchstart", markUserScrollIntent);
+      container.removeEventListener("touchmove", markUserScrollIntent);
       container.removeEventListener("scroll", handleScrollPositionChange);
     };
   }, [messages.length, loading, handleScrollPositionChange, markUserScrollIntent]);
+
+  // 尾 entry id：尾窗滑动（饱和后长度不变、头部丢弃）时它是唯一的“尾部又长了”信号。
+  const followTailEntryId = entryIds.length > 0 ? entryIds[entryIds.length - 1] : null;
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -1499,14 +1586,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (!initialScrollDoneRef.current) {
         initialScrollDoneRef.current = true;
         scrollToBottom("instant");
-      } else if (completionScrollAllowedRef.current) {
+      } else {
         // Follow the latest content while streaming and on completion.
-        // completionScrollAllowedRef is cleared when the user scrolls up to
-        // read, pausing auto-follow until the next prompt is sent.
-        scrollToBottom(agentRunning ? "instant" : "smooth");
+        // 用户上滑阅读时（allowed=false，判定见 chat-scroll-follow）暂停自动跟随，
+        // 直到滚回底部附近或发送下一条 prompt 恢复。shouldFollowStream 内含竞态
+        // 护栏：用户输入刚发生且已远离底部时跳过本帧，避免贴底落在底部把跟随
+        // 重新打开（“AI 回复时无法上拉”的第二条路径）。
+        const container = scrollContainerRef.current;
+        const distanceFromBottom =
+          container != null ? container.scrollHeight - container.scrollTop - container.clientHeight : 0;
+        if (shouldFollowStream(scrollFollowRef.current, distanceFromBottom, Date.now())) {
+          scrollToBottom(agentRunning ? "instant" : "smooth");
+        }
       }
     }
-  }, [messages.length, agentRunning, scrollToBottom]);
+    // 流式期间消息数不变（streamingMessage 原地增长），单独依赖它驱动跟随；
+    // 每个流式增量渲染一次、允许时即贴底一次，滚上去阅读则被 allowed gate 拦住。
+    // 尾 entry id 也在依赖里：subagent 子会话观看轮询在尾窗饱和（tail=100，消息数
+    // 恒定）后只剩窗口滑动，长度不再变，只有尾 id 能证明“尾部又长了”。
+  }, [messages.length, followTailEntryId, agentRunning, streamState.streamingMessage, scrollToBottom]);
 
   // Compact error auto-dismiss
   useEffect(() => {

@@ -15,6 +15,7 @@ import {
 } from "./rpc-manager.ts";
 import { resolveSessionPath } from "../session-reader.ts";
 import { generateSessionTitle } from "../session-title.ts";
+import { createSseWriter } from "./sse-writer.ts";
 import { type DaemonRouteHandler, readJsonBody, sendJson } from "./http.ts";
 
 /** The session-daemon surface: /v1/sessions/** — the daemon's core identity
@@ -29,28 +30,34 @@ import { type DaemonRouteHandler, readJsonBody, sendJson } from "./http.ts";
  *  Mirrors the SSE shape Pi Web emits. The stream also ends when the session
  *  is destroyed (kit round timeout / abort) — otherwise the browser-side
  *  pinned runtime would keep `agentRunning` true forever with no `agent_end`
- *  ever arriving. */
-function serveSessionSse(request: IncomingMessage, response: ServerResponse, session: AgentSessionWrapper): void {
+ *  ever arriving.
+ *
+ *  Writes go through a stall-bounded writer (lib/daemon/sse-writer.ts): a
+ *  viewer that stops reading is cut off at SSE_STALL_BYTES instead of
+ *  buffering every event in this process's heap — the 2026-08-30 daemon OOM.
+ *  Exported for lib/daemon/http-sessions.test.mjs. */
+export function serveSessionSse(request: IncomingMessage, response: ServerResponse, session: AgentSessionWrapper): void {
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
   });
-  const write = (data: unknown) => {
-    response.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-  write({ type: "connected", sessionId: session.sessionId });
-  const unsubscribe = session.onEvent((event) => write(event));
-  const heartbeat = setInterval(() => {
-    try { response.write(": \n\n"); } catch { /* response already closed */ }
-  }, 30_000);
+  let unsubscribe: () => void = () => {};
+  let offDestroy: () => void = () => {};
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   const cleanup = () => {
     clearInterval(heartbeat);
     unsubscribe();
     offDestroy();
-    try { response.end(); } catch { /* already ended */ }
+    // destroy (not end): a stalled peer must not have its megabytes of
+    // queued writes flushed, and end() on a wedged socket would re-queue.
+    response.destroy();
   };
-  const offDestroy = session.onDestroy(cleanup);
+  const writer = createSseWriter(response, cleanup);
+  writer.writeEvent({ type: "connected", sessionId: session.sessionId });
+  unsubscribe = session.onEvent((event) => writer.writeEvent(event));
+  heartbeat = setInterval(() => writer.writeRaw(": \n\n"), 30_000);
+  offDestroy = session.onDestroy(cleanup);
   request.on("close", cleanup);
   request.on("error", cleanup);
 }
@@ -60,28 +67,26 @@ function serveSessionSse(request: IncomingMessage, response: ServerResponse, ses
  *  heartbeat rounds alike (keyed by real session id), this single stream is
  *  the complete running answer — the web route proxies it verbatim for its
  *  badges. Subscribes BEFORE the initial snapshot so no transition can slip
- *  between the two. */
+ *  between the two. Same stall-bounded writer as serveSessionSse. */
 function serveRunningSse(request: IncomingMessage, response: ServerResponse): void {
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
   });
-  const write = (data: unknown) => {
-    response.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-  const unsubscribe = subscribeRunningSessions((ids) => {
-    try { write({ type: "running", runningSessionIds: ids }); } catch { /* closed */ }
-  });
-  write({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
-  const heartbeat = setInterval(() => {
-    try { response.write(": \n\n"); } catch { /* closed */ }
-  }, 30_000);
+  let unsubscribe: () => void = () => {};
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   const cleanup = () => {
     clearInterval(heartbeat);
     unsubscribe();
-    try { response.end(); } catch { /* already ended */ }
+    response.destroy();
   };
+  const writer = createSseWriter(response, cleanup);
+  unsubscribe = subscribeRunningSessions((ids) => {
+    try { writer.writeEvent({ type: "running", runningSessionIds: ids }); } catch { /* closed */ }
+  });
+  writer.writeEvent({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
+  heartbeat = setInterval(() => writer.writeRaw(": \n\n"), 30_000);
   request.on("close", cleanup);
   request.on("error", cleanup);
 }

@@ -34,7 +34,7 @@ async function main(): Promise<void> {
         ?? die(`未找到 loop「${name}」（${join(root, "loops", name, "LOOP.md")}）`, 1);
       const item = opt("--item");
       const result = await runNow(declaration, { pid: process.pid, host: hostname(), kind: "beat" },
-        () => beatRoundRunner(declaration, item ? { extraInstructions: `本轮优先处理 ${item}（工作项绑定触发）` } : {}));
+        () => beatRoundRunner(declaration, { manual: true, ...(item ? { extraInstructions: `本轮优先处理 ${item}（工作项绑定触发）` } : {}) }));
       console.log(result === "fired" ? `[pi-loop] 已起轮 ${name}` : `[pi-loop] ${name} 本轮已在跑`);
       process.exit(result === "fired" ? 0 : 1);
     } catch (error) {

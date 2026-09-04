@@ -110,6 +110,14 @@ test("workspace sidebar renders the merged workbench view with collapsible secti
   assert.match(workspaceSidebarSource, /导入目录…/);
   // Workbench section collapse state persists per workspace, parsed defensively.
   assert.match(workspaceSidebarSource, /pi-workbench-sections:/);
+  // The 会话/文件 split height is drag-resizable (pointer-based handle between
+  // the sections) and persists per workspace; double-click resets to 40%.
+  assert.match(workspaceSidebarSource, /pi-workbench-split:/);
+  assert.match(workspaceSidebarSource, /workbench-split-handle/);
+  // The 文件 header carries a manual refresh (external deletions/edits have no
+  // event — only agent turns auto-refresh) that also refreshes git status.
+  assert.match(workspaceSidebarSource, /explorerRefreshKey \+ manualExplorerKey/);
+  assert.match(workspaceSidebarSource, /setManualExplorerKey/);
   // The sidebar view is CONTROLLED from AppShell (lifted state).
   assert.match(workspaceSidebarSource, /activeView: SidebarView;/);
 });
