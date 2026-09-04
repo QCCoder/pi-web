@@ -13,9 +13,12 @@ const emptyHint: CSSProperties = { color: "var(--text-muted)", fontSize: 12 };
 export function LoopsPanel({
   workspace,
   onOpenLoopConfig,
+  onOpenFiles,
 }: {
   workspace: WorkspaceSummary;
   onOpenLoopConfig: (target: LoopConfigTarget) => void;
+  /** loop 名点击 → 跨视图定位：shell 切到工作台并把文件区 reveal 到 loops/<name>。 */
+  onOpenFiles: (name: string) => void;
 }) {
   const [loops, setLoops] = useState<LoopStatus[]>([]);
   const [busy, setBusy] = useState(false);
@@ -65,6 +68,7 @@ export function LoopsPanel({
               busy={busy}
               onConfigure={(name) => onOpenLoopConfig({ kind: "loop", name })}
               onAction={(name, action) => void loopAction(name, action)}
+              onNameClick={() => onOpenFiles(loop.name)}
             />
           ))}
           <div>

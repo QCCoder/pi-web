@@ -55,6 +55,8 @@ export function DesktopShell() {
     setWorkItemDetail,
     loopConfig,
     setLoopConfig,
+    loopFilesReveal,
+    setLoopFilesReveal,
     handleCloseWorkItemDetail,
     closeWorkItemDetailTick,
     settingsPage,
@@ -279,6 +281,10 @@ const renderMiddleColumn = () => {
         <LoopsPanel
           workspace={activeWorkspace}
           onOpenLoopConfig={(target) => setLoopConfig(target)}
+          onOpenFiles={(name) => {
+            handleSidebarSwitchView("workbench");
+            setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
+          }}
         />
       </div>
     );
@@ -295,6 +301,8 @@ const renderMiddleColumn = () => {
       allSessions={sessionActivity.sessions}
       refreshKey={refreshKey}
       explorerRefreshKey={explorerRefreshKey}
+      filesReveal={loopFilesReveal}
+      openFilesRequest={loopFilesReveal?.nonce}
       onSelectWorkspace={handleOpenWorkspace}
       onShowOverview={handleShowOverview}
       onCreateWorkspace={handleCreateWorkspace}

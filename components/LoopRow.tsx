@@ -21,15 +21,28 @@ export interface LoopRowProps {
   busy: boolean;
   onConfigure: (name: string) => void;
   onAction: (name: string, action: "pause" | "resume" | "stop") => void;
+  /** 可选：名字点击回调（LoopsPanel 传入 → 跨视图 reveal 到工作台文件区；
+   *  总览区块不传，名字保持纯展示 span）。 */
+  onNameClick?: () => void;
 }
 
 /** loop 单行（总览 Loops 区块与中栏 LoopsPanel 共用，避免两处漂移）。 */
-export function LoopRow({ loop, busy, onConfigure, onAction }: LoopRowProps) {
+export function LoopRow({ loop, busy, onConfigure, onAction, onNameClick }: LoopRowProps) {
   return (
     <div
       style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}
     >
-      <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>{loop.name}</span>
+      {onNameClick ? (
+        <button
+          type="button"
+          onClick={onNameClick}
+          style={{ fontFamily: "var(--font-mono)", fontWeight: 600, background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", textAlign: "left" }}
+        >
+          {loop.name}
+        </button>
+      ) : (
+        <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>{loop.name}</span>
+      )}
       <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
         {summarizeCron(loop.cron) ?? loop.cron}
       </span>

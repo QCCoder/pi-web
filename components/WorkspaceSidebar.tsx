@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { FileExplorer } from "./FileExplorer";
 import { PanelHeader, PanelHeaderButton } from "./PanelHeader";
 import type { SidebarView } from "./ActivityBar";
@@ -49,6 +49,12 @@ interface Props {
   onSelectSession: (session: SessionInfo) => void;
   onOpenFile: (path: string, name: string) => void;
   onSessionRemoved?: (id: string) => void;
+  /** Loops 面板定位信号：透传给工作台 FileExplorer 的 reveal（按祖先路径展开
+   *  定位到 `loops/<name>` 等目录；nonce 变化可对同一路径重复触发）。 */
+  filesReveal?: { path: string; nonce: number } | null;
+  /** 计数器信号：bump 时把文件 section 展开（跨视图「打开文件区」意图，
+   *  如 Loops 面板 loop 名点击——文件区默认收起，不展开则看不见 reveal 结果）。 */
+  openFilesRequest?: number;
 }
 
 // Knowledge repos are browsed with a FileExplorer that has no git overlay in the
@@ -356,6 +362,8 @@ export function WorkspaceSidebar({
   onSelectSession,
   onOpenFile,
   onSessionRemoved,
+  filesReveal,
+  openFilesRequest,
 }: Props) {
   // sessions 直接从 AppShell 已加载的全局列表派生（useSessionActivity，含 SSE 实时），
   // 不再自己 fetch /api/sessions——切换 workspace 时瞬时过滤，无重复请求与列表闪烁。
@@ -455,6 +463,17 @@ export function WorkspaceSidebar({
     }
     setWorkbenchSections((state) => ({ ...state, [section]: next }));
   }, [activeWorkspace]);
+
+  // openFilesRequest（计数器信号，如 Loops 面板 loop 名点击的跨视图定位）：bump 时
+  // 展开文件 section——复用上面的折叠持久化路径（只翻 files 键，会话 section 状态
+  // 不动）。nonce 守卫确保 effect 因 activeWorkspace / 折叠状态变化重跑时，旧意图
+  // 不会误开新工作区的文件段。
+  const lastOpenFilesRequestRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (openFilesRequest === undefined || openFilesRequest === lastOpenFilesRequestRef.current) return;
+    lastOpenFilesRequestRef.current = openFilesRequest;
+    if (!workbenchSections.files) toggleWorkbenchSection("files", false);
+  }, [openFilesRequest, workbenchSections.files, toggleWorkbenchSection]);
 
   // Knowledge bundles are the panel-facing repo list — code repos have no
   // standalone view anymore (browse in the workbench file tree, manage in
@@ -605,6 +624,7 @@ export function WorkspaceSidebar({
                       refreshKey={explorerRefreshKey}
                       gitStatusByPath={gitStatusByPath}
                       changedDirectoryPaths={changedDirectoryPaths}
+                      reveal={filesReveal ?? undefined}
                     />
                   )}
                 </div>

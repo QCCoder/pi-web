@@ -129,6 +129,11 @@ export function useAppShellState() {
   // Loop 配置视图（spec §4.1）：镜像 workItemDetail 的生命周期——
   // panel 切换 / 会话选择 / 工作区切换 / configView 打开时一并清空。
   const [loopConfig, setLoopConfig] = useState<LoopConfigTarget | null>(null);
+  // Loops 面板 → 工作台文件区的定位意图（一次性信号，非持久视图状态——无需清空
+  // 点位）：loop 名点击时写入 `loops/<name>`，nonce 保证同一路径可重复触发；
+  // 两 shell 把它透传给 WorkspaceSidebar（filesReveal → FileExplorer reveal +
+  // openFilesRequest 展开文件 section）。
+  const [loopFilesReveal, setLoopFilesReveal] = useState<{ path: string; nonce: number } | null>(null);
   const [closeWorkItemDetailTick, setCloseWorkItemDetailTick] = useState(0);
   const handleCloseWorkItemDetail = useCallback(() => {
     setWorkItemDetail(null);
@@ -1327,6 +1332,8 @@ export function useAppShellState() {
     setWorkItemDetail,
     loopConfig,
     setLoopConfig,
+    loopFilesReveal,
+    setLoopFilesReveal,
     handleCloseWorkItemDetail,
     closeWorkItemDetailTick,
     refreshKey,

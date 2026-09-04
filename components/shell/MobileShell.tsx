@@ -151,6 +151,8 @@ export function MobileShell() {
     openSessionStatsPanel,
     handleContextUsageChange,
     chatInputRef,
+    loopFilesReveal,
+    setLoopFilesReveal,
     updateActiveTab,
     setRefreshKey,
     setImportPickerOpen,
@@ -300,6 +302,8 @@ export function MobileShell() {
             allSessions={sessionActivity.sessions}
             refreshKey={refreshKey}
             explorerRefreshKey={explorerRefreshKey}
+            filesReveal={loopFilesReveal}
+            openFilesRequest={loopFilesReveal?.nonce}
             onSelectWorkspace={handleOpenWorkspace}
             onCreateWorkspace={handleCreateWorkspace}
             onImportDirectory={() => setImportPickerOpen(true)}
@@ -387,7 +391,14 @@ export function MobileShell() {
         return (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <PanelHeader title="Loops" meta={activeWorkspace.name} />
-            <LoopsPanel workspace={activeWorkspace} onOpenLoopConfig={(target) => setLoopsPage(target)} />
+            <LoopsPanel
+              workspace={activeWorkspace}
+              onOpenLoopConfig={(target) => setLoopsPage(target)}
+              onOpenFiles={(name) => {
+                setTab("workbench");
+                setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
+              }}
+            />
           </div>
         );
       case "settings":
