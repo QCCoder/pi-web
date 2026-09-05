@@ -6,20 +6,22 @@ const DECL = { workspacePath: "/ws", loopName: "dev-loop", dir: "/ws/loops/dev-l
   pattern: "dev-loop", cron: "0 8 * * 1-5", timezone: "Asia/Shanghai",
   level: "L2", maxMinutes: 45, body: "# 合同指针\n1. 读宪法文件" };
 
-test("daemon 形态：含 sessionId 与 per-loop ledger 路径", () => {
+test("daemon 形态：含 sessionId，不再注入已退役的宪法三件/ledger", () => {
   const prompt = buildRoundPrompt(DECL, { sessionId: "sess-123" });
   assert.ok(prompt.includes("/skill:dev-loop"));
   assert.ok(prompt.includes("sess-123"));
   assert.ok(prompt.includes(".lastrun") && prompt.includes(".round.lock")); // 宿主文件禁改条款（spec §6）
-  assert.ok(prompt.includes("/ws/loops/dev-loop/loop-ledger.json"));
-  assert.ok(!prompt.includes("loop-ledger.json（宪法文件，你禁改），再读 /ws/loops/dev-loop/loop-ledger.json".replace("/ws/loops/dev-loop/loop-ledger.json（", "XX"))); // 仅路径断言，防双写
+  assert.ok(prompt.includes("/ws/loops/dev-loop/STATE.md")); // 恢复上下文指针
+  assert.ok(!prompt.includes("loop-constraints"));
+  assert.ok(!prompt.includes("loop-budget"));
+  assert.ok(!prompt.includes("loop-ledger")); // 2026-09-04 退役：不再要求读/追加 ledger
   assert.ok(prompt.includes("L2"));
 });
 
-test("beat 形态：无 sessionId 行、无裸 ledger 引用", () => {
+test("beat 形态：无 sessionId 行、无 ledger 引用", () => {
   const prompt = buildRoundPrompt(DECL);
   assert.ok(!prompt.includes("sess-"));
-  assert.ok(prompt.includes("/ws/loops/dev-loop/loop-ledger.json"));
+  assert.ok(!prompt.includes("loop-ledger"));
   assert.ok(prompt.includes("PAUSED"));
   assert.ok(prompt.includes(".lastrun") && prompt.includes(".round.lock")); // 宿主文件禁改条款（spec §6）
 });
