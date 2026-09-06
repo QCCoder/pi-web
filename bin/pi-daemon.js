@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 "use strict";
 
+// Load <projectRoot>/.env.local BEFORE anything pi-related resolves paths
+// (agent dir, workspaces dir, index file). No-op when the file is absent.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { loadEnvLocal } = require("./load-env-local");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const nodePath = require("node:path");
+loadEnvLocal(nodePath.join(__dirname, ".."));
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { getUnsupportedNodeVersionMessage, isNodeVersionSupported } = require("./node-version");
 if (!isNodeVersionSupported(process.versions.node)) {

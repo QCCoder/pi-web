@@ -24,6 +24,12 @@ Typecheck: `node_modules/.bin/tsc --noEmit`
 Lint: `npm run lint`
 Tests: `npm test` (node:test over `lib/**/*.test.mjs`)
 
+**Optional — pi data home inside the repo**: `node scripts/adopt-pi-home.mjs` moves `~/.pi/{agent,workspaces,workspace.yaml}`
+into `<repo>/.pi/{agent,workspaces,workspace-index.yaml}` and writes `.env.local` pointing the three env vars
+(`PI_CODING_AGENT_DIR` / `PI_WORKSPACES_DIR` / `PI_WORKSPACE_INDEX_FILE`) there — workspaces, skills and sessions become
+visible in the project tree. `.pi/agent` + `.pi/workspaces` are gitignored (auth tokens live there) and excluded from
+tsc/eslint/git-discovery; `bin/pi-daemon.js` self-loads `.env.local` (see "Local pi data home" under Key Design Decisions).
+
 **Never run `next build` during dev** — it pollutes `.next/` and breaks `npm run dev`.
 
 ---
@@ -398,6 +404,12 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrate
 
 ### Workspace directory layout (reference)
 
+Default locations are under `~/.pi` — but local dev can relocate the whole data home INTO the repo via
+`scripts/adopt-pi-home.mjs` + `.env.local` (see "Local pi data home" under Key Design Decisions): `agent/` and
+`workspaces/` then live at `<repo>/.pi/`, the global index becomes `<repo>/.pi/workspace-index.yaml` (renamed —
+`.pi/workspace.yaml` in this repo is the pi-web workspace MANIFEST), and `.pi/agent` + `.pi/workspaces` are
+strictly gitignored / tsc+eslint excluded / pruned by git-discovery.
+
 ```
 ~/.pi/
   workspace.yaml                         global workspace index
@@ -427,6 +439,15 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrate
 ## File Map
 
 ```
+scripts/
+  adopt-pi-home.mjs               one-time migration of ~/.pi into <repo>/.pi (moves data, rewrites absolute-path
+                                   references — index entries / encoded session dir names / .jsonl cwd+parentSession —
+                                   writes .env.local, patches shell rc; idempotent repair mode)
+
+bin/
+  load-env-local.js                dotenv-lite .env.local loader used by pi-daemon at boot (never overrides
+                                   existing process env; missing file = no-op)
+
 app/api/
   sessions/route.ts                      GET  list all sessions (grouped by project/worktree root)
   sessions/[id]/route.ts                 GET/PATCH/DELETE session
@@ -516,7 +537,10 @@ lib/
                              (id/name prefix `pi-subagent` — replaces the old subagent-children.txt registry)
   (dev-loop/ retired — loops are per-workspace custom definitions; the R&D loop pattern lives in workspace-c, see Dev Loop section above)  git-changes.ts            getGitStatus (multi-repo groups) + getGitFileDiff (patch)
   git-status.ts             porcelain-v1 parse, status classify, buildRepoGroups (pure)
-  git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index)
+  git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index); IGNORED_NAMES prunes
+                            node_modules/dist/… and `.pi` — the latter can hold the relocated pi data home (dozens of
+                            nested git repos, GBs) inside a project tree; a workspace's own `.pi/` never contains `.git`, so
+                            pruning costs nothing on the normal path
   git-types.ts              GitFileStatus / RepoGroup / response shapes
   chat-scroll-follow.ts     聊天流式跟随的滚动决策状态机（纯逻辑 + 测试，`useAgentSession` 挂监听共用）：上滑判定先于近底恢复 / 0.5px 阈值 / touchmove 刷新意图窗 / 近底恢复需佐证（跟随中 ∣ 意图新鲜 ∣ scrollTop 增大）
   session-reader.ts         index-backed SessionInfo mapping + buildSessionContext (tail window) + buildEarlierContext + path caches
@@ -729,6 +753,24 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 ### File access allow-list
 - `/api/files` and `/api/git/*` are intentionally not general filesystem browsers. Allowed roots come from session cwds, their resolved project roots, workspace paths, `~/pi-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - `/api/cwd/validate`, `/api/default-cwd`, `/api/worktrees`, and `/api/workspaces` (GET/POST) call `allowFileRoot()` when they make a new location browsable.
+
+### Local pi data home (`.env.local` + `bin/load-env-local.js`)
+The pi data home is env-driven everywhere: `PI_CODING_AGENT_DIR` (SDK `getAgentDir()` — sessions, settings, models,
+skills, agents, auth, importer credentials, subagent registry), `PI_WORKSPACES_DIR` (`workspacesRoot()`),
+`PI_WORKSPACE_INDEX_FILE`. Docker deployments already set these (docker-compose.yml); `scripts/adopt-pi-home.mjs`
+pointed them at `<repo>/.pi/` for local dev. Wiring rules that must NOT regress:
+- **`bin/pi-daemon.js` self-loads `.env.local` at boot** (before anything resolves paths) — the daemon is spawned as a
+  web sidecar, via `npm run daemon`, or by hand, and only the sidecar inherits a web process whose Next runtime
+  already loaded `.env.local`; the loader (`bin/load-env-local.js`, dotenv-lite) NEVER overrides values already in
+  `process.env`, so explicit environments (docker-compose, shell) always win.
+- **`.pi/agent` + `.pi/workspaces` are gitignored and carry secrets** (auth tokens, importer credentials, 19G of
+  cloned repos). `.pi/workspace.yaml` (the pi-web workspace manifest) and `.pi/workspace-templates/` stay tracked.
+- **`git-discover.ts` prunes `.pi`** — walking a workspace root that contains the data home must never crawl GBs of
+  nested repos into the Changes panel / file index. tsc (`exclude`) and eslint (`ignores`) exclude the data dirs the
+  same way; `.vscode/settings.json` watcher-excludes them.
+- **The migration script owns path rewriting**: session dirs are NAMED after the encoded session cwd (`/` → `-`), and
+  `.jsonl` entries embed absolute `cwd`/`parentSession` paths — after a move, two plain substring replacements
+  (old workspaces root, old agent root) fix names, JSON content and the global index consistently.
 
 ### Plugins and skills
 - `/api/plugins` uses pi's `SettingsManager` + `DefaultPackageManager` for global/project package install, remove, update, enable, and disable. Disabling writes empty `extensions/skills/prompts/themes` arrays for that package entry.

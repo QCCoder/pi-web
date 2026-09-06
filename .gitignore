@@ -46,3 +46,10 @@ next-env.d.ts
 
 # superpowers scratch reports (process artifacts, not repo content)
 .superpowers/
+# pi data home — relocated from ~/.pi via scripts/adopt-pi-home.mjs (.env.local
+# points the three env vars at .pi/agent, .pi/workspaces, .pi/workspace-index.yaml).
+# NEVER commit: contains auth tokens, importer credentials, session history,
+# cloned repositories. (.pi/workspace.yaml manifest + workspace-templates stay tracked.)
+/.pi/agent/
+/.pi/workspaces/
+/.pi/workspace-index.yaml

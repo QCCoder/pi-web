@@ -2,10 +2,15 @@ import fs from "fs";
 import path from "path";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 
+// `.pi` is pruned because it can hold the relocated pi data home (agent/ +
+// workspaces/, gitignored, dozens of nested git repos, GBs) directly inside
+// a project tree — see `.env.local` / PI_CODING_AGENT_DIR + PI_WORKSPACES_DIR.
+// A workspace's own `.pi/` (manifest + kb cache) never contains `.git`, so
+// pruning it costs nothing on the normal path.
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
   ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store",
+  "target", "vendor", ".DS_Store", ".pi",
 ]);
 const IGNORED_SUFFIXES = [".pyc"];
 const MAX_REPO_ROOTS = 128;

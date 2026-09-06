@@ -1,0 +1,6 @@
+{
+  "files.watcherExclude": {
+    "**/.pi/agent/**": true,
+    "**/.pi/workspaces/**": true
+  }
+}
