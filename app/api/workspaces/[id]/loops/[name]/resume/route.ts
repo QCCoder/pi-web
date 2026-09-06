@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
-import { collectStatus } from "../../../../../../../pi-loop/status.ts";
+import { collectStatus } from "../../../../../../../packages/pi-loop/status.ts";
 
 /** 删 PAUSED 标记，幂等——未暂停时 resume 也成功。 */
 export async function POST(

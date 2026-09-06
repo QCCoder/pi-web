@@ -7,11 +7,11 @@ import type { DaemonJob } from "./jobs.ts";
 import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/service.ts";
 import { discoverWorkspaces, readWorkspaceManifest } from "../workspaces/service.ts";
 import { archiveSession } from "../session-archive.ts";
-import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "../../pi-loop/protocol.ts";
-import { runDueRound } from "../../pi-loop/fire.ts";
-import { updateRoundLock } from "../../pi-loop/round-lock.ts";
-import { buildRoundPrompt } from "../../pi-loop/contract.ts";
-import { reapOrphanedRoundProcesses } from "../../pi-loop/reap.ts";
+import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
+import { runDueRound } from "../../packages/pi-loop/fire.ts";
+import { updateRoundLock } from "../../packages/pi-loop/round-lock.ts";
+import { buildRoundPrompt } from "../../packages/pi-loop/contract.ts";
+import { reapOrphanedRoundProcesses } from "../../packages/pi-loop/reap.ts";
 import { hostname } from "node:os";
 
 /** 跑一条 prompt 并等它 settle（prompt_done）。超时 / prompt_error / destroy 均 reject。

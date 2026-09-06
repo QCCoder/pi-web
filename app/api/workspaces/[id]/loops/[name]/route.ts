@@ -4,8 +4,8 @@ import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
-import { applyLoopFrontmatterPatch, LoopFrontmatterError } from "../../../../../../pi-loop/frontmatter.ts";
-import { collectStatus } from "../../../../../../pi-loop/status.ts";
+import { applyLoopFrontmatterPatch, LoopFrontmatterError } from "../../../../../../packages/pi-loop/frontmatter.ts";
+import { collectStatus } from "../../../../../../packages/pi-loop/status.ts";
 import { deleteLoop, LoopManageError } from "@/lib/loops/manage";
 
 const EDITABLE = new Set(["cron", "timezone", "level", "max_minutes"]);

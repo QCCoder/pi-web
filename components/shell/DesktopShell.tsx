@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
-import { TabBar } from "../TabBar";
+import { TabBar, FILES_TAB_ID } from "../TabBar";
+import { FilesExplorerPanel } from "../FilesExplorerPanel";
 import { ArchiveModal } from "../ArchiveModal";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceOverview } from "../WorkspaceOverview";
@@ -68,6 +69,11 @@ export function DesktopShell() {
     sidebarContainerRef,
     startSidebarResize,
     resetSidebarWidth,
+    rightPanelWidth,
+    rightPanelResizing,
+    rightPanelContainerRef,
+    startRightPanelResize,
+    resetRightPanelWidth,
     workspaces,
     setWorkspaces,
     workspaceSettingsName,
@@ -283,7 +289,8 @@ const renderMiddleColumn = () => {
           workspace={activeWorkspace}
           onOpenLoopConfig={(target) => setLoopConfig(target)}
           onOpenFiles={(name) => {
-            handleSidebarSwitchView("workbench");
+            // 定位信号路由到右栏固定的「文件」tab（中栏工作台已无文件段）。
+            updateActiveTab({ activeFileTabId: FILES_TAB_ID, rightPanelOpen: true });
             setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
           }}
           onRunRound={(name) => handleRunLoopDirect(activeWorkspace, name)}
@@ -303,8 +310,7 @@ const renderMiddleColumn = () => {
       allSessions={sessionActivity.sessions}
       refreshKey={refreshKey}
       explorerRefreshKey={explorerRefreshKey}
-      filesReveal={loopFilesReveal}
-      openFilesRequest={loopFilesReveal?.nonce}
+      showFilesSection={false}
       onSelectWorkspace={handleOpenWorkspace}
       onShowOverview={handleShowOverview}
       onCreateWorkspace={handleCreateWorkspace}
@@ -553,22 +559,44 @@ const renderMiddleColumn = () => {
       </div>
     </div>
 
-    {/* Right panel: file viewer — always mounted, width animated via CSS */}
+    {/* Right panel resize handle (drag to widen/narrow; double-click resets
+        to the 42% default) — same pattern as the sidebar handle, placed
+        between the center column and the right file panel. Rendered only
+        while the panel is open (at home the panel is closed). */}
+    {rightPanelOpen && (
+      <div
+        className={`right-panel-resize-handle${rightPanelResizing ? " right-panel-resize-active" : ""}`}
+        role="separator"
+        aria-orientation="vertical"
+        title={translate("files.panelResize")}
+        onMouseDown={startRightPanelResize}
+        onDoubleClick={resetRightPanelWidth}
+      />
+    )}
+
+    {/* Right panel: file viewer — always mounted, width animated via CSS,
+        drag-resizable via the handle above (px width persisted in
+        localStorage; null → CSS 42% default) */}
     <div
-      className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
+      ref={rightPanelContainerRef}
+      className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizing ? " right-panel-resizing" : ""}`}
       style={{
         display: "flex",
         flexDirection: "column",
         borderLeft: "1px solid var(--border)",
         background: "var(--bg)",
-      }}
+        ...(rightPanelWidth != null ? { "--pi-right-panel-width": `${rightPanelWidth}px` } : {}),
+      } as React.CSSProperties}
     >
-      {/* Right panel tab bar */}
-      <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
+      {/* Right panel tab bar — leading pinned「文件」tab (the workbench file
+          tree; active when no file/session tab is). */}
+      <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}
+      >
         <div style={{ flex: 1, overflow: "hidden" }}>
           <TabBar
             tabs={fileTabs}
-            activeTabId={activeFileTabId ?? ""}
+            activeTabId={activeFileTabId ?? FILES_TAB_ID}
+            leadingTab={activeWorkspace ? { id: FILES_TAB_ID, label: "文件" } : undefined}
             onSelectTab={(id: string) => updateActiveTab({ activeFileTabId: id })}
             onCloseTab={handleCloseFileTab}
           />
@@ -576,8 +604,28 @@ const renderMiddleColumn = () => {
 
       </div>
 
-      {/* File content */}
+      {/* File content: the pinned「文件」tree tab stays MOUNTED (hidden via
+          display:none while another tab is active) so the tree keeps its
+          expansion state across switches. File/session tabs render only while
+          active; the empty hint remains only as the home fallback (no
+          workspace → no tree to show). */}
       <div style={{ flex: 1, overflow: "hidden" }}>
+        {activeWorkspace ? (
+          <div
+            style={{
+              display: activeFileTab ? "none" : "flex",
+              flexDirection: "column",
+              height: "100%",
+            }}
+          >
+            <FilesExplorerPanel
+              workspace={activeWorkspace}
+              explorerRefreshKey={explorerRefreshKey}
+              onOpenFile={handleOpenFile}
+              reveal={loopFilesReveal ?? undefined}
+            />
+          </div>
+        ) : null}
         {activeFileTab?.kind === "file" ? (
           <FileViewer
             filePath={activeFileTab.filePath}
@@ -601,11 +649,11 @@ const renderMiddleColumn = () => {
             onOpenFile={handleOpenLinkedFile}
             onOpenSession={handleOpenSessionViewer}
           />
-        ) : (
+        ) : !activeWorkspace ? (
           <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
              {translate("files.noneOpen")}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   </div>

@@ -18,7 +18,7 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { LoopConfigTarget } from "@/components/LoopsConfig";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
-import type { Tab } from "../TabBar";
+import { type Tab, FILES_TAB_ID } from "../TabBar";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -58,6 +58,13 @@ const SIDEBAR_DEFAULT_WIDTH = 260;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 560;
 const SIDEBAR_WIDTH_KEY = "pi-sidebar-width";
+
+// Right (file) panel resize — same shape as the sidebar, but the DEFAULT is
+// the CSS 42% fallback (rightPanelWidth === null → no --pi-right-panel-width
+// override); dragging stores a px width. The max keeps the center chat area
+// usable (≥620px for toolbar + tabs + composer).
+const RIGHT_PANEL_MIN_WIDTH = 300;
+const RIGHT_PANEL_WIDTH_KEY = "pi-right-panel-width";
 
 /**
  * The shared shell-state layer — ALL navigation/session/workspace state and
@@ -341,6 +348,61 @@ export function useAppShellState() {
     try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(SIDEBAR_DEFAULT_WIDTH)); } catch { /* ignore */ }
   }, []);
 
+  // ---- Desktop right (file) panel resize --------------------------------------
+  // Mirrors the sidebar resize: `rightPanelWidthRef` mirrors state so mouseup
+  // can persist the final value; null width = CSS 42% default (double-click
+  // reset removes the stored key). Clamp keeps the chat area ≥620px wide.
+  const [rightPanelWidth, setRightPanelWidth] = useState<number | null>(null);
+  const [rightPanelResizing, setRightPanelResizing] = useState(false);
+  const rightPanelWidthRef = useRef<number | null>(null);
+  const rightPanelContainerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { rightPanelWidthRef.current = rightPanelWidth; }, [rightPanelWidth]);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(RIGHT_PANEL_WIDTH_KEY);
+      if (raw) {
+        const n = Number(raw);
+        if (Number.isFinite(n)) setRightPanelWidth(Math.round(n));
+      }
+    } catch { /* localStorage unavailable — keep default */ }
+  }, []);
+  const clampRightPanelWidth = (n: number) =>
+    Math.min(Math.max(window.innerWidth - 620, RIGHT_PANEL_MIN_WIDTH), Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(n)));
+  const startRightPanelResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = rightPanelContainerRef.current;
+    if (!container) return;
+    const startX = e.clientX;
+    const startWidth = container.getBoundingClientRect().width;
+    setRightPanelResizing(true);
+    const onMove = (ev: MouseEvent) => {
+      // dragging the handle LEFT widens the right panel
+      setRightPanelWidth(clampRightPanelWidth(startWidth + (startX - ev.clientX)));
+    };
+    const onUp = () => {
+      setRightPanelResizing(false);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try {
+        if (rightPanelWidthRef.current != null) {
+          localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(rightPanelWidthRef.current));
+        } else {
+          localStorage.removeItem(RIGHT_PANEL_WIDTH_KEY);
+        }
+      } catch { /* ignore */ }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+  const resetRightPanelWidth = useCallback(() => {
+    setRightPanelWidth(null);
+    try { localStorage.removeItem(RIGHT_PANEL_WIDTH_KEY); } catch { /* ignore */ }
+  }, []);
+
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const pendingWorkItemConversationRef = useRef<{
     workspaceId: string;
@@ -480,7 +542,8 @@ export function useAppShellState() {
         workItemKey: null,
         fileTabs: [],
         activeFileTabId: null,
-        rightPanelOpen: false,
+        // 右栏默认常开（文件树固定 tab）；用户手动折叠后 per-tab 记住 false。
+        rightPanelOpen: true,
       };
       return [...prev, tab];
     });
@@ -1234,8 +1297,11 @@ export function useAppShellState() {
       const next = tab.fileTabs.filter((t) => t.id !== tabId);
       const activeFileTabId = tab.activeFileTabId !== tabId
         ? tab.activeFileTabId
-        : (next.length > 0 ? next[next.length - 1].id : null);
-      return { fileTabs: next, activeFileTabId, rightPanelOpen: next.length > 0 ? tab.rightPanelOpen : false };
+        : (next.length > 0 ? next[next.length - 1].id : FILES_TAB_ID);
+      // 关掉最后一个文件 tab 时回落到固定的「文件」tab（右栏保持常开，
+      // 桌面展示文件树；移动端 overlay 靠 activeFileTab 判空自动隐藏），
+      // 不再自动收起右栏。
+      return { fileTabs: next, activeFileTabId, rightPanelOpen: tab.rightPanelOpen };
     });
   }, [activeTabId, updateTab]);
 
@@ -1436,6 +1502,11 @@ export function useAppShellState() {
     sidebarContainerRef,
     startSidebarResize,
     resetSidebarWidth,
+    rightPanelWidth,
+    rightPanelResizing,
+    rightPanelContainerRef,
+    startRightPanelResize,
+    resetRightPanelWidth,
     chatInputRef,
     pendingWorkItemConversationRef,
     topBarRef,

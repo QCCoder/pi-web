@@ -22,14 +22,22 @@ export type Tab =
       sessionInfo: SessionInfo;
     };
 
+/** Reserved id of the pinned「文件」leading tab (the workbench file tree in
+ *  the right panel). NOT a member of `tabs` — it is rendered separately via
+ *  `leadingTab` and never closable. `activeFileTabId` may equal this id. */
+export const FILES_TAB_ID = "__files__";
+
 interface Props {
   tabs: Tab[];
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  /** Pinned, non-closable leading tab (the「文件」tree tab in the desktop
+   *  right panel). Rendered before every file/session tab. */
+  leadingTab?: { id: string; label: string };
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTab }: Props) {
   const { t } = useI18n();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
 
@@ -44,6 +52,42 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
         height: 36,
       }}
     >
+      {leadingTab && (
+        <div
+          onClick={() => onSelectTab(leadingTab.id)}
+          onMouseDown={(e) => {
+            if (e.button === 1) e.preventDefault();
+          }}
+          title={leadingTab.label}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            height: 36,
+            paddingLeft: 12,
+            paddingRight: 12,
+            borderRight: "1px solid var(--border)",
+            borderTop: leadingTab.id === activeTabId ? "2px solid var(--accent)" : "2px solid transparent",
+            background: leadingTab.id === activeTabId ? "var(--bg)" : "var(--bg-panel)",
+            cursor: "pointer",
+            fontSize: 12,
+            color: leadingTab.id === activeTabId ? "var(--text)" : "var(--text-muted)",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+            userSelect: "none",
+            transition: "background 0.1s, color 0.1s",
+          }}
+        >
+          <span style={{ flexShrink: 0, opacity: leadingTab.id === activeTabId ? 1 : 0.7, display: "flex", alignItems: "center" }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+          </span>
+          <span style={{ fontWeight: leadingTab.id === activeTabId ? 500 : 400 }}>
+            {leadingTab.label}
+          </span>
+        </div>
+      )}
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
         return (

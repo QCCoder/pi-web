@@ -124,12 +124,12 @@ body {
    得出 —— content-inset 平移下 scrollY/offsetTop 都是 0，只有 rect 量得到）。
    两者叠加后应用精确覆盖可视区：键盘上方不可能再有空白。
    height 必须 !important：压过 html 的 100% 和 body 的内联样式。 */
-html.pi-keyboard-open,
-html.pi-keyboard-open body {
+html.pi-keyboard-open.pi-kb-squeeze,
+html.pi-keyboard-open.pi-kb-squeeze body {
   height: var(--app-vh) !important;
   overflow: hidden;
 }
-html.pi-keyboard-open body {
+html.pi-keyboard-open.pi-kb-squeeze body {
   transform: translateY(var(--app-lift, 0px));
 }
 /* 键盘开启时底部 tab 栏直接隐藏（微信式）：不给它“顶上去”浮在键盘上方 ——
@@ -1010,7 +1010,10 @@ span.linenumber {
 }
 
 
-/* Right panel: animate width */
+/* Right panel: animate width. Width is drag-resizable (handle between the
+   center column and the panel): --pi-right-panel-width (px, set inline by
+   DesktopShell) overrides the 42% default; unset → the CSS fallback. Children
+   track the same var so they don't reflow during the open/close animation. */
 @media (min-width: 641px) {
   .right-panel-container {
     overflow: hidden;
@@ -1018,19 +1021,65 @@ span.linenumber {
     flex-shrink: 0;
   }
   .right-panel-container.right-panel-open {
-    width: 42%;
+    width: var(--pi-right-panel-width, 42%);
     min-width: 300px;
+    /* keep the center chat area usable (≥620px) even if the stored px width
+       was set on a larger window (min-width still wins below 920px windows) */
+    max-width: calc(100vw - 620px);
   }
   .right-panel-container.right-panel-closed {
     width: 0;
     min-width: 0;
     border-left: none !important;
   }
+  /* while actively dragging, jump instantly instead of animating each move */
+  .right-panel-container.right-panel-resizing {
+    transition: none !important;
+  }
   /* keep inner content at fixed width so it doesn't reflow during animation */
   .right-panel-container > * {
-    width: 42vw;
+    width: var(--pi-right-panel-width, 42vw);
     min-width: 300px;
   }
+}
+
+/* Desktop right panel resize handle (rendered only when open). Same pattern
+   as the sidebar handle: ::before is the invisible wide hit zone, ::after is
+   the visible 1px guide line; .right-panel-resize-active is toggled from JS
+   while dragging (the handle sits BEFORE the container, so no sibling
+   selector can reach it from the resizing container). */
+.right-panel-resize-handle {
+  flex-shrink: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 210;
+}
+.right-panel-resize-handle::before {
+  content: "";
+  position: absolute;
+  inset: 0 -5px;            /* 16px grab zone straddling the panel border */
+}
+.right-panel-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--border);
+  transition: background 0.12s ease, width 0.12s ease, opacity 0.12s ease;
+  opacity: 0.7;
+}
+.right-panel-resize-handle:hover::after,
+.right-panel-resize-handle:active::after,
+.right-panel-resize-handle.right-panel-resize-active::after {
+  background: var(--accent);
+  width: 2px;
+  margin-left: -1px;
+  opacity: 1;
 }
 
 /* Mobile sidebar: slide in/out as overlay */
@@ -1070,3 +1119,5 @@ span.linenumber {
 .scf-drawer {
   animation: scf-drawer-in 0.16s ease-out;
 }
+
+

@@ -1,7 +1,7 @@
 /** web 侧轮控制（spec §4/§5.2，S3/S4）：全部走现有 daemon 会话面 + pi-loop
  *  纯逻辑，无 daemon 新路由。依赖全部可注入（.test.mjs 直 import 测试）。 */
 import { hostname } from "node:os";
-import type { LoopDeclaration } from "../../pi-loop/protocol.ts";
+import type { LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
 import {
   acquireRoundLock,
   isRoundLockStale,
@@ -9,9 +9,9 @@ import {
   releaseRoundLock,
   updateRoundLock,
   type RoundLockHolder,
-} from "../../pi-loop/round-lock.ts";
-import { writeLastrun } from "../../pi-loop/due.ts";
-import { buildRoundPrompt } from "../../pi-loop/contract.ts";
+} from "../../packages/pi-loop/round-lock.ts";
+import { writeLastrun } from "../../packages/pi-loop/due.ts";
+import { buildRoundPrompt } from "../../packages/pi-loop/contract.ts";
 
 export interface StopRoundDeps {
   /** daemonProxy().destroySession —— DELETE /v1/sessions/:id（wrapper destroy，

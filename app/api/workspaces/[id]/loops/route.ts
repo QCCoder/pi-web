@@ -5,7 +5,7 @@ import {
   WorkspaceNotFoundError,
   WorkspaceValidationError,
 } from "@/lib/workspaces/service";
-import { collectStatus } from "../../../../../pi-loop/status.ts";
+import { collectStatus } from "../../../../../packages/pi-loop/status.ts";
 import { createLoop, LoopManageError, type CreateLoopInput } from "@/lib/loops/manage";
 
 function errorResponse(error: unknown): NextResponse {

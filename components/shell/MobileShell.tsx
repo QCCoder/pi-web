@@ -524,8 +524,13 @@ export function MobileShell() {
             {tab !== "chat" ? <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>{renderTabContent()}</div> : null}
 
             {/* File viewer / session viewer overlay — full-screen above the tab
-                content but below the tab bar (files opened from 工作台/知识库). */}
-            {rightPanelOpen && (
+                content but below the tab bar (files opened from 工作台/知识库)。
+                rightPanelOpen now defaults true (desktop's always-open tree
+                panel); the overlay itself only shows with an ACTIVE file/session
+                tab — the reserved FILES_TAB_ID resolves to activeFileTab null
+                (it's not in fileTabs), so closing the last file tab dismisses
+                the overlay without flipping rightPanelOpen. */}
+            {rightPanelOpen && activeFileTab && (
               <div style={{
                 position: "absolute", inset: 0, zIndex: 40,
                 display: "flex", flexDirection: "column",

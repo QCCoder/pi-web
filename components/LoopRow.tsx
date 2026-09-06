@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { summarizeCron } from "@/lib/loops/cron-summary";
 
-/** pi-loop/status.ts LoopStatusEntry 的 UI 侧镜像（GET /api/workspaces/:id/loops 行）。 */
+/** packages/pi-loop/status.ts LoopStatusEntry 的 UI 侧镜像（GET /api/workspaces/:id/loops 行）。 */
 export interface LoopStatus {
   name: string;
   pattern: string;

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { stringify, parse } from "yaml";
 import { writeLastrun } from "./due.ts";
 
-const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), "..", "kit", "templates", "basic");
+const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "kit", "templates", "basic");
 
 export function initLoop(root: string, opts: {
   name: string; cron: string; pattern?: string; level?: "L1" | "L2" | "L3"; maxMinutes?: number; timezone?: string;

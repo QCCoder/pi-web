@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { computeKeyboardLift, computeVkKeyboardState, resolveKeyboardStrategy, KEYBOARD_MIN_GAP_PX } from "@/lib/keyboard-layout";
 
 /**
  * 移动端虚拟键盘高度同步 —— 修复“键盘和输入框之间有一大片空白”。
@@ -22,13 +23,21 @@ import { useEffect } from "react";
  * - 事件驱动的内核差异太大（有的键盘弹出只发 window resize、有的一个事件都
  *   不发、reveal 平移发生在事件停止之后）：聚焦期间 + 关闭后 1.2s 内以 250ms
  *   轮询实测兜底，事件只是加速器。
- * - reveal 平移补偿：浏览器为露出聚焦输入框会把页面顶起（scroll 型能从
- *   scrollY 读到；iOS content-inset 型 scrollY/offsetTop 都是 0），每帧实测
- *   -html.getBoundingClientRect().top 得出顶起量设为 --app-lift，body
- *   translateY 反向抵消 —— 两种机制都量得到。
+ * - 布局策略分治（resolveKeyboardStrategy，lib/keyboard-layout.ts）：
+ *   ① native —— resizes-visual 类内核（Android Chrome/Edge、iOS：vv 缩而布局
+ *      视口不缩）：不压高、不平移、不锁滚动，只把应用钉在布局视口全高（此内
+ *      核的 100dvh 会随键盘缩，Edge 真机实测 535<live 682），键盘遮挡与输入
+ *      框 reveal 交给浏览器（其 reveal 是窗口级平移，JS 既测不到也撤不掉，
+ *      JS 压高会与它叠加出“应用悬空+下方空画布”，2026-09-06 截图实测）。
+ *   ② squeeze —— 布局视口自己缩的内核（微信 XWeb）、无 vv 老内核、vk
+ *      overlaysContent：压高（--app-height）+ reveal 平移补偿（--app-lift）。
+ * - reveal 平移补偿（仅 squeeze 路径）：浏览器为露出聚焦输入框会把页面顶起
+ *   （scroll 型能从 scrollY 读到；iOS content-inset 型 scrollY/offsetTop 都是 0），
+ *   每帧实测取 max 设为 --app-lift，body translateY 反向抵消。
  * - iOS 对 font-size<16px 的输入框聚焦会自动放大页面：globals.css 的
- *   pointer:coarse 规则统一兜底；这里再以 scale≤1.05 作守卫（用户手动放大时
- *   不接管布局）。
+ *   pointer:coarse 规则统一兜底；这里再以 scale 守卫（zoom-out<0.95 不接管，
+ *   防电脑版网站缩放误判；zoom-in 放宽到 3 —— gap 判据本身能区分键盘与放大，
+ *   收紧会在站点缩放被记住的内核上致盲全部检测，2026-09-06 Edge 真机事故）。
  *
  * 键盘收起（blur / 高度恢复）时移除 class 与变量，回到 100dvh。
  * 桌面（非 coarse pointer）零开销：监听器不注册。
@@ -38,14 +47,19 @@ import { useEffect } from "react";
  */
 
 /** visualViewport / clientHeight 比基准小超过此值才认定为“键盘挡住”。 */
-const KEYBOARD_MIN_GAP_PX = 150;
+const KEYBOARD_GAP_PX = KEYBOARD_MIN_GAP_PX;
 /** 用户手动缩放超出此窗口时不接管布局（防 pinch-zoom 误判成键盘）。双向：
  *  zoom-in（scale>1.05）是最初的守卫；zoom-out（scale<0.95，如手机上“电脑版
  *  网站”缩放显示）时 vv 天然只是布局视口的一个窗口，gap 恒大于 0 却根本没有
  *  键盘 —— 不设下界会把应用错误压短，触屏 PC/宽屏设备上表现为输入区与窗口
  *  底部之间凭空多出大片空白。真键盘弹出时 scale 恒为 1，双向窗口安全。 */
 const MIN_VIEWPORT_SCALE = 0.95;
-const MAX_VIEWPORT_SCALE = 1.05;
+// 上限只拦极端放大：gap 判据（基准-live>150）本身能区分键盘与 pinch 放大
+// （关闭态放大 2× 时 gap=349 会超阈，但需同时聚焦可编辑元素才判定，且 native
+// pin 的误触发与关闭态高度相同、无副作用）。反向收紧会让真实键盘在
+// “站点缩放被记住”的状态下（Edge 真机实测 scale 停在 1.0999）被完全致盲 ——
+// 2026-09-06 真机事故：用户站点缩放 1.1 后键盘检测全盲，适配彻底失效。
+const MAX_VIEWPORT_SCALE = 3;
 /** 聚焦期间与关闭后的实测轮询间隔（兜不发事件的内核与晚到的 reveal 平移）。 */
 const POLL_INTERVAL_MS = 250;
 /** focusout 后继续轮询的时长（键盘收起动画 + 平移回落）。 */
@@ -81,11 +95,20 @@ export function useVisualViewportKeyboard(): void {
     if (typeof window === "undefined") return;
     if (!window.matchMedia("(pointer: coarse)").matches) return;
     const vv = window.visualViewport; // 老 X5 内核没有 —— 回退 innerHeight
+    // VirtualKeyboard API（Chromium 94+）：键盘真实矩形，绕过 vv 对遮挡的高估
+    // （vv 把浏览器底部 UI 一起扣，真机实测空隙来源，2026-09-05）。iOS/微信/X5
+    // 没有此 API，自动走 vv 老路径。overlaysContent=true 后浏览器不再自己缩 vv，
+    // 键盘完全叠加，布局由本 hook 全接管。
+    const vk = (navigator as Navigator & { virtualKeyboard?: { overlaysContent: boolean; boundingRect: DOMRect; addEventListener: (t: string, l: () => void) => void; removeEventListener: (t: string, l: () => void) => void } }).virtualKeyboard ?? null;
+    if (vk) {
+      try {
+        vk.overlaysContent = true;
+      } catch {
+        // 只读实现（老版本）—— vk 路径退化为不可用，走 vv 老路径
+      }
+    }
+    const vkActive = Boolean(vk && vk.overlaysContent);
     const debug = debugProbeEnabled();
-    // [TEMP-KBDEBUG] 真机数据自动回传（仅 kbdebug 开启时）：每 ~800ms 最多一条
-    // POST /api/kbdebug，服务端落 /tmp/pi-kbdebug.log —— 免去人肉读数。诊断完删除。
-    const pointerCoarse = window.matchMedia("(pointer: coarse)").matches;
-    let lastBeaconAt = 0;
 
     let raf = 0;
     let keyboardOpen = false;
@@ -109,17 +132,23 @@ export function useVisualViewportKeyboard(): void {
       raf = requestAnimationFrame(() => {
         const root = document.documentElement;
         const liveLayout = root.clientHeight;
-        const visualHeight = vv ? vv.height : window.innerHeight;
+        // vk 路径（overlaysContent=true）：键盘真实矩形是唯一权威 —— vv 不再缩，
+        // 旧双判据在 overlays 模式下永远不触发，直接短路。
+        const vkState = vkActive
+          ? computeVkKeyboardState(vk!.boundingRect, liveLayout)
+          : null;
+        const visualHeight = vkState ? vkState.visibleHeight : (vv ? vv.height : window.innerHeight);
         const scale = vv ? vv.scale : 1;
         // 双判据：visualViewport 缩了（绝大多数内核）或布局视口自己缩了
         // （微信 XWeb 等原生 resizes-content 但 dvh 不跟随 —— 100dvh 兜底过期）。
         const gap = (baselineLayoutHeight || liveLayout) - visualHeight;
         const layoutGap = (baselineLayoutHeight || liveLayout) - liveLayout;
-        const nextOpen =
-          isEditableFocused() &&
-          scale >= MIN_VIEWPORT_SCALE &&
-          scale <= MAX_VIEWPORT_SCALE &&
-          (gap > KEYBOARD_MIN_GAP_PX || layoutGap > KEYBOARD_MIN_GAP_PX);
+        const nextOpen = vkState
+          ? vkState.open && isEditableFocused()
+          : isEditableFocused() &&
+            scale >= MIN_VIEWPORT_SCALE &&
+            scale <= MAX_VIEWPORT_SCALE &&
+            (gap > KEYBOARD_GAP_PX || layoutGap > KEYBOARD_GAP_PX);
         // 基准只在“前后都不在键盘态”时更新：开着时 html 已被压到 --app-height，
         // 关闭瞬间它还挂着旧值，live 都不可信。
         if (!keyboardOpen && !nextOpen) baselineLayoutHeight = liveLayout;
@@ -127,13 +156,33 @@ export function useVisualViewportKeyboard(): void {
           keyboardOpen = nextOpen;
           root.classList.toggle("pi-keyboard-open", keyboardOpen);
         }
-        if (keyboardOpen) {
-          root.style.setProperty("--app-height", `${Math.round(visualHeight)}px`);
-          // 实测页面被 reveal 平移顶起的量（content-inset 平移下 scrollY/offsetTop
-          // 均为 0，只有 rect 量得到），body translateY 反向抵消。
-          const lift = -root.getBoundingClientRect().top;
-          root.style.setProperty("--app-lift", `${Math.max(0, Math.round(lift))}px`);
+        // 布局策略分治：resizes-visual（vv 缩、布局视口不缩）→ native，不接管 ——
+        // 这类内核的键盘 reveal 是窗口级平移（JS 不可测），压高会与它叠加出“应用
+        // 悬空+下方空画布”（2026-09-06 真机截图实测）。布局视口自己缩（XWeb）、
+        // 无 vv 老内核、以及 vk overlaysContent（浏览器完全不管布局，必须自己压）
+        // → squeeze，保持压高+平移补偿。
+        const strategy = keyboardOpen
+          ? resolveKeyboardStrategy(baselineLayoutHeight, liveLayout, visualHeight, Boolean(vv) && !vkActive)
+          : null;
+        const squeeze = strategy?.mode === "squeeze";
+        root.classList.toggle("pi-kb-squeeze", keyboardOpen && squeeze);
+        if (keyboardOpen && strategy?.mode === "squeeze") {
+          root.style.setProperty("--app-height", `${strategy.appHeight}px`);
+          // reveal 平移补偿（computeKeyboardLift，三信号取 max —— 见 lib/keyboard-layout.ts）：
+          // ① iOS scroll 型：rect 与 vvTop 同时报告同一偏移（取 max 防双重补偿）；
+          // ② iOS content-inset 型：scrollY/offsetTop 都读 0，只有 rect 量得到。
+          const lift = computeKeyboardLift(
+            root.getBoundingClientRect().top,
+            vv ? vv.offsetTop : 0,
+          );
+          root.style.setProperty("--app-lift", `${lift}px`);
           if (window.scrollY !== 0 || root.scrollTop !== 0) window.scrollTo(0, 0);
+        } else if (strategy) {
+          // native：不压高不平移不锁滚动（键盘遮挡与 reveal 交给浏览器），但要把
+          // 应用钉在布局视口全高 —— 此内核 100dvh 会随键盘缩（Edge 实测 535<live 682），
+          // 放任 dvh 会在可视带下方留出画布空带（2026-09-06 真机实测）。
+          root.style.setProperty("--app-height", `${strategy.appHeight}px`);
+          root.style.removeProperty("--app-lift");
         } else {
           root.style.removeProperty("--app-height");
           root.style.removeProperty("--app-lift");
@@ -151,30 +200,6 @@ export function useVisualViewportKeyboard(): void {
             `vis=${Math.round(visualHeight)} vvTop=${Math.round(vv ? vv.offsetTop : 0)} scale=${scale.toFixed(2)}\n` +
             `scrollY=${Math.round(window.scrollY)} lift=${keyboardOpen ? root.style.getPropertyValue("--app-lift") : "-"}`;
         }
-        if (debug && Date.now() - lastBeaconAt > 800) {
-          lastBeaconAt = Date.now();
-          void fetch("/api/kbdebug", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              kb: keyboardOpen ? 1 : 0,
-              focused: isEditableFocused(),
-              live: liveLayout,
-              base: baselineLayoutHeight,
-              vis: Math.round(visualHeight),
-              vvTop: Math.round(vv ? vv.offsetTop : 0),
-              scale,
-              scrollY: Math.round(window.scrollY),
-              lift: keyboardOpen ? root.style.getPropertyValue("--app-lift") : null,
-              htmlTop: Math.round(root.getBoundingClientRect().top),
-              innerH: window.innerHeight,
-              hasVv: Boolean(vv),
-              pointerCoarse,
-              ua: navigator.userAgent,
-              url: location.pathname,
-            }),
-          }).catch(() => {});
-        }
       });
     };
 
@@ -187,6 +212,7 @@ export function useVisualViewportKeyboard(): void {
       vv.addEventListener("resize", apply);
       vv.addEventListener("scroll", apply);
     }
+    if (vk) vk.addEventListener("geometrychange", apply);
     window.addEventListener("resize", apply);
     window.addEventListener("scroll", apply, { passive: true });
     document.addEventListener("focusin", apply);
@@ -197,6 +223,7 @@ export function useVisualViewportKeyboard(): void {
         vv.removeEventListener("resize", apply);
         vv.removeEventListener("scroll", apply);
       }
+      if (vk) vk.removeEventListener("geometrychange", apply);
       window.removeEventListener("resize", apply);
       window.removeEventListener("scroll", apply);
       document.removeEventListener("focusin", apply);
@@ -204,6 +231,7 @@ export function useVisualViewportKeyboard(): void {
       cancelAnimationFrame(raf);
       if (pollTimer != null) clearInterval(pollTimer);
       document.documentElement.classList.remove("pi-keyboard-open");
+      document.documentElement.classList.remove("pi-kb-squeeze");
       document.documentElement.style.removeProperty("--app-height");
       document.documentElement.style.removeProperty("--app-lift");
       if (debugEl) debugEl.remove();

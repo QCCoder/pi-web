@@ -65,6 +65,7 @@ export const zhCNLocale: LocalePlugin = {
     "workspace.stepModels": "点击底部的“模型”按钮添加模型",
     "files.hidePanel": "隐藏文件面板",
     "files.showPanel": "显示文件面板",
+    "files.panelResize": "拖动调整文件区宽度（双击重置）",
     "files.noneOpen": "没有打开的文件",
     "sidebar.new": "新建",
     "sidebar.newSessionTitle": "在 {path} 中新建会话",

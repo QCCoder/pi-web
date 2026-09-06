@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
 import { stopRound } from "@/lib/loops/rounds";
-import { reapOrphanedRoundProcesses } from "../../../../../../../pi-loop/reap.ts";
+import { reapOrphanedRoundProcesses } from "../../../../../../../packages/pi-loop/reap.ts";
 import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
 
 /** 终止本轮（S4）：daemon 持有 → DELETE /v1/sessions/:id（现有面）+ 包内 reap

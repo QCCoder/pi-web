@@ -2,7 +2,7 @@
  *  按 loopName（name 字段，缺省=目录名）匹配，回落目录名——绑定存的是名（S1），
  *  一切文件操作仍以 declaration.dir（目录）为准（H7）。 */
 import { basename } from "node:path";
-import { discoverKitLoops, type LoopDeclaration } from "../../pi-loop/protocol.ts";
+import { discoverKitLoops, type LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
 
 export function findKitLoopByName(workspacePath: string, name: string): LoopDeclaration | undefined {
   return discoverKitLoops(workspacePath, { includePaused: true })

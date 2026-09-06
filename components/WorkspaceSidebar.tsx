@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { FileExplorer } from "./FileExplorer";
 import { PanelHeader, PanelHeaderButton } from "./PanelHeader";
+import { ExplorerSegmentedTabs } from "./FilesExplorerPanel";
 import type { SidebarView } from "./ActivityBar";
 import { useGitStatus } from "@/hooks/useGitStatus";
 import { ChangesPanel } from "./ChangesPanel";
@@ -55,6 +56,10 @@ interface Props {
   /** 计数器信号：bump 时把文件 section 展开（跨视图「打开文件区」意图，
    *  如 Loops 面板 loop 名点击——文件区默认收起，不展开则看不见 reveal 结果）。 */
   openFilesRequest?: number;
+  /** 工作台是否渲染「文件」段。桌面 false（文件树已迁往右栏固定的「文件」
+   *  tab，见 FilesExplorerPanel），会话列表占满高度；移动端 true（工作台
+   *  tab 内的文件树/折叠/分割逻辑原样保留）。默认 true。 */
+  showFilesSection?: boolean;
 }
 
 // Knowledge repos are browsed with a FileExplorer that has no git overlay in the
@@ -124,93 +129,8 @@ function rowStyle(active = false): React.CSSProperties {
   };
 }
 
-/** Workbench [ 文件 | 改动(N) ] segmented switch. Lives in the 文件 section
- *  header of the workbench view: the changes list follows the Explorer's
- *  current cwd scope. Only rendered inside a git directory. Margin is 0 — the
- *  enclosing section header provides the spacing. */
-function ExplorerSegmentedTabs({
-  active,
-  changesCount,
-  onSelect,
-}: {
-  active: "files" | "changes";
-  changesCount: number;
-  onSelect: (tab: "files" | "changes") => void;
-}) {
-  const tabBase: React.CSSProperties = {
-    flex: 1,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 5,
-    padding: "4px 8px",
-    border: 0,
-    borderRadius: 5,
-    background: "transparent",
-    color: "var(--text-muted)",
-    cursor: "pointer",
-    fontSize: "var(--pi-sidebar-fs-meta)",
-    fontWeight: 600,
-    whiteSpace: "nowrap",
-  };
-  const activeStyle: React.CSSProperties = {
-    background: "var(--bg-panel)",
-    color: "var(--text)",
-    boxShadow: "0 1px 2px rgba(0,0,0,0.12)",
-  };
-  return (
-    <div
-      role="tablist"
-      aria-label="Explorer 视图"
-      style={{
-        display: "flex",
-        gap: 3,
-        padding: 3,
-        background: "var(--bg-hover)",
-        borderRadius: 7,
-      }}
-    >
-      <button
-        type="button"
-        role="tab"
-        aria-selected={active === "files"}
-        style={active === "files" ? { ...tabBase, ...activeStyle } : tabBase}
-        onClick={() => onSelect("files")}
-      >
-        文件
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={active === "changes"}
-        style={active === "changes" ? { ...tabBase, ...activeStyle } : tabBase}
-        onClick={() => onSelect("changes")}
-      >
-        改动
-        {changesCount > 0 && (
-          <span
-            title={`${changesCount} 个改动`}
-            style={{
-              minWidth: 16,
-              height: 16,
-              padding: "0 5px",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: 8,
-              background: "var(--accent)",
-              color: "var(--bg-panel)",
-              fontSize: 10,
-              fontWeight: 700,
-            }}
-          >
-            {changesCount}
-          </span>
-        )}
-      </button>
-    </div>
-  );
-}
+/** Workbench [ 文件 | 改动(N) ] segmented switch now lives in FilesExplorerPanel
+ *  (shared with the desktop right panel's pinned「文件」tab). */
 
 /** 工作台头部的工作区切换器：当前工作区名 + ▾，点击弹出同列表（本工作区置顶），
  *  选即切；不在弹层里提供新建（顶部 WorkspaceTabBar 的 ＋ 是新建入口）。 */
@@ -384,6 +304,7 @@ export function WorkspaceSidebar({
   onSessionRemoved,
   filesReveal,
   openFilesRequest,
+  showFilesSection = true,
 }: Props) {
   // sessions 直接从 AppShell 已加载的全局列表派生（useSessionActivity，含 SSE 实时），
   // 不再自己 fetch /api/sessions——切换 workspace 时瞬时过滤，无重复请求与列表闪烁。
@@ -625,13 +546,18 @@ export function WorkspaceSidebar({
   }
 
   // ---- Module panels ----------------------------------------------------------
+  // 文件段可见性：桌面 false（文件树在右栏「文件」tab），会话列表占满高度。
+  const filesSectionVisible = showFilesSection !== false;
+  const filesOpen = filesSectionVisible && workbenchSections.files;
   const renderActiveView = (): ReactNode => {
     switch (activeView) {
       case "workbench":
-        // 工作台：会话（上）+ 文件（下）两个可折叠分段。两段都展开时会话占
-        // 分割高度（默认 40%，可拖中间的分割手柄调整，双击重置）内部滚动
-        // （不随内容伸缩，保证两段高度稳定）；文件默认收起——收起时只剩
-        // 头部贴在面板底部（marginTop:auto 吸收剩余空间），会话列表占满剩余高度。
+        // 工作台（移动端 / showFilesSection=true）：会话（上）+ 文件（下）两个可
+        // 折叠分段。两段都展开时会话占分割高度（默认 40%，可拖中间的分割手柄
+        // 调整，双击重置）内部滚动（不随内容伸缩，保证两段高度稳定）；文件默认
+        // 收起——收起时只剩头部贴在面板底部（marginTop:auto 吸收剩余空间），
+        // 会话列表占满剩余高度。桌面 showFilesSection=false：文件段不渲染，
+        // 会话占满（文件树在右栏「文件」tab）。
         return (
           <div ref={workbenchBodyRef} style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <WorkbenchSectionHeader
@@ -644,7 +570,7 @@ export function WorkspaceSidebar({
               <div
                 ref={sessionsBodyRef}
                 style={{
-                  flex: workbenchSections.files ? `0 0 ${splitPct ?? WORKBENCH_SPLIT_DEFAULT_PCT}%` : "1 1 0",
+                  flex: filesOpen ? `0 0 ${splitPct ?? WORKBENCH_SPLIT_DEFAULT_PCT}%` : "1 1 0",
                   minHeight: 0,
                   overflowY: "auto",
                 }}
@@ -667,7 +593,7 @@ export function WorkspaceSidebar({
                 )}
               </div>
             )}
-            {workbenchSections.sessions && workbenchSections.files && (
+            {workbenchSections.sessions && filesOpen && (
               <div
                 className="workbench-split-handle"
                 role="separator"
@@ -677,9 +603,10 @@ export function WorkspaceSidebar({
                 onDoubleClick={resetWorkbenchSplit}
               />
             )}
+            {filesSectionVisible && (
             <div
               style={{
-                flex: workbenchSections.files ? "1 1 0" : "0 0 auto",
+                flex: filesOpen ? "1 1 0" : "0 0 auto",
                 marginTop: "auto",
                 minHeight: 0,
                 display: "flex",
@@ -692,10 +619,10 @@ export function WorkspaceSidebar({
                   agent 回合结束才会自动刷新一次）。收起时不渲染，只剩标题条贴底。 */}
               <WorkbenchSectionHeader
                 label="文件"
-                open={workbenchSections.files}
+                open={filesOpen}
                 onToggle={() => toggleWorkbenchSection("files", workbenchSections.files)}
               >
-                {workbenchSections.files && (
+                {filesOpen && (
                   <>
                     {isGitRepo && (
                       <div style={{ flex: 1, minWidth: 0 }}>
@@ -734,7 +661,7 @@ export function WorkspaceSidebar({
                   </>
                 )}
               </WorkbenchSectionHeader>
-              {workbenchSections.files && (
+              {filesOpen && (
                 <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
                   {isGitRepo && effectiveExplorerTab === "changes" ? (
                     <ChangesPanel
@@ -755,6 +682,7 @@ export function WorkspaceSidebar({
                 </div>
               )}
             </div>
+            )}
           </div>
         );
 

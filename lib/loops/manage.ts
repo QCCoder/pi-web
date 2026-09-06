@@ -9,11 +9,11 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findKitLoopByName } from "./lookup.ts";
 import { listWorkItems } from "../work-items/service.ts";
-import { initLoop } from "../../pi-loop/init.ts";
-import { isValidCronExpression } from "../../pi-loop/cron.ts";
-import { isValidTimezone, splitLoopFile } from "../../pi-loop/frontmatter.ts";
-import { isRoundLockStale, readRoundLock } from "../../pi-loop/round-lock.ts";
-import type { LoopDeclaration } from "../../pi-loop/protocol.ts";
+import { initLoop } from "../../packages/pi-loop/init.ts";
+import { isValidCronExpression } from "../../packages/pi-loop/cron.ts";
+import { isValidTimezone, splitLoopFile } from "../../packages/pi-loop/frontmatter.ts";
+import { isRoundLockStale, readRoundLock } from "../../packages/pi-loop/round-lock.ts";
+import type { LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
 
 // NOTE (task-2 deviation): the brief's verbatim code used TypeScript parameter
 // properties (constructor(readonly status: number, ...)) — Node's strip-only

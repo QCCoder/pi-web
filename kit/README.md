@@ -48,7 +48,7 @@ fire 序列，跨宿主互斥（daemon 轮的锁写 `kind: "daemon"`，beat 看�
 **多 loop**：同根多个 loop 的并行轮由 per-loop 锁保证互不阻塞（A 轮在跑不挡 B 到点）；budget/constraints
 根共享——总帽/宪法正是要跨 loop 生效。
 
-CLI 命令面（宿主包 `pi-loop/`，照 host spec §4；发布前可直接 `node pi-loop/cli.ts …` 调用）：
+CLI 命令面（宿主包 `packages/pi-loop/`，照 host spec §4；发布前可直接 `node packages/pi-loop/cli.ts …` 调用）：
 
 | 命令 | 行为 |
 |---|---|

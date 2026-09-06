@@ -14,13 +14,16 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "pi-web": "bin/pi-web.js"
   },
   "files": [
     "bin",
     "lib",
-    "pi-loop",
+    "packages/pi-loop",
     "kit",
     ".next",
     "!.next/cache",
@@ -39,7 +42,7 @@
     "daemon": "node bin/pi-daemon.js",
     "loop": "node bin/pi-daemon.js",
     "lint": "eslint .",
-    "test": "node --test \"lib/**/*.test.mjs\" \"pi-loop/**/*.test.mjs\"",
+    "test": "node --test \"lib/**/*.test.mjs\" \"packages/pi-loop/**/*.test.mjs\"",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {

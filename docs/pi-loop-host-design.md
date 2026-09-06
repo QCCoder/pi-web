@@ -39,7 +39,7 @@
          GitHub Actions（可直接调 beat，也可沿用裸 pi -p 模板）
 ```
 
-**落位**：pi-web 仓内顶级目录 `pi-loop/`（独立 package.json 备未来发布，含 bin 入口），pi-web 内部以**相对路径导入**（同 `lib/` 待遇，不经 node_modules——`file:` 符号链接过 Next server bundle 有解析摩擦，实现期裁定改相对路径；发布时另配 exports）。npm 命名发布时再定（社区已有 `@bramburn/pi-loop`、`@hank-warren/pi-loop`，均为 scoped，无冲突但命名再议）。测试沿用仓内约定：`node --test`，`.test.mjs` 直接 import `.ts`。
+**落位**：pi-web 仓内 `packages/pi-loop/`（npm workspaces 成员，独立 package.json 备未来发布，含 bin 入口；2026-09 自顶级目录迁入，相对路径导入裁定不变），pi-web 内部以**相对路径导入**（同 `lib/` 待遇，不经 node_modules——`file:` 符号链接过 Next server bundle 有解析摩擦，实现期裁定改相对路径；发布时另配 exports）。npm 命名发布时再定（社区已有 `@bramburn/pi-loop`、`@hank-warren/pi-loop`，均为 scoped，无冲突但命名再议）。测试沿用仓内约定：`node --test`，`.test.mjs` 直接 import `.ts`。
 
 ## 4. 命令面
 

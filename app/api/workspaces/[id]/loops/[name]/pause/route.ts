@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
-import { collectStatus } from "../../../../../../../pi-loop/status.ts";
+import { collectStatus } from "../../../../../../../packages/pi-loop/status.ts";
 
 /** 写 loops/<name>/PAUSED 标记（web 进程 fs，loops route 先例）。幂等——
  *  已暂停再暂停成功。在跑的轮靠开场合同规则 6（发现 PAUSED 立即收尾）合作收尾。 */
