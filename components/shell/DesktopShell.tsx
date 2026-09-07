@@ -84,6 +84,7 @@ export function DesktopShell() {
     handleOpenConfig,
     handleOpenSessionFromHome,
     homeNewSession,
+    homeSession,
     handleHomeNewSession,
     handleHomeNewSessionSelect,
     handleHomeSessionCreated,
@@ -309,7 +310,7 @@ const renderMiddleColumn = () => {
       activeWorkspace={activeWorkspace}
       activeView={sidebarView}
       workspaces={workspaces}
-      selectedSessionId={selectedSession?.id ?? null}
+      selectedSessionId={selectedSession?.id ?? homeSession?.id ?? null}
       runningSessionIds={sessionActivity.runningIds}
       completedSessionIds={sessionActivity.completedIds}
       allSessions={sessionActivity.sessions}
@@ -533,7 +534,18 @@ const renderMiddleColumn = () => {
             </div>
           </div>
         ) : !activeWorkspace ? (
-          homeNewSession.open ? (
+          homeSession ? (
+            <ChatWindow
+              session={homeSession}
+              newSessionCwd={null}
+              reloadSignal={sessionKey}
+              onAgentEnd={handleAgentEnd}
+              onOpenFile={handleOpenLinkedFile}
+              onOpenSession={handleOpenSessionViewer}
+              modelsRefreshKey={modelsRefreshKey}
+              chatInputRef={chatInputRef}
+            />
+          ) : homeNewSession.open ? (
             <HomeNewSession
               workspaces={workspaces}
               selectedWorkspaceId={homeNewSession.workspaceId}

@@ -11,7 +11,7 @@ import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { resolveContractPattern } from "@/lib/loops/contract-prefill";
-import { defaultHomeNewSessionWorkspaceId } from "@/lib/home-quick-switch";
+import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "../ChatInput";
@@ -87,8 +87,11 @@ export function useAppShellState() {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [mruIds, setMruIds] = useState<string[]>([]);
   // 首页无主新会话页（B1 原地切换）：open 时首页主区渲染工作区选择器 + composer；
-  // 任何 tab 切换（含发送后落 tab、点首页返回）都会将其重置（见 activateTab）。
+  // 任何 tab 切换（含点首页返回）都会将其重置（见 activateTab）。
   const [homeNewSession, setHomeNewSession] = useState<{ open: boolean; workspaceId: string | null }>({ open: false, workspaceId: null });
+  // 从首页打开的会话（反馈修订：不跳工作区 tab）：聊天直接落在首页主区的
+  // ChatWindow，左侧中栏保持首页菜单；会话归属工作区不变（磁盘/daemon 决定）。
+  const [homeSession, setHomeSession] = useState<SessionInfo | null>(null);
   // False until the initial URL→tab restore has run, to avoid flashing the
   // "select a session" placeholder while the addressed tab is still loading.
   const [navReady, setNavReady] = useState(false);
@@ -563,6 +566,7 @@ export function useAppShellState() {
     if (id) setMruIds((ids) => [id, ...ids.filter((x) => x !== id)]);
     setActiveTabId(id);
     setHomeNewSession({ open: false, workspaceId: null });
+    setHomeSession(null);
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
@@ -729,8 +733,24 @@ export function useAppShellState() {
       .catch(() => {});
   }, [loadWorkspaces]);
 
+  // Open a session straight from the home page — 反馈修订：不跳转/不激活工作区
+  // tab，会话聊天直接落在首页主区，左侧中栏保持首页菜单。会话归属工作区
+  // 由磁盘/daemon 决定，之后随时可在对应工作区里继续。
+  const handleOpenSessionFromHome = useCallback((session: SessionInfo) => {
+    if (!workspaceForSession(session, workspaces)) return;
+    setWorkspaceManagerOpen(false);
+    setHomeSession(session);
+    setHomeNewSession({ open: false, workspaceId: null });
+    setSessionKey((key) => key + 1);
+    setSystemPrompt(null);
+  }, [workspaces]);
+
   const handleSelectSession = useCallback((session: SessionInfo) => {
-    if (!activeTabId) return;
+    // 首页（无活动 tab）点会话 = 跨工作区直达，委托给首页管道，不再静默吞掉。
+    if (!activeTabId) {
+      handleOpenSessionFromHome(session);
+      return;
+    }
     // Opening a session is an explicit “show me the chat” intent — drop the
     // right-column config view so the chat is actually visible.
     setConfigView(null);
@@ -743,7 +763,7 @@ export function useAppShellState() {
     // switching to the 会话 tab (focus signal; the desktop shell ignores it).
     focusChat();
     navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`);
-  }, [activeTabId, updateTab, navigateUrl, focusChat]);
+  }, [activeTabId, handleOpenSessionFromHome, updateTab, navigateUrl, focusChat]);
 
   // 按会话 id 打开（subagent 子会话 / 工作项关联会话）。走专门的 locate 端点：
   // 优先 probe daemon 拿权威元信息（会话在 daemon 进程里，它最先知道），
@@ -906,31 +926,11 @@ export function useAppShellState() {
     handleCloseWorkspaceTab(workspace.id);
   }, [handleCloseWorkspaceTab]);
 
-  // Open a session straight from the home page: resolve its owning workspace
-  // (already known from the loaded list) and switch into chat in one step.
-  const handleOpenSessionFromHome = useCallback((session: SessionInfo) => {
-    const owner = workspaces
-      .filter((workspace) => {
-        const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
-        return workspace.available
-          && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
-      })
-      .sort((left, right) => right.path.length - left.path.length)[0];
-    if (!owner) return;
-    setWorkspaceManagerOpen(false);
-    ensureTab(owner);
-    updateTab(owner.id, { view: "chat", session, newSessionCwd: null });
-    activateTab(owner.id);
-    setSessionKey((k) => k + 1);
-    setSystemPrompt(null);
-    focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(owner.id)}&view=chat&session=${encodeURIComponent(session.id)}`);
-  }, [workspaces, ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
-
   // ---- 首页无主新会话页（grill 共识：B1 原地切换）-----------------------------
   // 打开时默认选中最近活跃工作区（最近会话所属 → MRU tab → 第一个可用）。
   const handleHomeNewSession = useCallback(() => {
     const workspaceId = defaultHomeNewSessionWorkspaceId(workspaces, sessionActivity.sessions, mruIds);
+    setHomeSession(null);
     setHomeNewSession({ open: true, workspaceId });
     focusChat();
   }, [workspaces, sessionActivity.sessions, mruIds, focusChat]);
@@ -943,18 +943,15 @@ export function useAppShellState() {
     setHomeNewSession({ open: false, workspaceId: null });
   }, []);
 
-  // 首次发送后从无主页落到所选工作区的 tab（镜像 handleOpenSessionFromHome）；
-  // activateTab 顺带关闭无主页模式。
+  // 首页 composer 首次发送后：会话聊天原地落在首页主区（不跳工作区 tab）。
+  // homeNewSession 关闭 → 主区切到 homeSession 分支的 ChatWindow（按 session
+  // 加载上下文；若首条回复仍在流式，state 探测 isStreaming 后 SSE 自动接上）。
   const handleHomeSessionCreated = useCallback((session: SessionInfo) => {
-    const workspace = workspaces.find((item) => item.id === homeNewSession.workspaceId && item.available);
-    if (!workspace) return;
-    ensureTab(workspace);
-    updateTab(workspace.id, { view: "chat", session, newSessionCwd: null });
-    activateTab(workspace.id);
+    setHomeSession(session);
+    setHomeNewSession({ open: false, workspaceId: null });
     setSessionKey((key) => key + 1);
     focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(session.id)}`);
-  }, [workspaces, homeNewSession.workspaceId, ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
+  }, [focusChat]);
 
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
     // The work-items panel (full manager) receives the create request.
@@ -1581,6 +1578,7 @@ export function useAppShellState() {
     handleWorkspaceDeleted,
     handleOpenSessionFromHome,
     homeNewSession,
+    homeSession,
     handleHomeNewSession,
     handleHomeNewSessionSelect,
     handleExitHomeNewSession,

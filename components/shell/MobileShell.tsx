@@ -503,7 +503,18 @@ export function MobileShell() {
           bubbles survive tab switches (Q14). */}
       <div style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
         {!activeWorkspace ? (
-          s.homeNewSession.open ? (
+          s.homeSession ? (
+            <ChatWindow
+              reloadSignal={s.sessionKey}
+              session={s.homeSession}
+              newSessionCwd={null}
+              onAgentEnd={s.handleAgentEnd}
+              onOpenFile={s.handleOpenLinkedFile}
+              onOpenSession={s.handleOpenSessionViewer}
+              modelsRefreshKey={s.modelsRefreshKey}
+              chatInputRef={s.chatInputRef}
+            />
+          ) : s.homeNewSession.open ? (
             <HomeNewSession
               workspaces={workspaces}
               selectedWorkspaceId={s.homeNewSession.workspaceId}
