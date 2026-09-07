@@ -86,7 +86,6 @@ export function DesktopShell() {
     homeNewSession,
     handleHomeNewSession,
     handleHomeNewSessionSelect,
-    handleExitHomeNewSession,
     handleHomeSessionCreated,
     handleCreateWorkItem,
     openSessionStatsPanel,
@@ -539,7 +538,6 @@ const renderMiddleColumn = () => {
               workspaces={workspaces}
               selectedWorkspaceId={homeNewSession.workspaceId}
               onSelectWorkspace={handleHomeNewSessionSelect}
-              onBack={handleExitHomeNewSession}
               onSessionCreated={handleHomeSessionCreated}
               onCreateWorkspace={handleCreateWorkspace}
               modelsRefreshKey={modelsRefreshKey}

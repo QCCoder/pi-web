@@ -51,6 +51,11 @@ interface Props {
    *  Used by the home new-session page: one home-scoped draft that survives
    *  workspace-selection changes. */
   draftKeyOverride?: string;
+  /** Optional control rendered at the very LEFT of the composer controls row
+   *  (before the attach-image button) — passed through to ChatInput's
+   *  leadingControl. The home new-session page hosts its workspace selector
+   *  there (next to the upload button, per user feedback). */
+  inputLeadingControl?: React.ReactNode;
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -190,7 +195,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, ch
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, draftKeyOverride }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, draftKeyOverride, inputLeadingControl }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -466,6 +471,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       // key bump forces a remount so ChatInput re-reads the draft store.
       key={`composer-${composerEpoch}`}
       ref={chatInputRef}
+      leadingControl={inputLeadingControl}
       onSend={handleSend}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}

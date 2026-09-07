@@ -508,7 +508,6 @@ export function MobileShell() {
               workspaces={workspaces}
               selectedWorkspaceId={s.homeNewSession.workspaceId}
               onSelectWorkspace={s.handleHomeNewSessionSelect}
-              onBack={s.handleExitHomeNewSession}
               onSessionCreated={s.handleHomeSessionCreated}
               onCreateWorkspace={handleCreateWorkspace}
               modelsRefreshKey={s.modelsRefreshKey}

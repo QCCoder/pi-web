@@ -33,6 +33,10 @@ interface ModelOption {
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
+  /** Optional control rendered at the very LEFT of the bottom controls row
+   *  (before the attach-image button). Used by the home new-session page to
+   *  host the workspace selector next to the upload button. */
+  leadingControl?: React.ReactNode;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[]) => void;
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
@@ -267,6 +271,7 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
+  leadingControl,
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
@@ -1678,6 +1683,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
+            {leadingControl}
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isStreaming}
