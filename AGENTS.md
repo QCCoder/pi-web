@@ -608,7 +608,7 @@ components/
     ChatToolbar.tsx         the shared 36px tool strip (theme/language/chat-scoped buttons/token stats + dropdowns); ☰ desktop-only
   HomeLanding.tsx           the workspace picker / home screen. Desktop: hero + workspace cards + 「＋ 新建会话」primary action (opens the unbound new-session page); the old flat top-5 最近会话 section is retired (quick-switch lives in the middle column). Mobile: compact hero row (＋ 会话 primary, then 新建工作区/导入) + horizontal 工作区 chips + internal-scroll 最近会话 grouped by workspace (HomeSessionGroups)
   HomeSessionGroups.tsx    首页快速切换列表（按工作区分组：组头点击=打开工作区，chevron 折叠默认全展开不持久化，会话行=运行中呼吸点+名称+相对时间，点击=handleOpenSessionFromHome 直达；无行内管理操作）。桌面中栏首页面板与移动端 HomeLanding 下半区共用；排序由 lib/home-quick-switch.ts 的 groupSessionsByWorkspace 负责（活跃度降序、空组沉底）
-  HomeNewSession.tsx       首页无主新会话页（B1 原地切换，两 shell 同构）：‹ 返回 + 工作区选择器（默认最近活跃，共识 Q11=a）+ ChatWindow(session=null, draftKeyOverride="new:__home__")；首次发送走现有 /api/agent/new（cwd=所选工作区根，daemon 解析装配），onSessionCreated → useAppShellState.handleHomeSessionCreated 打开该工作区 tab；任何 activateTab 都会重置无主页模式；无可用工作区时显示创建引导
+  HomeNewSession.tsx       首页无主新会话页（B1 原地切换，反馈修订后无定制外壳）：直接渲染普通工作区同构的 ChatWindow 新会话视图（只有 composer，可直接发起对话；返回 = tab 栏首页按钮，activateTab 重置无主页模式）；工作区选择器经 ChatWindow inputLeadingControl → ChatInput leadingControl 槽渲染在 composer 控制行、上传图片按钮左侧（下拉向上展开；旧版挂在 PanelHeader meta 槽会被头部容器裁剪——即「点击无选项」bug 的成因），默认最近活跃（共识 Q11=a），草稿 draftKeyOverride="new:__home__"；首次发送走现有 /api/agent/new（cwd=所选工作区根，daemon 解析装配），onSessionCreated → useAppShellState.handleHomeSessionCreated 打开该工作区 tab；无可用工作区时显示创建引导
   ActivityBar.tsx           the icon rail (desktop left strip / mobile fixed bottom bar): module group 工作台→知识库→工作项→Loops + separator + global group 模型→Skills→插件→归档→设置(bottom-pinned; the config trio renders in the RIGHT column, not the middle column); defines `SidebarView` + `ConfigView`/`isConfigView` + `ACTIVITY_VIEW_ORDER` + `RAIL_GLOBAL_VIEWS` (rail icon order) + `GLOBAL_ACTIVITY_VIEWS` (middle-column persistence surface: archive/settings only) + `visibleActivityViews()`
   PanelHeader.tsx           unified ~36px middle-column panel header (title + back + context actions + mobile ×) + PanelHeaderButton
   SettingsPanel.tsx         the 设置 panel — iOS-settings index → 工作区/模型/Skills/插件/偏好 subpages (mounts the config bodies in `embedded` mode)
@@ -627,7 +627,7 @@ components/
   LoopsPanel.tsx            中栏 Loops 模块面板（rail 第四模块视图 body；行点击=右栏配置、「运行」=手动起轮并打开轮会话、名字点击=文件区 reveal 到 loops/<name>，配置/新建 → 右栏 loopConfig 视图）
   ChatWindow.tsx            chat composition + completion sound wrapper
   SessionChangedFiles.tsx   "本会话改动 N 个文件" toolbar button (right of the sound toggle in ChatInput) + slide-in drawer (desktop) / full-screen list (mobile); entries open the file via the openFile/file-tab pipeline
-  ChatInput.tsx             input bar + model/thinking/tools/compact controls
+  ChatInput.tsx             input bar + model/thinking/tools/compact controls; optional leadingControl ReactNode slot at the very LEFT of the controls row (before the attach-image button — hosts the home new-session workspace selector)
   MessageView.tsx           renders one message (user/assistant/toolCall/toolResult)
   BranchNavigator.tsx       in-session branch switcher
   ChatMinimap.tsx           scroll minimap alongside the message list
