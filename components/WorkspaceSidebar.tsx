@@ -9,7 +9,9 @@ import { useGitStatus } from "@/hooks/useGitStatus";
 import { ChangesPanel } from "./ChangesPanel";
 import type { SessionInfo } from "@/lib/types";
 import type { GitFileStatus } from "@/lib/git-types";
+import { HomeSessionGroups } from "./HomeSessionGroups";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
+import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
 import { joinFilePath } from "@/lib/file-paths";
 
 /**
@@ -18,7 +20,8 @@ import { joinFilePath } from "@/lib/file-paths";
  * the global panels (archive / settings) and the work-items manager panel are
  * rendered by AppShell directly, and the ActivityBar icon rail lives OUTSIDE
  * this component (a sibling column). At home (no active workspace) it renders
- * the workspace-list panel.
+ * the quick-switch panel: workspaces grouped with their full session lists
+ * (HomeSessionGroups) — clicking a session jumps straight into it.
  *
  * Retired here (moved elsewhere by the three-column redesign): the workspace
  * switcher header (→ top WorkspaceTabBar), the SettingsBar 模型/Skills/插件
@@ -488,7 +491,11 @@ export function WorkspaceSidebar({
   );
 
   // ---- Home panel (no active workspace) ---------------------------------------
+  // 快速切换面板：按工作区分组 + 各自全部会话（活跃度排序，HomeSessionGroups）。
+  // 组头点击 = 打开工作区；会话行点击 = 直达会话（handleOpenSessionFromHome）。
   if (!activeWorkspace) {
+    const homeGroups = groupSessionsByWorkspace(workspaces, allSessions);
+    const unavailableWorkspaces = workspaces.filter((workspace) => !workspace.available);
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
         <PanelHeader
@@ -501,13 +508,17 @@ export function WorkspaceSidebar({
           }
         />
         <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px" }}>
-          {workspaces.map((workspace) => (
-            <button
+          <HomeSessionGroups
+            groups={homeGroups}
+            runningSessionIds={runningSessionIds}
+            selectedSessionId={selectedSessionId}
+            onSelectWorkspace={onSelectWorkspace}
+            onSelectSession={onSelectSession}
+          />
+          {unavailableWorkspaces.map((workspace) => (
+            <div
               key={workspace.id}
-              disabled={!workspace.available}
-              onClick={() => onSelectWorkspace(workspace)}
               style={{
-                width: "100%",
                 display: "grid",
                 gap: 2,
                 padding: "9px 10px",
@@ -515,19 +526,14 @@ export function WorkspaceSidebar({
                 border: "1px solid var(--border)",
                 borderRadius: 8,
                 background: "var(--bg)",
-                color: "var(--text)",
-                cursor: workspace.available ? "pointer" : "default",
-                opacity: workspace.available ? 1 : 0.6,
-                textAlign: "left",
+                opacity: 0.6,
               }}
             >
-              <strong style={{ fontSize: "var(--pi-sidebar-fs)" }}>{workspace.name}</strong>
+              <strong style={{ fontSize: "var(--pi-sidebar-fs)", color: "var(--text-muted)" }}>{workspace.name}</strong>
               <span style={{ fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
-                {workspace.available
-                  ? `${workspace.capabilities.length} capabilities · ${workspace.repositoryCount} repositories`
-                  : "目录或配置不可用"}
+                目录或配置不可用
               </span>
-            </button>
+            </div>
           ))}
           {workspaces.length === 0 && (
             <div style={{ padding: 12, color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs)" }}>
