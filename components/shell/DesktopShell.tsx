@@ -17,8 +17,8 @@ import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
 import { LoopsConfig } from "../LoopsConfig";
 import { LoopsPanel } from "../LoopsPanel";
-import { HomeLanding } from "../HomeLanding";
 import { HomeNewSession } from "../HomeNewSession";
+import { defaultHomeNewSessionWorkspaceId } from "@/lib/home-quick-switch";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { useI18n } from "@/hooks/useI18n";
 import { getFileName } from "@/lib/file-paths";
@@ -82,10 +82,10 @@ export function DesktopShell() {
     setModelsRefreshKey,
     setSessionKey,
     handleOpenConfig,
-    handleOpenSessionFromHome,
     homeNewSession,
     homeSession,
-    handleHomeNewSession,
+    mruIds,
+    workspacesLoaded,
     handleHomeNewSessionSelect,
     handleHomeSessionCreated,
     handleCreateWorkItem,
@@ -545,27 +545,25 @@ const renderMiddleColumn = () => {
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
             />
-          ) : homeNewSession.open ? (
-            <HomeNewSession
-              workspaces={workspaces}
-              selectedWorkspaceId={homeNewSession.workspaceId}
-              onSelectWorkspace={handleHomeNewSessionSelect}
-              onSessionCreated={handleHomeSessionCreated}
-              onCreateWorkspace={handleCreateWorkspace}
-              modelsRefreshKey={modelsRefreshKey}
-              chatInputRef={chatInputRef}
-            />
           ) : (
-            <HomeLanding
-              workspaces={workspaces}
-              refreshKey={refreshKey}
-              onSelectWorkspace={handleOpenWorkspace}
-              onCreateWorkspace={handleCreateWorkspace}
-              onImportDirectory={() => setImportPickerOpen(true)}
-              onSelectSession={handleOpenSessionFromHome}
-              onNewSession={handleHomeNewSession}
-              runningSessionIds={sessionActivity.runningIds}
-            />
+            workspacesLoaded ? (
+              <HomeNewSession
+                workspaces={workspaces}
+                selectedWorkspaceId={
+                  homeNewSession.workspaceId
+                  ?? defaultHomeNewSessionWorkspaceId(workspaces, sessionActivity.sessions, mruIds)
+                }
+                onSelectWorkspace={handleHomeNewSessionSelect}
+                onSessionCreated={handleHomeSessionCreated}
+                onCreateWorkspace={handleCreateWorkspace}
+                modelsRefreshKey={modelsRefreshKey}
+                chatInputRef={chatInputRef}
+              />
+            ) : (
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
+                加载中…
+              </div>
+            )
           )
         ) : showPlaceholder ? (
           activeCwd ? (
