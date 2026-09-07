@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { HomeSessionGroups } from "./HomeSessionGroups";
+import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
 
 interface Props {
   workspaces: WorkspaceSummary[];
@@ -12,29 +14,10 @@ interface Props {
   onCreateWorkspace: () => void;
   onImportDirectory: () => void;
   onSelectSession: (session: SessionInfo) => void;
-}
-
-function formatRelativeTime(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  if (Number.isNaN(diff)) return "";
-  if (diff < 0) return "刚刚";
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "刚刚";
-  if (mins < 60) return `${mins} 分钟前`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} 天前`;
-  return new Date(dateStr).toLocaleDateString();
-}
-
-function workspaceForSession(session: SessionInfo, workspaces: WorkspaceSummary[]): WorkspaceSummary | undefined {
-  return workspaces
-    .filter((workspace) => {
-      const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
-      return workspace.available && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
-    })
-    .sort((left, right) => right.path.length - left.path.length)[0];
+  /** 打开首页无主新会话页（工作区选择器 + 输入框） */
+  onNewSession: () => void;
+  /** 运行中会话 id 集（移动端分组列表呼吸点） */
+  runningSessionIds: Set<string>;
 }
 
 export function HomeLanding({
@@ -44,6 +27,8 @@ export function HomeLanding({
   onCreateWorkspace,
   onImportDirectory,
   onSelectSession,
+  onNewSession,
+  runningSessionIds,
 }: Props) {
   const isMobile = useIsMobile();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -68,15 +53,6 @@ export function HomeLanding({
     () => workspaces.filter((workspace) => workspace.available),
     [workspaces],
   );
-
-  const recentSessions = useMemo(() => {
-    return sessions
-      .filter((session) =>
-        !session.subagentChild
-        && workspaceForSession(session, workspaces))
-      .sort((left, right) => right.modified.localeCompare(left.modified))
-      .slice(0, 5);
-  }, [sessions, workspaces]);
 
   // ---- Mobile (≤640px): one-screen two-zone layout ----------------------------
   // Hero compresses to a single row; 工作区 (~40%) scrolls horizontally, 最近会话
@@ -138,7 +114,7 @@ export function HomeLanding({
             Pi Web
           </h1>
           <button
-            onClick={onCreateWorkspace}
+            onClick={onNewSession}
             style={{
               ...compactBtn,
               border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))",
@@ -147,7 +123,19 @@ export function HomeLanding({
               fontWeight: 700,
             }}
           >
-            ＋ 新建工作区
+            ＋ 会话
+          </button>
+          <button
+            onClick={onCreateWorkspace}
+            style={{
+              ...compactBtn,
+              border: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+              color: "var(--text-muted)",
+              fontWeight: 600,
+            }}
+          >
+            新建工作区
           </button>
           <button
             onClick={onImportDirectory}
@@ -218,69 +206,12 @@ export function HomeLanding({
             <h2 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "var(--text)" }}>最近会话</h2>
           </div>
           <div style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
-            {recentSessions.length === 0 ? (
-              <div style={{ padding: "26px 8px", textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
-                暂无最近会话
-              </div>
-            ) : (
-              recentSessions.map((session) => {
-                const owner = workspaceForSession(session, workspaces);
-                return (
-                  <button
-                    key={session.id}
-                    onClick={() => onSelectSession(session)}
-                    style={{
-                      width: "100%",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                      padding: "8px 10px",
-                      marginBottom: 6,
-                      border: "1px solid var(--border)",
-                      borderRadius: 10,
-                      background: "var(--bg-panel)",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      transition: "background 0.12s",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
-                  >
-                    <span
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontSize: 12,
-                      }}
-                    >
-                      {session.name || session.firstMessage || "未命名会话"}
-                    </span>
-                    {owner && (
-                      <span
-                        style={{
-                          flexShrink: 0,
-                          maxWidth: 120,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          fontSize: 10,
-                          color: "var(--accent)",
-                        }}
-                      >
-                        {owner.name}
-                      </span>
-                    )}
-                    <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                      {formatRelativeTime(session.modified)}
-                    </span>
-                  </button>
-                );
-              })
-            )}
+            <HomeSessionGroups
+              groups={groupSessionsByWorkspace(workspaces, sessions)}
+              runningSessionIds={runningSessionIds}
+              onSelectWorkspace={onSelectWorkspace}
+              onSelectSession={onSelectSession}
+            />
           </div>
         </section>
       </main>
@@ -320,7 +251,7 @@ export function HomeLanding({
             欢迎使用 Pi Web
           </h1>
           <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)" }}>
-            选择一个工作区继续，或新建 / 导入一个开始协作。
+            选择一个工作区继续，或直接新建一个会话开始。
           </p>
         </div>
 
@@ -335,7 +266,7 @@ export function HomeLanding({
           }}
         >
           <button
-            onClick={onCreateWorkspace}
+            onClick={onNewSession}
             style={{
               display: "flex",
               alignItems: "center",
@@ -347,6 +278,29 @@ export function HomeLanding({
               color: "var(--accent)",
               cursor: "pointer",
               fontWeight: 700,
+              fontSize: 14,
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              <line x1="12" y1="7" x2="12" y2="13" />
+              <line x1="9" y1="10" x2="15" y2="10" />
+            </svg>
+            新建会话
+          </button>
+          <button
+            onClick={onCreateWorkspace}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "12px 20px",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              background: "var(--bg-panel)",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontWeight: 600,
               fontSize: 14,
             }}
           >
@@ -418,72 +372,6 @@ export function HomeLanding({
             </div>
           )}
         </section>
-
-        {/* Recent sessions */}
-        {recentSessions.length > 0 && (
-          <section style={{ marginTop: 36 }}>
-            <h2 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>最近会话</h2>
-            <div>
-              {recentSessions.map((session) => {
-                const owner = workspaceForSession(session, workspaces);
-                return (
-                  <button
-                    key={session.id}
-                    onClick={() => onSelectSession(session)}
-                    style={{
-                      width: "100%",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                      padding: "11px 14px",
-                      marginBottom: 8,
-                      border: "1px solid var(--border)",
-                      borderRadius: 10,
-                      background: "var(--bg-panel)",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      transition: "background 0.12s",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
-                  >
-                    <span
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontSize: 13,
-                      }}
-                    >
-                      {session.name || session.firstMessage || "未命名会话"}
-                    </span>
-                    {owner && (
-                      <span
-                        style={{
-                          flexShrink: 0,
-                          maxWidth: 160,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          fontSize: 11,
-                          color: "var(--accent)",
-                        }}
-                      >
-                        {owner.name}
-                      </span>
-                    )}
-                    <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                      {formatRelativeTime(session.modified)}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        )}
       </div>
     </main>
   );

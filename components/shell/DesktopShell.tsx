@@ -18,6 +18,7 @@ import { PluginsConfig } from "../PluginsConfig";
 import { LoopsConfig } from "../LoopsConfig";
 import { LoopsPanel } from "../LoopsPanel";
 import { HomeLanding } from "../HomeLanding";
+import { HomeNewSession } from "../HomeNewSession";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { useI18n } from "@/hooks/useI18n";
 import { getFileName } from "@/lib/file-paths";
@@ -82,6 +83,11 @@ export function DesktopShell() {
     setSessionKey,
     handleOpenConfig,
     handleOpenSessionFromHome,
+    homeNewSession,
+    handleHomeNewSession,
+    handleHomeNewSessionSelect,
+    handleExitHomeNewSession,
+    handleHomeSessionCreated,
     handleCreateWorkItem,
     openSessionStatsPanel,
     handleFileLineMention,
@@ -528,14 +534,29 @@ const renderMiddleColumn = () => {
             </div>
           </div>
         ) : !activeWorkspace ? (
-          <HomeLanding
-            workspaces={workspaces}
-            refreshKey={refreshKey}
-            onSelectWorkspace={handleOpenWorkspace}
-            onCreateWorkspace={handleCreateWorkspace}
-            onImportDirectory={() => setImportPickerOpen(true)}
-            onSelectSession={handleOpenSessionFromHome}
-          />
+          homeNewSession.open ? (
+            <HomeNewSession
+              workspaces={workspaces}
+              selectedWorkspaceId={homeNewSession.workspaceId}
+              onSelectWorkspace={handleHomeNewSessionSelect}
+              onBack={handleExitHomeNewSession}
+              onSessionCreated={handleHomeSessionCreated}
+              onCreateWorkspace={handleCreateWorkspace}
+              modelsRefreshKey={modelsRefreshKey}
+              chatInputRef={chatInputRef}
+            />
+          ) : (
+            <HomeLanding
+              workspaces={workspaces}
+              refreshKey={refreshKey}
+              onSelectWorkspace={handleOpenWorkspace}
+              onCreateWorkspace={handleCreateWorkspace}
+              onImportDirectory={() => setImportPickerOpen(true)}
+              onSelectSession={handleOpenSessionFromHome}
+              onNewSession={handleHomeNewSession}
+              runningSessionIds={sessionActivity.runningIds}
+            />
+          )
         ) : showPlaceholder ? (
           activeCwd ? (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 15 }}>

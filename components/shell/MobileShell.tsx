@@ -13,6 +13,7 @@ import { WorkspaceOverview } from "../WorkspaceOverview";
 import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
 import { HomeLanding } from "../HomeLanding";
+import { HomeNewSession } from "../HomeNewSession";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { ACTIVITY_VIEW_ORDER, SETTINGS_VIEW, type SidebarView } from "../ActivityBar";
 import { useI18n } from "@/hooks/useI18n";
@@ -502,14 +503,29 @@ export function MobileShell() {
           bubbles survive tab switches (Q14). */}
       <div style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
         {!activeWorkspace ? (
-          <HomeLanding
-            workspaces={workspaces}
-            refreshKey={refreshKey}
-            onSelectWorkspace={handleOpenWorkspace}
-            onCreateWorkspace={handleCreateWorkspace}
-            onImportDirectory={() => setImportPickerOpen(true)}
-            onSelectSession={s.handleOpenSessionFromHome}
-          />
+          s.homeNewSession.open ? (
+            <HomeNewSession
+              workspaces={workspaces}
+              selectedWorkspaceId={s.homeNewSession.workspaceId}
+              onSelectWorkspace={s.handleHomeNewSessionSelect}
+              onBack={s.handleExitHomeNewSession}
+              onSessionCreated={s.handleHomeSessionCreated}
+              onCreateWorkspace={handleCreateWorkspace}
+              modelsRefreshKey={s.modelsRefreshKey}
+              chatInputRef={s.chatInputRef}
+            />
+          ) : (
+            <HomeLanding
+              workspaces={workspaces}
+              refreshKey={refreshKey}
+              onSelectWorkspace={handleOpenWorkspace}
+              onCreateWorkspace={handleCreateWorkspace}
+              onImportDirectory={() => setImportPickerOpen(true)}
+              onSelectSession={s.handleOpenSessionFromHome}
+              onNewSession={s.handleHomeNewSession}
+              runningSessionIds={s.sessionActivity.runningIds}
+            />
+          )
         ) : (
           <>
             <div
