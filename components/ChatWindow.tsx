@@ -47,6 +47,10 @@ interface Props {
   /** When true, renders as a compact view-oriented viewer (no input bar or
    *  minimap) — used when embedded in the right split pane. */
   embedded?: boolean;
+  /** Overrides the composer draft key (default: session id or `new:<cwd>`).
+   *  Used by the home new-session page: one home-scoped draft that survives
+   *  workspace-selection changes. */
+  draftKeyOverride?: string;
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -186,7 +190,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, ch
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, draftKeyOverride }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -498,7 +502,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       onAudioUnlock={unlockAudio}
       changedFiles={!embedded && onOpenFile ? { count: changedFiles.length, open: changedFilesOpen, onToggle: toggleChangedFiles } : undefined}
       subagents={!embedded && onOpenSession ? { count: sessionSubagents.length, open: subagentsOpen, onToggle: toggleSubagents } : undefined}
-      draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
+      draftKey={draftKeyOverride ?? session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
     />
   );
