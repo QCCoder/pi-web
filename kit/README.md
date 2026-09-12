@@ -5,24 +5,24 @@
 
 ## 声明（D5：文件即声明）
 
-`loops/<name>/LOOP.md` 存在即 loop 存在，删除即消失。没有能力开关、manifest 字段、中央注册表。
+`.pi/loops/<name>/LOOP.md` 存在即 loop 存在，删除即消失。没有能力开关、manifest 字段、中央注册表。
 
 ## 文件布局
 
-    loops/<loop-name>/LOOP.md          # 声明 + 合同指针（frontmatter 机器读，正文模型读）
-    loops/<loop-name>/STATE.md         # 记忆脊柱：每轮读写，唯一运行状态
-    loops/<loop-name>/loop-ledger.json # 断路器账本（per-loop；agent 可追加，禁删改历史）
-    loops/<loop-name>/.lastrun         # 上次起轮时间戳（宿主写的机器真相；agent 禁改禁删）
-    loops/<loop-name>/.round.lock      # 轮互斥锁（宿主写；agent 禁改禁删）
-    loops/<loop-name>/PAUSED           # 暂停标记（存在即跳过起轮，D12）
-    loops/<loop-name>/<任意名>.md       # 可选说明文件（如 chandao.md 来源说明 / selection.md 选品规则）：人写的知识文档，
+    .pi/loops/<loop-name>/LOOP.md          # 声明 + 合同指针（frontmatter 机器读，正文模型读）
+    .pi/loops/<loop-name>/STATE.md         # 记忆脊柱：每轮读写，唯一运行状态
+    .pi/loops/<loop-name>/loop-ledger.json # 断路器账本（per-loop；agent 可追加，禁删改历史）
+    .pi/loops/<loop-name>/.lastrun         # 上次起轮时间戳（宿主写的机器真相；agent 禁改禁删）
+    .pi/loops/<loop-name>/.round.lock      # 轮互斥锁（宿主写；agent 禁改禁删）
+    .pi/loops/<loop-name>/PAUSED           # 暂停标记（存在即跳过起轮，D12）
+    .pi/loops/<loop-name>/<任意名>.md       # 可选说明文件（如 chandao.md 来源说明 / selection.md 选品规则）：人写的知识文档，
                                        #   agent 只读——LOOP.md 指针点名则必读；改知识/规则改这里，不碰 SKILL
     loop-constraints.md                # 绑定约束（宪法文件，agent 禁改；根共享）
     loop-budget.md                     # token/轮数预算（宪法文件，agent 禁改；根共享）
     .agents/skills/<pattern>/SKILL.md  # 模式合同（本轮做什么、产出什么、如何写 STATE）
     .pi/agents/*.md                    # 角色（maker/checker/brainstorm…）
     .pi/settings.json                  # 社区 pi 包依赖（仅 GitHub 场景声明 subagent 包）
-    loop-pause-all                     # 全 workspace 停跳标记（根目录，存在即全停）
+    .pi/loop/pause-all                 # 全 workspace 停跳标记（存在即全停）
 
 `.lastrun` / `.round.lock` 与 `PAUSED` 同级，是**宿主文件**（宿主 = pi-web daemon spawner / `pi-loop beat`），
 agent 禁改禁删；STATE.md 的 `Last run:` 行仍是叙事，不机器读。宪法文件位于仓库/workspace **根**，被该根下
@@ -54,7 +54,7 @@ CLI 命令面（宿主包 `packages/pi-loop/`，照 host spec §4；发布前可
 |---|---|
 | `pi-loop run <name> [--item <KEY>]` | 立即起一轮（无视 cron 判定；仍走锁——已在跑则拒绝；同样更新 `.lastrun`，避免下个 beat 立即重跑）。`--item` 在开场合同追加「本轮优先处理 <KEY>」 |
 | `pi-loop stop <name>` | 终止在跑轮：读 `.round.lock` → beat 持有则 SIGTERM→(3s)→SIGKILL 进程组 + 孤儿收割；daemon 持有则提示走 pi-web |
-| `pi-loop pause <name>` / `resume <name>` | 写/删 `loops/<name>/PAUSED` 标记（协议已有语义，加 CLI 入口） |
+| `pi-loop pause <name>` / `resume <name>` | 写/删 `.pi/loops/<name>/PAUSED` 标记（协议已有语义，加 CLI 入口） |
 | `pi-loop status [--root]` | 列出 loops：frontmatter 摘要（cron/level/max_minutes/timezone）/ `.lastrun` / next-due / running（锁存在且活）/ paused |
 | `pi-loop init --name --cron [--pattern] [--level] [--max-minutes] [--timezone] [--root]` | 从 `kit/templates/basic` 脚手架五件套 + SKILL.md 骨架；非交互；写 `.lastrun = now`（首轮等自然槽） |
 
@@ -92,7 +92,7 @@ CLI 命令面（宿主包 `packages/pi-loop/`，照 host spec §4；发布前可
 
 `{ "attempts": [{ "at": "...", "item": "REQ-0042", "error": "...", "digest": "..." }], "consecutiveFailures": 0 }`
 同一 error digest 连续 3 次、或单项尝试 >3 → 本轮停止该项并在 STATE.md 标 escalated。账本 per-loop
-（`loops/<name>/loop-ledger.json`）；budget 总帽仍由根共享的 `loop-budget.md` 承担。
+（`.pi/loops/<name>/loop-ledger.json`）；budget 总帽仍由根共享的 `.pi/loop/budget.md` 承担。
 
 ## 预算（loop-budget.md）
 

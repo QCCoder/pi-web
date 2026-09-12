@@ -83,7 +83,7 @@ template: { id: software-development, version: 1 }   # OPTIONAL/legacy — new w
 template?: { id, version }                          # (see "Template selection removed" below)
 skills: []                                          # new workspaces start with no skills
 capabilities: [sessions, explorer, work-items, repositories, knowledge, ...]  # always written explicitly
-repositories: [{ id, alias, name, kind: code|knowledge, status: active|removed, removed_at? }]
+repositories: [{ id, alias, name, kind: code|knowledge, path: <相对工作区根的 POSIX 路径>, status: active|removed, removed_at? }]
 agent: { default_model?, thinking_level? }
 git: { branch_rules: { requirement, bug }, create_after: plan_approved }      # only when work-items is on
 work_items: { next_requirement_number, next_bug_number }
@@ -91,10 +91,12 @@ created_at / updated_at
 ```
 
 - **Workspace index v2（一刀切迁移）**: `~/.pi/workspace.yaml` is schemaVersion 2. On first read a v1 index triggers `migrateIndexV2`: every registered manifest is rewritten with explicit `capabilities` (materialized `["sessions","explorer"]` when absent; retired channel values stripped), and `importWorkspace` runs the same `migrateManifestFile` normalization for unregistered directories. After the cut, `WorkspaceManifest.capabilities` is REQUIRED — `parseWorkspaceManifest` throws "capabilities is required" without it, `parseCapabilities` rejects retired channel values (`feishu-transport`/`feishu-channel`/`wecom-channel`) instead of silently stripping, and the `effectiveCapabilities` fallback helper is deleted (read `manifest.capabilities` directly).
-- **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", status }`. `kind` drives the storage path
-  (`repositories/<kind>/<alias>`) and, for `knowledge`, the **OKF seed** written on `init` (see Knowledge below). Note:
-  `knowledge` is *also* a top-level `WorkspaceCapability` (the UI "知识库" toggle); the repository `kind` and the
-  capability are separate concerns — the capability gates the module/UI, the kind gates the path. (`docs/workspace-redesign.md` §5.1)
+- **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", path, status }`. **path（2026-09 路径登记制）**
+  是相对工作区根的 POSIX 路径（校验：禁绝对路径/`..`/`.pi` 内），仓库就是根下你自己的目录，无固定父目录；
+  clone/init 默认落根级 `<alias>/`，`mode: "register"` 只登记已有目录不动文件（`addWorkspaceRepository` 落盘时
+  顺带往根 .gitignore 追加 `/<path>/`）。`kind` 不再驱动路径，只驱动 UI 标签与（knowledge 时）**OKF seed**（见
+  Knowledge）。Note: `knowledge` is *also* a top-level `WorkspaceCapability` (the UI "知识库" toggle); the
+  repository `kind` and the capability are separate concerns — the capability gates the module/UI. (`docs/workspace-redesign.md` §5.1)
 - **Template selection removed (redesign decision 5/7)**: creating a Workspace is **capability-driven** —
   `CreateWorkspaceInput = { name, slug, capabilities[] }`, no `templateId`. `createWorkspace()` validates the selection
   via `parseCapabilities`, force-includes the mandatory `sessions`+`explorer` (`normalizeInitCapabilities`), writes
@@ -114,7 +116,7 @@ repository `kind` to a first-class capability — redesign decision 4, type laye
 sessions, explorer, work-items, repositories, knowledge, workflows
 ```
 
-(PATCH capabilities are normalized by `normalizeUpdateCapabilities`: the mandatory `sessions`+`explorer` core can never be dropped. `parseCapabilities` REJECTS retired capability values (`feishu-transport`, `feishu-channel`, `wecom-channel`, the retired `overview` — the overview dashboard is now the unconditional landing view — the retired `loop`, replaced by the pi-loop kit: loops are declared by `loops/<name>/LOOP.md` files, no capability gate; `docs/pi-loop-kit-design.md` D5 — and the retired `requirement-sources`, 已随 importer 退役照 overview/loop 先例：外部源同步下放工作区脚本，见「外部源适配」节) — `WorkspaceValidationError` → HTTP 400. For the channel values the v2 index migration has already rewritten them out of existing manifests. `overview`, `loop` and `requirement-sources` share the one **read-path exception** (`LEGACY_READ_CAPABILITIES`): `parseWorkspaceManifest` strips it from `manifest.capabilities` BEFORE `parseCapabilities` validation, so legacy manifests that still list it keep parsing and normalize on every read — the value disappears from the file at the next manifest write.)
+(PATCH capabilities are normalized by `normalizeUpdateCapabilities`: the mandatory `sessions`+`explorer` core can never be dropped. `parseCapabilities` REJECTS retired capability values (`feishu-transport`, `feishu-channel`, `wecom-channel`, the retired `overview` — the overview dashboard is now the unconditional landing view — the retired `loop`, replaced by the pi-loop kit: loops are declared by `.pi/loops/<name>/LOOP.md` files, no capability gate; `docs/pi-loop-kit-design.md` D5 — and the retired `requirement-sources`, 已随 importer 退役照 overview/loop 先例：外部源同步下放工作区脚本，见「外部源适配」节) — `WorkspaceValidationError` → HTTP 400. For the channel values the v2 index migration has already rewritten them out of existing manifests. `overview`, `loop` and `requirement-sources` share the one **read-path exception** (`LEGACY_READ_CAPABILITIES`): `parseWorkspaceManifest` strips it from `manifest.capabilities` BEFORE `parseCapabilities` validation, so legacy manifests that still list it keep parsing and normalize on every read — the value disappears from the file at the next manifest write.)
 
 - `manifest.capabilities` is required and always present (see "Workspace index v2" above). Read it directly; there is no derivation helper.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
@@ -176,7 +178,7 @@ The panel bodies: 工作台/知识库 render in `WorkspaceSidebar` (module views
   panel bottom (`marginTop:auto`), and the `[ 文件 | 改动(N) ]` segmented tabs render only while open. Both sections' collapse state
   persists per workspace in `localStorage` key `pi-workbench-sections:<wsId>` (per-key defaults: 会话 open, 文件 collapsed).
 - **知识库** — **only `kind === "knowledge"`** repositories; each is an **OKF (Open Knowledge Format v0.2)** bundle
-  (Markdown + YAML frontmatter) browsed via a `FileExplorer` pointed at `knowledge/<alias>` (flat layout — sibling of `repositories/`, per `workspaceRepositoryPath`). A newly
+  (Markdown + YAML frontmatter) browsed via a `FileExplorer` pointed at the repo's registered `path`（路径登记制，通常根级 `<alias>/`，per `workspaceRepositoryPath`）. A newly
   `init`'d bundle is seeded with `index.md` (progressive-disclosure entry), `log.md`, and a `concepts/welcome.md`
   example concept (`lib/workspaces/okf.ts`, `renderOkfSeed`); a `clone`d bundle keeps the remote structure untouched.
   **L0 access is always built-in** — `read`/`ls`/`grep` need no tool. The view has an "open index.md" hint as the L0
@@ -216,7 +218,8 @@ handle precedes the container, so no sibling selector can reach it).
 ### Work Items (`lib/work-items/`)
 
 File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage under
-`<workspace>/<requirements|bugs>/<KEY>-<slug>/`:
+`<workspace>/.pi/work-items/<requirements|bugs>/<KEY>-<slug>/`（2026-09 布局，`lib/work-items/service.ts` 的
+`workItemRoot`；旧根级 requirements//bugs/ 目录已由 migrate-workspace-layout.mjs 收进 .pi/）:
 
 - `item.yaml` — structured metadata (status/phase/priority/repositories/conversations/… + optional top-level `loop?: string` kit-loop binding by loop NAME, S1 soft validation — existence NOT checked; protocol semantics in `kit/README.md` 工作项绑定一节), `schemaVersion 1`.
 - `README.md` — human body. **Original Description is preserved verbatim**; later analysis is appended, never overwriting it.
@@ -241,8 +244,8 @@ Key behavior:
 **Loop = 文件协议 + 心跳。** v3 引擎（orchestrator session / seeder / RUNS.jsonl / gate 机器）已拆除
 （设计：`docs/pi-loop-kit-design.md`；宿主层修订——beat/补跑/锁/D13——见 `docs/pi-loop-host-design.md`）。现行形态：
 
-- **声明**：workspace 根 `loops/<name>/LOOP.md` 存在即 loop（frontmatter：cron/timezone/level/max_minutes/pattern）；
-  `PAUSED` 标记文件停单 loop，根 `loop-pause-all` 全停。无 capability、无 manifest 字段。`GET /api/workspaces/[id]/loops`
+- **声明**：workspace 根 `.pi/loops/<name>/LOOP.md` 存在即 loop（frontmatter：cron/timezone/level/max_minutes/pattern）；
+  `PAUSED` 标记文件停单 loop，根 `.pi/loop/pause-all` 全停。无 capability、无 manifest 字段。`GET /api/workspaces/[id]/loops`
   返回全量状态（`collectStatus`，含 paused——管理面全量；纯 fs，导入 `packages/pi-loop/status.ts.ts`，无 daemon 依赖），消费方自行
   过滤 paused（D11 门控语义：暂停即不存在）——工作项「开始对话/收养续跑」按钮的门控与 Overview Loops 区块都读它。
 - **pi-loop 包**（`packages/pi-loop/`，npm workspaces 成员，独立 package.json 备发布；pi-web 以相对路径导入，不经 node_modules 链接——H5 的 Next server bundle 符号链接摩擦）：loop 宿主的**纯逻辑层 + CLI**——
@@ -258,9 +261,9 @@ Key behavior:
 - **补跑语义（anacron-lite）**：fire 判定 = `now >= nextDue(cron, tz, .lastrun)`——宿主睡眠/停机错过的槽位恢复后
   至多**补一轮**（旧分钟槽语义是静默丢失；A 轮在跑也不再丢 B 的槽，`.lastrun` per-loop）。`.lastrun` / `.round.lock`
   是宿主文件，agent 禁改禁删（与 `PAUSED` 同级，写进协议条款与开场合同）。
-- **运行状态**：只有 `STATE.md`（记忆脊柱：Last run / 优先级分区 / [BUDGET] / 复盘节）+ `loop-ledger.json`（断路器，
-  **per-loop**：`loops/<name>/loop-ledger.json`，D13 修订——断路计数跨 loop 混算无意义）+ workspace git log。
-  宪法文件（LOOP.md 的 level/cron、`loop-constraints.md`、`loop-budget.md`）agent 一律禁改；constraints/budget 维持
+- **运行状态**：只有 `STATE.md`（记忆脊柱：Last run / 优先级分区 / [BUDGET] / 复盘节）+ `.pi/loops/<name>/loop-ledger.json`（断路器，
+  **per-loop**：`.pi/loops/<name>/loop-ledger.json`，D13 修订——断路计数跨 loop 混算无意义）+ workspace git log。
+  宪法文件（LOOP.md 的 level/cron、`.pi/loop/constraints.md`、`.pi/loop/budget.md`）agent 一律禁改；constraints/budget 维持
   根共享（budget 是全 workspace 总帽）。
 - **事后钩子（D9）**：轮结束（成功与失败路径都跑）扫工作项 events.jsonl 的 conversationId 回填 conversations；
   无待决 `loop.gate` 里程碑 → 自动归档轮会话（会话列表防污染；有待决 gate 的留在列表供人在 composer 答复）。
@@ -276,7 +279,7 @@ Key behavior:
   「继续对话」 = open the latest conversation as a chat tab (the skill is already in its context).
 - **工作项绑定 + 管理面**（协议语义落文：`kit/README.md` 工作项绑定一节）：工作项可声明 `loop: <loop名>` 绑定（S1 软校验，
   两个 LLM 工具透传）；**绑定 = 路由收窄**——loop 轮拾取候选 = 「绑给我的项 + 未绑定项」，未命中/已删 loop 的绑定按未绑定
-  处理；SKILL.md 的选择段声明该过滤语义（候选 = 绑定项 ∪ 未绑定项；workspace-c 的 SKILL 行不在本面内）。管理面：
+  处理；SKILL.md 的选择段声明该过滤语义（候选 = 绑定项 ∪ 未绑定项）。管理面：
   ① 工作项「立即跑一轮」（B 按钮，`lib/loops/rounds.ts` `launchManualRound`）走 `POST …/loops/[name]/run`——web 进程
   import pi-loop 纯逻辑组装开场合同，经**现有 daemon 会话面**起轮（`POST /v1/sessions` 两步建会话：sessionId 要进
   开场合同第 3 条；无 daemon 新路由）；可选 `itemKey` → 合同追加「本轮优先处理 <KEY>」。手动轮**无 D9 自动归档**
@@ -370,21 +373,21 @@ reproducible where a `file:` directory pin would live-track the upstream tree �
 
 ### 外部源适配 = 工作区脚本（importer 已退役）
 
-**pi-web 不再内置 importer**：`lib/work-items/importers/`、`app/api/workspaces/[id]/importers/**`、`components/ImporterConfig.tsx`、daemon 的 `ImporterScheduler`/`/v1/importers/sync` 路由及 `requirement-sources` capability 已全部删除（strangler 计划；capability 照 `overview`/`loop` 先例退役——读路径剥离，新写入 400）。外部需求/bug 源（禅道等）的同步 = **工作区自己的脚本**，参考实例 cxin（workspace-c 仓内）`scripts/chandao-sync.py`：纯 stdlib、凭据存工作区本地（0600 且 gitignored）、日志不打印密码/token，由工作区自己的 cron/loop 触发；脚本直接调 pi-web HTTP API 创建/更新工作项，`external: {source, sourceId, ...}` 章即去重键（重新同步同一条不重复建项），LLM 工作项工具不透传该字段。同步摘要语义（脚本层继承自原 runner 约定）：单条 item 失败不中断同步（failed[] 记录）；结构性失败（登录失败/API 不可达/凭据缺失）退出码 2；已存在未归档项不盖 `imported` 里程碑（防 events 洪水，REQ-0012 教训），仅在摘要计数 synced。工作项的「来源」展示（`lib/work-items/source-labels.ts` 标签映射）保持不变。
+**pi-web 不再内置 importer**：`lib/work-items/importers/`、`app/api/workspaces/[id]/importers/**`、`components/ImporterConfig.tsx`、daemon 的 `ImporterScheduler`/`/v1/importers/sync` 路由及 `requirement-sources` capability 已全部删除（strangler 计划；capability 照 `overview`/`loop` 先例退役——读路径剥离，新写入 400）。外部需求/bug 源（禅道等）的同步 = **工作区自己的脚本**，参考实例 cxin（cxin-workspace 仓内）`scripts/chandao-sync.py`（凭据 `.pi/chandao.json`）：纯 stdlib、凭据存工作区本地（0600 且 gitignored）、日志不打印密码/token，由工作区自己的 cron/loop 触发；脚本直接调 pi-web HTTP API 创建/更新工作项，`external: {source, sourceId, ...}` 章即去重键（重新同步同一条不重复建项），LLM 工作项工具不透传该字段。同步摘要语义（脚本层继承自原 runner 约定）：单条 item 失败不中断同步（failed[] 记录）；结构性失败（登录失败/API 不可达/凭据缺失）退出码 2；已存在未归档项不盖 `imported` 里程碑（防 events 洪水，REQ-0012 教训），仅在摘要计数 synced。工作项的「来源」展示（`lib/work-items/source-labels.ts` 标签映射）保持不变。
 
-### Dev Loop (pi-loop kit 实例；reference: workspace-c)
+### Dev Loop (pi-loop kit 实例；reference: cxin-workspace)
 
 **Loops are per-workspace file protocols — pi-web ships no loop engine.** The generic surface is the kit spawner
 (`lib/daemon/loop-spawner.ts`) + the `kit/` template library; every loop's behavior lives in its workspace
-(`loops/<name>/LOOP.md` declaration + `STATE.md` spine + root constitution files + `.agents/skills/<pattern>/SKILL.md`
-contract + `.pi/agents/*.md` roles). There is no loop authoring UI and no dev-loop code path in pi-web; workspace-c's
+(`.pi/loops/<name>/LOOP.md` declaration + `STATE.md` spine + root constitution files + `.pi/skills/<pattern>/SKILL.md`
+contract + `.pi/agents/*.md` roles). There is no loop authoring UI and no dev-loop code path in pi-web; cxin-workspace's
 v3 leftovers (`loop.yaml`/`RUNS.jsonl`/`LEARN.jsonl`, v1/v2 baks) stay in place unread — git history is the audit
 (design §8.7: no migration, no deletion).
 
-The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrated to kit form (v3 history:
+The **dev Loop** is the R&D loop pattern deployed in cxin (cxin-workspace), migrated to kit form (v3 history:
 `docs/dev-loop-v3-design.md`, retired 2026-09). One heartbeat = ONE round session doing selection AND execution:
 
-- **SKILL.md contract** (`.agents/skills/dev-loop/SKILL.md`): opening triple judgment (predictedConf immutable /
+- **SKILL.md contract** (`.pi/skills/dev-loop/SKILL.md`): opening triple judgment (predictedConf immutable /
   verifiable / riskTier) + evidence pack + thin-SPEC write-through for pure-display items; hard invariants — L0
   branch/merge discipline plus orchestration bounds **N1 maker≠checker, N2 full gate exactly once before merge, N3
   never split across coupling points**; the **dispatch plan** as an explicit artifact (`loop.dispatch{steps[]}`
@@ -397,8 +400,8 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrate
   human merges), **checker** (single check seat, review-then-run, rework list routed by source
   code/plan/spec), **learner** (knowledge consolidator, see Learn below).
 - **Run state**: `STATE.md` (High Priority / Watch List / Recent Noise / [BUDGET] / Post-run critique) +
-  `loop-ledger.json` breaker (same error digest ×3 or >3 attempts on one item → escalated). Constitution
-  (`loop-constraints.md` path blacklist + discipline, `loop-budget.md` caps) is root-level shared by all loops of the
+  `.pi/loops/<name>/loop-ledger.json` breaker (same error digest ×3 or >3 attempts on one item → escalated). Constitution
+  (`.pi/loop/constraints.md` path blacklist + discipline, `.pi/loop/budget.md` caps) is root-level shared by all loops of the
   workspace (D13) and agent-immutable.
 - **API**: the pi-web loop surface is `GET /api/workspaces/[id]/loops`（全量状态）+ per-loop `run|pause|resume|stop` / frontmatter `PATCH`（`lib/loops/`，见 Loop 章——全部经现有 daemon 会话面，daemon 无 loop 路由）。
   standalone 宿主用 `pi-loop` CLI（beat/run/stop/status/init）。
@@ -407,16 +410,17 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrate
 
 **Qualitative knowledge transfer via consolidation, not per-run archiving.** Knowledge lives ONLY in KB `learnings/` notes, kept sharp by merging; run records are archives nothing reads for decisions.
 
-- **Learn step** (terminal; idle runs excluded): the round session ① writes `LEARN/<run-id>.md` — a human-browsable archive (lesson candidate, learner's disposition, index fields incl. **both** `predictedConf` and `tracedConf` so the calibration chain closes; idempotent replace) and ② dispatches the **`learner`** only if a candidate exists. **`LEARN.jsonl` is retired/frozen** in place (its old `humanDecision` narrative was the "summarizing the run" failure mode).
+- **Learn step** (terminal; idle runs excluded): the round session ① writes `.pi/loops/<name>/LEARN/<run-id>.md` — a human-browsable archive (lesson candidate, learner's disposition, index fields incl. **both** `predictedConf` and `tracedConf` so the calibration chain closes; idempotent replace) and ② dispatches the **`learner`** only if a candidate exists. **`LEARN.jsonl` is retired/frozen** in place (its old `humanDecision` narrative was the "summarizing the run" failure mode).
 - **learner = consolidator**: two-question generalization test — (1) is it still a rule with specifics deleted? (2) is it an instance of an existing rule (`kb_search`)? Then: merge-and-sharpen into an existing loop-owned note (abstraction lift **allowed but must stay instance-anchored**; trigger scenario inlined into the note's instance section) OR open a new file referencing near-kin. **`contentHash`** frontmatter guards against overwriting human edits — mismatch ⇒ the note is human-authoritative, degrade to new-file+reference.
 - **Single home**: everything loop-written goes to `learnings/` (module traps too, with strong module tags); `standards/*` is **purely human-maintained** (the old "loop append" clause is gone — it had no executor). One note touched/created per run max.
-- **Three artifacts, three purposes**: KB `learnings/*.md` = consolidated generalizable rules (loop-maintained via hash guard); `standards/*` = human-maintained; `LEARN/<KEY>-<date>.md` = per-execution archive (nothing parses it; the SKILL opening may `ls -t` it for calibration).
+- **Three artifacts, three purposes**: KB `learnings/*.md` = consolidated generalizable rules (loop-maintained via hash guard); `standards/*` = human-maintained; `.pi/loops/<name>/LEARN/<KEY>-<date>.md` = per-execution archive (nothing parses it; the SKILL opening may `ls -t` it for calibration).
 ### cxin reference (研发 Loop target workspace)
 
-- **dev Loop instance**: `~/.pi/workspaces/workspace-c/` in **kit form** (kit-rehearsal branch merged): `loops/dev-loop/LOOP.md`
+- **dev Loop instance**: `/Users/qiancheng/Documents/Workspace/cxin-workspace/`（2026-09 由 pi 托管的 workspace-c
+  拆解搬入并退役，外部路径导入，workspace id 沿用 01KYRBBY917PW4X0VHMY5GC8TE）in **kit form**: `.pi/loops/dev-loop/LOOP.md`
   (kit frontmatter; cron `*/30 9-22 * * 1-5` Asia/Shanghai; **L2** — migration exception, dev-loop 已在 v3 真实运行多月视为已过
-  L1 验证；全新 loop 一律 L1 起步), `STATE.md` spine, root-level `loop-constraints.md` / `loop-budget.md` / `loop-ledger.json`
-  (shared per D13), contract in `.agents/skills/dev-loop/SKILL.md`（六点改造：选择/执行合并为一轮、gate 里程碑由**轮自己**盖、
+  L1 验证；全新 loop 一律 L1 起步), `STATE.md` spine, root-level `.pi/loop/constraints.md` / `.pi/loop/budget.md` / `.pi/loops/<name>/loop-ledger.json`
+  (shared per D13), contract in `.pi/skills/dev-loop/SKILL.md`（六点改造：选择/执行合并为一轮、gate 里程碑由**轮自己**盖、
   双开 guard / `loop.active_session` 戳删除）, five roles in `.pi/agents/pi-subagent/` (community-package discovery: `.pi/agents` is not trust-gating, but files must live in the `pi-subagent/` subdir with the mandatory `tools:`/`extensions:`/`skills:` frontmatter arrays — see Subagent below). v3 leftovers (`loop.yaml`, `RUNS.jsonl`,
   `LEARN.jsonl`, v1/v2 baks) stay in place unread. Sensitive module list + module→repo map:
   `cargo-knowledge/standards/dev-loop-modules.md`; consolidated process lessons in `cargo-knowledge/learnings/`
@@ -425,6 +429,12 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (workspace-c), migrate
   unconditional). None runs in the web server (`instrumentation.ts` untouched).
 
 ### Workspace directory layout (reference)
+
+**2026-09 一套约定：pi 机制与数据统一收在工作区根的 `.pi/` 下（`packages/pi-loop/paths.ts` 是路径唯一源）；
+工作区根留人的内容** —— 代码仓/知识库是根下的普通目录，由 manifest 按相对路径登记
+（`repositories[].path`，`repositories/<kind>/<alias>` 固定布局已废除；`AddWorkspaceRepositoryInput.mode`
+含 `register` 用于登记已有目录）。工作区可以是任意外部路径（index 条目直接指过去，如
+`/Users/qiancheng/Documents/Workspace/cxin-workspace`），不必住在 workspaces 目录下。
 
 Default locations are under `~/.pi` — but local dev can relocate the whole data home INTO the repo via
 `scripts/adopt-pi-home.mjs` + `.env.local` (see "Local pi data home" under Key Design Decisions): `agent/` and
@@ -435,18 +445,20 @@ strictly gitignored / tsc+eslint excluded / pruned by git-discovery.
 ```
 ~/.pi/
   workspace.yaml                         global workspace index
-  workspaces/                            ($PI_WORKSPACES_DIR)
-    workspace-<slug>/
-      .pi/workspace.yaml                 manifest
-      .gitignore  AGENTS.md              (software-development template)
-      requirements/<KEY>-<slug>/{item.yaml, README.md, events.jsonl}
-      bugs/<KEY>-<slug>/...
-      designs/  plans/
-      repositories/<alias>/              code repos (clone or init), flat layout
-      knowledge/<alias>/                 knowledge bundles (OKF; flat, sibling of repositories/)
-      loops/<name>/{LOOP.md, STATE.md, [PAUSED]}    kit loop declaration + memory spine (D5 文件即声明)
-      loop-constraints.md  loop-budget.md  loop-ledger.json    kit constitution + breaker (root, shared by all loops)
-      loop-pause-all                       kit kill switch (root marker file, halts every loop)
+  workspaces/                            ($PI_WORKSPACES_DIR; 2026-09 起工作区也可以是任意外部路径)
+    workspace-<slug>/                    （或任意外部路径的工作区根）
+      AGENTS.md                          （永远在根：pi 从 cwd 根注入）
+      .pi/workspace.yaml                 manifest（repositories[].path = 仓库相对路径）
+      .pi/work-items/{requirements,bugs,designs,plans}/
+                                         work items: <KEY>-<slug>/{item.yaml, README.md, events.jsonl, attachments/}
+      .pi/skills/<pattern>/SKILL.md      项目技能合同（pi 原生发现 <cwd>/.pi/skills/；旧 .agents/skills/ 已迁移）
+      .pi/loops/<name>/{LOOP.md, STATE.md, loop-ledger.json, .lastrun, .round.lock, [PAUSED], LEARN/}
+                                         kit loop declaration + memory spine (D5 文件即声明)
+      .pi/loop/{constraints.md, budget.md, pause-all}
+                                         根级共享宪法 + 全局停机旗（原根级 loop-constraints/loop-budget/loop-pause-all）
+      .pi/agents/pi-subagent/*.md        subagent 项目角色；.pi/cache/ 可重建缓存
+      <alias>/                           代码仓 / 知识库（根级目录，路径登记；各自独立 git）
+      docs/ scripts/ …                   人的内容
     .pi/workspace-templates/<id>/        custom templates (template.yaml + seed/)
   agent/                                 (~/.pi/agent)
     sessions/<encoded-cwd>/*.jsonl
@@ -557,7 +569,7 @@ lib/
     sidecar.ts               ensureSessionDaemonStarted (probe→attach / spawn detached) + pure guards (decideSidecarAction, spawnableDaemonUrl, sidecarSpawnEnv)
   subagent-child.ts          subagentChild tagging for community @henryqw/pi-subagent children
                              (id/name prefix `pi-subagent` — replaces the old subagent-children.txt registry)
-  (dev-loop/ retired — loops are per-workspace custom definitions; the R&D loop pattern lives in workspace-c, see Dev Loop section above)  git-changes.ts            getGitStatus (multi-repo groups) + getGitFileDiff (patch)
+  (dev-loop/ retired — loops are per-workspace custom definitions; the R&D loop pattern lives in cxin-workspace, see Dev Loop section above)  git-changes.ts            getGitStatus (multi-repo groups) + getGitFileDiff (patch)
   git-status.ts             porcelain-v1 parse, status classify, buildRepoGroups (pure)
   git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index); IGNORED_NAMES prunes
                             node_modules/dist/… and `.pi` — the latter can hold the relocated pi data home (dozens of
@@ -588,7 +600,7 @@ lib/
   npx.ts, skill-lock.ts, skill-message.ts, skills-service.ts, skill-updates.ts   skills/plugins plumbing (skill-message.ts also powers session titles: `skillMessageTitle` reduces pi's `/skill:` expansion wrapper — `header + SKILL.md body + </skill> + args` — back to the args or `/skill:name`, incl. a truncated-wrapper fallback for pre-v2 index clips; used by the session index, session-reader, locate route, auto-name, MessageView)
 
 packages/pi-loop/                      THE loop-host package: pure protocol logic + beat CLI (design: docs/pi-loop-host-design.md; npm workspace, independent package.json for future publish, imported by relative path — see Loop section)
-  protocol.ts             LoopDeclaration / parseLoopDeclaration / discoverKitLoops (loops/*/LOOP.md frontmatter; PAUSED skipped) / isWorkspaceHalted (loop-pause-all) — pure fs+yaml, no daemon deps; the web loops route imports it too
+  protocol.ts             LoopDeclaration / parseLoopDeclaration / discoverKitLoops (.pi/loops/*/LOOP.md frontmatter; PAUSED skipped) / isWorkspaceHalted (loop-pause-all) — pure fs+yaml, no daemon deps; the web loops route imports it too
   cron.ts                 cronMatches (Vixie-cron matcher with timezone, never throws on bad input) + nextDue (first cron hit after a moment, minute granularity) — the fire judgment's clock
   round-lock.ts           .round.lock cross-host round mutex — acquire/read/update/releaseRoundLock + isRoundLockStale（唯一权威公式）; O_EXCL atomic create, stale = 无 sessionId 且 pid 死（启动窗口/beat 轮）或超 maxMinutes+15min 窗（带 sessionId 的锁一律窗口治理——web 手动轮锁 pid=web 进程，web 重启不得触发心跳双发）
   due.ts                  .lastrun machine truth (host-written ISO timestamp; STATE.md Last run stays narrative) + shouldFire = now >= nextDue(cron, tz, .lastrun) — anacron-lite catch-up (at most one round after downtime)
