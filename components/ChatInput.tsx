@@ -91,24 +91,12 @@ export interface ChatInputHandle {
 const TOOL_PRESETS = ["off", "default", "full"] as const;
 const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
-const MODEL_FILTER_THRESHOLD = 8;
 const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function compareModelOptions(a: ModelOption, b: ModelOption): number {
   return MODEL_OPTION_COLLATOR.compare(a.name || a.modelId, b.name || b.modelId)
     || MODEL_OPTION_COLLATOR.compare(a.provider, b.provider)
     || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
-}
-
-export function filterModelOptions(options: ModelOption[], query: string): ModelOption[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return options;
-
-  return options.filter((option) => (
-    `${option.name} ${option.modelId}`
-      .toLocaleLowerCase()
-      .includes(normalizedQuery)
-  ));
 }
 
 const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -288,7 +276,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
-  const [modelFilter, setModelFilter] = useState("");
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
@@ -986,12 +973,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       name,
     })).sort(compareModelOptions);
   })();
-  const filteredModelOptions = filterModelOptions(modelOptions, modelFilter);
-  const showModelFilter = modelOptions.length > MODEL_FILTER_THRESHOLD;
 
   // Group options by provider, preserving insertion order
   const modelsByProvider: { provider: string; options: ModelOption[] }[] = [];
-  for (const opt of filteredModelOptions) {
+  for (const opt of modelOptions) {
     const group = modelsByProvider.find((g) => g.provider === opt.provider);
     if (group) group.options.push(opt);
     else modelsByProvider.push({ provider: opt.provider, options: [opt] });
@@ -1023,7 +1008,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         modelDropdownPanelRef.current && !modelDropdownPanelRef.current.contains(e.target as Node)
       ) {
         setModelDropdownOpen(false);
-        setModelFilter("");
       }
       if (toolDropdownRef.current && !toolDropdownRef.current.contains(e.target as Node)) {
         setToolDropdownOpen(false);
@@ -1721,10 +1705,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     onClick={(e) => {
                       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                       setModelDropdownRect({ top: rect.top, left: rect.left, width: rect.width });
-                      setModelDropdownOpen((open) => {
-                        if (open) setModelFilter("");
-                        return !open;
-                      });
+                      setModelDropdownOpen((open) => !open);
                     }}
                     disabled={isStreaming}
                     style={{
@@ -1785,42 +1766,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                       overflow: "hidden", maxHeight: maxH, display: "flex", flexDirection: "column",
                       }}>
-                      {showModelFilter && (
-                        <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-                          <input
-                            value={modelFilter}
-                            onChange={(e) => setModelFilter(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Escape") {
-                                setModelFilter("");
-                                setModelDropdownOpen(false);
-                              }
-                            }}
-                            placeholder={t("chat.filterModels")}
-                            aria-label={t("chat.filterModels")}
-                            autoFocus
-                            autoComplete="off"
-                            spellCheck={false}
-                            style={{
-                              width: "100%",
-                              minWidth: isMobile ? 0 : 220,
-                              fontSize: 11,
-                              fontFamily: "var(--font-mono)",
-                              padding: "5px 8px",
-                              border: "1px solid var(--border)",
-                              borderRadius: 5,
-                              outline: "none",
-                              background: "var(--bg)",
-                              color: "var(--text)",
-                              boxSizing: "border-box",
-                            }}
-                          />
-                        </div>
-                      )}
                       <div style={{ minHeight: 0, overflowY: "auto" }}>
                         {modelsByProvider.length === 0 ? (
                           <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                            {modelFilter.trim() ? t("chat.noMatchingModels") : "No available models"}
+                            No available models
                           </div>
                         ) : modelsByProvider.map((group, gi) => (
                           <div key={group.provider}>
@@ -1841,7 +1790,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                   key={`${opt.provider}:${opt.modelId}`}
                                   onClick={() => {
                                     setModelDropdownOpen(false);
-                                    setModelFilter("");
                                     if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId);
                                   }}
                                   style={{
@@ -1925,7 +1873,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 tabIndex={controlsMenuOpen ? -1 : undefined}
                 onClick={() => {
                   setModelDropdownOpen(false);
-                  setModelFilter("");
                   setControlsMenuOpen(true);
                 }}
                 style={{

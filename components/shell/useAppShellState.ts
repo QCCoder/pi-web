@@ -92,6 +92,12 @@ export function useAppShellState() {
   // 从首页打开的会话（反馈修订：不跳工作区 tab）：聊天直接落在首页主区的
   // ChatWindow，左侧中栏保持首页菜单；会话归属工作区不变（磁盘/daemon 决定）。
   const [homeSession, setHomeSession] = useState<SessionInfo | null>(null);
+  // 首页右栏文件面板（反馈：首页也要文件区）：与工作区 tab 的右栏同构，但
+  // 状态独立（无 tab 可挂）。默认关闭，右上角按钮切换；上下文工作区 =
+  // 首页会话所属 / composer 所选工作区（DesktopShell 计算）。
+  const [homeFileTabs, setHomeFileTabs] = useState<Tab[]>([]);
+  const [homeActiveFileTabId, setHomeActiveFileTabId] = useState<string | null>(null);
+  const [homeRightPanelOpen, setHomeRightPanelOpen] = useState(false);
   // False until the initial URL→tab restore has run, to avoid flashing the
   // "select a session" placeholder while the addressed tab is still loading.
   const [navReady, setNavReady] = useState(false);
@@ -549,8 +555,8 @@ export function useAppShellState() {
         workItemKey: null,
         fileTabs: [],
         activeFileTabId: null,
-        // 右栏默认常开（文件树固定 tab）；用户手动折叠后 per-tab 记住 false。
-        rightPanelOpen: true,
+        // 右栏默认关闭（用户反馈）；右上角按钮或显式打开文件时展开。
+        rightPanelOpen: false,
       };
       return [...prev, tab];
     });
@@ -567,6 +573,9 @@ export function useAppShellState() {
     setActiveTabId(id);
     setHomeNewSession({ open: false, workspaceId: null });
     setHomeSession(null);
+    setHomeFileTabs([]);
+    setHomeActiveFileTabId(null);
+    setHomeRightPanelOpen(false);
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
@@ -737,13 +746,23 @@ export function useAppShellState() {
   // tab，会话聊天直接落在首页主区，左侧中栏保持首页菜单。会话归属工作区
   // 由磁盘/daemon 决定，之后随时可在对应工作区里继续。
   const handleOpenSessionFromHome = useCallback((session: SessionInfo) => {
-    if (!workspaceForSession(session, workspaces)) return;
+    // 首页点会话 = 进入它所属的工作区 tab 并选中该会话（2026-09 反馈修订：
+    // 不再停在首页上下文 homeSession——会话属于工作区，就在工作区里打开，
+    // 首页保持纯启动器；无归属会话（理论不达，HomeSessionGroups 已过滤）维持忽略）。
+    const owner = workspaceForSession(session, workspaces);
+    if (!owner) return;
     setWorkspaceManagerOpen(false);
-    setHomeSession(session);
-    setHomeNewSession({ open: false, workspaceId: null });
+    setConfigView(null);
+    setWorkItemDetail(null);
+    setLoopConfig(null);
+    const id = ensureTab(owner);
+    updateTab(id, { session, newSessionCwd: null, view: "chat" });
+    activateTab(id);
     setSessionKey((key) => key + 1);
     setSystemPrompt(null);
-  }, [workspaces]);
+    focusChat();
+    navigateUrl(`workspace=${encodeURIComponent(id)}&view=chat&session=${encodeURIComponent(session.id)}`);
+  }, [workspaces, ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
 
   const handleSelectSession = useCallback((session: SessionInfo) => {
     // 首页（无活动 tab）点会话 = 跨工作区直达，委托给首页管道，不再静默吞掉。
@@ -1246,9 +1265,40 @@ export function useAppShellState() {
     fileName: string,
     options?: { sourceSessionId?: string | null; modeHint?: "diff" },
   ) => {
-    if (!activeTabId) return;
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
+    // 首页（无活动 tab）：文件 tab 落在首页自己的右栏并展开面板。
+    if (!activeTabId) {
+      const fileTabId = `file:${filePath}`;
+      setHomeFileTabs((prev) => {
+        const existing = prev.find((t) => t.id === fileTabId);
+        if (!existing) {
+          return [...prev, {
+            id: fileTabId,
+            kind: "file",
+            label: fileName,
+            filePath,
+            sourceSessionId,
+            initialDisplayMode: modeHint,
+          }];
+        }
+        if (existing.kind !== "file") return prev;
+        const sourceUnchanged = !sourceSessionId || existing.sourceSessionId === sourceSessionId;
+        const modeUnchanged = !modeHint || existing.initialDisplayMode === modeHint;
+        if (sourceUnchanged && modeUnchanged) return prev;
+        return prev.map((t) => {
+          if (t.id !== fileTabId || t.kind !== "file") return t;
+          return {
+            ...t,
+            sourceSessionId: sourceSessionId ?? t.sourceSessionId,
+            initialDisplayMode: modeHint ?? t.initialDisplayMode,
+          };
+        });
+      });
+      setHomeActiveFileTabId(fileTabId);
+      setHomeRightPanelOpen(true);
+      return;
+    }
     const fileTabId = `file:${filePath}`;
     updateTab(activeTabId, (tab) => {
       const prev = tab.fileTabs;
@@ -1321,6 +1371,13 @@ export function useAppShellState() {
       };
     });
   }, [activeTabId, updateTab]);
+
+  // 首页右栏文件 tab 关闭：关掉活动的则回落到「文件」树 tab（无邻居逻辑，
+  // 首页面板是临时性）。与 handleCloseFileTab 对偶。
+  const handleCloseHomeFileTab = useCallback((tabId: string) => {
+    setHomeFileTabs((prev) => prev.filter((t) => t.id !== tabId));
+    setHomeActiveFileTabId((cur) => (cur === tabId ? null : cur));
+  }, []);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     if (!activeTabId) return;
@@ -1579,6 +1636,12 @@ export function useAppShellState() {
     handleOpenSessionFromHome,
     homeNewSession,
     homeSession,
+    homeFileTabs,
+    homeActiveFileTabId,
+    homeRightPanelOpen,
+    setHomeRightPanelOpen,
+    setHomeActiveFileTabId,
+    handleCloseHomeFileTab,
     handleHomeNewSession,
     handleHomeNewSessionSelect,
     handleExitHomeNewSession,

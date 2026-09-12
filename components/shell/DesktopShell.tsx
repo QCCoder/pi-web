@@ -18,7 +18,7 @@ import { PluginsConfig } from "../PluginsConfig";
 import { LoopsConfig } from "../LoopsConfig";
 import { LoopsPanel } from "../LoopsPanel";
 import { HomeNewSession } from "../HomeNewSession";
-import { defaultHomeNewSessionWorkspaceId } from "@/lib/home-quick-switch";
+import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
 import { WorkspaceTabBar } from "../WorkspaceTabBar";
 import { useI18n } from "@/hooks/useI18n";
 import { getFileName } from "@/lib/file-paths";
@@ -86,6 +86,12 @@ export function DesktopShell() {
     homeSession,
     mruIds,
     workspacesLoaded,
+    homeFileTabs,
+    homeActiveFileTabId,
+    homeRightPanelOpen,
+    setHomeRightPanelOpen,
+    setHomeActiveFileTabId,
+    handleCloseHomeFileTab,
     handleHomeNewSessionSelect,
     handleHomeSessionCreated,
     handleCreateWorkItem,
@@ -336,6 +342,23 @@ const renderMiddleColumn = () => {
     />
   );
   };
+
+  // 首页上下文（无活动工作区 tab）：composer 选区 / 首页会话归属 → 决定
+  // 首页主区新建会话页与右栏文件区的上下文工作区。
+  const homeAtDesktop = !activeWorkspace;
+  const homeComposerWorkspaceId = homeNewSession.workspaceId
+    ?? defaultHomeNewSessionWorkspaceId(workspaces, sessionActivity.sessions, mruIds);
+  const homeContextWorkspace = homeSession
+    ? workspaceForSession(homeSession, workspaces) ?? undefined
+    : workspaces.find((w) => w.id === homeComposerWorkspaceId && w.available);
+  // 右栏在首页用独立状态（无 tab 可挂）；面板/文件 tab 依上下文取源。
+  const panelWorkspace = activeWorkspace ?? homeContextWorkspace ?? null;
+  const panelOpen = homeAtDesktop ? homeRightPanelOpen : rightPanelOpen;
+  const panelFileTabs = homeAtDesktop ? homeFileTabs : fileTabs;
+  const panelActiveFileTabId = homeAtDesktop ? homeActiveFileTabId : activeFileTabId;
+  const panelActiveFileTab = homeAtDesktop
+    ? (homeActiveFileTabId ? homeFileTabs.find((t) => t.id === homeActiveFileTabId) : undefined)
+    : activeFileTab;
 
   return (
     <>
@@ -592,7 +615,7 @@ const renderMiddleColumn = () => {
         to the 42% default) — same pattern as the sidebar handle, placed
         between the center column and the right file panel. Rendered only
         while the panel is open (at home the panel is closed). */}
-    {rightPanelOpen && (
+    {panelOpen && (
       <div
         className={`right-panel-resize-handle${rightPanelResizing ? " right-panel-resize-active" : ""}`}
         role="separator"
@@ -608,7 +631,7 @@ const renderMiddleColumn = () => {
         localStorage; null → CSS 42% default) */}
     <div
       ref={rightPanelContainerRef}
-      className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizing ? " right-panel-resizing" : ""}`}
+      className={`right-panel-container${panelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizing ? " right-panel-resizing" : ""}`}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -623,11 +646,11 @@ const renderMiddleColumn = () => {
       >
         <div style={{ flex: 1, overflow: "hidden" }}>
           <TabBar
-            tabs={fileTabs}
-            activeTabId={activeFileTabId ?? FILES_TAB_ID}
-            leadingTab={activeWorkspace ? { id: FILES_TAB_ID, label: "文件" } : undefined}
-            onSelectTab={(id: string) => updateActiveTab({ activeFileTabId: id })}
-            onCloseTab={handleCloseFileTab}
+            tabs={panelFileTabs}
+            activeTabId={panelActiveFileTabId ?? FILES_TAB_ID}
+            leadingTab={panelWorkspace ? { id: FILES_TAB_ID, label: "文件" } : undefined}
+            onSelectTab={(id: string) => (homeAtDesktop ? setHomeActiveFileTabId(id) : updateActiveTab({ activeFileTabId: id }))}
+            onCloseTab={homeAtDesktop ? handleCloseHomeFileTab : handleCloseFileTab}
           />
         </div>
 
@@ -639,46 +662,46 @@ const renderMiddleColumn = () => {
           active; the empty hint remains only as the home fallback (no
           workspace → no tree to show). */}
       <div style={{ flex: 1, overflow: "hidden" }}>
-        {activeWorkspace ? (
+        {panelWorkspace ? (
           <div
             style={{
-              display: activeFileTab ? "none" : "flex",
+              display: panelActiveFileTab ? "none" : "flex",
               flexDirection: "column",
               height: "100%",
             }}
           >
             <FilesExplorerPanel
-              workspace={activeWorkspace}
+              workspace={panelWorkspace}
               explorerRefreshKey={explorerRefreshKey}
               onOpenFile={handleOpenFile}
               reveal={loopFilesReveal ?? undefined}
             />
           </div>
         ) : null}
-        {activeFileTab?.kind === "file" ? (
+        {panelActiveFileTab?.kind === "file" ? (
           <FileViewer
-            filePath={activeFileTab.filePath}
-            cwd={activeCwd ?? undefined}
-            sourceSessionId={activeFileTab.sourceSessionId}
+            filePath={panelActiveFileTab.filePath}
+            cwd={(homeAtDesktop ? panelWorkspace?.path : activeCwd) ?? undefined}
+            sourceSessionId={panelActiveFileTab.sourceSessionId}
             gitRefreshKey={explorerRefreshKey}
-            initialDisplayMode={activeFileTab.initialDisplayMode}
-            onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
+            initialDisplayMode={panelActiveFileTab.initialDisplayMode}
+            onMentionLines={panelOpen ? handleFileLineMention : undefined}
             onOpenFile={(filePath) => handleOpenFile(
               filePath,
               getFileName(filePath),
-              { sourceSessionId: activeFileTab.sourceSessionId },
+              { sourceSessionId: panelActiveFileTab.sourceSessionId },
             )}
           />
-        ) : activeFileTab?.kind === "session" ? (
+        ) : panelActiveFileTab?.kind === "session" ? (
           <ChatWindow
-            key={activeFileTab.sessionId}
-            session={activeFileTab.sessionInfo}
+            key={panelActiveFileTab.sessionId}
+            session={panelActiveFileTab.sessionInfo}
             newSessionCwd={null}
             embedded
             onOpenFile={handleOpenLinkedFile}
             onOpenSession={handleOpenSessionViewer}
           />
-        ) : !activeWorkspace ? (
+        ) : !panelWorkspace ? (
           <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
              {translate("files.noneOpen")}
           </div>
@@ -686,21 +709,21 @@ const renderMiddleColumn = () => {
       </div>
     </div>
   </div>
-  {/* File panel toggle — workspace-scoped; the home tab has no file context. */}
-  {activeWorkspace && <button
-    onClick={() => updateActiveTab((tab) => ({ rightPanelOpen: !tab.rightPanelOpen }))}
-     title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-     aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
+  {/* File panel toggle — workspace tab 或首页（上下文工作区存在即可切）。 */}
+  {panelWorkspace && <button
+    onClick={() => (homeAtDesktop ? setHomeRightPanelOpen(!homeRightPanelOpen) : updateActiveTab((tab) => ({ rightPanelOpen: !tab.rightPanelOpen })))}
+     title={panelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
+     aria-label={panelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
     style={{
       position: "fixed", top: 0, right: 0, zIndex: 300,
       display: "flex", alignItems: "center", justifyContent: "center",
       width: 36, height: 36, padding: 0,
       background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-      color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
+      color: panelOpen ? "var(--text)" : "var(--text-muted)",
       cursor: "pointer", transition: "color 0.12s",
     }}
     onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-    onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
+    onMouseLeave={(e) => { e.currentTarget.style.color = panelOpen ? "var(--text)" : "var(--text-muted)"; }}
   >
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />

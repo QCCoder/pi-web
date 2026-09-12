@@ -19,6 +19,7 @@ import { ACTIVITY_VIEW_ORDER, SETTINGS_VIEW, type SidebarView } from "../Activit
 import { useI18n } from "@/hooks/useI18n";
 import { useShell } from "./context";
 import { ChatToolbar } from "./ChatToolbar";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { getFileName } from "@/lib/file-paths";
 import type { WorkspaceCapability } from "@/lib/workspaces/types";
 
@@ -483,9 +484,22 @@ export function MobileShell() {
     );
   };
 
+  // 宽视口（≥768px：平板竖屏/手机横屏/折叠屏展开）且在工作区内 → 左侧竖向
+  // rail 取代底部 tab 栏；同一个 `tab` 状态，跨越断点不丢视图。首页落地页
+  // （无 activeWorkspace）不显示导航（与底部栏语义一致），HomeLanding 自带
+  // 工作区 chip 入口。
+  const wide = useMediaQuery("(min-width: 768px)");
+  const showRail = wide && Boolean(activeWorkspace);
+  // 首页落地页隐藏 WorkspaceTabBar 行（工作区入口在 HomeLanding 的 chip 下拉；
+  // homeSession / HomeNewSession 视图保留 tab 行以便跳转已打开的工作区）。
+  const showWorkspaceTabBar = Boolean(activeWorkspace) || Boolean(s.homeSession) || s.homeNewSession.open;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", flexDirection: showRail ? "row" : "column", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)" }}>
+      {showRail && <MobileSideRail tabs={tabsAvailable} active={tab} onSelect={switchTab} />}
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, height: "100%" }}>
       <ChatToolbar />
+      {showWorkspaceTabBar && (
       <WorkspaceTabBar
         workspaces={workspaces}
         tabIds={tabs.map((t) => t.id)}
@@ -497,6 +511,7 @@ export function MobileShell() {
         onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is NonNullable<typeof t> => Boolean(t)))}
         onPickWorkspace={handleOpenWorkspaceToChat}
       />
+      )}
 
       {/* Main area — the active tab's content. The 会话 tab's chat is ALWAYS
           mounted (hidden, not unmounted) so the SSE stream and streaming
@@ -619,9 +634,12 @@ export function MobileShell() {
         )}
       </div>
 
+      </div>
+
       {/* Bottom tab bar — rendered only inside a workspace (Home is a
-          workspace picker, not a tab — Q7). */}
-      {activeWorkspace && (
+          workspace picker, not a tab — Q7) and only on the narrow layout:
+          wide viewports (≥768px) get the left MobileSideRail instead. */}
+      {activeWorkspace && !wide && (
         <nav
           role="tablist"
           aria-label="工作区导航"
@@ -663,5 +681,72 @@ export function MobileShell() {
         </nav>
       )}
     </div>
+  );
+}
+
+/** Left vertical nav for wide viewports (≥768px): the same MobileTab set as
+ *  the bottom tab bar, stacked as icon-over-label buttons. Phone portrait
+ *  keeps the bottom bar; crossing 768px (rotation/fold/tablet) swaps the
+ *  chrome without losing `tab` state. Deliberately NOT classed
+ *  `mobile-bottom-tabbar` — the keyboard layer hides that bar while the
+ *  virtual keyboard is open, and the rail (never covered by a keyboard)
+ *  stays reachable. */
+function MobileSideRail({
+  tabs,
+  active,
+  onSelect,
+}: {
+  tabs: MobileTab[];
+  active: MobileTab;
+  onSelect: (tab: MobileTab) => void;
+}) {
+  return (
+    <nav
+      role="tablist"
+      aria-label="工作区导航"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        flexShrink: 0,
+        width: 68,
+        borderRight: "1px solid var(--border)",
+        background: "var(--bg-panel)",
+        paddingTop: 6,
+        paddingBottom: "env(safe-area-inset-bottom)",
+      }}
+    >
+      {tabs.map((item) => {
+        const isActive = item === active;
+        return (
+          <button
+            key={item}
+            type="button"
+            role="tab"
+            aria-selected={isActive}
+            aria-label={tabLabel(item)}
+            onClick={() => onSelect(item)}
+            style={{
+              position: "relative",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              padding: "9px 2px",
+              border: 0,
+              background: "transparent",
+              color: isActive ? "var(--accent)" : "var(--text-muted)",
+              cursor: "pointer",
+            }}
+          >
+            {isActive ? (
+              <span aria-hidden="true" style={{ position: "absolute", left: 0, top: 8, bottom: 8, width: 2.5, borderRadius: 2, background: "var(--accent)" }} />
+            ) : null}
+            {tabIcon(item)}
+            <span style={{ fontSize: 10, lineHeight: 1 }}>{tabLabel(item)}</span>
+          </button>
+        );
+      })}
+    </nav>
   );
 }
