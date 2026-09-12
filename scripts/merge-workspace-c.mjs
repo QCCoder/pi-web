@@ -20,7 +20,7 @@ const APPLY = process.argv.includes("--apply");
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), "..");
 loadEnvLocal(REPO_ROOT);
 const WS_C = join(REPO_ROOT, ".pi", "workspaces", "workspace-c");
-const CXIN = "/Users/qiancheng/Documents/Workspace/cxin-workspace";
+const CXIN = "/Users/qiancheng/Documents/Workspace/cxin";
 const SESSIONS_ROOT = process.env.PI_CODING_AGENT_DIR
   ? join(process.env.PI_CODING_AGENT_DIR, "sessions")
   : join(homedir(), ".pi", "agent", "sessions");

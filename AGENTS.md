@@ -416,7 +416,7 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (cxin-workspace), migr
 - **Three artifacts, three purposes**: KB `learnings/*.md` = consolidated generalizable rules (loop-maintained via hash guard); `standards/*` = human-maintained; `.pi/loops/<name>/LEARN/<KEY>-<date>.md` = per-execution archive (nothing parses it; the SKILL opening may `ls -t` it for calibration).
 ### cxin reference (研发 Loop target workspace)
 
-- **dev Loop instance**: `/Users/qiancheng/Documents/Workspace/cxin-workspace/`（2026-09 由 pi 托管的 workspace-c
+- **dev Loop instance**: `/Users/qiancheng/Documents/Workspace/cxin/`（2026-09 由 pi 托管的 workspace-c
   拆解搬入并退役，外部路径导入，workspace id 沿用 01KYRBBY917PW4X0VHMY5GC8TE）in **kit form**: `.pi/loops/dev-loop/LOOP.md`
   (kit frontmatter; cron `*/30 9-22 * * 1-5` Asia/Shanghai; **L2** — migration exception, dev-loop 已在 v3 真实运行多月视为已过
   L1 验证；全新 loop 一律 L1 起步), `STATE.md` spine, root-level `.pi/loop/constraints.md` / `.pi/loop/budget.md` / `.pi/loops/<name>/loop-ledger.json`
