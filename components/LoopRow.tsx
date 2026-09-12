@@ -104,7 +104,7 @@ export function LoopRow({
               event.stopPropagation();
               onRun();
             }}
-            style={rowLinkButton}
+            style={{ ...rowLinkButton, ...(busy || loop.running ? disabledButtonStyle : undefined) }}
           >
             运行
           </button>
@@ -116,7 +116,7 @@ export function LoopRow({
               event.stopPropagation();
               onConfigure(loop.name);
             }}
-            style={rowLinkButton}
+            style={{ ...rowLinkButton, ...(busy ? disabledButtonStyle : undefined) }}
           >
             配置
           </button>
@@ -127,7 +127,7 @@ export function LoopRow({
             event.stopPropagation();
             onAction(loop.name, loop.paused ? "resume" : "pause");
           }}
-          style={rowLinkButton}
+          style={{ ...rowLinkButton, ...(busy ? disabledButtonStyle : undefined) }}
         >
           {loop.paused ? "恢复" : "暂停"}
         </button>
@@ -138,7 +138,7 @@ export function LoopRow({
               event.stopPropagation();
               onAction(loop.name, "stop");
             }}
-            style={rowLinkButton}
+            style={{ ...rowLinkButton, ...(busy ? disabledButtonStyle : undefined) }}
           >
             停止
           </button>
@@ -150,6 +150,12 @@ export function LoopRow({
 
 // fix(task1-review): 与 sectionHeaderLinkStyle 等价（原抽取丢失 fontWeight）
 const rowLinkButton: React.CSSProperties = { fontSize: 12, fontWeight: 500, color: "var(--accent)", background: "transparent", border: 0, padding: 0, cursor: "pointer" };
+
+/** disabled 必须可见：rowLinkButton 原样式无禁用态视觉，disabled 按钮看起来
+ * 仍可点（同色同 pointer 光标），点击被浏览器静默吞掉 —— 「能点但没反应」。
+ * （幽灵锁场景实测：loop.running=true 时运行按钮 disabled 无视觉，用户
+ * 反馈「点击运行没效果」。） */
+const disabledButtonStyle: React.CSSProperties = { opacity: 0.45, cursor: "default" };
 
 /** loop 行的本地时间格式化（从 WorkspaceOverview 原样迁入）。 */
 export function formatLoopClock(iso: string): string {

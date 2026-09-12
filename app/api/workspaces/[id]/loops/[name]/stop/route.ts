@@ -23,6 +23,8 @@ export async function POST(
     const outcome = await stopRound(declaration, {
       destroySession: (sessionId) => client.destroySession(sessionId),
       reap: (path) => reapOrphanedRoundProcesses(path),
+      // 幽灵锁判定：轮已收尾（会话不在 running set）时直接清锁，无需 destroy
+      runningSessionIds: async () => (await client.runningSessionIds()).ids,
     });
     if (outcome === "not-running") {
       return NextResponse.json({ error: "本轮未在运行" }, { status: 409 });

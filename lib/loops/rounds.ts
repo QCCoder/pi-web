@@ -9,6 +9,7 @@ import {
   releaseRoundLock,
   updateRoundLock,
   type RoundLockHolder,
+  type RoundLockRecord,
 } from "../../packages/pi-loop/round-lock.ts";
 import { writeLastrun } from "../../packages/pi-loop/due.ts";
 import { buildRoundPrompt } from "../../packages/pi-loop/contract.ts";
@@ -19,6 +20,9 @@ export interface StopRoundDeps {
   destroySession: (sessionId: string) => Promise<unknown>;
   /** pi-loop/reap.ts 的孤儿收割（cwd 收敛到 workspace）。 */
   reap: (workspacePath: string) => Promise<unknown> | void;
+  /** daemonProxy().runningSessionIds 包装——幽灵锁活性判定用（可选：缺省或探测
+   *  失败都退化为旧行为，不判幽灵）。 */
+  runningSessionIds?: () => Promise<string[]>;
 }
 
 export type StopOutcome = "stopped" | "not-running" | "beat-held";
@@ -37,6 +41,12 @@ export async function stopRound(
   }
   if (lock.kind === "beat") return "beat-held";
   if (!lock.sessionId) return "not-running"; // 锁先于会话建立——轮可能仍在启动，不释放
+  // 幽灵锁（轮已收尾、会话已不在 running set）：清锁即达成「停止」语义。
+  // 探测失败/未注入依赖 → 走下方 destroy 原路径（其错误即真实原因）。
+  if (await isPhantomRoundLock(lock, deps)) {
+    releaseRoundLock(declaration.dir);
+    return "stopped";
+  }
   await deps.destroySession(lock.sessionId);
   try {
     await deps.reap(declaration.workspacePath);
@@ -54,6 +64,31 @@ export class RoundBusyError extends Error {
   }
 }
 
+/** sessionId 回填宽限：锁创建 → sessionId 回填 → prompt 到达 wrapper 之间，
+ *  会话可能尚未进入 running set；宽限期内一律不判幽灵（防把正在启动的轮
+ *  误判成已死，导致双发起轮/误停）。 */
+export const PHANTOM_LOCK_GRACE_MS = 2 * 60_000;
+
+/** 幽灵锁判定：daemon 锁带 sessionId、过宽限期、且不在 daemon running set
+ *  → 轮已实际结束。手动轮锁成功路径无人 await 轮结束（stale 窗兜底回收），
+ *  轮收尾/会话空闲被逐出后锁仍活——表现为最长 maxMinutes+15min 的假「运行
+ *  中」（运行按钮禁用 + 409 误报 + 心跳槽被吃）。活性接管把这个窗口收窄
+ *  到「探测可证」即清。beat 锁（无 sessionId，pid 治理）与启动窗口锁不判。 */
+async function isPhantomRoundLock(
+  lock: RoundLockRecord,
+  deps: { runningSessionIds?: () => Promise<string[]> },
+): Promise<boolean> {
+  if (!lock.sessionId || lock.kind === "beat") return false;
+  if (Date.now() - lock.startedAt <= PHANTOM_LOCK_GRACE_MS) return false;
+  if (!deps.runningSessionIds) return false;
+  try {
+    const ids = await deps.runningSessionIds();
+    return !ids.includes(lock.sessionId);
+  } catch {
+    return false; // 探测失败 = 无法证明轮已死 → 保守不判幽灵
+  }
+}
+
 export interface LaunchRoundDeps {
   /** daemonProxy().createSession —— POST /v1/sessions（不带 command：sessionId
    *  要进开场合同第 3 条，而它建完会话才知道 → 两步走）。 */
@@ -61,6 +96,9 @@ export interface LaunchRoundDeps {
   /** daemonProxy().sendSessionCommand —— POST /v1/sessions/:id/commands。 */
   sendCommand: (sessionId: string, command: { type: string; [key: string]: unknown }) => Promise<unknown>;
   destroySession: (sessionId: string) => Promise<unknown>;
+  /** daemonProxy().runningSessionIds 包装——幽灵锁活性接管用（可选：缺省或探测
+   *  失败都退化为 RoundBusyError，不接管）。 */
+  runningSessionIds?: () => Promise<string[]>;
 }
 
 /** 手动起一轮（spec §4，S3）：acquire 锁（kind daemon，pid=web 进程）→ 写
@@ -75,8 +113,17 @@ export async function launchManualRound(
   deps: LaunchRoundDeps,
 ): Promise<{ sessionId: string; cwd?: string; sessionFile?: string }> {
   const holder: RoundLockHolder = { pid: process.pid, host: hostname(), kind: "daemon" };
-  if (!acquireRoundLock(declaration.dir, holder, { maxStaleMs: declaration.maxMinutes * 60_000 + 15 * 60_000 })) {
-    throw new RoundBusyError(declaration.loopName);
+  const lockOpts = { maxStaleMs: declaration.maxMinutes * 60_000 + 15 * 60_000 };
+  if (!acquireRoundLock(declaration.dir, holder, lockOpts)) {
+    // 幽灵锁活性接管：锁活但轮已死（见 isPhantomRoundLock 注释）→ 释放重取，
+    // 而不是把「假运行中」顶回给用户。接管与重取之间被心跳抢走 → 仍 busy。
+    const existing = readRoundLock(declaration.dir);
+    if (existing && (await isPhantomRoundLock(existing, deps))) {
+      releaseRoundLock(declaration.dir);
+    }
+    if (!acquireRoundLock(declaration.dir, holder, lockOpts)) {
+      throw new RoundBusyError(declaration.loopName);
+    }
   }
   let sessionId: string | undefined;
   try {

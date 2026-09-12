@@ -32,6 +32,8 @@ export async function POST(
         createSession: (input) => client.createSession(input),
         sendCommand: (sessionId, command) => client.sendSessionCommand(sessionId, command),
         destroySession: (sessionId) => client.destroySession(sessionId),
+        // 幽灵锁活性接管：锁里的 sessionId 不在 daemon running set 即可清锁重起
+        runningSessionIds: async () => (await client.runningSessionIds()).ids,
       },
     );
     // /api/agent/new 同款后处理：files 路由 allow-list 同步 + id→path 缓存播种
