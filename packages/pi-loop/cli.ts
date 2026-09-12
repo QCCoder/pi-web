@@ -8,6 +8,7 @@ import { runNow } from "./fire.ts";
 import { beatRoot, beatRoundRunner, stopRound } from "./beat.ts";
 import { initLoop } from "./init.ts";
 import { collectStatus } from "./status.ts";
+import { loopDirPath } from "./paths.ts";
 
 const [command, ...args] = process.argv.slice(2);
 const opt = (flag: string): string | undefined => {
@@ -31,7 +32,7 @@ async function main(): Promise<void> {
     if (!name) die("用法: pi-loop run <name> [--item KEY] [--root .]");
     try {
       const declaration = discoverKitLoops(root, { includePaused: true }).find((d) => d.loopName === name)
-        ?? die(`未找到 loop「${name}」（${join(root, "loops", name, "LOOP.md")}）`, 1);
+        ?? die(`未找到 loop「${name}」（${loopDirPath(root, name)}/LOOP.md）`, 1);
       const item = opt("--item");
       const result = await runNow(declaration, { pid: process.pid, host: hostname(), kind: "beat" },
         () => beatRoundRunner(declaration, { manual: true, ...(item ? { extraInstructions: `本轮优先处理 ${item}（工作项绑定触发）` } : {}) }));
@@ -50,10 +51,10 @@ async function main(): Promise<void> {
   if (command === "pause" || command === "resume") {
     const name = args[0] ?? die(`用法: pi-loop ${command} <name>`);
     // pause 写标记会 ENOENT 崩溃；resume 对不存在的 loop 会误报「已恢复」exit 0 — 同一目录守卫
-    if (!existsSync(join(root, "loops", name))) {
-      die(`未找到 loop「${name}」（${join(root, "loops", name)}）`, 1);
+    if (!existsSync(loopDirPath(root, name))) {
+      die(`未找到 loop「${name}」（${loopDirPath(root, name)}）`, 1);
     }
-    const marker = join(root, "loops", name, "PAUSED");
+    const marker = join(loopDirPath(root, name), "PAUSED");
     if (command === "pause") writeFileSync(marker, "");
     else { try { unlinkSync(marker); } catch { /* 本就未暂停 */ } }
     console.log(`[pi-loop] ${command === "pause" ? "已暂停" : "已恢复"} ${name}`);
@@ -76,7 +77,7 @@ async function main(): Promise<void> {
       maxMinutes: opt("--max-minutes") ? Number(opt("--max-minutes")) : undefined,
       timezone: opt("--timezone"),
     });
-    console.log(`[pi-loop] 已创建 loops/${name}（五件套 + .lastrun=now，首轮等自然槽）`);
+    console.log(`[pi-loop] 已创建 .pi/loops/${name}（五件套 + .lastrun=now，首轮等自然槽）`);
     return;
   }
   if (command === "watch") {

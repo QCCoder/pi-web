@@ -5,11 +5,11 @@
  *  detached 子进程自成进程组，宿主 pid 定位不到组，stopRound 必须按子 pid 组杀。 */
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
-import { join } from "node:path";
 import { buildRoundPrompt } from "./contract.ts";
 import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "./protocol.ts";
 import { runDueRound } from "./fire.ts";
 import { readRoundLock, writeRoundLock } from "./round-lock.ts";
+import { loopDirPath } from "./paths.ts";
 import { reapOrphansByCwd } from "./reap.ts";
 
 export function piBinary(): string {
@@ -69,7 +69,7 @@ export async function beatRoot(root: string): Promise<BeatReport> {
 }
 
 export async function stopRound(root: string, name: string): Promise<{ ok: boolean; message: string }> {
-  const lock = readRoundLock(join(root, "loops", name));
+  const lock = readRoundLock(loopDirPath(root, name));
   if (!lock) return { ok: false, message: `loop「${name}」没有在跑的轮` };
   if (lock.kind === "daemon") return { ok: false, message: "由 pi-web daemon 持有，请在 pi-web 界面停止" };
   killGroup(lock.pid, "SIGTERM");

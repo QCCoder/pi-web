@@ -3,7 +3,7 @@
  *  入口 + 文件名白名单 + 服务端拼路径；不触 /api/files 的只读 allow-list。
  *  并发语义（spec §5.4）：知识/正文/宪法在轮开场被读取，编辑不加锁、下一轮生效；
  *  STATE.md 无写路径；删除在锁活时拒绝。 */
-import { readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ import { initLoop } from "../../packages/pi-loop/init.ts";
 import { isValidCronExpression } from "../../packages/pi-loop/cron.ts";
 import { isValidTimezone, splitLoopFile } from "../../packages/pi-loop/frontmatter.ts";
 import { isRoundLockStale, readRoundLock } from "../../packages/pi-loop/round-lock.ts";
+import { constitutionDirPath, loopDirPath, skillDirPath } from "../../packages/pi-loop/paths.ts";
 import type { LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
 
 // NOTE (task-2 deviation): the brief's verbatim code used TypeScript parameter
@@ -54,7 +55,8 @@ export interface LoopDocsBundle {
 const DOC_FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
 const RESERVED_DOC_NAMES = new Set(["LOOP.md", "STATE.md"]);
 const LOOP_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const CONSTITUTION_FILES = { constraints: "loop-constraints.md", budget: "loop-budget.md" } as const;
+/** 根级宪法落在 `.pi/loop/`（2026-09 布局约定），文件名去 loop- 前缀。 */
+const CONSTITUTION_FILES = { constraints: "constraints.md", budget: "budget.md" } as const;
 const TEMPLATES_ROOT = join(
   dirname(fileURLToPath(import.meta.url)), "..", "..", "kit", "templates", "basic", "root",
 );
@@ -84,6 +86,7 @@ async function readIfExists(path: string): Promise<ConstitutionEntry | undefined
 }
 
 async function atomicWrite(path: string, content: string): Promise<number> {
+  await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${Math.random().toString(36).slice(2)}`;
   await writeFile(tmp, content, "utf8");
   await rename(tmp, path);
@@ -123,8 +126,8 @@ export async function getLoopDocs(workspacePath: string, name: string): Promise<
     loopBodyMtimeMs: loopFile.mtimeMs,
     stateMd: stateFile?.content ?? "",
     constitution: {
-      constraints: await readIfExists(join(workspacePath, CONSTITUTION_FILES.constraints)),
-      budget: await readIfExists(join(workspacePath, CONSTITUTION_FILES.budget)),
+      constraints: await readIfExists(join(constitutionDirPath(workspacePath), CONSTITUTION_FILES.constraints)),
+      budget: await readIfExists(join(constitutionDirPath(workspacePath), CONSTITUTION_FILES.budget)),
     },
     constitutionTemplates: {
       constraints: await readFile(join(TEMPLATES_ROOT, CONSTITUTION_FILES.constraints), "utf8"),
@@ -182,7 +185,7 @@ export async function writeLoopFile(
     throw new LoopManageError("未知的写入 target", 400);
   }
   const fileName = CONSTITUTION_FILES[target.file];
-  const path = join(workspacePath, fileName);
+  const path = join(constitutionDirPath(workspacePath), fileName);
   const existing = await readIfExists(path);
   if (baseMtimeMs !== undefined && existing && existing.mtimeMs !== baseMtimeMs) {
     throw new LoopManageError(`${fileName} 已被其它编辑修改`, 409, {
@@ -224,13 +227,13 @@ export async function createLoop(
   if (input.pattern !== undefined && !LOOP_NAME_RE.test(input.pattern)) {
     throw new LoopManageError("pattern 必须是小写字母/数字/连字符的 slug", 400);
   }
-  if (existsSync(join(workspacePath, "loops", input.name))) {
+  if (existsSync(loopDirPath(workspacePath, input.name))) {
     throw new LoopManageError(`loop 已存在：${input.name}`, 409);
   }
-  // fix(final-review F2): initLoop 对既有 .agents/skills/<pattern>/SKILL.md 不覆盖——
+  // fix(final-review F2): initLoop 对既有 .pi/skills/<pattern>/SKILL.md 不覆盖——
   // 先记下复用事实，随响应返回让表单提示诚实化（此前 footer 谎称「骨架已生成」）。
   const skillExisted = existsSync(
-    join(workspacePath, ".agents", "skills", input.pattern ?? input.name, "SKILL.md"),
+    join(skillDirPath(workspacePath, input.pattern ?? input.name), "SKILL.md"),
   );
   initLoop(workspacePath, {
     name: input.name,

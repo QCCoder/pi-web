@@ -16,6 +16,10 @@ export interface WorkspaceRepository {
   alias: string;
   name: string;
   kind: WorkspaceRepositoryKind;
+  /** Relative POSIX path from the workspace root where this repository lives
+   *  (2026-09 path-registration convention — no fixed `repositories/` layout;
+   *  the root hosts the user's own project directories). REQUIRED. */
+  path: string;
   status: WorkspaceRepositoryStatus;
   removedAt?: string;
 }
@@ -34,7 +38,13 @@ export interface AddWorkspaceRepositoryInput {
   alias: string;
   name?: string;
   kind: WorkspaceRepositoryKind;
-  mode: "clone" | "init";
+  /** `clone` = git-clone a remote into the (new) path; `init` = git-init a fresh
+   *  repo there; `register` = register an EXISTING directory at `path` as a
+   *  repository (the path-registration flow for dirs the user already has). */
+  mode: "clone" | "init" | "register";
+  /** Relative POSIX path from the workspace root. Defaults to `alias` (root-level
+   *  directory) when omitted; REQUIRED for `register`. */
+  path?: string;
   remote?: string;
 }
 

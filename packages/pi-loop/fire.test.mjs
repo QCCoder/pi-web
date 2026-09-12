@@ -10,7 +10,7 @@ const readLastrunIso = (d) => readFileSync(join(d, ".lastrun"), "utf8").trim();
 
 const setup = () => {
   const root = mkdtempSync(join(tmpdir(), "fire-"));
-  const dir = join(root, "loops", "l");
+  const dir = join(root, ".pi", "loops", "l");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "LOOP.md"), "---\ncron: \"*/30 * * * *\"\ntimezone: UTC\nmax_minutes: 5\n---\nb");
   return { root, dir, decl: { workspacePath: root, loopName: "l", dir, pattern: "l", cron: "*/30 * * * *", timezone: "UTC", level: "L1", maxMinutes: 5, body: "b" } };

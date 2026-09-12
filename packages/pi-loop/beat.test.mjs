@@ -12,7 +12,7 @@ function fakePi(dir, body) {
   return bin;
 }
 function setup(root = mkdtempSync(join(tmpdir(), "beat-"))) {
-  const dir = join(root, "loops", "l");
+  const dir = join(root, ".pi", "loops", "l");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "LOOP.md"), "---\ncron: \"*/30 * * * *\"\ntimezone: UTC\nmax_minutes: 1\n---\nb");
   return { root, dir };
@@ -45,7 +45,7 @@ test("双 loop 独立性：一次 beat 各自起轮，.lastrun/锁 per-loop 互�
   const root = mkdtempSync(join(tmpdir(), "beat-dual-"));
   try {
     for (const name of ["a", "b"]) {
-      const dir = join(root, "loops", name);
+      const dir = join(root, ".pi", "loops", name);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "LOOP.md"), "---\ncron: \"* * * * *\"\ntimezone: UTC\nmax_minutes: 5\n---\nb");
     }
@@ -54,7 +54,7 @@ test("双 loop 独立性：一次 beat 各自起轮，.lastrun/锁 per-loop 互�
     assert.deepEqual([...result.fired].sort(), ["a", "b"]); // 两个 loop 都 fire（readdir 序不保证，排序后比对）
     assert.deepEqual(result.failed, []);
     for (const name of ["a", "b"]) {
-      const dir = join(root, "loops", name);
+      const dir = join(root, ".pi", "loops", name);
       assert.ok(existsSync(join(dir, ".lastrun")), `${name} 有自己的 .lastrun`);
       assert.ok(!existsSync(join(dir, ".round.lock")), `${name} 锁已释放`);
     }

@@ -72,18 +72,31 @@ function validateRepositoryKind(value: unknown): WorkspaceRepositoryKind {
 
 export function workspaceRepositoryPath(
   workspacePath: string,
-  repository: Pick<WorkspaceRepository, "kind" | "alias">,
+  repository: Pick<WorkspaceRepository, "path">,
 ): {
   relativePath: string;
   absolutePath: string;
 } {
-  // Flat layout: knowledge bundles live at `knowledge/<alias>` (sibling of
-  // `repositories/`); code repos at `repositories/<alias>`. `WorkspaceRepositoryKind`
-  // drives this path selection and the UI labels.
-  const relativePath = repository.kind === "knowledge"
-    ? `knowledge/${repository.alias}`
-    : `repositories/${repository.alias}`;
-  return { relativePath, absolutePath: resolve(workspacePath, relativePath) };
+  // Path-registration convention (2026-09): the manifest carries the repo's
+  // relative POSIX path inside the workspace; the root hosts the user's own
+  // project layout. `kind` no longer drives the path.
+  return { relativePath: repository.path, absolutePath: resolve(workspacePath, repository.path) };
+}
+
+/** Validate + normalize a repository path: relative POSIX, rooted at the
+ *  workspace, no traversal, no trailing slash. */
+export function validateRepositoryPath(value: string): string {
+  const normalized = value.trim().replace(/\\/g, "/").replace(/\/+$/g, "");
+  if (!normalized) throw new WorkspaceValidationError("Repository path is required");
+  if (normalized.startsWith("/") || normalized.split("/").includes("..")) {
+    throw new WorkspaceValidationError(
+      "Repository path must be relative to the workspace root and may not contain '..'",
+    );
+  }
+  if (normalized === ".pi" || normalized.startsWith(".pi/")) {
+    throw new WorkspaceValidationError("Repository path may not live inside .pi/ (pi mechanism files)");
+  }
+  return normalized;
 }
 
 declare global {
@@ -243,6 +256,11 @@ function parseRepositories(value: unknown): WorkspaceRepository[] {
     if (aliases.has(alias)) throw new WorkspaceValidationError(`Duplicate repository alias: ${alias}`);
     aliases.add(alias);
     const kind = validateRepositoryKind(record.kind);
+    // Path registration is REQUIRED post-migration (2026-09 one-cut): the manifest
+    // carries where the repo actually lives relative to the workspace root.
+    const path = validateRepositoryPath(
+      requireNonEmptyString(record.path, `repositories[${index}].path`),
+    );
     if (record.status !== "active" && record.status !== "removed") {
       throw new WorkspaceValidationError(
         `repositories[${index}].status must be active or removed`,
@@ -253,6 +271,7 @@ function parseRepositories(value: unknown): WorkspaceRepository[] {
       alias,
       name: requireNonEmptyString(record.name, `repositories[${index}].name`),
       kind,
+      path,
       status: record.status,
       ...(optionalString(record.removed_at, `repositories[${index}].removed_at`)
         ? { removedAt: optionalString(record.removed_at, `repositories[${index}].removed_at`) }
@@ -358,6 +377,7 @@ export function serializeWorkspaceManifest(manifest: WorkspaceManifest): string 
       alias: repository.alias,
       name: repository.name,
       kind: repository.kind,
+      path: repository.path,
       status: repository.status,
       ...(repository.removedAt ? { removed_at: repository.removedAt } : {}),
     })),
@@ -585,8 +605,8 @@ export async function addWorkspaceRepository(
   const workspace = await findWorkspace(idOrSlug, root);
   const alias = validateRepositoryAlias(requireNonEmptyString(input.alias, "alias"));
   const kind = validateRepositoryKind(input.kind);
-  if (input.mode !== "clone" && input.mode !== "init") {
-    throw new WorkspaceValidationError("mode must be clone or init");
+  if (input.mode !== "clone" && input.mode !== "init" && input.mode !== "register") {
+    throw new WorkspaceValidationError("mode must be clone, init or register");
   }
 
   return withWorkspaceWriteLock(workspace.path, async () => {
@@ -595,65 +615,83 @@ export async function addWorkspaceRepository(
       throw new WorkspaceConflictError(`Repository alias already exists: ${alias}`);
     }
 
+    const relativePath = input.path === undefined && input.mode !== "register"
+      ? alias // default: a root-level `<alias>/` directory (path-registration layout)
+      : validateRepositoryPath(input.path ?? "");
     const repository: WorkspaceRepository = {
       id: createUlid(),
       alias,
       name: optionalString(input.name, "name") ?? alias,
       kind,
+      path: relativePath,
       status: "active",
     };
-    const { relativePath, absolutePath } = workspaceRepositoryPath(workspace.path, repository);
+    const { absolutePath } = workspaceRepositoryPath(workspace.path, repository);
 
-    const remote = optionalString(input.remote, "remote");
-    try {
-      await lstat(absolutePath);
-      throw new WorkspaceConflictError(`Repository path already exists: ${relativePath}`);
-    } catch (error) {
-      if (error instanceof WorkspaceConflictError) throw error;
-    }
-    await mkdir(dirname(absolutePath), { recursive: true });
-    if (input.mode === "clone") {
-      if (!remote) throw new WorkspaceValidationError("remote is required when cloning");
+    if (input.mode === "register") {
+      // Register an existing directory without touching it (path-registration flow
+      // for project dirs the user already has, e.g. cxin-workspace's own repos).
+      let registered = false;
       try {
-        await execFileAsync("git", ["clone", "--", remote, absolutePath], {
-          cwd: workspace.path,
-          maxBuffer: 10 * 1024 * 1024,
-        });
-      } catch (error) {
-        await rm(absolutePath, { recursive: true, force: true });
-        throw new WorkspaceValidationError(
-          `Git clone failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        registered = (await stat(absolutePath)).isDirectory();
+      } catch {
+        registered = false;
+      }
+      if (!registered) {
+        throw new WorkspaceValidationError(`Repository path does not exist: ${relativePath}`);
       }
     } else {
+      const remote = optionalString(input.remote, "remote");
       try {
-        await mkdir(absolutePath);
-        await execFileAsync("git", ["init", "--initial-branch=main"], { cwd: absolutePath });
-        const title = `# ${repository.name}\n`;
-        await writeFile(join(absolutePath, "README.md"), title, "utf8");
-        if (kind === "knowledge") {
-          // OKF v0.2 seed (redesign decision 13 / §4): a progressive-disclosure
-          // index.md, a log.md, and a frontmatter'd example concept. This replaces
-          // the old bare `# Index` file. Clone mode above is untouched — a cloned
-          // knowledge repo brings its own OKF structure from the remote.
-          const seed = renderOkfSeed(alias);
-          for (const [relativePath, content] of Object.entries(seed.files)) {
-            const target = join(absolutePath, relativePath);
-            await mkdir(dirname(target), { recursive: true });
-            await writeFile(target, content, "utf8");
-          }
-        }
-        if (remote) {
-          await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: absolutePath });
-        }
-        await ensureGitIdentity(absolutePath);
-        await execFileAsync("git", ["add", "-A"], { cwd: absolutePath });
-        await execFileAsync("git", ["commit", "-m", "Initial commit"], { cwd: absolutePath });
+        await lstat(absolutePath);
+        throw new WorkspaceConflictError(`Repository path already exists: ${relativePath}`);
       } catch (error) {
-        await rm(absolutePath, { recursive: true, force: true });
-        throw new WorkspaceValidationError(
-          `Git init failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        if (error instanceof WorkspaceConflictError) throw error;
+      }
+      await mkdir(dirname(absolutePath), { recursive: true });
+      if (input.mode === "clone") {
+        if (!remote) throw new WorkspaceValidationError("remote is required when cloning");
+        try {
+          await execFileAsync("git", ["clone", "--", remote, absolutePath], {
+            cwd: workspace.path,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+        } catch (error) {
+          await rm(absolutePath, { recursive: true, force: true });
+          throw new WorkspaceValidationError(
+            `Git clone failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      } else {
+        try {
+          await mkdir(absolutePath);
+          await execFileAsync("git", ["init", "--initial-branch=main"], { cwd: absolutePath });
+          const title = `# ${repository.name}\n`;
+          await writeFile(join(absolutePath, "README.md"), title, "utf8");
+          if (kind === "knowledge") {
+            // OKF v0.2 seed (redesign decision 13 / §4): a progressive-disclosure
+            // index.md, a log.md, and a frontmatter'd example concept. This replaces
+            // the old bare `# Index` file. Clone mode above is untouched — a cloned
+            // knowledge repo brings its own OKF structure from the remote.
+            const seed = renderOkfSeed(alias);
+            for (const [seedPath, content] of Object.entries(seed.files)) {
+              const target = join(absolutePath, seedPath);
+              await mkdir(dirname(target), { recursive: true });
+              await writeFile(target, content, "utf8");
+            }
+          }
+          if (remote) {
+            await execFileAsync("git", ["remote", "add", "origin", remote], { cwd: absolutePath });
+          }
+          await ensureGitIdentity(absolutePath);
+          await execFileAsync("git", ["add", "-A"], { cwd: absolutePath });
+          await execFileAsync("git", ["commit", "-m", "Initial commit"], { cwd: absolutePath });
+        } catch (error) {
+          await rm(absolutePath, { recursive: true, force: true });
+          throw new WorkspaceValidationError(
+            `Git init failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
     }
 
@@ -661,9 +699,37 @@ export async function addWorkspaceRepository(
     manifest.updatedAt = new Date().toISOString();
     await writeWorkspaceManifest(workspace.path, manifest);
     await updateManagedRepositoryInstructions(workspace.path, manifest);
+    // Keep the workspace root repo from tracking the nested repository (same
+    // precedent as the old fixed-layout /repositories/ ignore entry).
+    await ignoreRepositoryInWorkspaceGit(workspace.path, relativePath);
     await commitWorkspaceChanges(workspace.path, `workspace: add ${kind} repository ${alias}`);
     return repository;
   });
+}
+
+/** Best-effort: add `/<repoPath>/` to the workspace root's .gitignore so the
+ *  nested repository never shows up as untracked dirt in the root repo. */
+async function ignoreRepositoryInWorkspaceGit(
+  workspacePath: string,
+  relativePath: string,
+): Promise<void> {
+  try {
+    await gitOutput(workspacePath, ["rev-parse", "--is-inside-work-tree"]);
+  } catch {
+    return; // not a git repo — nothing to maintain
+  }
+  const entry = `/${relativePath}/`;
+  const gitignorePath = join(workspacePath, ".gitignore");
+  let current = "";
+  try {
+    current = await readFile(gitignorePath, "utf8");
+  } catch {
+    current = "";
+  }
+  const lines = current.split("\n");
+  if (lines.some((line) => line.trim() === entry)) return;
+  const next = `${current}${current && !current.endsWith("\n") ? "\n" : ""}\n# Nested repositories are managed independently\n${entry}\n`;
+  await writeFile(gitignorePath, next, "utf8");
 }
 
 export async function removeWorkspaceRepository(
@@ -916,6 +982,22 @@ const MIGRATION_RETIRED_CAPABILITIES = new Set([
   "wecom-channel",
 ]);
 
+/** Legacy on-disk repository locations probed (in order) when a manifest entry
+ *  predates path registration: the flat `repositories/<alias>` layout, the
+ *  kind-nested `repositories/<kind>/<alias>` layout, and the knowledge
+ *  `knowledge/<alias>` bundle layout. */
+function legacyRepositoryPathCandidates(
+  alias: string,
+  kind: string,
+): string[] {
+  const kindDir = kind === "knowledge" ? "knowledge" : "code";
+  return [
+    `repositories/${alias}`,
+    `repositories/${kindDir}/${alias}`,
+    `knowledge/${alias}`,
+  ];
+}
+
 async function migrateManifestFile(workspacePath: string): Promise<boolean> {
   const filePath = join(workspacePath, ".pi", "workspace.yaml");
   let raw: unknown;
@@ -945,6 +1027,31 @@ async function migrateManifestFile(workspacePath: string): Promise<boolean> {
   if (capabilities.length === 0) {
     record.capabilities = ["sessions", "explorer"];
     changed = true;
+  }
+  // Path-registration backfill (2026-09 one-cut): entries without `path` get the
+  // first legacy candidate that exists on disk, else the flat default. Runs at the
+  // same boundaries as the capabilities migration (index v-migration + import).
+  if (Array.isArray(record.repositories)) {
+    for (const entry of record.repositories) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const repo = entry as Record<string, unknown>;
+      if (typeof repo.path === "string" && repo.path.trim()) continue;
+      const alias = typeof repo.alias === "string" ? repo.alias : "";
+      const kind = typeof repo.kind === "string" ? repo.kind : "code";
+      let resolved = alias; // flat default: root-level <alias>/
+      for (const candidate of legacyRepositoryPathCandidates(alias, kind)) {
+        try {
+          if ((await stat(join(workspacePath, candidate))).isDirectory()) {
+            resolved = candidate;
+            break;
+          }
+        } catch {
+          /* probe next candidate */
+        }
+      }
+      repo.path = resolved;
+      changed = true;
+    }
   }
   if (!changed) return false;
   let manifest: WorkspaceManifest;

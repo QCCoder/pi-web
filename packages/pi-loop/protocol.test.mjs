@@ -72,13 +72,13 @@ test("discoverKitLoops: finds, skips PAUSED, skips broken", () => {
   try {
     // 无 name 的 LOOP.md：loopName 缺省取目录名（F5 契约），正好覆盖回退路径
     const NAMELESS = LOOP_MD.replace(/\nname: smoke\n/, "\n");
-    mkdirSync(join(ws, "loops", "a"), { recursive: true });
-    writeFileSync(join(ws, "loops", "a", "LOOP.md"), NAMELESS);
-    mkdirSync(join(ws, "loops", "paused"), { recursive: true });
-    writeFileSync(join(ws, "loops", "paused", "LOOP.md"), NAMELESS);
-    writeFileSync(join(ws, "loops", "paused", "PAUSED"), "");
-    mkdirSync(join(ws, "loops", "broken"), { recursive: true });
-    writeFileSync(join(ws, "loops", "broken", "LOOP.md"), "garbage");
+    mkdirSync(join(ws, ".pi", "loops", "a"), { recursive: true });
+    writeFileSync(join(ws, ".pi", "loops", "a", "LOOP.md"), NAMELESS);
+    mkdirSync(join(ws, ".pi", "loops", "paused"), { recursive: true });
+    writeFileSync(join(ws, ".pi", "loops", "paused", "LOOP.md"), NAMELESS);
+    writeFileSync(join(ws, ".pi", "loops", "paused", "PAUSED"), "");
+    mkdirSync(join(ws, ".pi", "loops", "broken"), { recursive: true });
+    writeFileSync(join(ws, ".pi", "loops", "broken", "LOOP.md"), "garbage");
     const found = discoverKitLoops(ws);
     assert.deepEqual(found.map((d) => d.loopName), ["a"]);
     // NOTE (task-3 deviation): brief said assert.equal(..., []) — under
@@ -95,7 +95,8 @@ test("isWorkspaceHalted", () => {
   const ws = makeWorkspace();
   try {
     assert.equal(isWorkspaceHalted(ws), false);
-    writeFileSync(join(ws, "loop-pause-all"), "");
+    mkdirSync(join(ws, ".pi", "loop"), { recursive: true });
+    writeFileSync(join(ws, ".pi", "loop", "pause-all"), "");
     assert.equal(isWorkspaceHalted(ws), true);
   } finally {
     rmSync(ws, { recursive: true, force: true });
@@ -104,11 +105,11 @@ test("isWorkspaceHalted", () => {
 
 test("discoverKitLoops includePaused 返回暂停 loop 并标记 paused", () => {
   const root = mkdtempSync(join(tmpdir(), "kit-"));
-  mkdirSync(join(root, "loops", "a"), { recursive: true });
-  writeFileSync(join(root, "loops", "a", "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nbody");
-  mkdirSync(join(root, "loops", "b"), { recursive: true });
-  writeFileSync(join(root, "loops", "b", "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nbody");
-  writeFileSync(join(root, "loops", "b", "PAUSED"), "");
+  mkdirSync(join(root, ".pi", "loops", "a"), { recursive: true });
+  writeFileSync(join(root, ".pi", "loops", "a", "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nbody");
+  mkdirSync(join(root, ".pi", "loops", "b"), { recursive: true });
+  writeFileSync(join(root, ".pi", "loops", "b", "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nbody");
+  writeFileSync(join(root, ".pi", "loops", "b", "PAUSED"), "");
   assert.equal(discoverKitLoops(root).length, 1);            // 默认：暂停即不存在（D11 门控语义）
   const all = discoverKitLoops(root, { includePaused: true });
   assert.equal(all.length, 2);

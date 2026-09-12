@@ -36,7 +36,7 @@ test("manual 形态（web 运行按钮 / pi-loop run）：PAUSED 收尾规则不
   assert.ok(prompt.includes("手动触发"));
   assert.ok(!prompt.includes("立即收尾退出本轮")); // 严格收尾条款被替换
   assert.ok(prompt.includes("/ws/loops/dev-loop/PAUSED")); // 仍提示旗存在，但本轮不据此收尾
-  assert.ok(prompt.includes("loop-pause-all"));
+  assert.ok(prompt.includes(".pi/loop/pause-all"));
   assert.ok(prompt.includes("不删不改旗")); // 旗继续压自动心跳，手动轮不动旗
   assert.ok(prompt.includes("sess-m"));
 });

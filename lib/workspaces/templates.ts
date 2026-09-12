@@ -55,17 +55,16 @@ export function renderWorkspaceRepositories(
   resolveRelativePath?: (repository: WorkspaceRepository) => string,
 ): string {
   // The repositories section lists CODE repos only (knowledge bundles have their
-  // own `renderKnowledgeSection` segment). Path defaults to the flat
-  // `repositories/<alias>` layout; `resolveRelativePath` lets callers (e.g.
-  // `updateManagedRepositoryInstructions`) pass the actual on-disk path so each
-  // repo shows its real location in AGENTS.md.
+  // own `renderKnowledgeSection` segment). Each entry shows the repo's registered
+  // relative path (path-registration convention); `resolveRelativePath` lets
+  // callers override the resolution if they need something else.
   const active = manifest.repositories.filter(
     (repository) => repository.kind === "code" && repository.status === "active",
   );
   const lines = active.length === 0
     ? ["- No active repositories are configured."]
     : active.map((repository) => {
-        const rel = resolveRelativePath?.(repository) ?? `repositories/${repository.alias}`;
+        const rel = resolveRelativePath?.(repository) ?? repository.path;
         return `- \`${repository.alias}\` (${repository.kind}, id: \`${repository.id}\`): \`${rel}\``;
       });
   return `<!-- workspace-managed:repositories:start -->
@@ -97,7 +96,7 @@ export function renderKnowledgeSection(
     ? ["- No knowledge bundles are configured. Initialize or clone one under the 知识库 view."]
     : active.map(
       (repository) => {
-        const rel = resolveRelativePath?.(repository) ?? `knowledge/${repository.alias}`;
+        const rel = resolveRelativePath?.(repository) ?? repository.path;
         return `- \`${repository.alias}\` (id: \`${repository.id}\`): OKF bundle — read its index at \`${rel}/index.md\` to traverse it (L0: \`read\`/\`ls\`/\`grep\`, no tool required).`;
       },
     );
@@ -170,11 +169,10 @@ export function renderWorkspaceAgents(
 
 /** `.gitignore` written for git-using workspaces (a git repo is initialized when
  *  the `repositories` or `work-items` capability is on). Ignores rebuildable
- *  workspace state and the independently-managed nested repositories. */
+ *  workspace state; nested repositories are appended per-repo by
+ *  `addWorkspaceRepository` (path registration — no fixed directory to ignore). */
 export const SOFTWARE_DEVELOPMENT_GITIGNORE = `# Pi Workspace rebuildable state
 /.pi/cache/
 /.pi/*.sqlite
-
-# Nested repositories are managed independently
-/repositories/
+/.pi/*.log
 `;

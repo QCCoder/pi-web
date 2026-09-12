@@ -4,15 +4,16 @@
 import { existsSync, readFileSync, readdirSync, type Dirent } from "node:fs";
 import { basename, join } from "node:path";
 import { parse } from "yaml";
+import { haltMarkerPath, loopsDirPath } from "./paths.ts";
 
 export type LoopLevel = "L1" | "L2" | "L3";
 
 export interface LoopDeclaration {
   workspacePath: string;
   loopName: string;
-  /** `<workspace>/loops/<loopName>` — LOOP.md/STATE.md 所在目录。 */
+  /** `<workspace>/.pi/loops/<loopName>` — LOOP.md/STATE.md 所在目录。 */
   dir: string;
-  /** SKILL.md 合同的 skill 名（`.agents/skills/<pattern>/`）；缺省取 loopName。 */
+  /** SKILL.md 合同的 skill 名（`.pi/skills/<pattern>/`）；缺省取 loopName。 */
   pattern: string;
   cron: string;
   timezone: string;
@@ -65,7 +66,7 @@ export function discoverKitLoops(
   workspacePath: string,
   opts: { includePaused?: boolean } = {},
 ): LoopDeclaration[] {
-  const loopsDir = join(workspacePath, "loops");
+  const loopsDir = loopsDirPath(workspacePath);
   // NOTE (task-3 deviation): brief annotated this as ReturnType<typeof readdirSync>,
   // which resolves the wrong overload (Dirent<NonSharedBuffer>[]) under @types/node 25.
   // The withFileTypes:true call returns Dirent<string>[] — annotate that directly.
@@ -97,5 +98,5 @@ export function discoverKitLoops(
 }
 
 export function isWorkspaceHalted(workspacePath: string): boolean {
-  return existsSync(join(workspacePath, "loop-pause-all"));
+  return existsSync(haltMarkerPath(workspacePath));
 }

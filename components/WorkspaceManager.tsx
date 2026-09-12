@@ -252,11 +252,12 @@ export function WorkspaceManager({
   const [workspaceName, setWorkspaceName] = useState("");
   const [selectedCapabilities, setSelectedCapabilities] = useState<WorkspaceCapability[]>(["repositories", "work-items"]);
   const [repositoryFormOpen, setRepositoryFormOpen] = useState(false);
-  const [repositoryMode, setRepositoryMode] = useState<"clone" | "init">("clone");
+  const [repositoryMode, setRepositoryMode] = useState<"clone" | "init" | "register">("clone");
   const [repositoryKind, setRepositoryKind] = useState<WorkspaceRepositoryKind>("code");
   const [repositoryAlias, setRepositoryAlias] = useState("");
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryRemote, setRepositoryRemote] = useState("");
+  const [repositoryPath, setRepositoryPath] = useState("");
   const [skillSelectionOpen, setSkillSelectionOpen] = useState(false);
   const [skillDraft, setSkillDraft] = useState<string[]>([]);
   const [createWorkItemOpen, setCreateWorkItemOpen] = useState(false);
@@ -564,6 +565,7 @@ export function WorkspaceManager({
             name: repositoryName || repositoryAlias,
             kind: repositoryKind,
             mode: repositoryMode,
+            ...(repositoryPath.trim() ? { path: repositoryPath.trim() } : {}),
             ...(repositoryRemote.trim() ? { remote: repositoryRemote.trim() } : {}),
           }),
         }),
@@ -572,6 +574,7 @@ export function WorkspaceManager({
       setRepositoryAlias("");
       setRepositoryName("");
       setRepositoryRemote("");
+      setRepositoryPath("");
       await Promise.all([loadRepositories(selectedWorkspaceId), loadWorkspaces()]);
     } catch (addError) {
       setError(addError instanceof Error ? addError.message : String(addError));
@@ -585,6 +588,7 @@ export function WorkspaceManager({
     repositoryKind,
     repositoryMode,
     repositoryName,
+    repositoryPath,
     repositoryRemote,
     selectedWorkspaceId,
   ]);
@@ -1965,10 +1969,11 @@ export function WorkspaceManager({
                               <span>方式</span>
                               <select
                                 value={repositoryMode}
-                                onChange={(event) => setRepositoryMode(event.target.value as "clone" | "init")}
+                                onChange={(event) => setRepositoryMode(event.target.value as "clone" | "init" | "register")}
                               >
                                 <option value="clone">Clone 远程仓库</option>
                                 <option value="init">新建空仓库</option>
+                                <option value="register">登记已有目录</option>
                               </select>
                             </label>
                             <label className="workspace-field">
@@ -1997,14 +2002,36 @@ export function WorkspaceManager({
                                 placeholder={repositoryAlias || "Web"}
                               />
                             </label>
-                            <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                              <span>{repositoryMode === "clone" ? "Git URL" : "Origin URL（可选）"}</span>
-                              <input
-                                value={repositoryRemote}
-                                onChange={(event) => setRepositoryRemote(event.target.value)}
-                                placeholder="https://github.com/org/repo.git"
-                              />
-                            </label>
+                            {repositoryMode === "register" && (
+                              <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
+                                <span>相对路径（相对工作区根，必填）</span>
+                                <input
+                                  value={repositoryPath}
+                                  onChange={(event) => setRepositoryPath(event.target.value)}
+                                  placeholder="cargoware-haichuang"
+                                />
+                              </label>
+                            )}
+                            {repositoryMode !== "register" && (
+                              <label className="workspace-field">
+                                <span>相对路径（可选，默认为别名）</span>
+                                <input
+                                  value={repositoryPath}
+                                  onChange={(event) => setRepositoryPath(event.target.value)}
+                                  placeholder={repositoryAlias || "web"}
+                                />
+                              </label>
+                            )}
+                            {repositoryMode !== "register" && (
+                              <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
+                                <span>{repositoryMode === "clone" ? "Git URL" : "Origin URL（可选）"}</span>
+                                <input
+                                  value={repositoryRemote}
+                                  onChange={(event) => setRepositoryRemote(event.target.value)}
+                                  placeholder="https://github.com/org/repo.git"
+                                />
+                              </label>
+                            )}
                           </div>
                           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
                             <button
@@ -2012,11 +2039,18 @@ export function WorkspaceManager({
                               disabled={
                                 saving
                                 || !repositoryAlias
+                                || (repositoryMode === "register" && !repositoryPath.trim())
                                 || (repositoryMode === "clone" && !repositoryRemote.trim())
                               }
                               onClick={() => void addRepository()}
                             >
-                              {saving ? "处理中…" : repositoryMode === "clone" ? "Clone 仓库" : "创建仓库"}
+                              {saving
+                                ? "处理中…"
+                                : repositoryMode === "clone"
+                                  ? "Clone 仓库"
+                                  : repositoryMode === "register"
+                                    ? "登记仓库"
+                                    : "创建仓库"}
                             </button>
                           </div>
                         </div>

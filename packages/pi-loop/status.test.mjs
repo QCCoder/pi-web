@@ -7,11 +7,11 @@ import { collectStatus } from "./status.ts";
 
 test("running 用 sessionId 感知 stale 公式：死 pid + sessionId → running；死 pid 无 sessionId → 不 running", () => {
   const root = mkdtempSync(join(tmpdir(), "status-"));
-  const c = join(root, "loops", "c"); mkdirSync(c, { recursive: true });
+  const c = join(root, ".pi", "loops", "c"); mkdirSync(c, { recursive: true });
   writeFileSync(join(c, "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nc");
   // web 手动轮锁形态：pid=web 进程（已死）+ 已绑定 sessionId（轮活在 daemon）
   writeFileSync(join(c, ".round.lock"), JSON.stringify({ pid: 999999, host: "h", kind: "daemon", sessionId: "s-1", startedAt: Date.now() }));
-  const d = join(root, "loops", "d"); mkdirSync(d, { recursive: true });
+  const d = join(root, ".pi", "loops", "d"); mkdirSync(d, { recursive: true });
   writeFileSync(join(d, "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nd");
   writeFileSync(join(d, ".round.lock"), JSON.stringify({ pid: 999999, host: "h", kind: "beat", startedAt: Date.now() }));
   const entries = collectStatus(root);
@@ -21,10 +21,10 @@ test("running 用 sessionId 感知 stale 公式：死 pid + sessionId → runnin
 
 test("paused 可见并标记；running 由活锁判定；nextDue 由 .lastrun 推导", () => {
   const root = mkdtempSync(join(tmpdir(), "status-"));
-  const a = join(root, "loops", "a"); mkdirSync(a, { recursive: true });
+  const a = join(root, ".pi", "loops", "a"); mkdirSync(a, { recursive: true });
   writeFileSync(join(a, "LOOP.md"), "---\ncron: \"*/30 * * * *\"\ntimezone: UTC\n---\nb");
   writeFileSync(join(a, ".lastrun"), "2024-01-15T10:00:00.000Z");
-  const b = join(root, "loops", "b"); mkdirSync(b, { recursive: true });
+  const b = join(root, ".pi", "loops", "b"); mkdirSync(b, { recursive: true });
   writeFileSync(join(b, "LOOP.md"), "---\ncron: \"*/5 * * * *\"\n---\nb");
   writeFileSync(join(b, "PAUSED"), "");
   writeFileSync(join(b, ".round.lock"), JSON.stringify({ pid: process.pid, host: "h", kind: "daemon", startedAt: Date.now() }));

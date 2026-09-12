@@ -23,8 +23,8 @@ export function buildRoundPrompt(
   rules.push(`纪律：L1 只读 + 只写 STATE.md，不动代码不做 git 操作；L2 允许 worktree + draft 分支，禁止合并主分支；LOOP.md 的 level/cron 一律禁改。`);
   rules.push(
     opts.manual
-      ? `本轮为手动触发（人在场显式指令）：即使 ${declaration.dir}/PAUSED 或根目录 loop-pause-all 存在，也不据此收尾——照常执行完整流程（chandao-sync → 选品/收养 → 执行 → STATE 收尾）；暂停旗继续压制后续自动心跳，本轮不删不改旗；LOOP.md 中「发现 PAUSED 立即收尾」条款与本条冲突时，以本条（宿主注入）为准。`
-      : `若发现 ${declaration.dir}/PAUSED 或根目录 loop-pause-all 存在，立即收尾退出本轮。`,
+      ? `本轮为手动触发（人在场显式指令）：即使 ${declaration.dir}/PAUSED 或 .pi/loop/pause-all 存在，也不据此收尾——照常执行完整流程（chandao-sync → 选品/收养 → 执行 → STATE 收尾）；暂停旗继续压制后续自动心跳，本轮不删不改旗；LOOP.md 中「发现 PAUSED 立即收尾」条款与本条冲突时，以本条（宿主注入）为准。`
+      : `若发现 ${declaration.dir}/PAUSED 或 .pi/loop/pause-all 存在，立即收尾退出本轮。`,
   );
   rules.push(`\`.lastrun\` 与 \`.round.lock\` 是宿主文件，一律禁改禁删（与 PAUSED 同级）。`);
   rules.push(`结束前：更新 ${declaration.dir}/STATE.md（Last run / outcome / 复盘节必填）。`);

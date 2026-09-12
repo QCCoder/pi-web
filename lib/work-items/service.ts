@@ -114,6 +114,11 @@ function workItemDirectoryName(type: WorkItemType): "requirements" | "bugs" {
   return type === "requirement" ? "requirements" : "bugs";
 }
 
+/** 2026-09 布局约定：工作项存储收在工作区根的 `.pi/work-items/` 下（paths.ts 同源约定）。 */
+function workItemRoot(workspacePath: string, directory: "requirements" | "bugs"): string {
+  return join(workspacePath, ".pi", "work-items", directory);
+}
+
 function workItemTypeFromKey(key: string): WorkItemType {
   if (!WORK_ITEM_KEY_RE.test(key)) throw new WorkItemValidationError(`Invalid Work Item key: ${key}`);
   return key.startsWith("REQ-") ? "requirement" : "bug";
@@ -136,7 +141,7 @@ async function findWorkItemDirectory(
   type: WorkItemType,
   key: string,
 ): Promise<string> {
-  const root = join(workspacePath, workItemDirectoryName(type));
+  const root = workItemRoot(workspacePath, workItemDirectoryName(type));
   const exactPath = join(root, key);
   try {
     const entries = await readdir(root, { withFileTypes: true });
@@ -361,7 +366,7 @@ export async function listWorkItems(
   const archivedItems: WorkItemRecord[] = [];
   const invalid: InvalidWorkItem[] = [];
   for (const [directory, prefix] of [["requirements", "REQ-"], ["bugs", "BUG-"]] as const) {
-    const root = join(workspacePath, directory);
+    const root = workItemRoot(workspacePath, directory);
     let entries;
     try {
       entries = await readdir(root, { withFileTypes: true });
@@ -443,8 +448,7 @@ export async function createWorkItem(
     updatedAt: now,
   };
   const finalPath = join(
-    workspacePath,
-    workItemDirectoryName(type),
+    workItemRoot(workspacePath, workItemDirectoryName(type)),
     `${key}-${workItemTitleSlug(title)}`,
   );
   const temporaryPath = `${finalPath}.creating-${createUlid()}`;
