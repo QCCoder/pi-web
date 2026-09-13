@@ -1962,6 +1962,9 @@ export function WorkspaceManager({
                           {repositoryFormOpen ? "收起" : "添加仓库"}
                         </button>
                       </div>
+                      <p className="repository-scan-hint" style={{ margin: "4px 0 8px", fontSize: 12, opacity: 0.65 }}>
+                        根目录下的 git 仓与 OKF 知识库自动登记（打开本页即扫描）：往工作区放目录即可，无需手动添加；「停用」仅是隐藏，目录原样保留。
+                      </p>
                       {repositoryFormOpen && (
                         <div className="workspace-form-card" style={{ marginBottom: 9 }}>
                           <div className="workspace-form-grid">

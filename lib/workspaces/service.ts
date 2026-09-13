@@ -16,6 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { createUlid } from "./id.ts";
+import { scanWorkspaceRepositories } from "./scan.ts";
 import {
   DEFAULT_GIT_SETTINGS,
   normalizeInitCapabilities,
@@ -563,12 +564,88 @@ async function repositoryRemote(repositoryPath: string): Promise<string | undefi
   }
 }
 
+/** 把目录名规整成合法 alias（WORKSPACE_SLUG_RE）；全非 [a-z0-9]（如纯中文）时回落 `repo-<ulid8>`。 */
+function repositoryAliasFromDirName(name: string): string {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (slug && WORKSPACE_SLUG_RE.test(slug)) return slug;
+  return `repo-${createUlid().slice(-8).toLowerCase()}`;
+}
+
+/** 「扫描为事实，manifest 只存记忆」：把磁盘扫描结果对账进 manifest.repositories。
+ *  - 磁盘新目录 → 新增条目（alias = 目录名规整，与既有 alias 冲突时加数字后缀；
+ *    manifest 已钉住的条目 alias/kind 不被扫描改写，path 是对账键）；
+ *  - active 条目在磁盘上消失 → status removed（自动停用，保留 id/alias 供恢复）；
+ *  - removed 条目重现 → 恢复 active。
+ *  变更时同步刷新 AGENTS.md managed 段并（若是 git 仓）提交审计。调用方需持有
+ *  工作区写锁。返回是否发生了变更。 */
+async function syncRepositoriesFromScan(
+  workspacePath: string,
+  manifest: WorkspaceManifest,
+): Promise<boolean> {
+  const scanned = scanWorkspaceRepositories(workspacePath);
+  const byPath = new Map(manifest.repositories.map((repository) => [repository.path, repository]));
+  const now = new Date().toISOString();
+  let changed = false;
+
+  for (const found of scanned) {
+    const existing = byPath.get(found.path);
+    if (existing) {
+      if (existing.status !== "active") {
+        existing.status = "active";
+        delete existing.removedAt;
+        changed = true;
+      }
+      continue;
+    }
+    const takenAliases = new Set(manifest.repositories.map((repository) => repository.alias));
+    const baseAlias = repositoryAliasFromDirName(found.alias);
+    let alias = baseAlias;
+    for (let n = 2; takenAliases.has(alias); n += 1) alias = `${baseAlias}-${n}`;
+    manifest.repositories.push({
+      id: createUlid(),
+      alias,
+      name: found.alias,
+      kind: found.kind,
+      path: found.path,
+      status: "active",
+    });
+    // 嵌套仓不进根仓 git（与 addWorkspaceRepository 同款）；否则 add -A 会
+    // 把无提交的嵌套仓当 gitlink 处理甚至直接报错。
+    await ignoreRepositoryInWorkspaceGit(workspacePath, found.path);
+    changed = true;
+  }
+
+  const scannedPaths = new Set(scanned.map((found) => found.path));
+  for (const repository of manifest.repositories) {
+    if (repository.status === "active" && !scannedPaths.has(repository.path)) {
+      repository.status = "removed";
+      repository.removedAt = now;
+      changed = true;
+    }
+  }
+
+  if (!changed) return false;
+  manifest.updatedAt = now;
+  await writeWorkspaceManifest(workspacePath, manifest);
+  await updateManagedRepositoryInstructions(workspacePath, manifest);
+  // 自动同步的审计提交尽力而为——失败（如嵌套仓异常）不得打断列表
+  await commitWorkspaceChanges(workspacePath, "workspace: sync repositories (auto-scan)")
+    .catch((error: unknown) => console.error("[workspace] auto-scan commit failed:", error));
+  return true;
+}
+
 export async function listWorkspaceRepositories(
   idOrSlug: string,
   root?: string,
 ): Promise<WorkspaceRepositoryState[]> {
   const workspace = await findWorkspace(idOrSlug, root);
-  return Promise.all(workspace.manifest.repositories.map(async (repository) => {
+  // 先对账（扫描为事实）：列表/设置页打开即自动登记新目录、停用消失目录。
+  await withWorkspaceWriteLock(workspace.path, async () => {
+    const manifest = await readWorkspaceManifest(workspace.path);
+    await syncRepositoriesFromScan(workspace.path, manifest);
+  });
+  const latest = await readWorkspaceManifest(workspace.path);
+  return Promise.all(latest.repositories.map(async (repository) => {
     const { relativePath, absolutePath } = workspaceRepositoryPath(workspace.path, repository);
     try {
       const [branch, commit, status, remote] = await Promise.all([

@@ -91,12 +91,15 @@ created_at / updated_at
 ```
 
 - **Workspace index v2（一刀切迁移）**: `~/.pi/workspace.yaml` is schemaVersion 2. On first read a v1 index triggers `migrateIndexV2`: every registered manifest is rewritten with explicit `capabilities` (materialized `["sessions","explorer"]` when absent; retired channel values stripped), and `importWorkspace` runs the same `migrateManifestFile` normalization for unregistered directories. After the cut, `WorkspaceManifest.capabilities` is REQUIRED — `parseWorkspaceManifest` throws "capabilities is required" without it, `parseCapabilities` rejects retired channel values (`feishu-transport`/`feishu-channel`/`wecom-channel`) instead of silently stripping, and the `effectiveCapabilities` fallback helper is deleted (read `manifest.capabilities` directly).
-- **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", path, status }`. **path（2026-09 路径登记制）**
-  是相对工作区根的 POSIX 路径（校验：禁绝对路径/`..`/`.pi` 内），仓库就是根下你自己的目录，无固定父目录；
-  clone/init 默认落根级 `<alias>/`，`mode: "register"` 只登记已有目录不动文件（`addWorkspaceRepository` 落盘时
-  顺带往根 .gitignore 追加 `/<path>/`）。`kind` 不再驱动路径，只驱动 UI 标签与（knowledge 时）**OKF seed**（见
-  Knowledge）。Note: `knowledge` is *also* a top-level `WorkspaceCapability` (the UI "知识库" toggle); the
-  repository `kind` and the capability are separate concerns — the capability gates the module/UI. (`docs/workspace-redesign.md` §5.1)
+- **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", path, status }`. **path** 是相对工作区根的
+  POSIX 路径（校验：禁绝对路径/`..`/`.pi` 内）。**自动登记（2026-09「扫描为事实，manifest 只存记忆」）**：
+  `listWorkspaceRepositories` 打开即跑 `syncRepositoriesFromScan`——`lib/workspaces/scan.ts` 从根扫 git 仓
+  （`.git` 为目录；worktree 的 `.git` 文件不算）与 OKF 知识库（`index.md`+`log.md`，优先于 git 判定；点目录/
+  node_modules/.worktrees 剪枝、发现即停、深度 4），新目录自动登记（alias=目录名规整、冲突加后缀）、消失自动
+  停用、重现自动恢复；manifest 已有条目的 alias/kind 是钉住覆盖，扫描不改写。新仓顺带写入根 .gitignore。
+  clone/init 仍是显式操作；`kind` 只驱动 UI 标签与（knowledge 时）**OKF seed**。Note: `knowledge` is *also* a
+  top-level `WorkspaceCapability` (the UI "知识库" toggle); the repository `kind` and the capability are separate
+  concerns — the capability gates the module/UI. (`docs/workspace-redesign.md` §5.1)
 - **Template selection removed (redesign decision 5/7)**: creating a Workspace is **capability-driven** —
   `CreateWorkspaceInput = { name, slug, capabilities[] }`, no `templateId`. `createWorkspace()` validates the selection
   via `parseCapabilities`, force-includes the mandatory `sessions`+`explorer` (`normalizeInitCapabilities`), writes

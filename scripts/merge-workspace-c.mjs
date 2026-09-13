@@ -45,8 +45,6 @@ const move = (src, dst, label) => {
   renameSync(src, dst);
 };
 
-const copyDir = undefined; // 未使用（保留占位以免误导）
-
 // ---- 会话路径映射（长前缀优先）------------------------------------------
 const PATH_MAP = [
   [join(WS_C, "repositories", "cargoware-h5"), join(CXIN, "cargoware-h5-haichuang")],
@@ -56,14 +54,6 @@ const PATH_MAP = [
   [join(WS_C, "repositories", "cargo-report-server-haichuang"), join(CXIN, "cargo-report-server-haichuang")],
   [WS_C, CXIN],
 ];
-
-function mapPath(path) {
-  for (const [from, to] of PATH_MAP) {
-    if (path === from) return to;
-    if (path.startsWith(from + "/")) return to + path.slice(from.length);
-  }
-  return path;
-}
 
 /** encoded 目录名："--" + 各路径段以 "-" 相连 + "--"（实测 .index 目录名规律）。 */
 const encodeDir = (path) => "--" + path.split("/").filter(Boolean).join("-") + "--";
