@@ -92,7 +92,7 @@ work_items: { next_requirement_number, next_bug_number }
 created_at / updated_at
 ```
 
-- **Workspace index v2（一刀切迁移）**: `~/.pi/workspace.yaml` is schemaVersion 2. 条目可携带可选 `sort_order`（手动排序，2026-09：设置列表拖拽 → `PATCH /api/workspaces { order }` 重编 1..N，一次写；`registerWorkspacePath` 重建条目时透传保留）。`discoverWorkspaces` 终排序 = 可用优先 → 手动序升序在前 → 未设置条目按 lastOpenedAt 降序（MRU 兜底）——不排序的用户看到的顺序与引入前完全一致。 On first read a v1 index triggers `migrateIndexV2`: every registered manifest is rewritten with explicit `capabilities` (materialized `["sessions","explorer"]` when absent; retired channel values stripped), and `importWorkspace` runs the same `migrateManifestFile` normalization for unregistered directories. After the cut, `WorkspaceManifest.capabilities` is REQUIRED — `parseWorkspaceManifest` throws "capabilities is required" without it, `parseCapabilities` rejects retired channel values (`feishu-transport`/`feishu-channel`/`wecom-channel`) instead of silently stripping, and the `effectiveCapabilities` fallback helper is deleted (read `manifest.capabilities` directly).
+- **Workspace index v2**: `~/.pi/workspace.yaml` is schemaVersion 2 —— strict，无迁移路径（2026-09 一次性迁移已收敛删除：读到非 v2 索引直接报错；索引文件缺失时才走 `rebuildWorkspaceIndexFromScan` 扫描重建）。条目可携带可选 `sort_order`（手动排序，2026-09：设置列表拖拽 → `PATCH /api/workspaces { order }` 重编 1..N，一次写；`registerWorkspacePath` 重建条目时透传保留）。`discoverWorkspaces` 终排序 = 可用优先 → 手动序升序在前 → 未设置条目按 lastOpenedAt 降序（MRU 兜底）。 `WorkspaceManifest.capabilities` is REQUIRED —— `parseWorkspaceManifest` throws "capabilities is required" without it; read `manifest.capabilities` directly.
 - **WorkspaceRepository**: `{ id, alias, name, kind: "code"|"knowledge", path, status }`. **path** 是相对工作区根的
   POSIX 路径（校验：禁绝对路径/`..`/`.pi` 内）。**自动登记（2026-09「扫描为事实，manifest 只存记忆」）**：
   `listWorkspaceRepositories` 打开即跑 `syncRepositoriesFromScan`——`lib/workspaces/scan.ts` 从根扫 git 仓
@@ -121,7 +121,7 @@ repository `kind` to a first-class capability — redesign decision 4, type laye
 sessions, explorer, work-items, repositories, knowledge, workflows
 ```
 
-(PATCH capabilities are normalized by `normalizeUpdateCapabilities`: the mandatory `sessions`+`explorer` core can never be dropped. `parseCapabilities` REJECTS retired capability values (`feishu-transport`, `feishu-channel`, `wecom-channel`, the retired `overview` — the overview dashboard is now the unconditional landing view — the retired `loop`, replaced by the pi-loop kit: loops are declared by `.pi/loops/<name>/LOOP.md` files, no capability gate; `docs/pi-loop-kit-design.md` D5 — and the retired `requirement-sources`, 已随 importer 退役照 overview/loop 先例：外部源同步下放工作区脚本，见「外部源适配」节) — `WorkspaceValidationError` → HTTP 400. For the channel values the v2 index migration has already rewritten them out of existing manifests. `overview`, `loop` and `requirement-sources` share the one **read-path exception** (`LEGACY_READ_CAPABILITIES`): `parseWorkspaceManifest` strips it from `manifest.capabilities` BEFORE `parseCapabilities` validation, so legacy manifests that still list it keep parsing and normalize on every read — the value disappears from the file at the next manifest write.)
+(PATCH capabilities are normalized by `normalizeUpdateCapabilities`: the mandatory `sessions`+`explorer` core can never be dropped. `parseCapabilities` rejects anything outside `ALL_WORKSPACE_CAPABILITIES` with "Unknown capability" —— retired values (`feishu-transport`/`feishu-channel`/`wecom-channel`/`overview`/`loop`/`requirement-sources`) are simply unknown now, no read-path strip, no migration: a manifest still carrying one is config-invalid.)
 
 - `manifest.capabilities` is required and always present (see "Workspace index v2" above). Read it directly; there is no derivation helper.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
@@ -224,7 +224,7 @@ handle precedes the container, so no sibling selector can reach it).
 
 File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage under
 `<workspace>/.pi/work-items/<requirements|bugs>/<KEY>-<slug>/`（2026-09 布局，`lib/work-items/service.ts` 的
-`workItemRoot`；旧根级 requirements//bugs/ 目录已由 migrate-workspace-layout.mjs 收进 .pi/）:
+`workItemRoot`；旧根级 requirements//bugs/ 目录已一次性收进 .pi/，迁移脚本已删）:
 
 - `item.yaml` — structured metadata (status/phase/priority/repositories/conversations/… + optional top-level `loop?: string` kit-loop binding by loop NAME, S1 soft validation — existence NOT checked; protocol semantics in `kit/README.md` 工作项绑定一节), `schemaVersion 1`.
 - `README.md` — human body. **Original Description is preserved verbatim**; later analysis is appended, never overwriting it.
@@ -713,7 +713,7 @@ Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[
 `ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered but currently inert — no factory, no template. The former `overview` capability is RETIRED — the overview dashboard renders unconditionally; manifests still listing `overview` get it stripped on read, see the capability system section.)
 
 ### Capabilities are required — no fallback path
-`WorkspaceManifest.capabilities` is non-optional. `parseWorkspaceManifest` throws on a manifest without it, and the deleted `effectiveCapabilities` helper is NOT to be reintroduced — read `manifest.capabilities` directly. Legacy manifests were rewritten once by the v2 index migration (see Work Items → Key behavior above / "Workspace index v2" in the manifest section).
+`WorkspaceManifest.capabilities` is non-optional. `parseWorkspaceManifest` throws on a manifest without it, and the deleted `effectiveCapabilities` helper is NOT to be reintroduced — read `manifest.capabilities` directly. (The one-shot v2 migration and its read-path strip are gone; a manifest still carrying retired values is config-invalid.)
 
 ### AGENTS.md managed-segment replacement is a no-op without markers
 `updateManagedRepositoryInstructions()` only rewrites content **between** the managed markers, and now maintains **two**

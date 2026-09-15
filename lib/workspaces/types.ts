@@ -124,12 +124,6 @@ export interface WorkspaceIndex {
   workspaces: WorkspaceIndexEntry[];
 }
 
-/** Legacy on-disk index shape; migrated in place to v2 on first read. */
-export interface WorkspaceIndexV1 {
-  schemaVersion: 1;
-  workspaces: WorkspaceIndexEntry[];
-}
-
 /** Workspace-selection predicate for every picker surface (home selectors,
  *  tab-bar/workspace-switcher dropdowns, home grouping): directory must be
  *  healthy AND not user-disabled. Pure so client components share it. */
