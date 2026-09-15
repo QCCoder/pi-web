@@ -40,6 +40,10 @@ interface Props {
   runningSessionIds: Set<string>;
   completedSessionIds: Set<string>;
   allSessions: SessionInfo[];
+  /** 方案二骨架门控：未加载时渲染骨架而非「尚无工作区/空组」假态（SSR 预取
+   *  失败或首屏未种子的兑底路径；正常路径种子直接命中，门控不会出现）。 */
+  workspacesLoaded?: boolean;
+  sessionsLoaded?: boolean;
   refreshKey: number;
   explorerRefreshKey: number;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
@@ -325,6 +329,8 @@ export function WorkspaceSidebar({
   runningSessionIds,
   completedSessionIds,
   allSessions,
+  workspacesLoaded = true,
+  sessionsLoaded = true,
   refreshKey,
   explorerRefreshKey,
   onSelectWorkspace,
@@ -495,6 +501,28 @@ export function WorkspaceSidebar({
   // a/b/c，docs/global-session-sidebar-design.md）。移动端不消费本 body（工作台
   // 会话段保持工作区作用域，首页用自己的 HomeLanding）。
   const renderGlobalSessionsBody = (): ReactNode => {
+    // 骨架门控（方案二）：任一列表未加载时渲染骨架行，绝不渲染「尚无工作区」
+    // 或空组（那是加载完成后的真态/中间假态——诊断出的两次跳变之一）。
+    if (!workspacesLoaded || !sessionsLoaded) {
+      return (
+        <div style={{ padding: "14px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
+          {[0, 1, 2].map((i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              <span style={{ width: 14, height: 14, borderRadius: 4, background: "var(--bg-hover)", flexShrink: 0 }} />
+              <span
+                style={{
+                  height: 10,
+                  flex: 1,
+                  borderRadius: 5,
+                  background: "var(--bg-hover)",
+                  opacity: 1 - i * 0.25,
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      );
+    }
     const homeGroups = groupSessionsByWorkspace(workspaces, allSessions);
     const unavailableWorkspaces = workspaces.filter((workspace) => !workspace.available);
     return (

@@ -1,12 +1,8 @@
 import { NextResponse } from "next/server";
-import { invalidateSessionListCache, listAllSessions } from "@/lib/session-reader";
+import { invalidateSessionListCache } from "@/lib/session-reader";
 import { listArchivedSessions } from "@/lib/session-archive";
-import {
-  isSubagentChildSession,
-  loadLegacySubagentChildIds,
-} from "@/lib/subagent-child";
+import { buildSessionsPayload } from "@/lib/session-payload";
 import { daemonProxy } from "@/lib/agent-proxy";
-import type { SessionInfo } from "@/lib/types";
 
 export async function GET(req: Request) {
   try {
@@ -21,66 +17,12 @@ export async function GET(req: Request) {
     if (url.searchParams.has("refresh")) {
       invalidateSessionListCache();
     }
-    const sessions = await listAllSessions();
-
-    // Merge live daemon sessions that are not yet on disk. A brand-new session
-    // exists in the daemon's registry before pi flushes its .jsonl, so without
-    // this it would be missing from the (cached) disk scan until the cache
-    // expires — making the sidebar list lag behind a freshly created session.
-    // (Registry access is daemon-side now — C2.)
-    //
-    // Best-effort ONLY: the daemon merge is a freshness enhancement on top of
-    // the persistent session index (the list's source of truth). When the
-    // daemon is unreachable (or its sidecar cannot start), serve the disk list
-    // with an empty running set instead of failing the whole route — a 500
-    // here rendered the sidebar as an EMPTY session list, which read as data
-    // loss to the user. `daemonProxy()` still attempts a sidecar revive, so
-    // the next successful spawn re-enables the merge automatically.
-    let merged = sessions;
-    let runningIds: string[] = [];
-    let daemonDown = false;
-    try {
-      const client = await daemonProxy();
-      const [liveMetas, running] = await Promise.all([
-        client.liveSessions(),
-        client.runningSessionIds(),
-      ]);
-      const presentIds = new Set(sessions.map((session) => session.id));
-      const liveSynthesized: SessionInfo[] = [];
-      for (const live of liveMetas.sessions) {
-        if (!live.id || presentIds.has(live.id)) continue;
-        presentIds.add(live.id);
-        liveSynthesized.push({
-          path: live.sessionFile || "",
-          id: live.id,
-          cwd: live.cwd,
-          created: new Date().toISOString(),
-          modified: new Date().toISOString(),
-          messageCount: 0,
-          firstMessage: "(no messages)",
-          projectRoot: live.cwd,
-        });
-      }
-      merged = liveSynthesized.length > 0 ? [...liveSynthesized, ...sessions] : sessions;
-      runningIds = running.ids;
-    } catch {
-      daemonDown = true;
-    }
-
-    // Tag subagent worker sessions so the sidebar hides them. They stay in the
-    // response so the parent's "open child" action can still resolve by id.
-    // Community @henryqw/pi-subagent children persist with parent-generated
-    // `pi-subagent-<uuid>` ids and `pi-subagent <role>` names — the prefix IS
-    // the registry for new children; ids recorded by the retired built-in in
-    // subagent-children.txt (read-only, mtime-cached) still tag as children.
-    const legacyChildIds = loadLegacySubagentChildIds();
-    const sessionsWithFlags = merged.map((session) =>
-      isSubagentChildSession(session, legacyChildIds)
-        ? { ...session, subagentChild: true }
-        : session
-    );
-
-    return NextResponse.json({ sessions: sessionsWithFlags, runningSessionIds: runningIds, daemonDown });
+    // Payload assembly (disk list + best-effort daemon live merge + subagent
+    // child tagging) lives in lib/session-payload.ts — shared with the SSR
+    // prefetch in app/page.tsx. This route keeps daemonProxy(): it MAY wait
+    // for a sidecar spawn (the sidebar list tolerates it); SSR does not.
+    const payload = await buildSessionsPayload(() => daemonProxy());
+    return NextResponse.json(payload);
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },

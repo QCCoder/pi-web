@@ -75,7 +75,15 @@ const SESSION_TABS_STORAGE_KEY = "pi-session-tabs";
  * signals (`chatFocusKey`, `panelFocus`) that the mobile shell subscribes to
  * and the desktop shell ignores.
  */
-export function useAppShellState() {
+export function useAppShellState(seed?: {
+  initialWorkspaces?: WorkspaceSummary[] | null;
+  initialSessions?: SessionInfo[] | null;
+  initialRunningIds?: string[] | null;
+}) {
+  // SSR 预取种子（方案二，app/page.tsx）：首帧即真数据+真排序；null = 预取
+  // 失败，退回客户端拉取 + 骨架态（workspacesLoaded/sessionsLoaded 门控）。
+  const seedWorkspaces = seed?.initialWorkspaces ?? null;
+  const seedSessions = seed?.initialSessions ?? null;
   // ---- Session tabs ----------------------------------------------------------
   // Each open tab (session / new-session placeholder / workspace home) is one
   // entry in `tabs`; the active one is `activeTabId`. Per-tab view state is
@@ -223,7 +231,11 @@ export function useAppShellState() {
     setSidebarOpen(true);
   }, [sidebarView, configView, handleSidebarSwitchView, handleOpenConfig]);
   const [refreshKey, setRefreshKey] = useState(0);
-  const sessionActivity = useSessionActivity(selectedSession?.id ?? null, refreshKey);
+  const sessionActivity = useSessionActivity(
+    selectedSession?.id ?? null,
+    refreshKey,
+    seedSessions != null ? { sessions: seedSessions, runningIds: seed?.initialRunningIds ?? [] } : null,
+  );
   // Running-id 集来自 session daemon 的 SSE（/api/agent/running/events 代理它的
   // /v1/sessions/running/events）。daemon 的注册表按真 session id 存交互会话、
   // subagent child 和 kit 轮会话 —— 单一集合就是完整答案，不再需要
@@ -266,8 +278,8 @@ export function useAppShellState() {
   const [importPickerOpen, setImportPickerOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [workspacesLoaded, setWorkspacesLoaded] = useState(false);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>(() => seedWorkspaces ?? []);
+  const [workspacesLoaded, setWorkspacesLoaded] = useState(() => seedWorkspaces != null);
   const [createWorkItemRequest, setCreateWorkItemRequest] = useState<{
     type: "requirement" | "bug";
     id: number;

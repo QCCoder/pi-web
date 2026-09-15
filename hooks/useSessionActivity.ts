@@ -26,9 +26,21 @@ function saveIds(key: string, ids: Set<string>) {
   }
 }
 
-export function useSessionActivity(selectedSessionId: string | null, refreshKey = 0) {
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
+/** SSR 预取种子（方案二）：page.tsx 服务端预取的会话列表 + 运行中集合。
+ *  种子让首帧即真数据（无「空列表→填充」跳变）；null = 无种子，退回客户端拉取。 */
+export interface SessionActivitySeed {
+  sessions: SessionInfo[];
+  runningIds: string[];
+}
+
+export function useSessionActivity(
+  selectedSessionId: string | null,
+  refreshKey = 0,
+  seed?: SessionActivitySeed | null,
+) {
+  const [sessions, setSessions] = useState<SessionInfo[]>(() => seed?.sessions ?? []);
+  const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set(seed?.runningIds ?? []));
+  const [loaded, setLoaded] = useState(() => seed != null);
   const [completedIds, setCompletedIds] = useState<Set<string>>(() => loadIds(COMPLETED_KEY));
   const previousRunningRef = useRef<Set<string>>(loadIds(LAST_RUNNING_KEY));
   const receivedSnapshotRef = useRef(false);
@@ -45,6 +57,8 @@ export function useSessionActivity(selectedSessionId: string | null, refreshKey 
       setCompletedIds((current) => new Set([...current].filter((id) => existing.has(id))));
     } catch {
       // Activity indicators are best-effort; the owning views render fetch errors.
+    } finally {
+      setLoaded(true);
     }
   }, []);
 
@@ -114,5 +128,5 @@ export function useSessionActivity(selectedSessionId: string | null, refreshKey 
     return () => window.removeEventListener("storage", sync);
   }, []);
 
-  return { sessions, runningIds, completedIds };
+  return { sessions, runningIds, completedIds, loaded };
 }

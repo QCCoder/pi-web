@@ -240,6 +240,8 @@ const renderMiddleColumn = () => {
       runningSessionIds={sessionActivity.runningIds}
       completedSessionIds={sessionActivity.completedIds}
       allSessions={sessionActivity.sessions}
+      workspacesLoaded={workspacesLoaded}
+      sessionsLoaded={sessionActivity.loaded}
       refreshKey={refreshKey}
       explorerRefreshKey={explorerRefreshKey}
       showFilesSection={false}

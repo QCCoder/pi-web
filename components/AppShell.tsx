@@ -2,6 +2,8 @@
 
 import { useViewportIsMobile } from "@/hooks/useIsMobile";
 import { useVisualViewportKeyboard } from "@/hooks/useVisualViewportKeyboard";
+import type { WorkspaceSummary } from "@/lib/workspaces/types";
+import type { SessionInfo } from "@/lib/types";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
@@ -28,8 +30,20 @@ import { MobileShell } from "./shell/MobileShell";
  * (home create-workspace wizard, directory import picker, project trust
  * dialog) render here for both.
  */
-export function AppShell({ initialIsMobile = false }: { initialIsMobile?: boolean }) {
-  const state = useAppShellState();
+export function AppShell({
+  initialIsMobile = false,
+  initialWorkspaces = null,
+  initialSessions = null,
+  initialRunningIds = null,
+}: {
+  initialIsMobile?: boolean;
+  /** SSR 预取种子（方案二，app/page.tsx）：null = 预取失败，退回客户端拉取 +
+   *  骨架态。种子让首帧即真数据+真排序，挂载后的刷新是静默同数据更新。 */
+  initialWorkspaces?: WorkspaceSummary[] | null;
+  initialSessions?: SessionInfo[] | null;
+  initialRunningIds?: string[] | null;
+}) {
+  const state = useAppShellState({ initialWorkspaces, initialSessions, initialRunningIds });
   const isMobile = useViewportIsMobile(initialIsMobile);
   // 移动端键盘高度同步（--app-height）：触屏设备上键盘弹起时把应用根压到
   // visualViewport 高度，输入框贴住键盘，消除键盘与输入框之间的大片空白。

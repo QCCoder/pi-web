@@ -97,6 +97,7 @@ export function MobileShell() {
     rightPanelOpen,
     activeCwd,
     workspaces,
+    workspacesLoaded,
     workspaceActivity,
     refreshKey,
     explorerRefreshKey,
@@ -336,6 +337,8 @@ export function MobileShell() {
             runningSessionIds={sessionActivity.runningIds}
             completedSessionIds={sessionActivity.completedIds}
             allSessions={sessionActivity.sessions}
+            workspacesLoaded={workspacesLoaded}
+            sessionsLoaded={sessionActivity.loaded}
             refreshKey={refreshKey}
             explorerRefreshKey={explorerRefreshKey}
             filesReveal={loopFilesReveal}
