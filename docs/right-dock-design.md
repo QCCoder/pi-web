@@ -1,6 +1,13 @@
 # 右栏扩展坞设计（桌面）
 
-> 状态：grill 共识已确认（2026-09-15，与用户逐题确认的十一项决策）；本文档是实施契约，**尚未实施**。
+> 状态：S1 已实施（2026-09-15；grill 共识十一项决策见 §0）；S2/S3 待实施。
+> 实施记录（S1）：lib/tab-types.ts（LOOPS_TAB_ID/MODULE_TAB_IDS/isModuleTabId + 测试）、
+> TabBar.tsx（leadingTab→leadingTabs 钦死模块组 + .dock-module-tab 类）、globals.css
+> （right-panel-container container-type:inline-size + @container≤420px 图标化）、
+> hooks/useKitLoops.ts（loops 状态 hook，总览与坞共用）、components/LoopsDockPanel.tsx（新，
+> loop 列表+状态/操作+内联 LoopsConfig 推导航）、WorkspaceOverview（onOpenLoopsTab 传入时
+> Loops 区块瘦身为摘要行，移动端保持全量）、DesktopShell（坞接线）、useAppShellState
+> （loopConfig 状态整体退役——移动端本就用自己的 overviewStack，无消费者）。
 > 动机：**d 并排协作**（模块面板常开在聊天旁，边聊边看工作项/loop 状态）+ **c 右栏利用率**（现状右栏只有文件，
 > 左=会话/右=工作区资源的概念对称未兑现）+ **b hub 层级深**（进个工作项要 家tab→总览→hub 视图两层跳；
 > 工作项详情/Loop 配置还会**顶替中心聊天区**）。

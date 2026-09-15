@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
 import { type Tab, FILES_TAB_ID } from "@/lib/tab-types";
@@ -10,17 +10,27 @@ import { type Tab, FILES_TAB_ID } from "@/lib/tab-types";
 export type { Tab };
 export { FILES_TAB_ID };
 
+/** A pinned, non-closable module tab of the right dock (文件/Loops/… — right-dock
+ *  design §2). Rendered before every file/session tab, in order. */
+export interface LeadingTabEntry {
+  id: string;
+  label: string;
+  icon?: ReactNode;
+}
+
 interface Props {
   tabs: Tab[];
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
-  /** Pinned, non-closable leading tab (the「文件」tree tab in the desktop
-   *  right panel). Rendered before every file/session tab. */
-  leadingTab?: { id: string; label: string };
+  /** Pinned, non-closable leading module tabs of the right dock
+   *  (文件/Loops/…). Rendered in order before every file/session tab.
+   *  Narrow panels collapse them to icon-only via the `.dock-module-tab`
+   *  container-query rules in globals.css (module tabs never scroll away). */
+  leadingTabs?: LeadingTabEntry[];
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTab }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTabs }: Props) {
   const { t } = useI18n();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
 
@@ -35,13 +45,15 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTab 
         height: 36,
       }}
     >
-      {leadingTab && (
+      {leadingTabs?.map((tab) => (
         <div
-          onClick={() => onSelectTab(leadingTab.id)}
+          key={tab.id}
+          className="dock-module-tab"
+          onClick={() => onSelectTab(tab.id)}
           onMouseDown={(e) => {
             if (e.button === 1) e.preventDefault();
           }}
-          title={leadingTab.label}
+          title={tab.label}
           style={{
             display: "flex",
             alignItems: "center",
@@ -50,27 +62,29 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTab 
             paddingLeft: 12,
             paddingRight: 12,
             borderRight: "1px solid var(--border)",
-            borderTop: leadingTab.id === activeTabId ? "2px solid var(--accent)" : "2px solid transparent",
-            background: leadingTab.id === activeTabId ? "var(--bg)" : "var(--bg-panel)",
+            borderTop: tab.id === activeTabId ? "2px solid var(--accent)" : "2px solid transparent",
+            background: tab.id === activeTabId ? "var(--bg)" : "var(--bg-panel)",
             cursor: "pointer",
             fontSize: 12,
-            color: leadingTab.id === activeTabId ? "var(--text)" : "var(--text-muted)",
+            color: tab.id === activeTabId ? "var(--text)" : "var(--text-muted)",
             whiteSpace: "nowrap",
             flexShrink: 0,
             userSelect: "none",
             transition: "background 0.1s, color 0.1s",
           }}
         >
-          <span style={{ flexShrink: 0, opacity: leadingTab.id === activeTabId ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            </svg>
+          <span style={{ flexShrink: 0, opacity: tab.id === activeTabId ? 1 : 0.7, display: "flex", alignItems: "center" }}>
+            {tab.icon ?? (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+            )}
           </span>
-          <span style={{ fontWeight: leadingTab.id === activeTabId ? 500 : 400 }}>
-            {leadingTab.label}
+          <span className="dock-module-tab-label" style={{ fontWeight: tab.id === activeTabId ? 500 : 400 }}>
+            {tab.label}
           </span>
         </div>
-      )}
+      ))}
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
         return (

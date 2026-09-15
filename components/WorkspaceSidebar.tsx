@@ -9,6 +9,7 @@ import { useGitStatus } from "@/hooks/useGitStatus";
 import { ChangesPanel } from "./ChangesPanel";
 import type { SessionInfo } from "@/lib/types";
 import { HomeSessionGroups } from "./HomeSessionGroups";
+import { SessionRow } from "./SessionRow";
 import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
 import { computeMenuLayout, readViewportWindow, type MenuLayout } from "@/lib/dropdown-layout";
@@ -488,12 +489,64 @@ export function WorkspaceSidebar({
     window.addEventListener("pointercancel", finish);
   }, [activeWorkspace]);
 
-  // ---- Home panel (no active workspace) ---------------------------------------
-  // 快速切换面板：按工作区分组 + 各自全部会话（活跃度排序，HomeSessionGroups）。
-  // 组头点击 = 打开工作区；会话行点击 = 直达会话（handleOpenSessionFromHome）。
-  if (!activeWorkspace) {
+  // ---- Global sessions body（2026-09 全局左栏）--------------------------------
+  // 桌面中栏的会话面板 = 全局分组列表（HomeSessionGroups + 不可用工作区 + 导入
+  // 入口），工作台与首页两个分支同体——左栏不再随 activeWorkspace 换血（痛点
+  // a/b/c，docs/global-session-sidebar-design.md）。移动端不消费本 body（工作台
+  // 会话段保持工作区作用域，首页用自己的 HomeLanding）。
+  const renderGlobalSessionsBody = (): ReactNode => {
     const homeGroups = groupSessionsByWorkspace(workspaces, allSessions);
     const unavailableWorkspaces = workspaces.filter((workspace) => !workspace.available);
+    return (
+      <div style={{ padding: "10px 8px" }}>
+        <HomeSessionGroups
+          groups={homeGroups}
+          runningSessionIds={runningSessionIds}
+          completedSessionIds={completedSessionIds}
+          selectedSessionId={selectedSessionId}
+          onSelectWorkspace={onSelectWorkspace}
+          onSelectSession={onSelectSession}
+          onOpenSessionInNewTab={onOpenSessionInNewTab}
+          onSessionRemoved={onSessionRemoved}
+        />
+        {unavailableWorkspaces.map((workspace) => (
+          <div
+            key={workspace.id}
+            style={{
+              display: "grid",
+              gap: 2,
+              padding: "9px 10px",
+              marginBottom: 4,
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              background: "var(--bg)",
+              opacity: 0.6,
+            }}
+          >
+            <strong style={{ fontSize: "var(--pi-sidebar-fs)", color: "var(--text-muted)" }}>{workspace.name}</strong>
+            <span style={{ fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
+              目录或配置不可用
+            </span>
+          </div>
+        ))}
+        {workspaces.length === 0 && (
+          <div style={{ padding: 12, color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs)" }}>
+            尚未创建 Workspace。
+          </div>
+        )}
+        <button
+          onClick={onImportDirectory}
+          style={{ ...rowStyle(), padding: "9px 10px", marginTop: 10 }}
+        >
+          ＋ 导入目录…
+        </button>
+      </div>
+    );
+  };
+
+  // ---- Home panel (no active workspace) ---------------------------------------
+  // 首页中栏：头部 Pi Web + 新建工作区；body = 全局分组列表（与工作台同体）。
+  if (!activeWorkspace) {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
         <PanelHeader
@@ -505,45 +558,8 @@ export function WorkspaceSidebar({
             </PanelHeaderButton>
           }
         />
-        <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px" }}>
-          <HomeSessionGroups
-            groups={homeGroups}
-            runningSessionIds={runningSessionIds}
-            selectedSessionId={selectedSessionId}
-            onSelectWorkspace={onSelectWorkspace}
-            onSelectSession={onSelectSession}
-          />
-          {unavailableWorkspaces.map((workspace) => (
-            <div
-              key={workspace.id}
-              style={{
-                display: "grid",
-                gap: 2,
-                padding: "9px 10px",
-                marginBottom: 4,
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                background: "var(--bg)",
-                opacity: 0.6,
-              }}
-            >
-              <strong style={{ fontSize: "var(--pi-sidebar-fs)", color: "var(--text-muted)" }}>{workspace.name}</strong>
-              <span style={{ fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
-                目录或配置不可用
-              </span>
-            </div>
-          ))}
-          {workspaces.length === 0 && (
-            <div style={{ padding: 12, color: "var(--text-dim)", fontSize: "var(--pi-sidebar-fs)" }}>
-              尚未创建 Workspace。
-            </div>
-          )}
-          <button
-            onClick={onImportDirectory}
-            style={{ ...rowStyle(), padding: "9px 10px", marginTop: 10 }}
-          >
-            ＋ 导入目录…
-          </button>
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+          {renderGlobalSessionsBody()}
         </div>
       </div>
     );
@@ -556,12 +572,15 @@ export function WorkspaceSidebar({
   const renderActiveView = (): ReactNode => {
     switch (activeView) {
       case "workbench":
-        // 工作台（移动端 / showFilesSection=true）：会话（上）+ 文件（下）两个可
-        // 折叠分段。两段都展开时会话占分割高度（默认 40%，可拖中间的分割手柄
-        // 调整，双击重置）内部滚动（不随内容伸缩，保证两段高度稳定）；文件默认
-        // 收起——收起时只剩头部贴在面板底部（marginTop:auto 吸收剩余空间），
-        // 会话列表占满剩余高度。桌面 showFilesSection=false：文件段不渲染，
-        // 会话占满（文件树在右栏「文件」tab）。
+        // 桌面（showFilesSection=false，2026-09 全局左栏）：会话区 = 全局分组
+        // 列表（与首页同体）——不再有「会话」分段头（组头即结构），文件树在右栏
+        // 「文件」tab。移动端（true）：会话（上，工作区作用域）+ 文件（下）两个
+        // 可折叠分段照旧——分段都展开时会话占分割高度（默认 40%，可拖中间的
+        // 分割手柄调整，双击重置）；文件默认收起，收起时只剩头部贴底，会话列表
+        // 占满剩余高度。
+        if (!filesSectionVisible) {
+          return renderGlobalSessionsBody();
+        }
         return (
           <div ref={workbenchBodyRef} style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <WorkbenchSectionHeader
@@ -741,124 +760,3 @@ export function WorkspaceSidebar({
   );
 }
 
-const hoverActionBtn: React.CSSProperties = {
-  flexShrink: 0,
-  border: "1px solid var(--border)",
-  borderRadius: 6,
-  background: "var(--bg-hover)",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: 11,
-  padding: "2px 8px",
-};
-
-function SessionRow({
-  session,
-  isSelected,
-  activity,
-  onSelect,
-  onOpenInNewTab,
-  onChanged,
-  onRemoved,
-}: {
-  session: SessionInfo;
-  isSelected: boolean;
-  activity?: "running" | "completed";
-  onSelect: () => void;
-  /** C1 的显式并行手势：Cmd/Ctrl-点击与鼠标中键 → 新开（或聚焦）该会话的 tab。 */
-  onOpenInNewTab?: () => void;
-  onChanged: () => void;
-  onRemoved?: (id: string) => void;
-}) {
-  const [hovered, setHovered] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const label = session.name || session.firstMessage || "未命名会话";
-
-  const archive = useCallback(async () => {
-    setBusy(true);
-    try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
-      onRemoved?.(session.id);
-      onChanged();
-    } finally { setBusy(false); }
-  }, [session.id, onChanged, onRemoved]);
-
-  return (
-    <div
-      onClick={(event) => {
-        if (onOpenInNewTab && (event.metaKey || event.ctrlKey)) {
-          event.preventDefault();
-          onOpenInNewTab();
-          return;
-        }
-        onSelect();
-      }}
-      onMouseDown={(event) => {
-        if (event.button === 1) event.preventDefault();
-      }}
-      onAuxClick={(event) => {
-        if (event.button !== 1 || !onOpenInNewTab) return;
-        event.preventDefault();
-        onOpenInNewTab();
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        ...rowStyle(isSelected),
-        justifyContent: "space-between",
-        opacity: busy ? 0.5 : 1,
-        background: isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
-      }}
-    >
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{label}</span>
-      {activity === "running" && !hovered && (
-        <span
-          title="运行中"
-          aria-label="运行中"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: 12,
-            height: 12,
-            flexShrink: 0,
-            color: "var(--text)",
-          }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
-            <g>
-              <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
-              <animateTransform
-                attributeName="transform"
-                type="rotate"
-                from="0 12 12"
-                to="360 12 12"
-                dur="0.9s"
-                repeatCount="indefinite"
-              />
-            </g>
-          </svg>
-        </span>
-      )}
-      {activity === "completed" && !hovered && (
-        <span
-          title="完成，尚未查看"
-          aria-label="完成"
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
-            flexShrink: 0,
-            background: "var(--accent)",
-          }}
-        />
-      )}
-      {hovered && !busy && (
-        <div style={{ display: "flex", gap: 4, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-          {onOpenInNewTab && <button title="在新 tab 打开" onClick={onOpenInNewTab} style={hoverActionBtn}>新 tab</button>}
-          <button title="归档" onClick={() => void archive()} style={hoverActionBtn}>归档</button>
-        </div>
-      )}
-    </div>
-  );
-}

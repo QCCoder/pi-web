@@ -16,7 +16,6 @@ import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "../ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
-import type { LoopConfigTarget } from "@/components/LoopsConfig";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { type Tab, FILES_TAB_ID } from "@/lib/tab-types";
@@ -157,9 +156,6 @@ export function useAppShellState() {
   // (panel switch / session select / new session / workspace switch): those
   // are all “show me something else in the right column” intents.
   const [workItemDetail, setWorkItemDetail] = useState<{ key: string; title: string } | null>(null);
-  // Loop 配置视图（spec §4.1）：镜像 workItemDetail 的生命周期——
-  // panel 切换 / 会话选择 / 工作区切换 / configView 打开时一并清空。
-  const [loopConfig, setLoopConfig] = useState<LoopConfigTarget | null>(null);
   // Loops 面板 → 工作台文件区的定位意图（一次性信号，非持久视图状态——无需清空
   // 点位）：loop 名点击时写入 `loops/<name>`，nonce 保证同一路径可重复触发；
   // 两 shell 把它透传给 WorkspaceSidebar（filesReveal → FileExplorer reveal +
@@ -168,7 +164,6 @@ export function useAppShellState() {
   const [closeWorkItemDetailTick, setCloseWorkItemDetailTick] = useState(0);
   const handleCloseWorkItemDetail = useCallback(() => {
     setWorkItemDetail(null);
-    setLoopConfig(null);
     setCloseWorkItemDetailTick((tick) => tick + 1);
   }, []);
   const handleOpenConfig = useCallback((view: ConfigView) => {
@@ -176,7 +171,6 @@ export function useAppShellState() {
     // The config view takes over the right column — drop a stale work-item
     // detail so closing the config view doesn't resurrect it.
     setWorkItemDetail(null);
-    setLoopConfig(null);
     // The config LIST lives in the middle column — make sure the column is
     // visible when a config view opens (desktop-only entry point; mobile
     // serves the same content via the settings subpages and never gets here).
@@ -185,7 +179,6 @@ export function useAppShellState() {
   useEffect(() => {
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     if (!activeWorkspace) {
       const storedGlobal = localStorage.getItem(GLOBAL_PANEL_KEY) as SidebarView | null;
       setSidebarView(storedGlobal === "settings" ? "settings" : "workbench");
@@ -211,7 +204,6 @@ export function useAppShellState() {
     // there) — any panel switch must hand the column back.
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     setSidebarView(view);
     if (GLOBAL_ACTIVITY_VIEWS.includes(view)) {
       try { localStorage.setItem(GLOBAL_PANEL_KEY, view); } catch { /* ignore */ }
@@ -892,7 +884,6 @@ export function useAppShellState() {
     setWorkspaceManagerOpen(false);
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     openSessionTab(session);
   }, [openSessionTab]);
 
@@ -907,7 +898,6 @@ export function useAppShellState() {
     if (tabs.some((t) => t.id === existingId)) {
       setConfigView(null);
       setWorkItemDetail(null);
-      setLoopConfig(null);
       activateTab(existingId);
       setSessionKey((k) => k + 1);
       setSystemPrompt(null);
@@ -925,7 +915,6 @@ export function useAppShellState() {
     // C1 morph：当前会话/占位 tab 原地变身（保留 F1 文件 tab 状态）。
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     const owner = workspaceForSession(session, workspaces) ?? activeTab?.workspace ?? null;
     if (!owner) return;
     const fresh = createSessionTab(owner, session);
@@ -970,7 +959,6 @@ export function useAppShellState() {
     if (!activeWorkspace) return;
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     const id = ensureHomeTab(activeWorkspace);
     activateTab(id);
     navigateUrl(`workspace=${encodeURIComponent(activeWorkspace.id)}&view=overview`);
@@ -982,7 +970,6 @@ export function useAppShellState() {
     if (!activeWorkspace) return;
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     openNewSessionTab(activeWorkspace);
   }, [activeWorkspace, openNewSessionTab]);
 
@@ -1186,7 +1173,6 @@ export function useAppShellState() {
     // (the button itself lives inside the portaled work-item detail).
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     // Latest conversation first: a kit round (or run-contract prefill) session is
     // APPENDED to `conversations`, so the most recent entry is the live/latest
     // contract run. Resolve via /locate (daemon probe + forced disk scan) — never the
@@ -1257,7 +1243,6 @@ export function useAppShellState() {
     }
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
       if (response.ok) {
@@ -1312,7 +1297,6 @@ export function useAppShellState() {
       : `${verb} ${item.key}`;
     setConfigView(null);
     setWorkItemDetail(null);
-    setLoopConfig(null);
     const tabId = openNewSessionTab(workspace);
     // 草稿键 = 占位 tab id（U1：多 composer 并存互不互踩，修复旧 new:<wsPath> 隐患）；
     // composerEpoch 强制已挂载的 ChatInput 重读草稿。
@@ -1611,8 +1595,6 @@ export function useAppShellState() {
     setConfigPortalNode,
     workItemDetail,
     setWorkItemDetail,
-    loopConfig,
-    setLoopConfig,
     loopFilesReveal,
     setLoopFilesReveal,
     handleCloseWorkItemDetail,

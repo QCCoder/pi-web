@@ -1019,6 +1019,8 @@ span.linenumber {
     overflow: hidden;
     transition: width 0.2s ease, min-width 0.2s ease;
     flex-shrink: 0;
+    /* the panel measures itself for the dock module-tab collapse below */
+    container-type: inline-size;
   }
   .right-panel-container.right-panel-open {
     width: var(--pi-right-panel-width, 42%);
@@ -1040,6 +1042,19 @@ span.linenumber {
   .right-panel-container > * {
     width: var(--pi-right-panel-width, 42vw);
     min-width: 300px;
+  }
+  /* Right dock module tabs are PINNED primary nav — they never scroll away
+     (flexShrink:0 in TabBar). On narrow panels (<~420px) they collapse to
+     icon-only; tooltips carry the full names. File/session tabs keep the
+     existing horizontal-scroll overflow. Design doc §2 / decision #4. */
+  @container (max-width: 420px) {
+    .dock-module-tab-label {
+      display: none;
+    }
+    .dock-module-tab {
+      padding-left: 10px;
+      padding-right: 10px;
+    }
   }
 }
 

@@ -3,35 +3,45 @@
 import { useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
-import { formatRelativeTime } from "@/lib/format-time";
 import type { WorkspaceSessionGroup } from "@/lib/home-quick-switch";
+import { SessionRow } from "./SessionRow";
 
 /**
- * 首页快速切换列表：按工作区分组，每组列出该工作区全部会话（组内按修改
+ * 全局会话分组列表（按工作区分组，每组列出该工作区全部会话，组内按修改
  * 时间降序，分组按组内最新会话活跃度降序——排序由 lib/home-quick-switch 的
- * groupSessionsByWorkspace 负责）。两个宿主共用：桌面首页的中栏面板
- * （WorkspaceSidebar home 分支）与移动端首页的「最近会话」区（HomeLanding）。
+ * groupSessionsByWorkspace 负责）。宿主（2026-09 全局左栏后）：桌面中栏的
+ * **唯一**会话面板（工作台与首页同体）+ 移动端首页的「最近会话」区（HomeLanding）。
  *
- * 交互（grill 共识）：
+ * 交互：
  * - 组头 = 工作区名 + 会话总数，点击 = 打开该工作区；
  * - 组头右侧 chevron 折叠/展开该组（默认全展开，状态不持久化）；
- * - 会话行 = 运行中呼吸点 + 名称/首条消息 + 相对时间，点击 = 直达会话；
- * - 无行内管理操作——本组件是切换器，不是管理器。
+ * - 会话行 = 共享 SessionRow（运行/完成徽章 + 相对时间 + Cmd/中键/hover 新 tab
+ *   + 行内归档——原「切换器无管理操作」契约随全局左栏升级作废）；
+ *   点击 = C1 分派（当前 tab 变身；首页/家 tab 上=开新 tab；Cmd/中键=新 tab）。
  */
 interface Props {
   groups: WorkspaceSessionGroup[];
   runningSessionIds: Set<string>;
+  /** 完成未读徽章（useSessionActivity.completedIds）；不传则不显示。 */
+  completedSessionIds?: Set<string>;
   selectedSessionId?: string | null;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onSelectSession: (session: SessionInfo) => void;
+  /** C1 并行手势：Cmd/Ctrl-点击、中键、hover「新 tab」（桌面传入；移动端首页不传）。 */
+  onOpenSessionInNewTab?: (session: SessionInfo) => void;
+  /** 行内归档后回调（shell 从 allSessions 移除）。 */
+  onSessionRemoved?: (id: string) => void;
 }
 
 export function HomeSessionGroups({
   groups,
   runningSessionIds,
+  completedSessionIds,
   selectedSessionId,
   onSelectWorkspace,
   onSelectSession,
+  onOpenSessionInNewTab,
+  onSessionRemoved,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
 
@@ -131,58 +141,22 @@ export function HomeSessionGroups({
                 </div>
               ) : (
                 group.sessions.map((session) => {
-                  const running = runningSessionIds.has(session.id);
-                  const selected = selectedSessionId === session.id;
+                  const activity = runningSessionIds.has(session.id)
+                    ? "running"
+                    : completedSessionIds?.has(session.id)
+                      ? "completed"
+                      : undefined;
                   return (
-                    <button
+                    <SessionRow
                       key={session.id}
-                      onClick={() => onSelectSession(session)}
-                      title={session.name || session.firstMessage || "未命名会话"}
-                      style={{
-                        width: "100%",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 7,
-                        padding: "6px 10px 6px 30px",
-                        border: 0,
-                        borderRadius: 8,
-                        background: selected ? "var(--bg-selected)" : "transparent",
-                        color: selected ? "var(--text)" : "var(--text-muted)",
-                        cursor: "pointer",
-                        textAlign: "left",
-                        fontSize: 12,
-                      }}
-                      onMouseEnter={(e) => { if (!selected) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                      onMouseLeave={(e) => { if (!selected) e.currentTarget.style.background = "transparent"; }}
-                    >
-                      {running && (
-                        <span
-                          aria-label="运行中"
-                          style={{
-                            flexShrink: 0,
-                            width: 7,
-                            height: 7,
-                            borderRadius: "50%",
-                            background: "var(--accent)",
-                            animation: "pulse 1.6s ease-in-out infinite",
-                          }}
-                        />
-                      )}
-                      <span
-                        style={{
-                          flex: 1,
-                          minWidth: 0,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {session.name || session.firstMessage || "未命名会话"}
-                      </span>
-                      <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                        {formatRelativeTime(session.modified)}
-                      </span>
-                    </button>
+                      session={session}
+                      isSelected={selectedSessionId === session.id}
+                      activity={activity}
+                      showTime
+                      onSelect={() => onSelectSession(session)}
+                      onOpenInNewTab={onOpenSessionInNewTab ? () => onOpenSessionInNewTab(session) : undefined}
+                      onRemoved={onSessionRemoved}
+                    />
                   );
                 })
               )

@@ -15,9 +15,10 @@ import { SettingsPanel, PreferencesPage } from "../SettingsPanel";
 import { ModelsConfig } from "../ModelsConfig";
 import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
-import { LoopsConfig } from "../LoopsConfig";
+import { LoopsDockPanel } from "../LoopsDockPanel";
 import { HomeNewSession } from "../HomeNewSession";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
+import { LOOPS_TAB_ID, isModuleTabId } from "@/lib/tab-types";
 import { SessionTabBar } from "../SessionTabBar";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { useI18n } from "@/hooks/useI18n";
@@ -58,8 +59,6 @@ export function DesktopShell() {
     setConfigPortalNode,
     workItemDetail,
     setWorkItemDetail,
-    loopConfig,
-    setLoopConfig,
     loopFilesReveal,
     handleCloseWorkItemDetail,
     closeWorkItemDetailTick,
@@ -284,6 +283,15 @@ const renderMiddleColumn = () => {
   const panelActiveFileTab = homeAtDesktop
     ? (homeActiveFileTabId ? homeFileTabs.find((t) => t.id === homeActiveFileTabId) : undefined)
     : activeFileTab;
+  // Right dock（design S1）：activeFileTabId 的值域 = 文件/会话 tab id + 钦死模块
+  // tab id（文件/Loops）。模块 id 永不在 fileTabs 里——文件 tab 不活时它指向当前
+  // 模块；非模块非文件 id（陈旧值）安全回落到文件树。模块内容跟工作区（决策 #6）：
+  // 两个模块体常驻挂载（display:none 隐藏），LoopsDockPanel 以 key=workspace.id
+  // 重置——同工作区切会话 tab 状态存活，换工作区才重建。
+  const panelEffTabId = panelActiveFileTabId ?? FILES_TAB_ID;
+  const dockActiveModule = !panelActiveFileTab && isModuleTabId(panelEffTabId) ? panelEffTabId : null;
+  const showFilesTree = Boolean(panelWorkspace) && !panelActiveFileTab
+    && (panelEffTabId === FILES_TAB_ID || !isModuleTabId(panelEffTabId));
 
   return (
     <>
@@ -353,15 +361,15 @@ const renderMiddleColumn = () => {
 
       {/* Main content: a config view (模型/Skills/插件 — desktop rail icons)
           renders its DETAIL here; its LIST lives in the middle column and
-          portals the detail into this container via configPortalNode. The
-          settings › 工作区 and 偏好 split views reuse the same mechanism:
-          the middle column keeps the settings INDEX (plus the workspace
-          list rail for 工作区), and the detail portals into this container.
-          The 工作项 panel does the same for the selected work item — the
-          list stays in the middle column, the detail opens here (× or any
-          chat/panel intent hands the column back). */}
+          portals the detail into this container via configPortalNode.
+          The settings › 工作区 page (2026-09) renders here WHOLE — list +
+          detail side by side in ONE container (WorkspaceManager inline
+          split), no portal; 偏好 mounts directly. The 工作项 panel keeps
+          the portal pattern for the selected work item — the list stays in
+          the middle column, the detail opens here (× or any chat/panel
+          intent hands the column back). */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {(configView || workItemDetail || loopConfig || (sidebarView === "settings" && settingsPage !== "index")) ? (
+        {(configView || workItemDetail || (sidebarView === "settings" && settingsPage !== "index")) ? (
           configView ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
               <PanelHeader
@@ -385,25 +393,6 @@ const renderMiddleColumn = () => {
                 ref={setConfigPortalNode}
                 style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", padding: "14px 16px" }}
               />
-            </div>
-          ) : loopConfig ? (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title={loopConfig.kind === "new" ? "新建 Loop" : loopConfig.name}
-                meta="Loop 配置"
-                onClose={() => setLoopConfig(null)}
-              />
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                {activeWorkspace && (
-                  <LoopsConfig
-                    workspace={activeWorkspace}
-                    target={loopConfig}
-                    onClose={() => setLoopConfig(null)}
-                    onOpenLoop={(name) => setLoopConfig({ kind: "loop", name })}
-                    onChanged={() => setLoopsRefreshKey((key) => key + 1)}
-                  />
-                )}
-              </div>
             </div>
           ) : sidebarView === "settings" && settingsPage === "workspace" ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -522,14 +511,13 @@ const renderMiddleColumn = () => {
                 updateActiveTab({ activeFileTabId: FILES_TAB_ID, rightPanelOpen: true });
               }
             }}
-            onRunLoop={(name) => handleRunLoopDirect(activeTab.workspace, name)}
             onAddRepository={() => {
               handleSidebarSwitchView("settings");
               setSettingsPage("workspace");
               setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
             }}
             onSessionDeleted={handleSessionRemoved}
-            onOpenLoopConfig={(target) => setLoopConfig(target)}
+            onOpenLoopsTab={() => updateActiveTab({ activeFileTabId: LOOPS_TAB_ID, rightPanelOpen: true })}
             loopsRefreshKey={loopsRefreshKey}
           />
           )
@@ -640,15 +628,29 @@ const renderMiddleColumn = () => {
         ...(rightPanelWidth != null ? { "--pi-right-panel-width": `${rightPanelWidth}px` } : {}),
       } as React.CSSProperties}
     >
-      {/* Right panel tab bar — leading pinned「文件」tab (the workbench file
-          tree; active when no file/session tab is). */}
+      {/* Right dock tab bar（design S1）—— 钦死模块 tab（文件/Loops；窄面板时
+          图标化，见 globals.css 的 @container 规则）+ 文件/会话 tab。模块 tab
+          永不关闭；关到最后一个文件 tab 回落到「文件」树（handleCloseFileTab
+          现状语义）。 */}
       <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}
       >
         <div style={{ flex: 1, overflow: "hidden" }}>
           <TabBar
             tabs={panelFileTabs}
             activeTabId={panelActiveFileTabId ?? FILES_TAB_ID}
-            leadingTab={panelWorkspace ? { id: FILES_TAB_ID, label: "文件" } : undefined}
+            leadingTabs={panelWorkspace ? [
+              { id: FILES_TAB_ID, label: "文件" },
+              {
+                id: LOOPS_TAB_ID,
+                label: "Loops",
+                icon: (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M17 2l4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+                    <path d="M7 22l-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" />
+                  </svg>
+                ),
+              },
+            ] : undefined}
             onSelectTab={(id: string) => (homeAtDesktop ? setHomeActiveFileTabId(id) : updateActiveTab({ activeFileTabId: id }))}
             onCloseTab={homeAtDesktop ? handleCloseHomeFileTab : handleCloseFileTab}
           />
@@ -656,16 +658,17 @@ const renderMiddleColumn = () => {
 
       </div>
 
-      {/* File content: the pinned「文件」tree tab stays MOUNTED (hidden via
-          display:none while another tab is active) so the tree keeps its
-          expansion state across switches. File/session tabs render only while
-          active; the empty hint remains only as the home fallback (no
-          workspace → no tree to show). */}
+      {/* Dock bodies: module tabs stay MOUNTED (hidden via display:none while
+          another tab is active) so their state survives tab switches of the
+          SAME workspace (decision #6) — LoopsDockPanel resets only when the
+          workspace changes (key). File/session tabs render only while active;
+          the empty hint remains only as the home fallback (no workspace → no
+          tree to show). */}
       <div style={{ flex: 1, overflow: "hidden" }}>
         {panelWorkspace ? (
           <div
             style={{
-              display: panelActiveFileTab ? "none" : "flex",
+              display: showFilesTree ? "flex" : "none",
               flexDirection: "column",
               height: "100%",
             }}
@@ -675,6 +678,23 @@ const renderMiddleColumn = () => {
               explorerRefreshKey={explorerRefreshKey}
               onOpenFile={handleOpenFile}
               reveal={loopFilesReveal ?? undefined}
+            />
+          </div>
+        ) : null}
+        {panelWorkspace ? (
+          <div
+            style={{
+              display: dockActiveModule === LOOPS_TAB_ID ? "flex" : "none",
+              flexDirection: "column",
+              height: "100%",
+            }}
+          >
+            <LoopsDockPanel
+              key={panelWorkspace.id}
+              workspace={panelWorkspace}
+              refreshKey={loopsRefreshKey}
+              onChanged={() => setLoopsRefreshKey((key) => key + 1)}
+              onRunLoop={(name) => handleRunLoopDirect(panelWorkspace, name)}
             />
           </div>
         ) : null}

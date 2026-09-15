@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
 import type { LoopConfigTarget } from "./LoopsConfig";
-import { LoopRow, type LoopStatus } from "./LoopRow";
+import { LoopRow } from "./LoopRow";
 import { STATUS_LABELS } from "./WorkspaceManager";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useKitLoops } from "@/hooks/useKitLoops";
 
 interface Props {
   workspace: WorkspaceSummary;
@@ -21,12 +22,16 @@ interface Props {
   /** Open the workspace settings' add-repository form (AppShell wires it). */
   onAddRepository: () => void;
   onSessionDeleted?: (id: string) => void;
-  /** 打开 loop 配置（桌面右栏 / 移动端 overview 栈）；新建走 { kind: "new" }。 */
-  onOpenLoopConfig: (target: LoopConfigTarget) => void;
-  /** 「运行」——手动起一轮并打开轮会话（W-中：LoopsPanel 退役后总览接管该按钮）。 */
+  /** 打开 loop 配置（移动端 overview 栈；新建走 { kind: "new" }）。桌面不再传
+   *  ——右坞 Loops tab 承接配置/新建，桌面只传 onOpenLoopsTab 渲染摘要行。 */
+  onOpenLoopConfig?: (target: LoopConfigTarget) => void;
+  /** 「运行」——手动起一轮并打开轮会话（移动端全量区块的行按钮）。 */
   onRunLoop?: (name: string) => void;
   /** loop 变更刷新信号（创建/删除/frontmatter 保存后由 shell bump）。 */
   loopsRefreshKey?: number;
+  /** 右坞 Loops tab 入口（桌面传）：传入时 Loops 区块瘦身为摘要行（决策 #10）——
+   *  点击开右坞 Loops tab，状态/操作/配置只住 tab；不传（移动端）保持全量区块。 */
+  onOpenLoopsTab?: () => void;
 }
 
 function formatRelativeTime(dateStr: string): string {
@@ -101,42 +106,13 @@ export function WorkspaceOverview({
   onOpenLoopConfig,
   onRunLoop,
   loopsRefreshKey,
+  onOpenLoopsTab,
 }: Props) {
   const isMobile = useIsMobile();
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [loops, setLoops] = useState<LoopStatus[]>([]);
-  const [loopsBusy, setLoopsBusy] = useState(false);
-
-  const refreshLoops = useCallback(async () => {
-    try {
-      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}/loops`);
-      if (!response.ok) return;
-      const data = (await response.json()) as { loops?: LoopStatus[] };
-      setLoops(data.loops ?? []);
-    } catch { /* offline — keep last */ }
-  }, [workspace.id]);
-
-  useEffect(() => { void refreshLoops(); }, [refreshLoops, loopsRefreshKey]);
-
-  const loopAction = useCallback(async (name: string, action: "pause" | "resume" | "stop") => {
-    if (action === "stop" && !window.confirm("终止本轮进程？未完成的工作由下轮补跑。")) return;
-    setLoopsBusy(true);
-    try {
-      const response = await fetch(
-        `/api/workspaces/${encodeURIComponent(workspace.id)}/loops/${encodeURIComponent(name)}/${action}`,
-        { method: "POST" },
-      );
-      if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as { error?: string };
-        window.alert(body.error || `操作失败（HTTP ${response.status}）`);
-      }
-      await refreshLoops();
-    } finally {
-      setLoopsBusy(false);
-    }
-  }, [refreshLoops, workspace.id]);
+  const { loops, busy: loopsBusy, runAction: loopAction } = useKitLoops(workspace.id, loopsRefreshKey);
 
   const hasWorkItems = workspace.capabilities.includes("work-items");
   const hasRepositories = workspace.capabilities.includes("repositories");
@@ -439,14 +415,43 @@ export function WorkspaceOverview({
           </section>
         )}
 
-        {/* Loops 管理（仪表盘职责：状态/暂停恢复/停止；配置与新建走 onOpenLoopConfig；
-            常驻渲染——无 loop 也有「新建」入口，spec §4.2） */}
+        {/* Loops：桌面（onOpenLoopsTab 传入）瘦身为摘要行（决策 #10）——状态/操作/
+            配置只住右坞 Loops tab；移动端保持全量区块（状态/暂停恢复/停止/运行 +
+            配置/新建走 onOpenLoopConfig → overview 栈），常驻渲染（无 loop 也有
+            「新建」入口）。 */}
         <section style={sectionStyle}>
           <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px" }}>Loops</h2>
-          {loops.length === 0 ? (
+          {onOpenLoopsTab ? (
+            <button onClick={onOpenLoopsTab} style={cardRowStyle}>
+              <span style={{ display: "flex", alignItems: "center", color: "var(--text-muted)", flexShrink: 0 }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M17 2l4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+                  <path d="M7 22l-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" />
+                </svg>
+              </span>
+              <span style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                <span style={{ fontWeight: 500 }}>
+                  {loops.length === 0 ? "暂无 loop" : `${loops.length} 个 loop`}
+                </span>
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  {(() => {
+                    const running = loops.filter((loop) => loop.running).length;
+                    const paused = loops.filter((loop) => loop.paused).length;
+                    if (loops.length === 0) return "文件即声明：.pi/loops/&lt;name&gt;/LOOP.md";
+                    const parts: string[] = [];
+                    if (running > 0) parts.push(`${running} 个运行中`);
+                    if (paused > 0) parts.push(`${paused} 个已暂停`);
+                    if (running === 0 && paused === 0) parts.push("全部就绪");
+                    return parts.join(" · ");
+                  })()}
+                </span>
+              </span>
+              <span style={{ color: "var(--text-dim)", fontSize: 14 }}>›</span>
+            </button>
+          ) : loops.length === 0 ? (
             <div style={{ display: "flex", gap: 10, alignItems: "center", color: "var(--text-muted)", fontSize: 12 }}>
               <span>暂无 loop（文件即声明：loops/&lt;name&gt;/LOOP.md）</span>
-              <button onClick={() => onOpenLoopConfig({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
+              <button onClick={() => onOpenLoopConfig?.({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -455,13 +460,13 @@ export function WorkspaceOverview({
                   key={loop.name}
                   loop={loop}
                   busy={loopsBusy}
-                  onConfigure={(name) => onOpenLoopConfig({ kind: "loop", name })}
+                  onConfigure={(name) => onOpenLoopConfig?.({ kind: "loop", name })}
                   onAction={(name, action) => void loopAction(name, action)}
                   onRun={onRunLoop ? () => onRunLoop(loop.name) : undefined}
                 />
               ))}
               <div>
-                <button onClick={() => onOpenLoopConfig({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
+                <button onClick={() => onOpenLoopConfig?.({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
               </div>
             </div>
           )}
