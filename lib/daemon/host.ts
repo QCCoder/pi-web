@@ -54,11 +54,8 @@ export function createDaemon() {
 }
 
 export async function startDaemon(options: { host?: string; port?: number } = {}): Promise<void> {
-  // PI_DAEMON_HOST/PORT are canonical; PI_LOOP_HOST/PORT are legacy fallbacks
-  // kept so existing shells/systemd units keep working.
-  const host = options.host ?? process.env.PI_DAEMON_HOST ?? process.env.PI_LOOP_HOST ?? DEFAULT_HOST;
-  const port = options.port
-    ?? Number(process.env.PI_DAEMON_PORT ?? process.env.PI_LOOP_PORT ?? DEFAULT_PORT);
+  const host = options.host ?? process.env.PI_DAEMON_HOST ?? DEFAULT_HOST;
+  const port = options.port ?? Number(process.env.PI_DAEMON_PORT ?? DEFAULT_PORT);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("PI_DAEMON_PORT must be a valid port");
   }

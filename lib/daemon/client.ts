@@ -1,7 +1,6 @@
-/** Daemon base URL. PI_DAEMON_URL is the canonical name; PI_LOOP_URL is the
- *  legacy fallback kept so existing shells/systemd units keep working. */
+/** Daemon base URL. */
 const baseUrl = () =>
-  (process.env.PI_DAEMON_URL ?? process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
+  (process.env.PI_DAEMON_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
 
 /** Input for the session-daemon create route — mirrors /api/agent/new's body
  *  (cwd + optional pre-selection + optional first command). */

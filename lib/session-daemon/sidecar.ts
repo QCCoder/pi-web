@@ -36,8 +36,7 @@ export function spawnableDaemonUrl(baseUrl: string): boolean {
 }
 
 function daemonBaseUrl(): string {
-  // PI_DAEMON_URL is canonical; PI_LOOP_URL is the legacy fallback.
-  return (process.env.PI_DAEMON_URL ?? process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
+  return (process.env.PI_DAEMON_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
 }
 
 /** Env for the spawned daemon so it listens exactly where this web process
@@ -45,8 +44,7 @@ function daemonBaseUrl(): string {
  *  PI_DAEMON_URL — that is the web-side client address), so a URL-only
  *  configuration must be translated; otherwise the sidecar would spawn a
  *  daemon on the default port and then poll the URL's port forever. Explicit
- *  PI_DAEMON_HOST/PI_DAEMON_PORT (or their PI_LOOP_* legacy spellings) always
- *  win. */
+ *  PI_DAEMON_HOST/PI_DAEMON_PORT always win. */
 export function sidecarSpawnEnv(
   daemonUrl: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
@@ -55,8 +53,8 @@ export function sidecarSpawnEnv(
   const hostname = url.hostname.replace(/^\[(.+)\]$/, "$1");
   return {
     ...baseEnv,
-    PI_DAEMON_HOST: baseEnv.PI_DAEMON_HOST ?? baseEnv.PI_LOOP_HOST ?? hostname,
-    PI_DAEMON_PORT: baseEnv.PI_DAEMON_PORT ?? baseEnv.PI_LOOP_PORT ?? url.port,
+    PI_DAEMON_HOST: baseEnv.PI_DAEMON_HOST ?? hostname,
+    PI_DAEMON_PORT: baseEnv.PI_DAEMON_PORT ?? url.port,
   };
 }
 
