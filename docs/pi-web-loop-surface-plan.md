@@ -46,10 +46,10 @@
 - [ ] **Step 1: 建 worktree + 分支**
 
 ```bash
-cd /Users/qiancheng/Documents/Workspace/qyinf-workspace/pi-web
+cd /Users/qiancheng/Documents/Workspace/pi/pi-web
 git worktree add ../pi-web-worktrees/loop-surface -b feature/loop-surface develop
 cd ../pi-web-worktrees/loop-surface
-ln -s /Users/qiancheng/Documents/Workspace/qyinf-workspace/pi-web/node_modules node_modules  # 测试/类型检查依赖；如失效改跑 npm ci
+ln -s /Users/qiancheng/Documents/Workspace/pi/pi-web/node_modules node_modules  # 测试/类型检查依赖；如失效改跑 npm ci
 mkdir -p .superpowers/sdd/pi-web-loop-surface   # SDD ledger
 node_modules/.bin/tsc --noEmit && npm test  # 基线必须全绿
 ```
@@ -1653,7 +1653,7 @@ import 行：`import { summarizeCron } from "@/lib/loops/cron-summary";`、`useC
 - [ ] **Step 3: 合并**（主仓工作区）：
 
 ```bash
-cd /Users/qiancheng/Documents/Workspace/qyinf-workspace/pi-web
+cd /Users/qiancheng/Documents/Workspace/pi/pi-web
 git status --short                       # 记录另一会话 WIP 现状
 git stash push -m "loop-surface-merge: AGENTS.md WIP" -- AGENTS.md   # 仅当 AGENTS.md 有未提交改动（预期有）
 git merge --no-ff feature/loop-surface -m "Merge branch 'feature/loop-surface' into develop — pi-web loop 产品面：工作项绑定 + 立即跑一轮 + Loops 管理区块（spec: docs/pi-web-loop-surface-design.md S1-S6；plan: docs/pi-web-loop-surface-plan.md）"

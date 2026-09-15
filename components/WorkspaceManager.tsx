@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { createPortal } from "react-dom";
 import { MarkdownBody } from "./MarkdownBody";
+import { CapabilityToggle } from "./CapabilityToggle";
 import type {
   WorkspaceCapability,
   WorkspaceRepositoryState,
@@ -48,15 +49,19 @@ interface Props {
    *  the 280px rail + content grid. Rows/toolbars compact below a 480px
    *  container width (the middle column is drag-resizable 200–560px). */
   panel?: boolean;
-  /** Split (three-column) mode: the workspace LIST (rail) renders inline in
-   *  the middle column while the selected workspace's settings DETAIL portals
-   *  into the right column's config area (`portalTarget` = AppShell's
-   *  configPortalNode — same pattern as the 模型/Skills/插件 split views). One
-   *  instance keeps every bit of state (selection, drafts, save flow); only
-   *  the layout splits. The manager chrome (header/tabs) is skipped — the
-   *  middle column already renders its own PanelHeader. A null portal target
-   *  renders nothing for the detail (the frame arrives in the next commit). */
-  split?: { portalTarget: HTMLElement | null };
+  /** Split (three-column) mode — two variants sharing one instance's state
+   *  (selection, drafts, save flow); only the layout splits, and the manager
+   *  chrome (header/tabs) is always skipped (the host column already renders
+   *  its own PanelHeader):
+   *  - `{ portalTarget }`: the workspace LIST (rail) renders inline in the
+   *    host while the selected workspace's settings DETAIL portals into
+   *    `portalTarget` (AppShell's configPortalNode — same pattern as the
+   *    模型/Skills/插件 split views). A null portal target renders nothing for
+   *    the detail (the frame arrives in the next commit).
+   *  - `{ inline: true }`: LIST + DETAIL render side by side inside ONE host
+   *    container (the desktop center-area 工作区设置 page — 2026-09 the list
+   *    left the cramped middle column; both panes live in the main area). */
+  split?: { portalTarget: HTMLElement | null } | { inline: true };
   initialSection?: ManagerSection;
   /** Desktop work-items split (the 工作项 middle-column panel): the LIST
    *  stays mounted in the middle column while the selected work item's
@@ -260,6 +265,8 @@ export function WorkspaceManager({
   const [repositoryPath, setRepositoryPath] = useState("");
   const [skillSelectionOpen, setSkillSelectionOpen] = useState(false);
   const [skillDraft, setSkillDraft] = useState<string[]>([]);
+  // 基本信息：改名草稿（随选中工作区重置；空/未变时保存禁用）。
+  const [nameDraft, setNameDraft] = useState("");
   const [createWorkItemOpen, setCreateWorkItemOpen] = useState(false);
   const [workItemType, setWorkItemType] = useState<WorkItemType>("bug");
   const [workItemTitle, setWorkItemTitle] = useState("");
@@ -290,6 +297,11 @@ export function WorkspaceManager({
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
   ) ?? null;
+
+  // 改名草稿跟随选中工作区（切换/保存后刷新都同步）。
+  useEffect(() => {
+    setNameDraft(selectedWorkspace?.name ?? "");
+  }, [selectedWorkspace?.id, selectedWorkspace?.name]);
 
   const openCreateWorkItem = useCallback((type?: WorkItemType) => {
     if (type) setWorkItemType(type);
@@ -658,6 +670,54 @@ export function WorkspaceManager({
     }
   }, [loadWorkspaces, selectedWorkspace, skillDraft]);
 
+  const saveWorkspaceName = useCallback(async () => {
+    if (!selectedWorkspace) return;
+    const name = nameDraft.trim();
+    if (!name || name === selectedWorkspace.name) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await responseJson(
+        await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspace.id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedUpdatedAt: selectedWorkspace.updatedAt,
+            name,
+          }),
+        }),
+      );
+      await loadWorkspaces();
+    } catch (saveNameError) {
+      setError(saveNameError instanceof Error ? saveNameError.message : String(saveNameError));
+    } finally {
+      setSaving(false);
+    }
+  }, [loadWorkspaces, nameDraft, selectedWorkspace]);
+
+  const setWorkspaceDisabled = useCallback(async (disabled: boolean) => {
+    if (!selectedWorkspace || selectedWorkspace.disabled === disabled) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await responseJson(
+        await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspace.id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedUpdatedAt: selectedWorkspace.updatedAt,
+            disabled,
+          }),
+        }),
+      );
+      await loadWorkspaces();
+    } catch (disableError) {
+      setError(disableError instanceof Error ? disableError.message : String(disableError));
+    } finally {
+      setSaving(false);
+    }
+  }, [loadWorkspaces, selectedWorkspace]);
+
   const createWorkItem = useCallback(async () => {
     if (!selectedWorkspaceId) return;
     setSaving(true);
@@ -857,7 +917,8 @@ export function WorkspaceManager({
   if (!open && !embedded) return null;
 
   const splitMode = split != null;
-  const portalTarget = split?.portalTarget ?? null;
+  const portalTarget = split != null && "portalTarget" in split ? split.portalTarget : null;
+  const inlineSplit = split != null && "inline" in split;
   const workItemSplitMode = workItemSplit != null;
 
   // Shared narrow-layout compaction (single-column form grids, wrapping
@@ -1750,7 +1811,9 @@ export function WorkspaceManager({
   const railPane = (
     <aside
       className="workspace-rail"
-      style={splitMode ? { width: "100%", flex: 1, minHeight: 0, borderRight: "none" } : undefined}
+      style={inlineSplit
+        ? { width: 300, flexShrink: 0, minHeight: 0 }
+        : splitMode ? { width: "100%", flex: 1, minHeight: 0, borderRight: "none" } : undefined}
     >
             <div className="workspace-page-header">
               <strong>Workspaces</strong>
@@ -1768,12 +1831,32 @@ export function WorkspaceManager({
                   setSelectedWorkItem(null);
                 }}
               >
-                <strong>{workspace.name}</strong>
+                <strong>
+                  {workspace.name}
+                  {workspace.disabled && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        padding: "1px 6px",
+                        borderRadius: 6,
+                        fontSize: 10,
+                        fontWeight: 600,
+                        color: "var(--text-muted)",
+                        background: "var(--bg-hover)",
+                        verticalAlign: "middle",
+                      }}
+                    >
+                      已停用
+                    </span>
+                  )}
+                </strong>
                 <span className="workspace-rail-meta">{workspace.path}</span>
                 <span className="workspace-rail-meta">
-                  {workspace.available
-                    ? `${workspace.capabilities.length} capabilities · ${workspace.repositoryCount} repos`
-                    : "目录或配置不可用"}
+                  {workspace.disabled
+                    ? "已停用（仅设置可见）"
+                    : workspace.available
+                      ? `${workspace.capabilities.length} capabilities · ${workspace.repositoryCount} repos`
+                      : "目录或配置不可用"}
                 </span>
               </button>
             ))}
@@ -1864,6 +1947,43 @@ export function WorkspaceManager({
                   </div>
                 ) : selectedWorkspace ? (
                   <>
+                    <div className="workspace-summary-card">
+                      <div className="workspace-form-grid">
+                        <label className="workspace-field">
+                          <span>名称</span>
+                          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+                            <input
+                              value={nameDraft}
+                              onChange={(event) => setNameDraft(event.target.value)}
+                              placeholder="工作区名称"
+                              style={{ flex: 1, minWidth: 0 }}
+                            />
+                            <button
+                              className="workspace-action"
+                              disabled={saving || !nameDraft.trim() || nameDraft.trim() === selectedWorkspace.name}
+                              onClick={() => void saveWorkspaceName()}
+                            >
+                              保存
+                            </button>
+                          </div>
+                        </label>
+                        <div className="workspace-field">
+                          <span>状态</span>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", minHeight: 32 }}>
+                            <CapabilityToggle
+                              enabled={!selectedWorkspace.disabled}
+                              loading={saving}
+                              onToggle={(next) => void setWorkspaceDisabled(!next)}
+                            />
+                            <span className="workspace-rail-meta">
+                              {selectedWorkspace.disabled
+                                ? "已停用：首页与各工作区选择器不再出现，已打开的会话不受影响"
+                                : "启用中"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                     <div className="workspace-summary-card">
                       <div className="workspace-form-grid">
                         <div>
@@ -2115,8 +2235,24 @@ export function WorkspaceManager({
   );
 
   if (splitMode) {
-    // Split (three-column) mode: the workspace LIST (rail) fills the middle
-    // column — no manager chrome, the column's own PanelHeader (via
+    if (inlineSplit) {
+      // Inline split (the desktop center-area 工作区设置 page, 2026-09): LIST
+      // + DETAIL render side by side inside ONE container — no portal, no
+      // manager chrome. The list left the cramped middle column; both panes
+      // live in the main content area now.
+      return (
+        <div
+          className="workspace-manager-page"
+          style={{ display: "flex", flexDirection: "row" }}
+        >
+          <style>{managerStyles}</style>
+          {railPane}
+          {contentPane}
+        </div>
+      );
+    }
+    // Portal split (three-column) mode: the workspace LIST (rail) fills the
+    // host column — no manager chrome, the column's own PanelHeader (via
     // SettingsPanel) already titles the panel — while the selected
     // workspace's settings DETAIL portals into the right column's config
     // area (the container under the 工作区设置 PanelHeader). The detail keeps

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
-import type { WorkspaceSummary } from "@/lib/workspaces/types";
+import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { HomeSessionGroups } from "./HomeSessionGroups";
 import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
@@ -58,7 +58,7 @@ export function HomeLanding({
   }, [refreshKey]);
 
   const availableWorkspaces = useMemo(
-    () => workspaces.filter((workspace) => workspace.available),
+    () => workspaces.filter(isWorkspaceSelectable),
     [workspaces],
   );
   // 空工作区不成组（无会话的工作区只在 ⊞ 面板出现，最近区保持紧凑）。

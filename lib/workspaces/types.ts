@@ -74,6 +74,12 @@ export interface WorkspaceManifest {
    *  index migration; a manifest without it is config-invalid. */
   capabilities: WorkspaceCapability[];
   git?: WorkspaceGitSettings;
+  /** Temporarily disabled by the user (2026-09 设置可停用): pickers (home
+   *  selectors, tab-bar/workspace-switcher dropdowns, home grouping) hide the
+   *  workspace, but open tabs, loop heartbeats and session assembly are
+   *  untouched — re-enabling happens from the settings detail. Omitted/absent
+   *  means enabled (old manifests stay valid without migration). */
+  disabled?: boolean;
   workItems: {
     nextRequirementNumber: number;
     nextBugNumber: number;
@@ -90,6 +96,10 @@ export interface WorkspaceSummary {
   capabilities: WorkspaceCapability[];
   available: boolean;
   configStatus: "ready" | "directory-unavailable" | "config-missing" | "config-invalid";
+  /** User-disabled (manifest `disabled: true`). Distinct from `available`
+   *  (directory health): a disabled workspace can still be selected in the
+   *  settings list to re-enable or edit it. */
+  disabled: boolean;
   skills: string[];
   repositories: WorkspaceRepository[];
   repositoryCount: number;
@@ -116,6 +126,13 @@ export interface WorkspaceIndexV1 {
   workspaces: WorkspaceIndexEntry[];
 }
 
+/** Workspace-selection predicate for every picker surface (home selectors,
+ *  tab-bar/workspace-switcher dropdowns, home grouping): directory must be
+ *  healthy AND not user-disabled. Pure so client components share it. */
+export function isWorkspaceSelectable(workspace: WorkspaceSummary): boolean {
+  return workspace.available && !workspace.disabled;
+}
+
 export interface CreateWorkspaceInput {
   name: string;
   slug: string;
@@ -135,4 +152,7 @@ export interface UpdateWorkspaceInput {
   skills?: string[];
   /** Replace the workspace's capability set. Used to toggle modules on/off. */
   capabilities?: WorkspaceCapability[];
+  /** Temporarily disable/enable the workspace (picker visibility only — see
+   *  `WorkspaceManifest.disabled`). */
+  disabled?: boolean;
 }

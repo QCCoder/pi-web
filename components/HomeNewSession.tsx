@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
-import type { WorkspaceSummary } from "@/lib/workspaces/types";
+import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 import type { ChatInputHandle } from "./ChatInput";
 import { ChatWindow } from "./ChatWindow";
 
@@ -39,7 +39,7 @@ export function HomeNewSession({
   modelsRefreshKey,
   chatInputRef,
 }: Props) {
-  const available = workspaces.filter((workspace) => workspace.available);
+  const available = workspaces.filter(isWorkspaceSelectable);
 
   if (available.length === 0) {
     return (

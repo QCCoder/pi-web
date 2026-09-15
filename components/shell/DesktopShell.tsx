@@ -16,14 +16,14 @@ import { ModelsConfig } from "../ModelsConfig";
 import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
 import { LoopsConfig } from "../LoopsConfig";
-import { LoopsPanel } from "../LoopsPanel";
 import { HomeNewSession } from "../HomeNewSession";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
-import { WorkspaceTabBar } from "../WorkspaceTabBar";
+import { SessionTabBar } from "../SessionTabBar";
+import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { useI18n } from "@/hooks/useI18n";
 import { getFileName } from "@/lib/file-paths";
 import { useShell } from "./context";
-import type { WorkspaceTabState } from "./useAppShellState";
+import type { SessionTabState } from "@/lib/session-tabs";
 import { ChatToolbar } from "./ChatToolbar";
 
 /**
@@ -40,9 +40,10 @@ export function DesktopShell() {
   const {
     tabs,
     setTabs,
+    activeTabId,
+    activeTab,
     activeWorkspace,
     selectedSession,
-    workspaceView,
     selectedWorkItemKey,
     fileTabs,
     activeFileTabId,
@@ -51,6 +52,8 @@ export function DesktopShell() {
     sidebarView,
     configView,
     setConfigView,
+    hubView,
+    setHubView,
     configPortalNode,
     setConfigPortalNode,
     workItemDetail,
@@ -58,7 +61,6 @@ export function DesktopShell() {
     loopConfig,
     setLoopConfig,
     loopFilesReveal,
-    setLoopFilesReveal,
     handleCloseWorkItemDetail,
     closeWorkItemDetailTick,
     settingsPage,
@@ -114,8 +116,10 @@ export function DesktopShell() {
     handleWorkspaceSettingsSelection,
     handleOpenWorkspace,
     handleShowOverview,
-    handleOpenWorkspaceToChat,
-    handleCloseWorkspaceTab,
+    closeTab,
+    openSessionTab,
+    handleSelectTab,
+    handleSessionRemoved,
     handleCreateWorkspace,
     handleReturnHome,
     handleOpenConversation,
@@ -192,7 +196,8 @@ const renderMiddleColumn = () => {
       </div>
     );
   }
-  // Global settings panel works at home too (workspace subpage hidden).
+  // Global settings panel works at home too. 工作区管理是全局的：列表+详情
+  // 已搬到中央内容区（下方 workspace 分支），中栏回到纯设置索引，首页也可见入口。
   if (sidebarView === "settings") {
     return (
       <SettingsPanel
@@ -200,32 +205,7 @@ const renderMiddleColumn = () => {
         onPageChange={setSettingsPage}
         workspace={activeWorkspace}
         settingsCwd={settingsCwd ?? ""}
-        workspaceSlot={activeWorkspace ? (
-          // The manager is mounted whenever settings is open — its rail
-          // (workspace list) shows BELOW the index rows only while the
-          // 工作区 row is active; its detail portals to the right column.
-          settingsPage === "workspace" ? (
-            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", borderTop: "1px solid var(--border)", marginTop: 8 }}>
-              <WorkspaceManager
-                open
-                embedded
-                initialSection="workspaces"
-                split={{ portalTarget: configPortalNode }}
-                onSelectedWorkspaceChange={handleWorkspaceSettingsSelection}
-                activeWorkspacePath={activeWorkspace.path}
-                openRepositoryFormRequest={openRepositoryFormRequest}
-                onClose={() => {}}
-                onOpenWorkspace={handleOpenWorkspace}
-                onOpenWorkItemConversation={handleOpenWorkItemConversation}
-                onRunLoopRound={handleRunLoopRound}
-                onRunContract={handleRunContract}
-                onOpenConversation={handleOpenConversation}
-                onWorkspaceDeleted={handleWorkspaceDeleted}
-                onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-                    />
-            </div>
-          ) : null
-        ) : null}
+        workspaceSlot={null}
         onOpenArchive={activeWorkspace ? () => handleSidebarSwitchView("archive") : undefined}
         onWorkspaceSkillsChange={(updated) => {
           setWorkspaces((current) =>
@@ -257,64 +237,11 @@ const renderMiddleColumn = () => {
       </div>
     );
   }
-  if (activeWorkspace && sidebarView === "work-items") {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-        <PanelHeader
-          title="工作项"
-          meta={activeWorkspace.name}
-        />
-        <WorkspaceManager
-          open
-          embedded
-          panel
-          initialSection="work-items"
-          activeWorkspacePath={activeWorkspace.path}
-          initialWorkItemKey={selectedWorkItemKey}
-          createWorkItemRequest={createWorkItemRequest}
-          workItemSplit={{ portalTarget: configPortalNode }}
-          onSelectedWorkItemChange={setWorkItemDetail}
-          closeWorkItemDetailRequest={closeWorkItemDetailTick}
-          onClose={() => {}}
-          onOpenWorkspace={handleOpenWorkspace}
-          onOpenWorkItemConversation={handleOpenWorkItemConversation}
-          onRunLoopRound={handleRunLoopRound}
-          onRunContract={handleRunContract}
-          onOpenConversation={handleOpenConversation}
-          onWorkspaceDeleted={handleWorkspaceDeleted}
-          onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-        />
-      </div>
-    );
-  }
-  // Loops 模块视图（rail 第四模块视图）：中栏常驻管理列表（LoopsPanel，与总览
-  // Loops 区块共用 LoopRow）；配置/新建 → 右栏 loopConfig 视图（setLoopConfig
-  // 已接好）——与 模型/Skills/插件/工作项 相同的三列模式。
-  if (activeWorkspace && sidebarView === "loops") {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-        <PanelHeader
-          title="Loops"
-          meta={activeWorkspace.name}
-        />
-        <LoopsPanel
-          workspace={activeWorkspace}
-          onOpenLoopConfig={(target) => setLoopConfig(target)}
-          onOpenFiles={(name) => {
-            // 定位信号路由到右栏固定的「文件」tab（中栏工作台已无文件段）。
-            updateActiveTab({ activeFileTabId: FILES_TAB_ID, rightPanelOpen: true });
-            setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
-          }}
-          onRunRound={(name) => handleRunLoopDirect(activeWorkspace, name)}
-        />
-      </div>
-    );
-  }
-  // Module views (workbench / knowledge) + the home panel.
+  // 工作台会话列表（W-中：中栏只剩这一种模块视图；工作项/知识库/Loops 在家 tab hub）。
   return (
     <WorkspaceSidebar
       activeWorkspace={activeWorkspace}
-      activeView={sidebarView}
+      activeView="workbench"
       workspaces={workspaces}
       selectedSessionId={selectedSession?.id ?? homeSession?.id ?? null}
       runningSessionIds={sessionActivity.runningIds}
@@ -334,11 +261,9 @@ const renderMiddleColumn = () => {
       }}
       onNewSession={handleWorkspaceNewSession}
       onSelectSession={handleSelectSession}
+      onOpenSessionInNewTab={openSessionTab}
       onOpenFile={handleOpenFile}
-      onSessionRemoved={(id) => {
-        updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
-        setRefreshKey((k) => k + 1);
-      }}
+      onSessionRemoved={handleSessionRemoved}
     />
   );
   };
@@ -409,16 +334,21 @@ const renderMiddleColumn = () => {
     <div className="app-shell-center" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
       <ChatToolbar />
 
-      <WorkspaceTabBar
+      <SessionTabBar
+        tabs={tabs}
+        activeTabId={activeTabId}
         workspaces={workspaces}
-        tabIds={tabs.map((t) => t.id)}
-        activeWorkspaceId={activeWorkspace?.id ?? null}
-        activityByWorkspaceId={workspaceActivity}
+        runningIds={sessionActivity.runningIds}
+        completedIds={sessionActivity.completedIds}
+        workspaceActivity={workspaceActivity}
         onSelectHome={handleReturnHome}
-        onSelectWorkspace={handleOpenWorkspace}
-        onCloseWorkspace={handleCloseWorkspaceTab}
-        onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is WorkspaceTabState => Boolean(t)))}
-        onPickWorkspace={handleOpenWorkspaceToChat}
+        onSelectTab={(id: string) => {
+          if (id !== activeTabId) handleSelectTab(id);
+        }}
+        onCloseTab={closeTab}
+        onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is SessionTabState => Boolean(t)))}
+        onNewSession={handleWorkspaceNewSession}
+        onPickWorkspace={handleOpenWorkspace}
       />
 
       {/* Main content: a config view (模型/Skills/插件 — desktop rail icons)
@@ -482,10 +412,28 @@ const renderMiddleColumn = () => {
                 meta={workspaceSettingsName ?? activeWorkspace?.name ?? undefined}
                 onClose={() => setSettingsPage("index")}
               />
-              <div
-                ref={setConfigPortalNode}
-                style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-              />
+              {/* 工作区列表 + 单个详情都在中央内容区（2026-09 搬家：不再拆中栏窄列
+                  + 右栏 portal）。inline split = 左 300px 列表 + 右详情并排；
+                  「添加仓库」深链仍走 openRepositoryFormRequest → 选中项自动开表单。 */}
+              <div style={{ flex: 1, minHeight: 0, padding: "10px 12px", display: "flex", flexDirection: "column" }}>
+                <WorkspaceManager
+                  open
+                  embedded
+                  initialSection="workspaces"
+                  split={{ inline: true }}
+                  onSelectedWorkspaceChange={handleWorkspaceSettingsSelection}
+                  activeWorkspacePath={activeWorkspace?.path ?? null}
+                  openRepositoryFormRequest={openRepositoryFormRequest}
+                  onClose={() => {}}
+                  onOpenWorkspace={handleOpenWorkspace}
+                  onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                  onRunLoopRound={handleRunLoopRound}
+                  onRunContract={handleRunContract}
+                  onOpenConversation={handleOpenConversation}
+                  onWorkspaceDeleted={handleWorkspaceDeleted}
+                  onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+                />
+              </div>
             </div>
           ) : sidebarView === "settings" && settingsPage === "preferences" ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -507,33 +455,84 @@ const renderMiddleColumn = () => {
               <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }} />
             </div>
           )
-        ) : activeWorkspace && workspaceView === "overview" ? (
+        ) : activeTab?.kind === "workspace-home" ? (
+          hubView === "work-items" ? (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title="工作项"
+                meta={activeTab.workspace.name}
+                onBack={() => setHubView("overview")}
+                backLabel="总览"
+              />
+              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+                <WorkspaceManager
+                  open
+                  embedded
+                  initialSection="work-items"
+                  activeWorkspacePath={activeTab.workspace.path}
+                  initialWorkItemKey={selectedWorkItemKey}
+                  createWorkItemRequest={createWorkItemRequest}
+                  workItemSplit={{ portalTarget: configPortalNode }}
+                  onSelectedWorkItemChange={setWorkItemDetail}
+                  closeWorkItemDetailRequest={closeWorkItemDetailTick}
+                  onClose={() => {}}
+                  onOpenWorkspace={handleOpenWorkspace}
+                  onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                  onRunLoopRound={handleRunLoopRound}
+                  onRunContract={handleRunContract}
+                  onOpenConversation={handleOpenConversation}
+                  onWorkspaceDeleted={handleWorkspaceDeleted}
+                  onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+                />
+              </div>
+            </div>
+          ) : hubView === "knowledge" ? (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title="知识库"
+                meta={activeTab.workspace.name}
+                onBack={() => setHubView("overview")}
+                backLabel="总览"
+              />
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <KnowledgeBrowser
+                  workspace={activeTab.workspace}
+                  onOpenFile={handleOpenFile}
+                  refreshKey={explorerRefreshKey}
+                />
+              </div>
+            </div>
+          ) : (
           <WorkspaceOverview
-            workspace={activeWorkspace}
+            workspace={activeTab.workspace}
             onNewSession={handleWorkspaceNewSession}
             onOpenSettings={() => {
               setOpenRepositoryFormRequest(undefined);
               handleSidebarSwitchView("settings");
               setSettingsPage("workspace");
             }}
-            onOpenWorkItems={() => handleSidebarSwitchView("work-items")}
+            onOpenWorkItems={() => setHubView("work-items")}
             onCreateWorkItem={handleCreateWorkItem}
             onSelectSession={handleSelectSession}
             onSwitchSidebarView={(view) => {
-              if (view === "knowledge" || view === "workbench") handleSidebarSwitchView(view);
+              // 仓库行 → 激活右栏「文件」tab 浏览；知识库行 → 家 tab hub 知识库视图。
+              if (view === "knowledge") {
+                setHubView("knowledge");
+              } else {
+                updateActiveTab({ activeFileTabId: FILES_TAB_ID, rightPanelOpen: true });
+              }
             }}
+            onRunLoop={(name) => handleRunLoopDirect(activeTab.workspace, name)}
             onAddRepository={() => {
               handleSidebarSwitchView("settings");
               setSettingsPage("workspace");
               setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
             }}
-            onSessionDeleted={(id) => {
-              setRefreshKey((key) => key + 1);
-              updateActiveTab((tab) => (tab.session?.id === id ? { session: null } : {}));
-            }}
+            onSessionDeleted={handleSessionRemoved}
             onOpenLoopConfig={(target) => setLoopConfig(target)}
             loopsRefreshKey={loopsRefreshKey}
           />
+          )
         ) : showChat ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -541,6 +540,7 @@ const renderMiddleColumn = () => {
                 reloadSignal={sessionKey}
                 session={selectedSession}
                 newSessionCwd={effectiveNewSessionCwd}
+                draftKeyOverride={activeTab?.kind === "new-session" ? activeTab.id : undefined}
                 onAgentEnd={handleAgentEnd}
                 onSessionCreated={handleSessionCreated}
                 onSessionForked={handleSessionForked}

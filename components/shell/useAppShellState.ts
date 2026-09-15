@@ -19,39 +19,34 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { LoopConfigTarget } from "@/components/LoopsConfig";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
-import { type Tab, FILES_TAB_ID } from "../TabBar";
+import { type Tab, FILES_TAB_ID } from "@/lib/tab-types";
+import {
+  type SessionTabState,
+  createSessionTab,
+  createNewSessionTab,
+  createHomeTab,
+  sessionTabId,
+  homeTabId,
+  newSessionTabId,
+  resolveOpenSessionTarget,
+  nextActiveTabId,
+  tabQuery,
+  serializeTabs,
+  parseStoredTabs,
+  restoreTabs,
+} from "@/lib/session-tabs";
 
 type SessionCopyField = "file" | "id";
+
+/** 工作区家 tab（总览）内的 hub 子视图：overview 仪表盘 / 工作项管理面 /
+ * 知识库浏览（W-中收敛，docs/session-tabs-design.md Phase 2）。 */
+export type HubView = "overview" | "work-items" | "knowledge";
 type AutoNameStatus =
   | { kind: "idle" }
   | { kind: "naming" }
   | { kind: "success" }
   | { kind: "error"; message: string };
 
-/** The right column's content view: the overview dashboard is the landing
- *  state, chat takes over once a session is selected / a new session starts.
- *  (The former "settings" / "work-items" / "loops" values moved to the middle
- *  column panels — legacy URLs map onto panel switches in applyUrlToTabs.) */
-type WorkspaceView = "overview" | "chat";
-
-/**
- * One open workspace tab. All per-tab view state (selected session, file tabs,
- * panel state …) lives here, so switching tabs is just changing `activeTabId` —
- * there is no snapshot capture/restore. The URL is a write-only projection of
- * the active tab; popstate (back/forward) and the initial mount are the only
- * places the URL drives state.
- */
-export interface WorkspaceTabState {
-  id: string;
-  workspace: WorkspaceSummary;
-  view: WorkspaceView;
-  session: SessionInfo | null;
-  newSessionCwd: string | null;
-  workItemKey: string | null;
-  fileTabs: Tab[];
-  activeFileTabId: string | null;
-  rightPanelOpen: boolean;
-}
 const LANGUAGE_MENU_WIDTH = 176;
 // Desktop sidebar is drag-resizable (handle between sidebar and center). Width is
 // persisted in localStorage; clamped to these bounds. Mobile keeps a fixed drawer.
@@ -67,6 +62,10 @@ const SIDEBAR_WIDTH_KEY = "pi-sidebar-width";
 const RIGHT_PANEL_MIN_WIDTH = 300;
 const RIGHT_PANEL_WIDTH_KEY = "pi-right-panel-width";
 
+// R2：会话 tab 条持久化（身份 + 顺序 + active；fileTabs/右栏开合不持久化，
+// 重载后为默认态）。失效 id（会话已删/归档、工作区不可用）在恢复时静默跳过。
+const SESSION_TABS_STORAGE_KEY = "pi-session-tabs";
+
 /**
  * The shared shell-state layer — ALL navigation/session/workspace state and
  * handlers, shell-agnostic. `AppShell` calls this once and provides the result
@@ -79,13 +78,23 @@ const RIGHT_PANEL_WIDTH_KEY = "pi-right-panel-width";
  * and the desktop shell ignores.
  */
 export function useAppShellState() {
-  // ---- Workspace tabs ---------------------------------------------------------
-  // Each open workspace is one entry in `tabs`; the active one is `activeTabId`.
-  // Per-tab view state is read directly off the active tab (no snapshot dance),
-  // and the URL is a write-only projection of it.
-  const [tabs, setTabs] = useState<WorkspaceTabState[]>([]);
+  // ---- Session tabs ----------------------------------------------------------
+  // Each open tab (session / new-session placeholder / workspace home) is one
+  // entry in `tabs`; the active one is `activeTabId`. Per-tab view state is
+  // read directly off the active tab (no snapshot dance), and the URL is a
+  // write-only projection of it. The workspace context (`activeWorkspace`)
+  // follows the ACTIVE tab — the same chain the old workspace-tab model used.
+  const [tabs, setTabs] = useState<SessionTabState[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  // MRU of WORKSPACE ids (for the home composer's default workspace pick) —
+  // activateTab pushes the activated tab's workspace.id.
   const [mruIds, setMruIds] = useState<string[]>([]);
+  // Tabs mirror for stable callbacks (activateTab reads it to resolve the
+  // workspace for MRU without depending on `tabs`).
+  const tabsRef = useRef<SessionTabState[]>([]);
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
   // 首页无主新会话页（B1 原地切换）：open 时首页主区渲染工作区选择器 + composer；
   // 任何 tab 切换（含点首页返回）都会将其重置（见 activateTab）。
   const [homeNewSession, setHomeNewSession] = useState<{ open: boolean; workspaceId: string | null }>({ open: false, workspaceId: null });
@@ -103,9 +112,8 @@ export function useAppShellState() {
   const [navReady, setNavReady] = useState(false);
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
   const activeWorkspace = activeTab?.workspace ?? null;
-  const selectedSession = activeTab?.session ?? null;
-  const newSessionCwd = activeTab?.newSessionCwd ?? null;
-  const workspaceView = activeTab?.view ?? "overview";
+  const selectedSession = activeTab?.kind === "session" ? activeTab.session : null;
+  const newSessionCwd = activeTab?.kind === "new-session" ? activeTab.workspace.path : null;
   const selectedWorkItemKey = activeTab?.workItemKey ?? null;
   const fileTabs = activeTab?.fileTabs ?? [];
   const activeFileTabId = activeTab?.activeFileTabId ?? null;
@@ -130,6 +138,9 @@ export function useAppShellState() {
   // (its bar has no config icons — the settings index subpages serve the same
   // content there via the components' embedded mode).
   const [configView, setConfigView] = useState<ConfigView | null>(null);
+  // 家 tab（工作区总览）内的 hub 子视图（W-中：知识库/工作项/Loops 面板收进
+  // 总览 hub；Loops 本就是总览区块）。Session-only：随 activateTab 重置，不持久化。
+  const [hubView, setHubView] = useState<HubView>("overview");
   // The right column's config portal target (the div under the config view's
   // PanelHeader). The middle-column split panel (ModelsConfig/SkillsConfig/
   // PluginsConfig in `split` mode) portals its DETAIL pane into this node —
@@ -522,7 +533,7 @@ export function useAppShellState() {
   // appear in a navigation effect's dependency array (the race root cause).
   const updateTab = useCallback((
     id: string,
-    patch: Partial<WorkspaceTabState> | ((tab: WorkspaceTabState) => Partial<WorkspaceTabState>),
+    patch: Partial<SessionTabState> | ((tab: SessionTabState) => Partial<SessionTabState>),
   ) => {
     setTabs((prev) => prev.map((t) => {
       if (t.id !== id) return t;
@@ -532,35 +543,20 @@ export function useAppShellState() {
   }, []);
 
   const updateActiveTab = useCallback((
-    patch: Partial<WorkspaceTabState> | ((tab: WorkspaceTabState) => Partial<WorkspaceTabState>),
+    patch: Partial<SessionTabState> | ((tab: SessionTabState) => Partial<SessionTabState>),
   ) => {
     if (activeTabId) updateTab(activeTabId, patch);
   }, [activeTabId, updateTab]);
 
-  // Register a workspace as a tab if it isn't open yet (with its default view),
-  // keep the master workspace list in sync, and touch MRU. Returns the tab id.
-  const ensureTab = useCallback((workspace: WorkspaceSummary): string => {
+  /** 家 tab（U1：每工作区一个）：已开则返回既有 id，未开则追加。同时同步
+   *  workspaces 主列表（capability/仓库等在 tab 打开期间会变）。 */
+  const ensureHomeTab = useCallback((workspace: WorkspaceSummary): string => {
     setWorkspaces((current) => current.some((w) => w.id === workspace.id)
       ? current.map((w) => (w.id === workspace.id ? workspace : w))
       : [...current, workspace]);
-    setTabs((prev) => {
-      if (prev.some((t) => t.id === workspace.id)) return prev;
-      const tab: WorkspaceTabState = {
-        id: workspace.id,
-        workspace,
-        // The overview dashboard is the unconditional landing view.
-        view: "overview",
-        session: null,
-        newSessionCwd: null,
-        workItemKey: null,
-        fileTabs: [],
-        activeFileTabId: null,
-        // 右栏默认关闭（用户反馈）；右上角按钮或显式打开文件时展开。
-        rightPanelOpen: false,
-      };
-      return [...prev, tab];
-    });
-    return workspace.id;
+    const id = homeTabId(workspace.id);
+    setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, createHomeTab(workspace)]));
+    return id;
   }, []);
 
   // Make a tab active (or go home with null). Closes overlays and clears the
@@ -569,7 +565,13 @@ export function useAppShellState() {
     setWorkspaceManagerOpen(false);
     setProjectTrustDialogOpen(false);
     setActiveTopPanel(null);
-    if (id) setMruIds((ids) => [id, ...ids.filter((x) => x !== id)]);
+    setHubView("overview");
+    if (id) {
+      // MRU 记的是工作区 id（首页 composer 默认工作区的选源）；新 tab 尚未
+      // 进入 tabsRef 时跳过本次（best-effort，不影响正确性）。
+      const tab = tabsRef.current.find((t) => t.id === id);
+      if (tab) setMruIds((ids) => [tab.workspace.id, ...ids.filter((x) => x !== tab.workspace.id)]);
+    }
     setActiveTabId(id);
     setHomeNewSession({ open: false, workspaceId: null });
     setHomeSession(null);
@@ -592,11 +594,90 @@ export function useAppShellState() {
     else window.history.pushState(null, "", target);
   }, []);
 
-  const buildTabQuery = useCallback((tab: WorkspaceTabState): string => {
-    const parts = [`workspace=${encodeURIComponent(tab.id)}`, `view=${tab.view === "chat" ? "chat" : "overview"}`];
-    if (tab.view === "chat" && tab.session) parts.push(`session=${encodeURIComponent(tab.session.id)}`);
-    return parts.join("&");
-  }, []);
+  /** U1 会话 tab 唯一性：已开则聚焦（制新 session 信息），未开则新建并激活。
+   *  归属工作区由 session.cwd 派生（最长前缀）；无归属时回退当前 tab 的工作区
+   *  上下文，两者皆无则不开（与旧模型「无归属会话不可开」一致）。 */
+  const openSessionTab = useCallback((session: SessionInfo): string | null => {
+    const owner = workspaceForSession(session, workspaces) ?? activeWorkspace;
+    if (!owner) return null;
+    const id = sessionTabId(session.id);
+    setTabs((prev) => prev.some((t) => t.id === id)
+      ? prev.map((t) => (t.id === id ? { ...t, session, workspace: owner } : t))
+      : [...prev, createSessionTab(owner, session)]);
+    activateTab(id);
+    setSessionKey((k) => k + 1);
+    setSystemPrompt(null);
+    focusChat();
+    navigateUrl(tabQuery(createSessionTab(owner, session)));
+    return id;
+  }, [workspaces, activeWorkspace, activateTab, navigateUrl, focusChat]);
+
+  const openNewSessionTab = useCallback((workspace: WorkspaceSummary): string => {
+    const id = newSessionTabId(
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    setTabs((prev) => [...prev, createNewSessionTab(workspace, id)]);
+    activateTab(id);
+    setSessionKey((k) => k + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
+    setSystemPrompt(null);
+    focusChat();
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`);
+    return id;
+  }, [activateTab, navigateUrl, focusChat]);
+
+  /** X1 关 tab：草稿确认（会话 tab 用 session.id 键，占位 tab 用 tab.id 键）
+   *  → 邻居规则回落（先左后右；一个不剩 → 首页）。会话删除/归档的自动关
+   *  闭路径传 skipDraftConfirm（草稿已无意义）。 */
+  const closeTab = useCallback((id: string, options?: { skipDraftConfirm?: boolean }) => {
+    const tab = tabs.find((t) => t.id === id) ?? null;
+    if (tab && !options?.skipDraftConfirm) {
+      const draftKey = tab.kind === "session" && tab.session ? tab.session.id : tab.id;
+      const draft = getDraft(draftKey);
+      if (draft && (draft.value || draft.images.length > 0)) {
+        if (!window.confirm("这个 tab 有未发送的聊天草稿。要关闭并丢弃草稿吗？")) return;
+        clearDraft(draftKey);
+      }
+    }
+    const remaining = tabs.filter((t) => t.id !== id);
+    setTabs(remaining);
+    if (activeTabId !== id) return;
+    const nextId = nextActiveTabId(tabs, id);
+    if (nextId) {
+      activateTab(nextId);
+      const nextTab = remaining.find((t) => t.id === nextId);
+      navigateUrl(nextTab ? tabQuery(nextTab) : null);
+    } else {
+      activateTab(null);
+      navigateUrl("tab=home");
+    }
+  }, [tabs, activeTabId, activateTab, navigateUrl]);
+
+  /** 会话删除/归档：其 tab 自动关闭（X1 邻居回落；草稿随会话失效免确认）+ 列表刷新。 */
+  const handleSessionRemoved = useCallback((sessionId: string) => {
+    setRefreshKey((k) => k + 1);
+    const id = sessionTabId(sessionId);
+    if (tabsRef.current.some((t) => t.id === id)) {
+      closeTab(id, { skipDraftConfirm: true });
+    }
+  }, [closeTab]);
+
+  /** tab 条点击：激活既有 tab + URL 投影 + ChatWindow 重建信号（M1：切 tab =
+   *  与切会话同构的重建）。家 tab 不需要重建信号（无 ChatWindow）。 */
+  const handleSelectTab = useCallback((id: string) => {
+    const tab = tabsRef.current.find((t) => t.id === id);
+    if (!tab) return;
+    activateTab(id);
+    if (tab.kind !== "workspace-home") {
+      setSessionKey((k) => k + 1);
+      setSystemPrompt(null);
+      focusChat();
+    }
+    navigateUrl(tabQuery(tab));
+  }, [activateTab, navigateUrl, focusChat]);
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -671,40 +752,103 @@ export function useAppShellState() {
       return;
     }
 
-    // Legacy URL views (settings / work-items) map onto middle-column panels —
-    // the right column only knows overview/chat now.
-    const panelFromLegacy: Partial<Record<string, SidebarView>> = {
-      settings: "settings",
-      "work-items": "work-items",
-    };
-    const view: WorkspaceView = rawView === "chat" ? "chat" : "overview";
-    const legacyPanel = rawView ? panelFromLegacy[rawView] : undefined;
-    ensureTab(workspace);
-    updateTab(workspaceId, {
-      view,
-      session,
-      newSessionCwd: view === "chat" && !session ? workspace.path : null,
-      workItemKey: legacyPanel === "work-items" ? itemKey : null,
-    });
-    // Persist the legacy deep-linked panel BEFORE activating the tab — the
-    // activeWorkspace effect re-derives `sidebarView` from these keys on tab
+    // Legacy URL views: settings → 全局面板；work-items → 家 tab hub（W-中后
+    // 工作项面板收进总览 hub，不再有中栏面板可落）。
+    const isChat = rawView === "chat";
+    const legacySettings = rawView === "settings";
+    const legacyWorkItems = rawView === "work-items";
+    // Persist the legacy settings deep-link BEFORE activating the tab — the
+    // activeWorkspace effect re-derives `sidebarView` from this key on tab
     // switch and would otherwise clobber an immediate setState.
-    if (legacyPanel) {
+    if (legacySettings) {
       try {
-        if (legacyPanel === "settings") localStorage.setItem(GLOBAL_PANEL_KEY, "settings");
-        else localStorage.setItem(`pi-active-view:${workspaceId}`, legacyPanel);
+        localStorage.setItem(GLOBAL_PANEL_KEY, "settings");
       } catch { /* ignore */ }
     }
-    activateTab(workspaceId);
-  }, [workspaces, sessionActivity.sessions, ensureTab, updateTab, activateTab]);
+    if (isChat && session) {
+      // 会话 tab：已开则刷新 session 信息（保留 F1 文件 tab 状态），未开则新建。
+      const id = sessionTabId(session.id);
+      setTabs((prev) => prev.some((t) => t.id === id)
+        ? prev.map((t) => (t.id === id ? { ...t, session, workspace } : t))
+        : [...prev, createSessionTab(workspace, session)]);
+      activateTab(id);
+      return;
+    }
+    if (isChat) {
+      // 新会话占位 tab（view=chat 无 session）：复用该工作区已有的最新占位 tab，
+      // 避免 popstate 来回导航叠加占位。
+      const existing = [...tabsRef.current].reverse().find((t) => t.kind === "new-session" && t.workspace.id === workspaceId);
+      if (existing) {
+        activateTab(existing.id);
+        return;
+      }
+      const id = newSessionTabId(`${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      setTabs((prev) => [...prev, createNewSessionTab(workspace, id)]);
+      activateTab(id);
+      return;
+    }
+    // 家 tab（overview 落地；legacy work-items 深链落到 hub 工作项视图——
+    // 必须在 activateTab 之后 set（activateTab 会重置 hubView）。）
+    const homeId = ensureHomeTab(workspace);
+    activateTab(homeId);
+    if (legacyWorkItems) {
+      setHubView("work-items");
+      if (itemKey) updateTab(homeId, { workItemKey: itemKey });
+    }
+  }, [workspaces, sessionActivity.sessions, ensureHomeTab, updateTab, activateTab]);
 
-  // Initial restore: once workspaces are loaded, open whatever the URL points at.
+  // Initial restore: once workspaces are loaded, (a) R2 恢复 tab 条全量（URL
+  // 深链优先决定 active；URL 为首页则停在首页；URL 为空才用恢复的 active），
+  // (b) 打开 URL 指向的 tab。恢复用的会话列表自取一次（不依赖 sessionActivity
+  // 的异步时序）；两者都是 best-effort，失败不阻断导航。
   const initialNavDoneRef = useRef(false);
   useEffect(() => {
     if (!workspacesLoaded || initialNavDoneRef.current) return;
     initialNavDoneRef.current = true;
-    void applyUrlToTabs(new URLSearchParams(window.location.search)).finally(() => setNavReady(true));
-  }, [workspacesLoaded, applyUrlToTabs]);
+    const params = new URLSearchParams(window.location.search);
+    const urlPointsSomewhere = Boolean(params.get("workspace") || params.get("tab"));
+    void (async () => {
+      let restoredTabs: SessionTabState[] = [];
+      let restoredActive: string | null = null;
+      try {
+        const stored = parseStoredTabs(localStorage.getItem(SESSION_TABS_STORAGE_KEY));
+        if (stored && stored.tabs.length > 0) {
+          let sessions = sessionActivity.sessions;
+          if (sessions.length === 0) {
+            try {
+              const r = await fetch("/api/sessions");
+              const d = r.ok ? await r.json() as { sessions?: SessionInfo[] } : null;
+              sessions = d?.sessions ?? [];
+            } catch { /* fall through with empty list — session tabs skip */ }
+          }
+          const result = restoreTabs(stored, workspaces, sessions);
+          restoredTabs = result.tabs;
+          restoredActive = result.activeTabId;
+        }
+      } catch { /* restore is best-effort */ }
+      await applyUrlToTabs(params);
+      if (restoredTabs.length > 0) {
+        // 合并：URL 深链新建的 tab 靠右（浏览器「恢复会话 + 新开 tab」的惯例）；
+        // 与恢复项重复的（同会话/同家）以 URL 侧为准。
+        setTabs((prev) => {
+          const ids = new Set(prev.map((t) => t.id));
+          return [...restoredTabs.filter((t) => !ids.has(t.id)), ...prev];
+        });
+        if (!urlPointsSomewhere && restoredActive) {
+          setActiveTabId(restoredActive);
+        }
+      }
+    })().finally(() => setNavReady(true));
+  }, [workspacesLoaded, workspaces, sessionActivity.sessions, applyUrlToTabs]);
+
+  // R2 写入：tab 身份 + 顺序 + active（便宜：纯序列化）。navReady 前不写，避免
+  // 把恢复前的空态覆盖进存储。
+  useEffect(() => {
+    if (!navReady) return;
+    try {
+      localStorage.setItem(SESSION_TABS_STORAGE_KEY, JSON.stringify(serializeTabs(tabs, activeTabId)));
+    } catch { /* ignore */ }
+  }, [tabs, activeTabId, navReady]);
 
   // Back/forward: the only other place the URL drives state.
   useEffect(() => {
@@ -721,7 +865,7 @@ export function useAppShellState() {
     setTabs((prev) => {
       let changed = false;
       const next = prev.map((t) => {
-        const fresh = workspaces.find((w) => w.id === t.id);
+        const fresh = workspaces.find((w) => w.id === t.workspace.id);
         if (fresh && fresh !== t.workspace) {
           changed = true;
           return { ...t, workspace: fresh };
@@ -742,27 +886,15 @@ export function useAppShellState() {
       .catch(() => {});
   }, [loadWorkspaces]);
 
-  // Open a session straight from the home page — 反馈修订：不跳转/不激活工作区
-  // tab，会话聊天直接落在首页主区，左侧中栏保持首页菜单。会话归属工作区
-  // 由磁盘/daemon 决定，之后随时可在对应工作区里继续。
+  // 首页点会话 = 打开它的会话 tab 并激活（会话 tab 模型；无归属会话在
+  // openSessionTab 内回退当前上下文工作区或忽略）。首页保持纯启动器。
   const handleOpenSessionFromHome = useCallback((session: SessionInfo) => {
-    // 首页点会话 = 进入它所属的工作区 tab 并选中该会话（2026-09 反馈修订：
-    // 不再停在首页上下文 homeSession——会话属于工作区，就在工作区里打开，
-    // 首页保持纯启动器；无归属会话（理论不达，HomeSessionGroups 已过滤）维持忽略）。
-    const owner = workspaceForSession(session, workspaces);
-    if (!owner) return;
     setWorkspaceManagerOpen(false);
     setConfigView(null);
     setWorkItemDetail(null);
     setLoopConfig(null);
-    const id = ensureTab(owner);
-    updateTab(id, { session, newSessionCwd: null, view: "chat" });
-    activateTab(id);
-    setSessionKey((key) => key + 1);
-    setSystemPrompt(null);
-    focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(id)}&view=chat&session=${encodeURIComponent(session.id)}`);
-  }, [workspaces, ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
+    openSessionTab(session);
+  }, [openSessionTab]);
 
   const handleSelectSession = useCallback((session: SessionInfo) => {
     // 首页（无活动 tab）点会话 = 跨工作区直达，委托给首页管道，不再静默吞掉。
@@ -770,19 +902,42 @@ export function useAppShellState() {
       handleOpenSessionFromHome(session);
       return;
     }
-    // Opening a session is an explicit “show me the chat” intent — drop the
-    // right-column config view so the chat is actually visible.
+    // U1：该会话已有 tab → 聚焦即可（会话全局唯一 tab）。
+    const existingId = sessionTabId(session.id);
+    if (tabs.some((t) => t.id === existingId)) {
+      setConfigView(null);
+      setWorkItemDetail(null);
+      setLoopConfig(null);
+      activateTab(existingId);
+      setSessionKey((k) => k + 1);
+      setSystemPrompt(null);
+      focusChat();
+      const tab = tabs.find((t) => t.id === existingId);
+      if (tab) navigateUrl(tabQuery(tab));
+      return;
+    }
+    const target = resolveOpenSessionTarget(activeTab);
+    // 家 tab 是枢纽锚点：列表点击开新会话 tab，不吃掉家 tab。
+    if (target === "new-tab") {
+      handleOpenSessionFromHome(session);
+      return;
+    }
+    // C1 morph：当前会话/占位 tab 原地变身（保留 F1 文件 tab 状态）。
     setConfigView(null);
     setWorkItemDetail(null);
     setLoopConfig(null);
-    updateTab(activeTabId, { session, newSessionCwd: null, view: "chat" });
+    const owner = workspaceForSession(session, workspaces) ?? activeTab?.workspace ?? null;
+    if (!owner) return;
+    const fresh = createSessionTab(owner, session);
+    setTabs((prev) => prev.map((t) => (t.id === activeTabId
+      ? { ...fresh, fileTabs: t.fileTabs, activeFileTabId: t.activeFileTabId, rightPanelOpen: t.rightPanelOpen }
+      : t)));
+    activateTab(existingId);
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
-    // Opening a session is a "show me the chat" intent — on mobile that means
-    // switching to the 会话 tab (focus signal; the desktop shell ignores it).
     focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`);
-  }, [activeTabId, handleOpenSessionFromHome, updateTab, navigateUrl, focusChat]);
+    navigateUrl(tabQuery(fresh));
+  }, [activeTabId, activeTab, tabs, workspaces, handleOpenSessionFromHome, activateTab, navigateUrl, focusChat]);
 
   // 按会话 id 打开（subagent 子会话 / 工作项关联会话）。走专门的 locate 端点：
   // 优先 probe daemon 拿权威元信息（会话在 daemon 进程里，它最先知道），
@@ -793,100 +948,48 @@ export function useAppShellState() {
       .then((r) => (r.ok ? (r.json() as Promise<{ session: SessionInfo }>) : null))
       .then((d) => {
         if (d?.session) {
-          handleSelectSession(d.session);
+          openSessionTab(d.session);
           // locate 已让磁盘缓存失效；触发侧边栏重拉，让这个新会话立即出现在会话列表里。
           setRefreshKey((k) => k + 1);
         }
       })
       .catch(() => {});
-  }, [handleSelectSession]);
+  }, [openSessionTab]);
 
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
-    const id = ensureTab(workspace);
+    // P1：开工作区 = 开/激活它的家 tab（总览落地；会话 tab 模型下「进入工作区」
+    // 与「看它的总览」是同一件事）。
+    const id = ensureHomeTab(workspace);
     activateTab(id);
-    // Project the (possibly already-open) tab to the URL. `tabs` may not yet
-    // reflect a brand-new tab, so fall back to the workspace's default view.
-    const existing = tabs.find((t) => t.id === id);
-    navigateUrl(existing ? buildTabQuery(existing) : `workspace=${encodeURIComponent(id)}&view=overview`);
-  }, [ensureTab, activateTab, tabs, buildTabQuery, navigateUrl]);
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=overview`);
+  }, [ensureHomeTab, activateTab, navigateUrl]);
 
-  /** Overview 仪表盘的回头路：view 只在新 tab 首落时为 overview，此后 9 处切换全部设 chat——
-   *  tab 一旦进过 chat，Overview（含 Loops 管理区块、快速操作、活跃工作项）便再无入口。
-   *  工作台 PanelHeader「总览」按钮 → 桌面把主区切回 overview（会话绑定保留，回去路径
-   *  照旧：新建会话/选会话/工作项）；移动端由 MobileShell 用本地栈接管（onShowOverview prop）。 */
+  /** Overview（家 tab）的回头路：工作台 PanelHeader「总览」按钮 → 开/激活当前
+   *  工作区的家 tab；移动端由 MobileShell 用本地栈接管（onShowOverview prop）。 */
   const handleShowOverview = useCallback(() => {
-    if (!activeTabId) return;
+    if (!activeWorkspace) return;
     setConfigView(null);
     setWorkItemDetail(null);
     setLoopConfig(null);
-    updateTab(activeTabId, { view: "overview" });
-    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=overview`);
-  }, [activeTabId, updateTab, navigateUrl]);
-
-  // The tab-bar ＋ picker: open (or switch to) a workspace and land in its
-  // CHAT view. An already-open tab keeps its session binding (continue the
-  // conversation); a fresh one gets the new-session composer. Mirrors
-  // handleSelectSession's "show me the chat" intent (drop the right-column
-  // overlays, focus the mobile 会话 tab) but never touches the session.
-  const handleOpenWorkspaceToChat = useCallback((workspace: WorkspaceSummary) => {
-    setConfigView(null);
-    setWorkItemDetail(null);
-    setLoopConfig(null);
-    const id = ensureTab(workspace);
-    const existing = tabs.find((t) => t.id === id);
-    updateTab(id, existing?.session
-      ? { view: "chat" }
-      : { view: "chat", newSessionCwd: existing?.newSessionCwd ?? workspace.path });
+    const id = ensureHomeTab(activeWorkspace);
     activateTab(id);
-    const parts = [`workspace=${encodeURIComponent(id)}`, "view=chat"];
-    if (existing?.session) parts.push(`session=${encodeURIComponent(existing.session.id)}`);
-    navigateUrl(parts.join("&"));
-    focusChat();
-  }, [ensureTab, updateTab, activateTab, tabs, navigateUrl, focusChat]);
+    navigateUrl(`workspace=${encodeURIComponent(activeWorkspace.id)}&view=overview`);
+  }, [activeWorkspace, ensureHomeTab, activateTab, navigateUrl]);
 
   const handleWorkspaceNewSession = useCallback(() => {
-    if (!activeTabId) return;
+    // 新建会话 = 开一个新的占位 tab（U1 豁免：同工作区可并存多个 composer）；
+    // 当前会话视图不被替换。
+    if (!activeWorkspace) return;
     setConfigView(null);
     setWorkItemDetail(null);
     setLoopConfig(null);
-    updateTab(activeTabId, { view: "chat", session: null, newSessionCwd: activeWorkspace?.path ?? null });
-    setSessionKey((k) => k + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
-    setSystemPrompt(null);
-    focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat`);
-  }, [activeTabId, activeWorkspace, updateTab, navigateUrl, focusChat]);
+    openNewSessionTab(activeWorkspace);
+  }, [activeWorkspace, openNewSessionTab]);
 
   const handleReturnHome = useCallback(() => {
     activateTab(null);
     navigateUrl("tab=home");
   }, [activateTab, navigateUrl]);
-
-  const handleCloseWorkspaceTab = useCallback((workspaceId: string) => {
-    const tab = tabs.find((t) => t.id === workspaceId) ?? null;
-    const draftKey = tab?.session?.id ?? (tab?.newSessionCwd ? `new:${tab.newSessionCwd}` : null);
-    const draft = draftKey ? getDraft(draftKey) : null;
-    if (draft && (draft.value || draft.images.length > 0)) {
-      const shouldClose = window.confirm("这个工作区有未发送的聊天草稿。要关闭并丢弃草稿吗？");
-      if (!shouldClose) return;
-      clearDraft(draftKey!);
-    }
-    const remaining = tabs.filter((t) => t.id !== workspaceId);
-    setTabs(remaining);
-    setMruIds((ids) => ids.filter((id) => id !== workspaceId));
-    if (activeTabId !== workspaceId) return;
-
-    const nextId = mruIds.find((id) => id !== workspaceId && remaining.some((t) => t.id === id));
-    if (nextId) {
-      activateTab(nextId);
-      const nextTab = remaining.find((t) => t.id === nextId);
-      navigateUrl(nextTab ? buildTabQuery(nextTab) : `workspace=${encodeURIComponent(nextId)}`);
-    } else {
-      activateTab(null);
-      navigateUrl("tab=home");
-    }
-  }, [tabs, activeTabId, mruIds, activateTab, buildTabQuery, navigateUrl]);
 
   const handleCreateWorkspace = useCallback(() => {
     // Opening the manager from home; don't run it through activateTab (which
@@ -942,8 +1045,22 @@ export function useAppShellState() {
 
   const handleWorkspaceDeleted = useCallback((workspace: WorkspaceSummary) => {
     setWorkspaces((current) => current.filter((item) => item.id !== workspace.id));
-    handleCloseWorkspaceTab(workspace.id);
-  }, [handleCloseWorkspaceTab]);
+    // 关掉该工作区的全部 tab（家 tab + 会话/占位 tab）；活动 tab 在其中则落到
+    // 移除块位置的最近残留 tab，一个不剩 → 首页。工作区删除无需草稿确认。
+    const index = tabs.findIndex((t) => t.workspace.id === workspace.id);
+    const remaining = tabs.filter((t) => t.workspace.id !== workspace.id);
+    setTabs(remaining);
+    if (index !== -1 && activeTab && activeTab.workspace.id === workspace.id) {
+      const next = remaining[Math.min(index, remaining.length - 1)] ?? null;
+      if (next) {
+        activateTab(next.id);
+        navigateUrl(tabQuery(next));
+      } else {
+        activateTab(null);
+        navigateUrl("tab=home");
+      }
+    }
+  }, [tabs, activeTab, activateTab, navigateUrl]);
 
   // ---- 首页无主新会话页（grill 共识：B1 原地切换）-----------------------------
   // 打开时默认选中最近活跃工作区（最近会话所属 → MRU tab → 第一个可用）。
@@ -973,12 +1090,20 @@ export function useAppShellState() {
   }, [focusChat]);
 
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
-    // The work-items panel (full manager) receives the create request.
-    if (activeWorkspace?.capabilities.includes("work-items")) handleSidebarSwitchView("work-items");
+    // W-中：工作项面收进家 tab hub——开/激活家 tab 并切到工作项 hub 视图，
+    // 创建请求送进挂在那里的 WorkspaceManager。移动端由 MobileShell 自己接管
+    // （overview 栈），不经此路径。
+    if (!activeWorkspace?.capabilities.includes("work-items")) {
+      setCreateWorkItemRequest({ type, id: Date.now() });
+      return;
+    }
+    const homeId = ensureHomeTab(activeWorkspace);
+    activateTab(homeId);
+    setHubView("work-items");
     setCreateWorkItemRequest({ type, id: Date.now() });
-    // On mobile, switch to the 工作项 tab so the create form is visible.
-    focusPanel("work-items");
-  }, [activeWorkspace, handleSidebarSwitchView, focusPanel]);
+    // On mobile, switch to the 工作台 tab（overview 栈在那里）。
+    focusPanel("workbench");
+  }, [activeWorkspace, ensureHomeTab, activateTab, focusPanel]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -993,24 +1118,41 @@ export function useAppShellState() {
   // server-computed projectRoot, which the same-project check in
   // handleCwdChange relies on. Hydrate it from the session list so switching
   // worktrees right after creating a session doesn't close the chat.
+  // 按 s:<sessionId> 定位（不按活动 tab：占位转正/fork 后 tab id 会变，
+  // 调用时闭包里的 activeTabId 可能已过期）。
   const hydrateSelectedSession = useCallback((sessionId: string) => {
     void fetch("/api/sessions")
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
         if (!full) return;
-        updateActiveTab((tab) => (tab.session?.id === sessionId && !tab.session.projectRoot ? { session: full } : {}));
+        updateTab(sessionTabId(sessionId), (tab) => (tab.session?.id === sessionId && !tab.session.projectRoot ? { session: full } : {}));
       })
       .catch(() => {});
-  }, [updateActiveTab]);
+  }, [updateTab]);
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
     if (!activeTabId) return;
-    updateTab(activeTabId, { session, newSessionCwd: null });
+    const tab = tabs.find((t) => t.id === activeTabId);
+    if (!tab) return;
+    // 占位 tab 原地转正（U1）：id 换成 s:<sessionId>；若该会话已有 tab（并发
+    // 边角）则并入既有 tab 并关占位。F1 文件 tab 状态随 tab 保留。
+    const newId = sessionTabId(session.id);
+    if (tabs.some((t) => t.id === newId)) {
+      setTabs((prev) => prev
+        .filter((t) => t.id !== tab.id)
+        .map((t) => (t.id === newId ? { ...t, session } : t)));
+      activateTab(newId);
+    } else {
+      setTabs((prev) => prev.map((t) => (t.id === tab.id
+        ? { ...createSessionTab(t.workspace, session), fileTabs: t.fileTabs, activeFileTabId: t.activeFileTabId, rightPanelOpen: t.rightPanelOpen }
+        : t)));
+      activateTab(newId);
+    }
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
-    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(session.id)}`, true);
+    navigateUrl(`workspace=${encodeURIComponent(tab.workspace.id)}&view=chat&session=${encodeURIComponent(session.id)}`, true);
     const pending = pendingWorkItemConversationRef.current;
     pendingWorkItemConversationRef.current = null;
     if (pending) {
@@ -1033,7 +1175,7 @@ export function useAppShellState() {
         })
         .catch(() => {});
     }
-  }, [activeTabId, updateTab, navigateUrl, hydrateSelectedSession]);
+  }, [activeTabId, tabs, activateTab, navigateUrl, hydrateSelectedSession]);
 
   const handleOpenWorkItemConversation = useCallback(async (
     workspace: WorkspaceSummary,
@@ -1056,13 +1198,7 @@ export function useAppShellState() {
         if (response.ok) {
           const data = await response.json() as { session?: SessionInfo };
           if (data.session) {
-            ensureTab(workspace);
-            updateTab(workspace.id, { view: "chat", session: data.session, newSessionCwd: null });
-            activateTab(workspace.id);
-            setSessionKey((k) => k + 1);
-            setSystemPrompt(null);
-            focusChat();
-            navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(data.session.id)}`);
+            openSessionTab(data.session);
             return;
           }
         }
@@ -1075,12 +1211,7 @@ export function useAppShellState() {
       workspaceId: workspace.id,
       key: item.key,
     };
-    ensureTab(workspace);
-    updateTab(workspace.id, { view: "chat", session: null, newSessionCwd: workspace.path });
-    activateTab(workspace.id);
-    setSessionKey((key) => key + 1);
-    focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}`, true);
+    openNewSessionTab(workspace);
     const prompt = `请继续处理工作项 ${item.key}（${item.title}）。先调用 workspace_get_work_item 读取现状，再按 Workspace 的 AGENTS.md 和已选 Pi skills 协作；只把关键里程碑写回工作项。`;
     let attempts = 0;
     const timer = window.setInterval(() => {
@@ -1092,7 +1223,7 @@ export function useAppShellState() {
         window.clearInterval(timer);
       }
     }, 50);
-  }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
+  }, [openSessionTab, openNewSessionTab]);
 
   /** 「立即跑一轮」的公共主体（WorkspaceOverview B 按钮与 LoopsPanel「运行」
    *  共用）：POST run 路由（daemon 现有会话面起轮；itemKey 存在时才带优
@@ -1132,19 +1263,13 @@ export function useAppShellState() {
       if (response.ok) {
         const data = await response.json() as { session?: SessionInfo };
         if (data.session) {
-          ensureTab(workspace);
-          updateTab(workspace.id, { view: "chat", session: data.session, newSessionCwd: null });
-          activateTab(workspace.id);
-          setSessionKey((key) => key + 1);
-          setSystemPrompt(null);
-          focusChat();
-          navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat&session=${encodeURIComponent(sessionId)}`);
+          openSessionTab(data.session);
           return;
         }
       }
     } catch { /* fall through */ }
     window.alert("轮已启动，但打开会话视图失败——请从会话列表进入。");
-  }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
+  }, [openSessionTab]);
 
   /** 「立即跑一轮」（spec §4 B 按钮）：带工作项优先键起轮并打开轮会话 tab。 */
   const handleRunLoopRound = useCallback(async (
@@ -1185,27 +1310,15 @@ export function useAppShellState() {
     const text = pattern
       ? `/skill:${pattern} ${verb} ${item.key}`
       : `${verb} ${item.key}`;
-    setDraft(`new:${workspace.path}`, { value: text, images: [] });
-    // The prefill targets a composer that may ALREADY be mounted on the same
-    // draftKey (empty composer already open) — bump the epoch ChatWindow keys
-    // its ChatInput on so the input remounts and re-reads the draft.
-    setComposerEpoch((epoch) => epoch + 1);
-    // Mirror the 新建会话 switch (handleWorkspaceNewSession): hand the right
-    // column back from any open config/work-item detail, land on a fresh
-    // composer bound to the workspace root, reset the per-session chrome.
     setConfigView(null);
     setWorkItemDetail(null);
     setLoopConfig(null);
-    ensureTab(workspace);
-    updateTab(workspace.id, { view: "chat", session: null, newSessionCwd: workspace.path });
-    activateTab(workspace.id);
-    setSessionKey((key) => key + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
-    setSystemPrompt(null);
-    focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`);
-  }, [ensureTab, updateTab, activateTab, navigateUrl, focusChat]);
+    const tabId = openNewSessionTab(workspace);
+    // 草稿键 = 占位 tab id（U1：多 composer 并存互不互踩，修复旧 new:<wsPath> 隐患）；
+    // composerEpoch 强制已挂载的 ChatInput 重读草稿。
+    setDraft(tabId, { value: text, images: [] });
+    setComposerEpoch((epoch) => epoch + 1);
+  }, [openNewSessionTab]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -1249,16 +1362,16 @@ export function useAppShellState() {
   }, [selectedSession?.id]);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
+    // K1：fork 结果开新会话 tab，原对话 tab 原地不动（fork 的典型意图就是
+    // 「另开一条路，原对话留着」）。
     if (!activeTabId) return;
+    const tab = tabs.find((t) => t.id === activeTabId);
+    if (!tab || tab.kind !== "session" || !tab.session) return;
     setRefreshKey((k) => k + 1);
-    setSessionKey((k) => k + 1);
-    updateTab(activeTabId, (tab) => ({
-      session: { ...(tab.session ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }), id: newSessionId },
-      newSessionCwd: null,
-    }));
+    const forked: SessionInfo = { ...tab.session, id: newSessionId };
+    openSessionTab(forked);
     hydrateSelectedSession(newSessionId);
-    navigateUrl(`workspace=${encodeURIComponent(activeTabId)}&view=chat&session=${encodeURIComponent(newSessionId)}`, true);
-  }, [activeTabId, updateTab, navigateUrl, hydrateSelectedSession]);
+  }, [activeTabId, tabs, openSessionTab, hydrateSelectedSession]);
 
   const handleOpenFile = useCallback((
     filePath: string,
@@ -1346,7 +1459,9 @@ export function useAppShellState() {
   // made the click silently do nothing until the cache caught up (felt like
   // "you must wait for the subagent to finish before opening it").
   const handleOpenSessionViewer = useCallback(async (sessionId: string) => {
-    if (!activeTabId) return;
+    // 会话 tab 模型：subagent 子会话等作为顶层会话 tab 打开（保留父会话视图；
+    // U1 去重聚焦）。仍走 locate 端点（daemon probe + 强制磁盘扫描），不依赖
+    // 30s 列表缓存——新建的子会话能立刻打开。
     let info: SessionInfo | undefined;
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
@@ -1356,21 +1471,8 @@ export function useAppShellState() {
       }
     } catch { /* ignore — cannot resolve */ }
     if (!info) return;
-    const sessionInfo = info;
-    const tabId = `session:${sessionId}`;
-    const label = sessionInfo.name?.trim()
-      || (sessionInfo.firstMessage ? sessionInfo.firstMessage.slice(0, 48) : "subagent");
-    updateTab(activeTabId, (tab) => {
-      if (tab.fileTabs.some((t) => t.id === tabId)) {
-        return { activeFileTabId: tabId, rightPanelOpen: true };
-      }
-      return {
-        fileTabs: [...tab.fileTabs, { id: tabId, kind: "session", label, sessionId, sessionInfo }],
-        activeFileTabId: tabId,
-        rightPanelOpen: true,
-      };
-    });
-  }, [activeTabId, updateTab]);
+    openSessionTab(info);
+  }, [openSessionTab]);
 
   // 首页右栏文件 tab 关闭：关掉活动的则回落到「文件」树 tab（无邻居逻辑，
   // 首页面板是临时性）。与 handleCloseFileTab 对偶。
@@ -1503,6 +1605,8 @@ export function useAppShellState() {
     setSidebarView,
     configView,
     setConfigView,
+    hubView,
+    setHubView,
     configPortalNode,
     setConfigPortalNode,
     workItemDetail,
@@ -1615,21 +1719,26 @@ export function useAppShellState() {
     handleFileLineMention,
     updateTab,
     updateActiveTab,
-    ensureTab,
+    ensureHomeTab,
+    openSessionTab,
+    openNewSessionTab,
+    closeTab,
+    handleSelectTab,
+    handleSessionRemoved,
     activateTab,
     navigateUrl,
-    buildTabQuery,
+
     loadWorkspaces,
     applyUrlToTabs,
     initialNavDoneRef,
     handleSelectSession,
     handleOpenConversation,
     handleOpenWorkspace,
-    handleOpenWorkspaceToChat,
+
     handleShowOverview,
     handleWorkspaceNewSession,
     handleReturnHome,
-    handleCloseWorkspaceTab,
+
     handleCreateWorkspace,
     handleImportDirectory,
     handleWorkspaceDeleted,
@@ -1667,7 +1776,7 @@ export function useAppShellState() {
     activeWorkspace,
     selectedSession,
     newSessionCwd,
-    workspaceView,
+
     selectedWorkItemKey,
     fileTabs,
     activeFileTabId,

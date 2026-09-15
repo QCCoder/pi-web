@@ -333,6 +333,10 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     throw new WorkspaceValidationError("work_items is required");
   }
   const workItemRecord = workItems as Record<string, unknown>;
+  const disabledValue = record.disabled;
+  if (disabledValue !== undefined && typeof disabledValue !== "boolean") {
+    throw new WorkspaceValidationError("disabled must be a boolean");
+  }
   const slug = validateWorkspaceSlug(requireNonEmptyString(record.slug, "slug"));
   return {
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
@@ -351,6 +355,7 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     },
     capabilities,
     ...(git ? { git } : {}),
+    ...(disabledValue === true ? { disabled: true } : {}),
     workItems: {
       nextRequirementNumber: parsePositiveInteger(
         workItemRecord.next_requirement_number,
@@ -395,6 +400,7 @@ export function serializeWorkspaceManifest(manifest: WorkspaceManifest): string 
           },
         }
       : {}),
+    ...(manifest.disabled ? { disabled: true } : {}),
     work_items: {
       next_requirement_number: manifest.workItems.nextRequirementNumber,
       next_bug_number: manifest.workItems.nextBugNumber,
@@ -462,6 +468,7 @@ export function workspaceSummary(workspacePath: string, manifest: WorkspaceManif
     capabilities: [...manifest.capabilities],
     available: true,
     configStatus: "ready",
+    disabled: manifest.disabled === true,
     skills: [...manifest.skills],
     repositories: manifest.repositories.map((repository) => ({ ...repository })),
     repositoryCount: manifest.repositories.filter((repository) => repository.status === "active").length,
@@ -1016,6 +1023,7 @@ function unavailableWorkspaceSummary(
     capabilities: ["sessions", "explorer"] as WorkspaceCapability[],
     available: false,
     configStatus: status,
+    disabled: false,
     skills: [],
     repositories: [],
     repositoryCount: 0,
@@ -1329,6 +1337,14 @@ export async function updateWorkspace(
       throw new WorkspaceConflictError("Workspace changed since it was loaded");
     }
     if (input.name !== undefined) latest.name = requireNonEmptyString(input.name, "name");
+    if (input.disabled !== undefined) {
+      if (typeof input.disabled !== "boolean") {
+        throw new WorkspaceValidationError("disabled must be a boolean");
+      }
+      // `false` strips the key entirely — old manifests stay byte-compatible.
+      if (input.disabled) latest.disabled = true;
+      else delete latest.disabled;
+    }
     if (input.skills !== undefined) {
       if (!Array.isArray(input.skills) || input.skills.some((skill) => typeof skill !== "string" || !skill.trim())) {
         throw new WorkspaceValidationError("skills must be an array of non-empty strings");

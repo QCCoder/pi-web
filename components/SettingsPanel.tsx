@@ -210,15 +210,19 @@ export function SettingsPanel({
       />
       {showIndex && (
         <div style={{
-          flex: desktopSplit && page === "workspace" ? "0 0 auto" : "1",
+          flex: 1,
           minHeight: 0,
           overflowY: "auto",
-          maxHeight: desktopSplit && page === "workspace" ? "45%" : undefined,
           borderTop: "1px solid var(--border)",
         }}>
-          {workspace && (
-            <IndexRow label="工作区" hint={workspace.name} active={desktopSplit && page === "workspace"} onClick={() => onPageChange("workspace")} />
-          )}
+          {/* 工作区管理是全局的（列表+详情在中央内容区），首页也可见入口；
+              hint 显示当前工作区名（无则描述用途）。 */}
+          <IndexRow
+            label="工作区"
+            hint={workspace?.name ?? "管理全部工作区"}
+            active={desktopSplit && page === "workspace"}
+            onClick={() => onPageChange("workspace")}
+          />
           {/* 模型/Skills/插件：桌面端有 rail 直达图标（三栏视图），设置里不再重复列出；
               手机端无 rail 图标，这三行是唯一入口，保留并进入子页。 */}
           {!onOpenConfigView && (
@@ -236,10 +240,9 @@ export function SettingsPanel({
           )}
         </div>
       )}
-      {/* Desktop split: while the 工作区 row is active, the WorkspaceManager
-          (rail = workspace list) fills the column BELOW the index rows; its
-          detail portals into the right column via configPortalNode. */}
-      {desktopSplit && page === "workspace" && workspaceSlot}
+      {/* Mobile: the 工作区 subpage swaps in-place (panel-mode manager,
+          single column in the drawer). Desktop renders the manager in the
+          CENTER area (DesktopShell) — no slot here. */}
       {page === "workspace" && !desktopSplit && (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {workspaceSlot}

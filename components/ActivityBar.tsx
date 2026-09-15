@@ -7,21 +7,12 @@ import type { WorkspaceCapability } from "@/lib/workspaces/types";
  * The single-focus navigation views surfaced by the workspace Activity Bar
  * (the left icon rail on desktop / the bottom tab bar on mobile).
  *
- * Two groups with different scopes:
- * - MODULE views (workbench / knowledge / work-items / loops) are
- *   workspace-scoped — knowledge and work-items are capability-gated, while
- *   workbench and loops are always-on. Order: workbench → knowledge
- *   → work-items → loops. (The former standalone 仓库 view was removed — repo browsing
- *   lives in the workbench file tree, add/manage in settings. The Loops view
- *   is the rail-side management face of the kit loops — 无能力门，与总览 Loops 区块一致.)
- * - GLOBAL views are app-scoped. The desktop rail shows 模型/Skills/插件 (config
- *   views — LIST in the middle column + DETAIL in the right column, see
- *   `ConfigView`), then 归档
- *   (which additionally requires an active workspace — its content is
- *   workspace-filtered), with 设置 pinned to the very bottom. A visual
- *   separator marks the module/global scope boundary. The mobile bottom bar
- *   keeps five tabs: the module views + 设置 only — the config views stay in
- *   the settings index subpages on mobile.
+ * 2026-09 W-中收敛（docs/session-tabs-design.md Phase 2）：模块组只保留
+ * 工作台（中栏的固定身份 + 从全局面板返回的入口）；知识库/工作项/Loops 的
+ * 面板退役，全部收进工作区家 tab（总览 hub：工作项管理面 / 知识库浏览 /
+ * Loops 区块）。GLOBAL views are app-scoped: 模型/Skills/插件 (config views —
+ * LIST in the middle column + DETAIL in the right column), 归档 (needs an
+ * active workspace), 设置 bottom-pinned.
  */
 /**
  * The config views (模型 / Skills / 插件) — strict three-column views on
@@ -41,9 +32,6 @@ export function isConfigView(view: SidebarView): view is ConfigView {
 
 export type SidebarView =
   | "workbench"
-  | "knowledge"
-  | "work-items"
-  | "loops"
   | ConfigView
   | "archive"
   | "settings";
@@ -70,11 +58,9 @@ const ICON_PROPS = {
 };
 
 /**
- * Canonical module-view order: workbench → knowledge → work-items → loops
- * (`loops` closes the module group; capability: null — kit loops have no
- * capability gate, same posture as the overview Loops block). `workbench` is
- * always-on (`capability: null`) — it merges the former sessions + explorer
- * views into one stacked layout (会话 above, 文件 below).
+ * Canonical module-view order（W-中后仅剩工作台——中栏的固定身份，也是从
+ * 归档/设置等全局面板返回会话列表的入口）。知识库/工作项/Loops 的入口在
+ * 工作区家 tab（总览 hub）。
  */
 export const ACTIVITY_VIEW_ORDER: ActivityViewDef[] = [
   {
@@ -87,45 +73,6 @@ export const ACTIVITY_VIEW_ORDER: ActivityViewDef[] = [
         {/* A box split horizontally: two stacked panes (会话 above, 文件 below). */}
         <rect x="3" y="3" width="18" height="18" rx="2" />
         <line x1="3" y1="10" x2="21" y2="10" />
-      </svg>
-    ),
-  },
-  {
-    view: "knowledge",
-    capability: "knowledge",
-    label: "知识库",
-    title: "知识库",
-    icon: (
-      <svg {...ICON_PROPS}>
-        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-      </svg>
-    ),
-  },
-  {
-    view: "work-items",
-    capability: "work-items",
-    label: "工作项",
-    title: "工作项",
-    icon: (
-      <svg {...ICON_PROPS}>
-        <path d="M9 11l3 3L22 4" />
-        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-      </svg>
-    ),
-  },
-  {
-    view: "loops",
-    capability: null,
-    label: "Loops",
-    title: "Loops",
-    icon: (
-      <svg {...ICON_PROPS}>
-        {/* A repeat/cycle: two arrows forming a loop. */}
-        <path d="M17 2l4 4-4 4" />
-        <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
-        <path d="M7 22l-4-4 4-4" />
-        <path d="M21 13v1a4 4 0 0 1-4 4H3" />
       </svg>
     ),
   },

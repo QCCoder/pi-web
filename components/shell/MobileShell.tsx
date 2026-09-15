@@ -6,7 +6,7 @@ import { FileViewer } from "../FileViewer";
 import { TabBar } from "../TabBar";
 import { ArchiveModal } from "../ArchiveModal";
 import { LoopsConfig, type LoopConfigTarget } from "../LoopsConfig";
-import { LoopsPanel } from "../LoopsPanel";
+import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
 import { WorkspaceOverview } from "../WorkspaceOverview";
@@ -14,39 +14,25 @@ import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
 import { HomeLanding } from "../HomeLanding";
 import { HomeNewSession } from "../HomeNewSession";
-import { WorkspaceTabBar } from "../WorkspaceTabBar";
-import { ACTIVITY_VIEW_ORDER, SETTINGS_VIEW, type SidebarView } from "../ActivityBar";
+import { SessionTabBar } from "../SessionTabBar";
+import type { SessionTabState } from "@/lib/session-tabs";
+import { ACTIVITY_VIEW_ORDER, SETTINGS_VIEW } from "../ActivityBar";
 import { useI18n } from "@/hooks/useI18n";
 import { useShell } from "./context";
 import { ChatToolbar } from "./ChatToolbar";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { getFileName } from "@/lib/file-paths";
-import type { WorkspaceCapability } from "@/lib/workspaces/types";
 
 /**
- * The mobile tab keys. 工作台 is first (= the landing tab, Q4), 会话 second;
- * the capability modules (知识库/工作项) follow in ACTIVITY_VIEW_ORDER, then
- * 设置. Tapping a tab SWITCHES the main area (no drawer — Q1/Q3);
- * tapping the active tab is a no-op. Secondary pages (archive) live on a
- * per-tab stack with a ‹返回 header (Q6); the settings and work-items panels
- * manage their own in-panel subpage navigation.
+ * The mobile tab keys. W-中收敛（2026-09）：底部 tab 只剩 会话/工作台/设置——
+ * 知识库/工作项/Loops 的入口 = 工作台 tab 的 overview 栈页（与桌面家 tab hub
+ * 同构）。Tapping a tab SWITCHES the main area (no drawer); tapping the active
+ * tab is a no-op. Secondary pages (archive) live on a per-tab stack with ‹返回
+ * headers; settings manages its own in-panel subpage navigation.
  */
-type MobileTab = "chat" | "workbench" | "knowledge" | "work-items" | "loops" | "settings";
+type MobileTab = "chat" | "workbench" | "settings";
 
-const TAB_ORDER: MobileTab[] = ["chat", "workbench", "knowledge", "work-items", "loops", "settings"];
-
-/** Capability gating for the module tabs (workbench/chat/loops/settings are always on). */
-const TAB_CAPABILITY: Partial<Record<MobileTab, WorkspaceCapability>> = {
-  knowledge: "knowledge",
-  "work-items": "work-items",
-};
-
-function availableTabs(capabilities: WorkspaceCapability[]): MobileTab[] {
-  return TAB_ORDER.filter((tab) => {
-    const capability = TAB_CAPABILITY[tab];
-    return !capability || capabilities.includes(capability);
-  });
-}
+const TAB_ORDER: MobileTab[] = ["chat", "workbench", "settings"];
 
 const CHAT_TAB_DEF = {
   view: "chat" as const,
@@ -62,22 +48,22 @@ const CHAT_TAB_DEF = {
 function tabLabel(tab: MobileTab): string {
   if (tab === "workbench") return "工作台";
   if (tab === "chat") return CHAT_TAB_DEF.label;
-  if (tab === "settings") return SETTINGS_VIEW.label;
-  return ACTIVITY_VIEW_ORDER.find((item) => item.view === (tab as SidebarView))?.label ?? tab;
+  return SETTINGS_VIEW.label;
 }
 
 function tabIcon(tab: MobileTab) {
   if (tab === "workbench") return ACTIVITY_VIEW_ORDER[0].icon;
   if (tab === "chat") return CHAT_TAB_DEF.icon;
-  if (tab === "settings") return SETTINGS_VIEW.icon;
-  return ACTIVITY_VIEW_ORDER.find((item) => item.view === (tab as SidebarView))?.icon ?? null;
+  return SETTINGS_VIEW.icon;
 }
 
-/** Per-workspace tab persistence (falls back to 会话 — the landing tab — on stale values). */
-function readStoredTab(workspaceId: string, capabilities: WorkspaceCapability[]): MobileTab {
+/** Per-workspace tab persistence（旧模块 tab 值 knowledge/work-items/loops 归到
+ *  工作台——它们的入口现在都在工作台 overview 栈里）。 */
+function readStoredTab(workspaceId: string): MobileTab {
   try {
-    const raw = localStorage.getItem(`pi-mobile-tab:${workspaceId}`) as MobileTab | null;
-    if (raw && availableTabs(capabilities).includes(raw)) return raw;
+    const raw = localStorage.getItem(`pi-mobile-tab:${workspaceId}`);
+    if (raw === "knowledge" || raw === "work-items" || raw === "loops") return "workbench";
+    if (raw && (TAB_ORDER as string[]).includes(raw)) return raw as MobileTab;
   } catch { /* ignore */ }
   return "chat";
 }
@@ -115,6 +101,7 @@ export function MobileShell() {
     refreshKey,
     explorerRefreshKey,
     createWorkItemRequest,
+    setCreateWorkItemRequest,
     openRepositoryFormRequest,
     sessionActivity,
     modelsRefreshKey,
@@ -128,12 +115,13 @@ export function MobileShell() {
     setSettingsPage,
     settingsCwd,
     handleOpenWorkspace,
-    handleOpenWorkspaceToChat,
-    handleCloseWorkspaceTab,
+    closeTab,
+    openSessionTab,
+    handleSelectTab,
+    handleSessionRemoved,
     handleCreateWorkspace,
     handleReturnHome,
     handleOpenConversation,
-    handleCreateWorkItem,
     handleWorkspaceNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
@@ -155,7 +143,6 @@ export function MobileShell() {
     handleContextUsageChange,
     chatInputRef,
     loopFilesReveal,
-    setLoopFilesReveal,
     updateActiveTab,
     setRefreshKey,
     setImportPickerOpen,
@@ -163,14 +150,13 @@ export function MobileShell() {
   } = s;
 
   // ---- Active tab -------------------------------------------------------------
-  const capabilities = activeWorkspace?.capabilities ?? [];
-  const tabsAvailable = availableTabs(capabilities);
+  const tabsAvailable = TAB_ORDER;
   const [tab, setTab] = useState<MobileTab>("chat");
   // Per-workspace restore: on workspace switch, read the stored tab; a
   // deep-linked session (view=chat with a live chat) lands on the 会话 tab.
   useEffect(() => {
     if (!activeWorkspace) return;
-    setTab(showChat && activeTab?.view === "chat" ? "chat" : readStoredTab(activeWorkspace.id, activeWorkspace.capabilities));
+    setTab(showChat ? "chat" : readStoredTab(activeWorkspace.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWorkspace?.id]);
 
@@ -206,25 +192,22 @@ export function MobileShell() {
     if (tab !== "settings") setArchiveOpen(false);
   }, [tab]);
 
-  // 工作台 tab 的总览栈（D2）：工作台 PanelHeader「总览」推入 WorkspaceOverview
-  // （组件内已有 useIsMobile 自适应）；Loops「配置/新建」再推 loop 配置栈页。
-  // 离开工作台 tab 或切换工作区即丢弃。
-  type OverviewPage = { page: "overview" } | { page: "loop-config"; target: LoopConfigTarget };
+  // 工作台 tab 的总览栈（D2 + W-中）：「总览」推入 WorkspaceOverview；Loops
+  // 「配置/新建」再推 loop 配置栈页；「工作项管理/知识库浏览」是家 tab hub 的
+  // 移动镜像。离开工作台 tab 或切换工作区即丢弃。
+  type OverviewPage =
+    | { page: "overview" }
+    | { page: "loop-config"; target: LoopConfigTarget }
+    | { page: "work-items" }
+    | { page: "knowledge" };
   const [overviewStack, setOverviewStack] = useState<OverviewPage | null>(null);
   useEffect(() => {
     if (tab !== "workbench") setOverviewStack(null);
   }, [tab]);
 
-  // Loops tab 的本地配置页（D2 栈模式镜像）：配置/新建推入，‹Loops 返回；离开 tab 即丢弃。
-  const [loopsPage, setLoopsPage] = useState<LoopConfigTarget | null>(null);
-  useEffect(() => {
-    if (tab !== "loops") setLoopsPage(null);
-  }, [tab]);
-
   const overviewWorkspaceId = activeWorkspace?.id;
   useEffect(() => {
     setOverviewStack(null);
-    setLoopsPage(null);
   }, [overviewWorkspaceId]);
 
   // The knowledge panel's ＋ (add knowledge repo) routes to the settings tab's
@@ -262,6 +245,52 @@ export function MobileShell() {
               </div>
             );
           }
+          if (overviewStack.page === "work-items") {
+            return (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+                <PanelHeader
+                  title="工作项"
+                  meta={activeWorkspace.name}
+                  onBack={() => setOverviewStack({ page: "overview" })}
+                  backLabel="总览"
+                />
+                <WorkspaceManager
+                  open
+                  embedded
+                  panel
+                  initialSection="work-items"
+                  activeWorkspacePath={activeWorkspace.path}
+                  initialWorkItemKey={selectedWorkItemKey}
+                  createWorkItemRequest={createWorkItemRequest}
+                  onClose={() => {}}
+                  onOpenWorkspace={handleOpenWorkspace}
+                  onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                  onRunLoopRound={handleRunLoopRound}
+                  onRunContract={handleRunContract}
+                  onOpenConversation={handleOpenConversation}
+                  onWorkspaceDeleted={handleWorkspaceDeleted}
+                  onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+                />
+              </div>
+            );
+          }
+          if (overviewStack.page === "knowledge") {
+            return (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+                <PanelHeader
+                  title="知识库"
+                  meta={activeWorkspace.name}
+                  onBack={() => setOverviewStack({ page: "overview" })}
+                  backLabel="总览"
+                />
+                <KnowledgeBrowser
+                  workspace={activeWorkspace}
+                  onOpenFile={handleOpenFile}
+                  refreshKey={explorerRefreshKey}
+                />
+              </div>
+            );
+          }
           return (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
               <PanelHeader
@@ -278,16 +307,20 @@ export function MobileShell() {
                     setSettingsPage("workspace");
                     setTab("settings");
                   }}
-                  onOpenWorkItems={() => setTab("work-items")}
-                  onCreateWorkItem={handleCreateWorkItem}
-                  onSelectSession={handleSelectSession}
-                  onSwitchSidebarView={(view) => setTab(view === "knowledge" ? "knowledge" : "workbench")}
-                  onAddRepository={handleKnowledgeAddRepository}
-                  onSessionDeleted={(id) => {
-                    setRefreshKey((key) => key + 1);
-                    updateActiveTab((current) => (current.session?.id === id ? { session: null } : {}));
+                  onOpenWorkItems={() => setOverviewStack({ page: "work-items" })}
+                  onCreateWorkItem={(type) => {
+                    setOverviewStack({ page: "work-items" });
+                    setCreateWorkItemRequest({ type, id: Date.now() });
                   }}
+                  onSelectSession={handleSelectSession}
+                  onSwitchSidebarView={(view) => {
+                    if (view === "knowledge") setOverviewStack({ page: "knowledge" });
+                    else { setOverviewStack(null); setTab("workbench"); }
+                  }}
+                  onAddRepository={handleKnowledgeAddRepository}
+                  onSessionDeleted={handleSessionRemoved}
                   onOpenLoopConfig={(target) => setOverviewStack({ page: "loop-config", target })}
+                  onRunLoop={(name) => handleRunLoopDirect(activeWorkspace, name)}
                 />
               </div>
             </div>
@@ -313,97 +346,10 @@ export function MobileShell() {
             onAddRepository={handleKnowledgeAddRepository}
             onNewSession={handleWorkspaceNewSession}
             onSelectSession={handleSelectSession}
+            onOpenSessionInNewTab={openSessionTab}
             onOpenFile={handleOpenFile}
-            onSessionRemoved={(id) => {
-              updateActiveTab((current) => (current.session?.id === id ? { session: null } : {}));
-              setRefreshKey((k) => k + 1);
-            }}
+            onSessionRemoved={handleSessionRemoved}
           />
-        );
-      case "knowledge":
-        return (
-          <WorkspaceSidebar
-            activeWorkspace={activeWorkspace}
-            activeView="knowledge"
-            workspaces={workspaces}
-            selectedSessionId={selectedSession?.id ?? null}
-            runningSessionIds={sessionActivity.runningIds}
-            completedSessionIds={sessionActivity.completedIds}
-            allSessions={sessionActivity.sessions}
-            refreshKey={refreshKey}
-            explorerRefreshKey={explorerRefreshKey}
-            onSelectWorkspace={handleOpenWorkspace}
-            onCreateWorkspace={handleCreateWorkspace}
-            onImportDirectory={() => setImportPickerOpen(true)}
-            onAddRepository={handleKnowledgeAddRepository}
-            onNewSession={handleWorkspaceNewSession}
-            onSelectSession={handleSelectSession}
-            onOpenFile={handleOpenFile}
-            onSessionRemoved={(id) => {
-              updateActiveTab((current) => (current.session?.id === id ? { session: null } : {}));
-              setRefreshKey((k) => k + 1);
-            }}
-          />
-        );
-      case "work-items":
-        if (!activeWorkspace) return null;
-        return (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-            <PanelHeader title="工作项" meta={activeWorkspace.name} />
-            <WorkspaceManager
-              open
-              embedded
-              panel
-              initialSection="work-items"
-              activeWorkspacePath={activeWorkspace.path}
-              initialWorkItemKey={selectedWorkItemKey}
-              createWorkItemRequest={createWorkItemRequest}
-              onClose={() => {}}
-              onOpenWorkspace={handleOpenWorkspace}
-              onOpenWorkItemConversation={handleOpenWorkItemConversation}
-              onRunLoopRound={handleRunLoopRound}
-              onRunContract={handleRunContract}
-              onOpenConversation={handleOpenConversation}
-              onWorkspaceDeleted={handleWorkspaceDeleted}
-              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-                />
-          </div>
-        );
-      case "loops":
-        if (!activeWorkspace) return null;
-        if (loopsPage) {
-          return (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title={loopsPage.kind === "new" ? "新建 Loop" : loopsPage.name}
-                meta="Loop 配置"
-                onBack={() => setLoopsPage(null)}
-                backLabel="Loops"
-              />
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                <LoopsConfig
-                  workspace={activeWorkspace}
-                  target={loopsPage}
-                  onClose={() => setLoopsPage(null)}
-                  onOpenLoop={(name) => setLoopsPage({ kind: "loop", name })}
-                />
-              </div>
-            </div>
-          );
-        }
-        return (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-            <PanelHeader title="Loops" meta={activeWorkspace.name} />
-            <LoopsPanel
-              workspace={activeWorkspace}
-              onOpenLoopConfig={(target) => setLoopsPage(target)}
-              onOpenFiles={(name) => {
-                setTab("workbench");
-                setLoopFilesReveal({ path: `loops/${name}`, nonce: Date.now() });
-              }}
-              onRunRound={(name) => handleRunLoopDirect(activeWorkspace, name)}
-            />
-          </div>
         );
       case "settings":
         if (archiveOpen && activeWorkspace) {
@@ -425,13 +371,13 @@ export function MobileShell() {
             onPageChange={setSettingsPage}
             workspace={activeWorkspace}
             settingsCwd={settingsCwd ?? ""}
-            workspaceSlot={activeWorkspace ? (
+            workspaceSlot={(
               <WorkspaceManager
                 open
                 embedded
                 panel
                 initialSection="workspaces"
-                activeWorkspacePath={activeWorkspace.path}
+                activeWorkspacePath={activeWorkspace?.path ?? null}
                 openRepositoryFormRequest={openRepositoryFormRequest}
                 onClose={() => {}}
                 onOpenWorkspace={handleOpenWorkspace}
@@ -442,7 +388,7 @@ export function MobileShell() {
                 onWorkspaceDeleted={handleWorkspaceDeleted}
                 onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
                     />
-            ) : null}
+            )}
             onOpenArchive={activeWorkspace ? () => setArchiveOpen(true) : undefined}
             onWorkspaceSkillsChange={(updated) => {
               s.setWorkspaces((current: import("@/lib/workspaces/types").WorkspaceSummary[]) =>
@@ -468,6 +414,7 @@ export function MobileShell() {
         reloadSignal={sessionKey}
         session={selectedSession}
         newSessionCwd={effectiveNewSessionCwd ?? activeWorkspace?.path ?? null}
+        draftKeyOverride={activeTab?.kind === "new-session" ? activeTab.id : undefined}
         onAgentEnd={handleAgentEnd}
         onSessionCreated={handleSessionCreated}
         onSessionForked={handleSessionForked}
@@ -490,26 +437,31 @@ export function MobileShell() {
   // 工作区 chip 入口。
   const wide = useMediaQuery("(min-width: 768px)");
   const showRail = wide && Boolean(activeWorkspace);
-  // 首页落地页隐藏 WorkspaceTabBar 行（工作区入口在 HomeLanding 的 chip 下拉；
-  // homeSession / HomeNewSession 视图保留 tab 行以便跳转已打开的工作区）。
-  const showWorkspaceTabBar = Boolean(activeWorkspace) || Boolean(s.homeSession) || s.homeNewSession.open;
+  // 首页落地页隐藏 SessionTabBar 行（工作区入口在 HomeLanding 的 chip 下拉；
+  // homeSession / HomeNewSession 视图保留 tab 行以便跳回已打开的会话）。
+  const showTabBarRow = Boolean(s.activeTabId) || Boolean(s.homeSession) || s.homeNewSession.open;
 
   return (
     <div style={{ display: "flex", flexDirection: showRail ? "row" : "column", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)" }}>
       {showRail && <MobileSideRail tabs={tabsAvailable} active={tab} onSelect={switchTab} />}
       <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, height: "100%" }}>
       <ChatToolbar />
-      {showWorkspaceTabBar && (
-      <WorkspaceTabBar
+      {showTabBarRow && (
+      <SessionTabBar
+        tabs={tabs}
+        activeTabId={s.activeTabId}
         workspaces={workspaces}
-        tabIds={tabs.map((t) => t.id)}
-        activeWorkspaceId={activeWorkspace?.id ?? null}
-        activityByWorkspaceId={workspaceActivity}
+        runningIds={sessionActivity.runningIds}
+        completedIds={sessionActivity.completedIds}
+        workspaceActivity={workspaceActivity}
         onSelectHome={handleReturnHome}
-        onSelectWorkspace={handleOpenWorkspace}
-        onCloseWorkspace={handleCloseWorkspaceTab}
-        onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is NonNullable<typeof t> => Boolean(t)))}
-        onPickWorkspace={handleOpenWorkspaceToChat}
+        onSelectTab={(id: string) => {
+          if (id !== s.activeTabId) handleSelectTab(id);
+        }}
+        onCloseTab={closeTab}
+        onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is SessionTabState => Boolean(t)))}
+        onNewSession={handleWorkspaceNewSession}
+        onPickWorkspace={handleOpenWorkspace}
       />
       )}
 

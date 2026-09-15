@@ -1,8 +1,9 @@
 import type { SessionInfo } from "./types";
-import type { WorkspaceSummary } from "./workspaces/types";
+import { isWorkspaceSelectable, type WorkspaceSummary } from "./workspaces/types";
 
 /** Longest-prefix workspace owner match for a session cwd (nested workspaces:
- *  deeper path wins; unavailable workspaces never own sessions). */
+ *  deeper path wins; unavailable or user-disabled workspaces never own
+ *  sessions — disabled ones disappear from the home surfaces entirely). */
 export function workspaceForSession(
   session: { cwd: string },
   workspaces: WorkspaceSummary[],
@@ -10,7 +11,8 @@ export function workspaceForSession(
   return workspaces
     .filter((workspace) => {
       const prefix = `${workspace.path.replace(/\/+$/, "")}/`;
-      return workspace.available && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
+      return isWorkspaceSelectable(workspace)
+        && (session.cwd === workspace.path || session.cwd.startsWith(prefix));
     })
     .sort((left, right) => right.path.length - left.path.length)[0];
 }
@@ -24,17 +26,17 @@ export interface WorkspaceSessionGroup {
 }
 
 /** Group sessions by owning workspace for the home quick-switch list.
- *  Available workspaces only (each keeps a group, header-only when empty);
- *  subagent children and sessions outside every workspace are dropped.
- *  Groups with sessions sort by latestModified desc; empty groups sink to the
- *  bottom (name asc). */
+ *  Selectable workspaces only (available and not user-disabled; each keeps a
+ *  group, header-only when empty); subagent children and sessions outside
+ *  every workspace are dropped. Groups with sessions sort by latestModified
+ *  desc; empty groups sink to the bottom (name asc). */
 export function groupSessionsByWorkspace(
   workspaces: WorkspaceSummary[],
   sessions: SessionInfo[],
 ): WorkspaceSessionGroup[] {
   const byId = new Map<string, WorkspaceSessionGroup>(
     workspaces
-      .filter((workspace) => workspace.available)
+      .filter((workspace) => isWorkspaceSelectable(workspace))
       .map((workspace) => [workspace.id, { workspace, sessions: [], latestModified: "" }]),
   );
   const owners = [...byId.values()].map((group) => group.workspace);

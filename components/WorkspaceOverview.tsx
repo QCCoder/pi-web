@@ -23,6 +23,8 @@ interface Props {
   onSessionDeleted?: (id: string) => void;
   /** 打开 loop 配置（桌面右栏 / 移动端 overview 栈）；新建走 { kind: "new" }。 */
   onOpenLoopConfig: (target: LoopConfigTarget) => void;
+  /** 「运行」——手动起一轮并打开轮会话（W-中：LoopsPanel 退役后总览接管该按钮）。 */
+  onRunLoop?: (name: string) => void;
   /** loop 变更刷新信号（创建/删除/frontmatter 保存后由 shell bump）。 */
   loopsRefreshKey?: number;
 }
@@ -97,6 +99,7 @@ export function WorkspaceOverview({
   onAddRepository,
   onSessionDeleted,
   onOpenLoopConfig,
+  onRunLoop,
   loopsRefreshKey,
 }: Props) {
   const isMobile = useIsMobile();
@@ -454,6 +457,7 @@ export function WorkspaceOverview({
                   busy={loopsBusy}
                   onConfigure={(name) => onOpenLoopConfig({ kind: "loop", name })}
                   onAction={(name, action) => void loopAction(name, action)}
+                  onRun={onRunLoop ? () => onRunLoop(loop.name) : undefined}
                 />
               ))}
               <div>

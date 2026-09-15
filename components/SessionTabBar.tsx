@@ -2,97 +2,106 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { WorkspaceSummary } from "@/lib/workspaces/types";
+import { computeMenuLayout, readViewportWindow } from "@/lib/dropdown-layout";
+import type { SessionTabState } from "@/lib/session-tabs";
+import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
+
+/**
+ * 会话 tab 条（docs/session-tabs-design.md Phase 1）：顶栏 tab = 会话/占位/
+ * 工作区家 tab，跨工作区混排（工作区色点标识）。替换旧的 WorkspaceTabBar，
+ * 桌面/移动两 shell 共用（无 isMobile 分支——移动端就是一排可横滚的紧凑 chips）。
+ *
+ * 右端按钮区（P1）：＋ = 在当前 tab 的工作区开新会话 tab（无活动 tab 时隐藏——
+ * 首页有自己的 composer）；⊞ = 工作区选择器下拉 → 开/激活该工作区的家 tab。
+ */
 
 interface Props {
+  tabs: SessionTabState[];
+  activeTabId: string | null;
   workspaces: WorkspaceSummary[];
-  tabIds: string[];
-  activeWorkspaceId: string | null;
-  activityByWorkspaceId: Record<string, "running" | "completed" | undefined>;
+  /** 全局 running 集会话级徽章，无需每会话 SSE（M1）。 */
+  runningIds: ReadonlySet<string>;
+  completedIds: ReadonlySet<string>;
+  /** 家 tab 上的工作区级聚合活动（沿用旧 tab 条的 ActivityIndicator）。 */
+  workspaceActivity: Record<string, "running" | "completed" | undefined>;
   onSelectHome: () => void;
-  onSelectWorkspace: (workspace: WorkspaceSummary) => void;
-  onCloseWorkspace: (workspaceId: string) => void;
-  onReorder: (tabIds: string[]) => void;
-  /** ＋ at the tab strip's right end — opens a workspace picker: select one
-   *  to open (or switch to) that workspace's chat view. Creating workspaces
-   *  lives on HomeLanding only (mobile consensus: the old ＋-opens-wizard
-   *  behavior made switching to an unopened workspace a detour through 首页). */
+  onSelectTab: (id: string) => void;
+  onCloseTab: (id: string) => void;
+  onReorder: (ids: string[]) => void;
+  onNewSession: () => void;
   onPickWorkspace: (workspace: WorkspaceSummary) => void;
 }
 
-function shortestUniqueLabels(workspaces: WorkspaceSummary[]): Map<string, string> {
-  const labels = new Map<string, string>();
-  const byName = new Map<string, WorkspaceSummary[]>();
-  for (const workspace of workspaces) {
-    const group = byName.get(workspace.name) ?? [];
-    group.push(workspace);
-    byName.set(workspace.name, group);
+/** 工作区色点：id 哈希 → 固定调色板（同一工作区跨会话/家 tab 颜色一致，
+ *  跨工作区 tab 一眼可辨——「上下文甩鞭」的缓解手段之一）。 */
+const WORKSPACE_COLORS = [
+  "#e05d5d", "#e08b3a", "#c9a227", "#5aa469",
+  "#4d9de0", "#7b6ce0", "#b56bb5", "#5aa0a8",
+];
+
+function workspaceColor(workspaceId: string): string {
+  let hash = 0;
+  for (let index = 0; index < workspaceId.length; index += 1) {
+    hash = (hash * 31 + workspaceId.charCodeAt(index)) | 0;
   }
-  for (const group of byName.values()) {
-    if (group.length === 1) {
-      labels.set(group[0].id, group[0].name);
-      continue;
-    }
-    const segments = group.map((workspace) => workspace.path.split(/[\\/]+/).filter(Boolean));
-    for (let depth = 1; depth <= Math.max(...segments.map((parts) => parts.length)); depth += 1) {
-      const suffixes = segments.map((parts) => parts.slice(-depth).join("/"));
-      if (new Set(suffixes).size !== group.length) continue;
-      group.forEach((workspace, index) => labels.set(workspace.id, `${workspace.name} · ${suffixes[index]}`));
-      break;
-    }
-    group.forEach((workspace) => {
-      if (!labels.has(workspace.id)) labels.set(workspace.id, `${workspace.name} · ${workspace.id.slice(0, 6)}`);
-    });
-  }
-  return labels;
+  return WORKSPACE_COLORS[Math.abs(hash) % WORKSPACE_COLORS.length];
 }
 
-export function WorkspaceTabBar({
+function tabLabel(tab: SessionTabState): string {
+  if (tab.kind === "workspace-home") return tab.workspace.name;
+  if (tab.kind === "new-session") return "新会话";
+  const name = tab.session?.name?.trim();
+  if (name) return name;
+  const first = tab.session?.firstMessage?.trim();
+  return first ? (first.length > 24 ? `${first.slice(0, 24)}…` : first) : "会话";
+}
+
+function tabTitle(tab: SessionTabState): string {
+  if (tab.kind === "workspace-home") return `${tab.workspace.name}（总览）\n${tab.workspace.path}`;
+  if (tab.kind === "new-session") return `新会话\n${tab.workspace.name} · ${tab.workspace.path}`;
+  return `${tabLabel(tab)}\n${tab.workspace.name} · ${tab.workspace.path}`;
+}
+
+export function SessionTabBar({
+  tabs,
+  activeTabId,
   workspaces,
-  tabIds,
-  activeWorkspaceId,
-  activityByWorkspaceId,
+  runningIds,
+  completedIds,
+  workspaceActivity,
   onSelectHome,
-  onSelectWorkspace,
-  onCloseWorkspace,
+  onSelectTab,
+  onCloseTab,
   onReorder,
+  onNewSession,
   onPickWorkspace,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
+  const pickerRef = useRef<HTMLButtonElement>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerRect, setPickerRect] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
-  const openWorkspaces = tabIds
-    .map((id) => workspaces.find((workspace) => workspace.id === id))
-    .filter((workspace): workspace is WorkspaceSummary => Boolean(workspace));
-  const labels = shortestUniqueLabels(openWorkspaces);
-  const availableWorkspaces = workspaces.filter((workspace) => workspace.available);
-  const pickerLabels = shortestUniqueLabels(availableWorkspaces);
-  const openTabIds = new Set(tabIds);
+  const availableWorkspaces = workspaces.filter(isWorkspaceSelectable);
 
-  // The picker dropdown lives in a body-level portal: the tab strip is an
-  // overflow-x scroller and would clip an absolutely-positioned child.
   useEffect(() => {
     if (!pickerOpen) return;
-    const rect = plusRef.current?.getBoundingClientRect();
+    const rect = pickerRef.current?.getBoundingClientRect();
     if (rect) {
-      setPickerRect({
-        top: rect.bottom + 4,
-        right: window.innerWidth - rect.right,
-        maxHeight: Math.max(160, Math.min(320, window.innerHeight - rect.bottom - 16)),
-      });
+      setPickerRect(
+        computeMenuLayout({ anchor: rect, menuMinWidth: 220, maxMenuHeight: 320 }, readViewportWindow()),
+      );
     }
   }, [pickerOpen]);
 
   useEffect(() => {
     activeRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-  }, [activeWorkspaceId]);
+  }, [activeTabId]);
 
   const reorderBefore = (targetId: string) => {
     if (!draggedId || draggedId === targetId) return;
-    const next = tabIds.filter((id) => id !== draggedId);
+    const next = tabs.map((t) => t.id).filter((id) => id !== draggedId);
     next.splice(next.indexOf(targetId), 0, draggedId);
     onReorder(next);
   };
@@ -101,7 +110,7 @@ export function WorkspaceTabBar({
     <div
       ref={containerRef}
       role="tablist"
-      aria-label="工作区"
+      aria-label="会话"
       onWheel={(event) => {
         if (!containerRef.current || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
         containerRef.current.scrollLeft += event.deltaY;
@@ -110,7 +119,7 @@ export function WorkspaceTabBar({
       onDrop={(event) => {
         event.preventDefault();
         if (!draggedId) return;
-        onReorder([...tabIds.filter((id) => id !== draggedId), draggedId]);
+        onReorder([...tabs.map((t) => t.id).filter((id) => id !== draggedId), draggedId]);
         setDraggedId(null);
       }}
       style={{
@@ -125,65 +134,83 @@ export function WorkspaceTabBar({
       }}
     >
       <div
-        ref={activeWorkspaceId === null ? activeRef : undefined}
+        ref={activeTabId === null ? activeRef : undefined}
         role="tab"
-        aria-selected={activeWorkspaceId === null}
+        aria-selected={activeTabId === null}
         onClick={onSelectHome}
-        style={tabStyle(activeWorkspaceId === null, true)}
+        style={tabStyle(activeTabId === null, true)}
       >
         <HomeIcon />
         <span>首页</span>
       </div>
-      {openWorkspaces.map((workspace) => {
-        const active = workspace.id === activeWorkspaceId;
+      {tabs.map((tab) => {
+        const active = tab.id === activeTabId;
+        const running = tab.kind === "session" && tab.session
+          ? runningIds.has(tab.session.id)
+          : false;
+        const completed = tab.kind === "session" && tab.session && !active
+          ? completedIds.has(tab.session.id)
+          : false;
+        const workspaceStatus = tab.kind === "workspace-home" ? workspaceActivity[tab.workspace.id] : undefined;
         return (
           <div
-            key={workspace.id}
+            key={tab.id}
             ref={active ? activeRef : undefined}
             role="tab"
             aria-selected={active}
             draggable
             onDragStart={(event) => {
-              setDraggedId(workspace.id);
+              setDraggedId(tab.id);
               event.dataTransfer.effectAllowed = "move";
-              event.dataTransfer.setData("text/plain", workspace.id);
+              event.dataTransfer.setData("text/plain", tab.id);
             }}
             onDragEnd={() => setDraggedId(null)}
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              reorderBefore(workspace.id);
+              reorderBefore(tab.id);
               setDraggedId(null);
             }}
-            onClick={() => onSelectWorkspace(workspace)}
+            onClick={() => onSelectTab(tab.id)}
             onMouseDown={(event) => {
               if (event.button === 1) event.preventDefault();
             }}
             onAuxClick={(event) => {
               if (event.button !== 1) return;
               event.preventDefault();
-              onCloseWorkspace(workspace.id);
+              onCloseTab(tab.id);
             }}
-            title={`${workspace.name}\n${workspace.path}`}
-            style={{ ...tabStyle(active), opacity: draggedId === workspace.id ? 0.55 : 1 }}
+            title={tabTitle(tab)}
+            style={{ ...tabStyle(active), opacity: draggedId === tab.id ? 0.55 : 1 }}
           >
-            <ActivityIndicator status={activityByWorkspaceId[workspace.id]} />
-            <WorkspaceIcon />
+            {(running || completed) && <ActivityIndicator status={running ? "running" : "completed"} />}
+            {workspaceStatus && <ActivityIndicator status={workspaceStatus} />}
+            <span
+              aria-hidden
+              title={tab.workspace.name}
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                flexShrink: 0,
+                background: workspaceColor(tab.workspace.id),
+              }}
+            />
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-              {labels.get(workspace.id) ?? workspace.name}
+              {tabLabel(tab)}
             </span>
             <button
               type="button"
-              title={`关闭 ${workspace.name}`}
-              aria-label={`关闭 ${workspace.name}`}
+              title={`关闭 ${tabLabel(tab)}`}
+              aria-label={`关闭 ${tabLabel(tab)}`}
               onClick={(event) => {
                 event.stopPropagation();
-                onCloseWorkspace(workspace.id);
+                onCloseTab(tab.id);
               }}
               style={{
-                width: 28,
-                height: 28,
+                width: 26,
+                height: 26,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -203,32 +230,31 @@ export function WorkspaceTabBar({
           </div>
         );
       })}
+      {/* ＋ 在当前 tab 的工作区开新会话 tab（P1：无活动 tab = 首页上下文时隐藏，
+          首页有自己的 composer）。 */}
+      {activeTabId !== null && (
+        <button
+          ref={plusRef}
+          type="button"
+          title="新会话"
+          aria-label="新会话"
+          onClick={onNewSession}
+          style={buttonStyle(false)}
+        >
+          ＋
+        </button>
+      )}
       <button
-        ref={plusRef}
+        ref={pickerRef}
         type="button"
         title="打开工作区"
         aria-label="打开工作区"
         aria-haspopup="menu"
         aria-expanded={pickerOpen}
         onClick={() => setPickerOpen((open) => !open)}
-        style={{
-          width: 36,
-          height: 36,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-          padding: 0,
-          border: 0,
-          borderLeft: "1px solid var(--border)",
-          background: pickerOpen ? "var(--bg-hover)" : "transparent",
-          color: pickerOpen ? "var(--text)" : "var(--text-muted)",
-          cursor: "pointer",
-          fontSize: 16,
-          lineHeight: 1,
-        }}
+        style={buttonStyle(pickerOpen)}
       >
-        ＋
+        <WorkspaceIcon />
       </button>
       {pickerOpen && pickerRect && createPortal(
         <>
@@ -260,8 +286,8 @@ export function WorkspaceTabBar({
               <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-dim)" }}>没有可用工作区</div>
             )}
             {availableWorkspaces.map((workspace) => {
-              const active = workspace.id === activeWorkspaceId;
-              const isOpen = openTabIds.has(workspace.id);
+              const homeOpen = tabs.some((t) => t.kind === "workspace-home" && t.workspace.id === workspace.id);
+              const anyOpen = tabs.some((t) => t.workspace.id === workspace.id);
               return (
                 <button
                   key={workspace.id}
@@ -278,21 +304,23 @@ export function WorkspaceTabBar({
                     padding: "6px 8px",
                     border: 0,
                     borderRadius: 6,
-                    background: active ? "var(--bg-selected)" : "transparent",
-                    color: active ? "var(--text)" : "var(--text-muted)",
+                    background: "transparent",
+                    color: "var(--text-muted)",
                     cursor: "pointer",
                     textAlign: "left",
                     fontSize: 12,
-                    fontWeight: active ? 600 : 450,
+                    fontWeight: 450,
                   }}
                 >
-                  <WorkspaceIcon />
+                  <span
+                    aria-hidden
+                    style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: workspaceColor(workspace.id) }}
+                  />
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-                    {pickerLabels.get(workspace.id) ?? workspace.name}
+                    {workspace.name}
                   </span>
-                  <ActivityIndicator status={activityByWorkspaceId[workspace.id]} />
-                  {isOpen && <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>已打开</span>}
-                  {active && <span aria-hidden style={{ color: "var(--accent)", fontSize: 12, flexShrink: 0 }}>✓</span>}
+                  <ActivityIndicator status={workspaceActivity[workspace.id]} />
+                  {anyOpen && <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>{homeOpen ? "家已开" : "已开"}</span>}
                 </button>
               );
             })}
@@ -308,11 +336,11 @@ function tabStyle(active: boolean, pinned = false): React.CSSProperties {
   return {
     display: "flex",
     alignItems: "center",
-    gap: 7,
-    minWidth: pinned ? 96 : 120,
-    maxWidth: pinned ? 96 : 220,
+    gap: 6,
+    minWidth: pinned ? 72 : 110,
+    maxWidth: pinned ? 72 : 200,
     height: 36,
-    padding: pinned ? "0 14px" : "0 5px 0 12px",
+    padding: pinned ? "0 12px" : "0 4px 0 10px",
     flexShrink: 0,
     borderRight: "1px solid var(--border)",
     borderTop: active ? "2px solid var(--accent)" : "2px solid transparent",
@@ -327,12 +355,31 @@ function tabStyle(active: boolean, pinned = false): React.CSSProperties {
   };
 }
 
+function buttonStyle(active: boolean): React.CSSProperties {
+  return {
+    width: 36,
+    height: 36,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    padding: 0,
+    border: 0,
+    borderLeft: "1px solid var(--border)",
+    background: active ? "var(--bg-hover)" : "transparent",
+    color: active ? "var(--text)" : "var(--text-muted)",
+    cursor: "pointer",
+    fontSize: 16,
+    lineHeight: 1,
+  };
+}
+
 function ActivityIndicator({ status }: { status: "running" | "completed" | undefined }) {
   if (!status) return null;
   if (status === "running") {
     return (
       <span
-        title="有会话正在运行"
+        title="会话正在运行"
         aria-label="运行中"
         style={{
           width: 12,

@@ -3,29 +3,12 @@
 import { useState } from "react";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
-import type { SessionInfo } from "@/lib/types";
+import { type Tab, FILES_TAB_ID } from "@/lib/tab-types";
 
-export type Tab =
-  | {
-      id: string;
-      kind: "file";
-      label: string;
-      filePath: string;
-      sourceSessionId?: string | null;
-      initialDisplayMode?: "source" | "preview" | "diff";
-    }
-  | {
-      id: string;
-      kind: "session";
-      label: string;
-      sessionId: string;
-      sessionInfo: SessionInfo;
-    };
-
-/** Reserved id of the pinned「文件」leading tab (the workbench file tree in
- *  the right panel). NOT a member of `tabs` — it is rendered separately via
- *  `leadingTab` and never closable. `activeFileTabId` may equal this id. */
-export const FILES_TAB_ID = "__files__";
+// Re-exported for the existing import sites (shell state + shells); the
+// definitions live in lib/tab-types.ts (shared with the pure session-tab model).
+export type { Tab };
+export { FILES_TAB_ID };
 
 interface Props {
   tabs: Tab[];
