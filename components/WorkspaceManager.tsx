@@ -63,19 +63,6 @@ interface Props {
    *    left the cramped middle column; both panes live in the main area). */
   split?: { portalTarget: HTMLElement | null } | { inline: true };
   initialSection?: ManagerSection;
-  /** Desktop work-items split (the 工作项 middle-column panel): the LIST
-   *  stays mounted in the middle column while the selected work item's
-   *  DETAIL portals into the right column's config area (same mechanism as
-   *  the 模型/Skills/插件 split views — `portalTarget` is AppShell's
-   *  configPortalNode; null renders nothing until the frame mounts). Omitted
-   *  on mobile — the detail replaces the list in place there. */
-  workItemSplit?: { portalTarget: HTMLElement | null };
-  /** Reports the selection up (the right-column PanelHeader shows key/title;
-   *  the shell clears its mirror when it hands the right column elsewhere). */
-  onSelectedWorkItemChange?: (item: { key: string; title: string } | null) => void;
-  /** Increment to clear the selection (the right column's × — request-counter
-   *  pattern, same as createWorkItemRequest). */
-  closeWorkItemDetailRequest?: number;
   activeWorkspacePath?: string | null;
   initialWorkItemKey?: string | null;
   createWorkItemRequest?: { type: WorkItemType; id: number } | null;
@@ -222,9 +209,6 @@ export function WorkspaceManager({
   panel = false,
   split,
   initialSection = "workspaces",
-  workItemSplit,
-  onSelectedWorkItemChange,
-  closeWorkItemDetailRequest,
   activeWorkspacePath,
   initialWorkItemKey,
   createWorkItemRequest,
@@ -486,16 +470,6 @@ export function WorkspaceManager({
   // Work-item detail split (desktop): report selection changes up (the
   // right-column header + shell mirror), and honor the right column's ×
   // (request counter — clearing here unmounts the portaled detail).
-  useEffect(() => {
-    if (!onSelectedWorkItemChange) return;
-    onSelectedWorkItemChange(selectedWorkItem
-      ? { key: selectedWorkItem.item.key, title: selectedWorkItem.item.title }
-      : null);
-  }, [selectedWorkItem, onSelectedWorkItemChange]);
-  useEffect(() => {
-    if (!closeWorkItemDetailRequest) return;
-    setSelectedWorkItem(null);
-  }, [closeWorkItemDetailRequest]);
 
   useEffect(() => {
     if ((!open && !embedded) || !createWorkspaceOnOpen) return;
@@ -942,7 +916,6 @@ export function WorkspaceManager({
   const splitMode = split != null;
   const portalTarget = split != null && "portalTarget" in split ? split.portalTarget : null;
   const inlineSplit = split != null && "inline" in split;
-  const workItemSplitMode = workItemSplit != null;
 
   // Shared narrow-layout compaction (single-column form grids, wrapping
   // toolbars, phase-badge-hidden work-item meta line, stacked detail header).
@@ -1324,19 +1297,15 @@ export function WorkspaceManager({
   `;
 
   // Work-items panes. In the default (modal / mobile / settings-split)
-  // contexts the detail replaces the list in place. In `workItemSplit` mode
-  // (desktop 工作项 panel) the LIST stays mounted in the middle column while
-  // the DETAIL portals into the right column's config area — one instance
-  // keeps every bit of state (selection, drafts, save flow).
+  // contexts the detail replaces the list in place (右坞 S3 起，工作项宿主全部
+  // 是 panel/embedded 推导航——workItemSplit portal 机制已随 S3 退役)。
   // T7: bound kit-loop NAME for the detail 「Loop」 row ("" = 未绑定). Hoisted
   // so the 未生效 badge check narrows cleanly (item.loop is optional).
   const boundLoopName = selectedWorkItem?.item.loop ?? "";
   const workItemDetailPane = selectedWorkItem && selectedWorkspace ? (
     <div className="work-item-detail-card">
                   <div className="work-item-detail-header">
-                    {!workItemSplitMode && (
-                      <button className="workspace-action" onClick={() => setSelectedWorkItem(null)}>← 返回</button>
-                    )}
+                    <button className="workspace-action" onClick={() => setSelectedWorkItem(null)}>← 返回</button>
                     <div>
                       <div className="work-item-key">{selectedWorkItem.item.key}</div>
                       <h2>{selectedWorkItem.item.title}</h2>
@@ -2289,7 +2258,7 @@ export function WorkspaceManager({
             )}
 
             {section === "work-items" && selectedWorkspace && (
-              workItemSplitMode ? workItemListPane : selectedWorkItem ? workItemDetailPane : workItemListPane
+              selectedWorkItem ? workItemDetailPane : workItemListPane
             )}
     </main>
   );
@@ -2371,9 +2340,6 @@ export function WorkspaceManager({
           {contentPane}
         </div>
       </div>
-      {workItemSplitMode && workItemDetailPane && workItemSplit.portalTarget
-        ? createPortal(workItemDetailPane, workItemSplit.portalTarget)
-        : null}
     </div>
   );
 }

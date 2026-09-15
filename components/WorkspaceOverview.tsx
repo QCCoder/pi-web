@@ -17,7 +17,8 @@ interface Props {
   onOpenWorkItems: () => void;
   onCreateWorkItem: (type: WorkItemType) => void;
   onSelectSession: (session: SessionInfo) => void;
-  /** Navigate the sidebar's focused Activity Bar view (仓库 rows → 工作台文件区, 知识库 row). */
+  /** 仓库/知识库行导航：仓库 → 右坞「文件」tab；知识库 → 右坞「知识库」tab
+   *  （S2 收编；移动端 MobileShell 自行路由到 overview 栈 knowledge 页）。 */
   onSwitchSidebarView: (view: "workbench" | "knowledge") => void;
   /** Open the workspace settings' add-repository form (AppShell wires it). */
   onAddRepository: () => void;

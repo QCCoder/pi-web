@@ -1,6 +1,6 @@
 # 右栏扩展坞设计（桌面）
 
-> 状态：S1 已实施（2026-09-15；grill 共识十一项决策见 §0）；S2/S3 待实施。
+> 状态：S1 + S2 + S3 全部已实施（2026-09-15；grill 共识十一项决策见 §0）。
 > 实施记录（S1）：lib/tab-types.ts（LOOPS_TAB_ID/MODULE_TAB_IDS/isModuleTabId + 测试）、
 > TabBar.tsx（leadingTab→leadingTabs 钦死模块组 + .dock-module-tab 类）、globals.css
 > （right-panel-container container-type:inline-size + @container≤420px 图标化）、
@@ -8,6 +8,17 @@
 > loop 列表+状态/操作+内联 LoopsConfig 推导航）、WorkspaceOverview（onOpenLoopsTab 传入时
 > Loops 区块瘦身为摘要行，移动端保持全量）、DesktopShell（坞接线）、useAppShellState
 > （loopConfig 状态整体退役——移动端本就用自己的 overviewStack，无消费者）。
+> 实施记录（S2）：KNOWLEDGE_TAB_ID 进 MODULE_TAB_IDS（knowledge capability 门控）；
+> KnowledgeBrowser 直挂坞体（key=workspace.id，chips 选择状态随工作区重置）；hub 的
+> knowledge 渲染分支与 setHubView("knowledge") 消费点删除（hubView 桌面只剩 overview/
+> work-items）；总览知识库行 retarget → 开右坞知识库 tab；移动端照旧。
+> 实施记录（S3）：WORK_ITEMS_TAB_ID 进 MODULE_TAB_IDS（work-items capability 门控）；
+> WorkspaceManager `embedded + panel` 模式挂坞体（key=workspace.id；总览工作项按钮 →
+> 开坞 tab；handleCreateWorkItem 重写为 开坞 tab + 创建请求；legacy work-items URL 深链 →
+> 家 tab + 坞 tab）；hubView 状态 + workItemDetail/setWorkItemDetail/closeWorkItemDetailTick
+> 整套退役（useAppShellState 无消费者）；WorkspaceManager 内 workItemSplit portal 机制 +
+> onSelectedWorkItemChange/closeWorkItemDetailRequest 两个镜像 prop 一并删除；家 tab 中心
+> 只剩总览；移动端照旧（overview 栈）。
 > 动机：**d 并排协作**（模块面板常开在聊天旁，边聊边看工作项/loop 状态）+ **c 右栏利用率**（现状右栏只有文件，
 > 左=会话/右=工作区资源的概念对称未兑现）+ **b hub 层级深**（进个工作项要 家tab→总览→hub 视图两层跳；
 > 工作项详情/Loop 配置还会**顶替中心聊天区**）。

@@ -18,7 +18,7 @@ import { PluginsConfig } from "../PluginsConfig";
 import { LoopsDockPanel } from "../LoopsDockPanel";
 import { HomeNewSession } from "../HomeNewSession";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
-import { LOOPS_TAB_ID, isModuleTabId } from "@/lib/tab-types";
+import { LOOPS_TAB_ID, KNOWLEDGE_TAB_ID, WORK_ITEMS_TAB_ID, isModuleTabId } from "@/lib/tab-types";
 import { SessionTabBar } from "../SessionTabBar";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { useI18n } from "@/hooks/useI18n";
@@ -45,7 +45,6 @@ export function DesktopShell() {
     activeTab,
     activeWorkspace,
     selectedSession,
-    selectedWorkItemKey,
     fileTabs,
     activeFileTabId,
     rightPanelOpen,
@@ -53,18 +52,13 @@ export function DesktopShell() {
     sidebarView,
     configView,
     setConfigView,
-    hubView,
-    setHubView,
     configPortalNode,
     setConfigPortalNode,
-    workItemDetail,
-    setWorkItemDetail,
     loopFilesReveal,
-    handleCloseWorkItemDetail,
-    closeWorkItemDetailTick,
     settingsPage,
     setSettingsPage,
     settingsCwd,
+    selectedWorkItemKey,
     sidebarOpen,
     sidebarWidth,
     sidebarResizing,
@@ -369,7 +363,7 @@ const renderMiddleColumn = () => {
           the middle column, the detail opens here (× or any chat/panel
           intent hands the column back). */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {(configView || workItemDetail || (sidebarView === "settings" && settingsPage !== "index")) ? (
+        {(configView || (sidebarView === "settings" && settingsPage !== "index")) ? (
           configView ? (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
               <PanelHeader
@@ -380,18 +374,6 @@ const renderMiddleColumn = () => {
               <div
                 ref={setConfigPortalNode}
                 style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-              />
-            </div>
-          ) : workItemDetail ? (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title={workItemDetail.key}
-                meta={workItemDetail.title}
-                onClose={handleCloseWorkItemDetail}
-              />
-              <div
-                ref={setConfigPortalNode}
-                style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", padding: "14px 16px" }}
               />
             </div>
           ) : sidebarView === "settings" && settingsPage === "workspace" ? (
@@ -445,53 +427,6 @@ const renderMiddleColumn = () => {
             </div>
           )
         ) : activeTab?.kind === "workspace-home" ? (
-          hubView === "work-items" ? (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title="工作项"
-                meta={activeTab.workspace.name}
-                onBack={() => setHubView("overview")}
-                backLabel="总览"
-              />
-              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-                <WorkspaceManager
-                  open
-                  embedded
-                  initialSection="work-items"
-                  activeWorkspacePath={activeTab.workspace.path}
-                  initialWorkItemKey={selectedWorkItemKey}
-                  createWorkItemRequest={createWorkItemRequest}
-                  workItemSplit={{ portalTarget: configPortalNode }}
-                  onSelectedWorkItemChange={setWorkItemDetail}
-                  closeWorkItemDetailRequest={closeWorkItemDetailTick}
-                  onClose={() => {}}
-                  onOpenWorkspace={handleOpenWorkspace}
-                  onOpenWorkItemConversation={handleOpenWorkItemConversation}
-                  onRunLoopRound={handleRunLoopRound}
-                  onRunContract={handleRunContract}
-                  onOpenConversation={handleOpenConversation}
-                  onWorkspaceDeleted={handleWorkspaceDeleted}
-                  onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-                />
-              </div>
-            </div>
-          ) : hubView === "knowledge" ? (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title="知识库"
-                meta={activeTab.workspace.name}
-                onBack={() => setHubView("overview")}
-                backLabel="总览"
-              />
-              <div style={{ flex: 1, minHeight: 0 }}>
-                <KnowledgeBrowser
-                  workspace={activeTab.workspace}
-                  onOpenFile={handleOpenFile}
-                  refreshKey={explorerRefreshKey}
-                />
-              </div>
-            </div>
-          ) : (
           <WorkspaceOverview
             workspace={activeTab.workspace}
             onNewSession={handleWorkspaceNewSession}
@@ -500,16 +435,16 @@ const renderMiddleColumn = () => {
               handleSidebarSwitchView("settings");
               setSettingsPage("workspace");
             }}
-            onOpenWorkItems={() => setHubView("work-items")}
+            onOpenWorkItems={() => updateActiveTab({ activeFileTabId: WORK_ITEMS_TAB_ID, rightPanelOpen: true })}
             onCreateWorkItem={handleCreateWorkItem}
             onSelectSession={handleSelectSession}
             onSwitchSidebarView={(view) => {
-              // 仓库行 → 激活右栏「文件」tab 浏览；知识库行 → 家 tab hub 知识库视图。
-              if (view === "knowledge") {
-                setHubView("knowledge");
-              } else {
-                updateActiveTab({ activeFileTabId: FILES_TAB_ID, rightPanelOpen: true });
-              }
+              // 仓库行 → 激活右坞「文件」tab；知识库行 → 右坞「知识库」tab
+              // （S2 收编：hub knowledge 子视图已退役）。
+              updateActiveTab({
+                activeFileTabId: view === "knowledge" ? KNOWLEDGE_TAB_ID : FILES_TAB_ID,
+                rightPanelOpen: true,
+              });
             }}
             onAddRepository={() => {
               handleSidebarSwitchView("settings");
@@ -520,7 +455,6 @@ const renderMiddleColumn = () => {
             onOpenLoopsTab={() => updateActiveTab({ activeFileTabId: LOOPS_TAB_ID, rightPanelOpen: true })}
             loopsRefreshKey={loopsRefreshKey}
           />
-          )
         ) : showChat ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -650,6 +584,25 @@ const renderMiddleColumn = () => {
                   </svg>
                 ),
               },
+              ...(panelWorkspace.capabilities.includes("knowledge") ? [{
+                id: KNOWLEDGE_TAB_ID,
+                label: "知识库",
+                icon: (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                  </svg>
+                ),
+              }] : []),
+              ...(panelWorkspace.capabilities.includes("work-items") ? [{
+                id: WORK_ITEMS_TAB_ID,
+                label: "工作项",
+                icon: (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <polyline points="9 11 12 14 22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                  </svg>
+                ),
+              }] : []),
             ] : undefined}
             onSelectTab={(id: string) => (homeAtDesktop ? setHomeActiveFileTabId(id) : updateActiveTab({ activeFileTabId: id }))}
             onCloseTab={homeAtDesktop ? handleCloseHomeFileTab : handleCloseFileTab}
@@ -695,6 +648,50 @@ const renderMiddleColumn = () => {
               refreshKey={loopsRefreshKey}
               onChanged={() => setLoopsRefreshKey((key) => key + 1)}
               onRunLoop={(name) => handleRunLoopDirect(panelWorkspace, name)}
+            />
+          </div>
+        ) : null}
+        {panelWorkspace ? (
+          <div
+            style={{
+              display: dockActiveModule === KNOWLEDGE_TAB_ID ? "flex" : "none",
+              flexDirection: "column",
+              height: "100%",
+            }}
+          >
+            <KnowledgeBrowser
+              key={panelWorkspace.id}
+              workspace={panelWorkspace}
+              onOpenFile={handleOpenFile}
+              refreshKey={explorerRefreshKey}
+            />
+          </div>
+        ) : null}
+        {panelWorkspace?.capabilities.includes("work-items") ? (
+          <div
+            style={{
+              display: dockActiveModule === WORK_ITEMS_TAB_ID ? "flex" : "none",
+              flexDirection: "column",
+              height: "100%",
+            }}
+          >
+            <WorkspaceManager
+              key={panelWorkspace.id}
+              open
+              embedded
+              panel
+              initialSection="work-items"
+              activeWorkspacePath={panelWorkspace.path}
+              initialWorkItemKey={selectedWorkItemKey}
+              createWorkItemRequest={createWorkItemRequest}
+              onClose={() => {}}
+              onOpenWorkspace={handleOpenWorkspace}
+              onOpenWorkItemConversation={handleOpenWorkItemConversation}
+              onRunLoopRound={handleRunLoopRound}
+              onRunContract={handleRunContract}
+              onOpenConversation={handleOpenConversation}
+              onWorkspaceDeleted={handleWorkspaceDeleted}
+              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
             />
           </div>
         ) : null}
