@@ -58,7 +58,6 @@ export function DesktopShell() {
     settingsPage,
     setSettingsPage,
     settingsCwd,
-    selectedWorkItemKey,
     sidebarOpen,
     sidebarWidth,
     sidebarResizing,
@@ -684,7 +683,6 @@ const renderMiddleColumn = () => {
               panel
               initialSection="work-items"
               activeWorkspacePath={panelWorkspace.path}
-              initialWorkItemKey={selectedWorkItemKey}
               createWorkItemRequest={createWorkItemRequest}
               onClose={() => {}}
               onOpenWorkspace={handleOpenWorkspace}

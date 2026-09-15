@@ -91,7 +91,6 @@ export function MobileShell() {
     activeTab,
     activeWorkspace,
     selectedSession,
-    selectedWorkItemKey,
     fileTabs,
     activeFileTabId,
     rightPanelOpen,
@@ -261,7 +260,6 @@ export function MobileShell() {
                   panel
                   initialSection="work-items"
                   activeWorkspacePath={activeWorkspace.path}
-                  initialWorkItemKey={selectedWorkItemKey}
                   createWorkItemRequest={createWorkItemRequest}
                   onClose={() => {}}
                   onOpenWorkspace={handleOpenWorkspace}

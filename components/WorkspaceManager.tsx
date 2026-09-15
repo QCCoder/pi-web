@@ -64,7 +64,6 @@ interface Props {
   split?: { portalTarget: HTMLElement | null } | { inline: true };
   initialSection?: ManagerSection;
   activeWorkspacePath?: string | null;
-  initialWorkItemKey?: string | null;
   createWorkItemRequest?: { type: WorkItemType; id: number } | null;
   createWorkspaceOnOpen?: boolean;
   openRepositoryFormRequest?: number;
@@ -210,7 +209,6 @@ export function WorkspaceManager({
   split,
   initialSection = "workspaces",
   activeWorkspacePath,
-  initialWorkItemKey,
   createWorkItemRequest,
   createWorkspaceOnOpen = false,
   openRepositoryFormRequest,
@@ -454,12 +452,6 @@ export function WorkspaceManager({
       cancelled = true;
     };
   }, [embedded, open, selectedWorkspaceId]);
-
-  useEffect(() => {
-    if ((!open && !embedded) || !selectedWorkspaceId || !initialWorkItemKey) return;
-    setSection("work-items");
-    void loadWorkItem(selectedWorkspaceId, initialWorkItemKey);
-  }, [embedded, initialWorkItemKey, loadWorkItem, open, selectedWorkspaceId]);
 
   useEffect(() => {
     if ((!open && !embedded) || !createWorkItemRequest) return;

@@ -120,7 +120,6 @@ export function useAppShellState(seed?: {
   const activeWorkspace = activeTab?.workspace ?? null;
   const selectedSession = activeTab?.kind === "session" ? activeTab.session : null;
   const newSessionCwd = activeTab?.kind === "new-session" ? activeTab.workspace.path : null;
-  const selectedWorkItemKey = activeTab?.workItemKey ?? null;
   const fileTabs = activeTab?.fileTabs ?? [];
   const activeFileTabId = activeTab?.activeFileTabId ?? null;
   const rightPanelOpen = activeTab?.rightPanelOpen ?? false;
@@ -685,7 +684,6 @@ export function useAppShellState(seed?: {
     let workspace = workspaces.find((w) => w.id === workspaceId && w.available) ?? null;
     const rawView = params.get("view");
     const sessionId = params.get("session");
-    const itemKey = params.get("item");
 
     let session: SessionInfo | null = null;
     if (sessionId) {
@@ -733,19 +731,7 @@ export function useAppShellState(seed?: {
       return;
     }
 
-    // Legacy URL views: settings → 全局面板；work-items → 家 tab hub（W-中后
-    // 工作项面板收进总览 hub，不再有中栏面板可落）。
     const isChat = rawView === "chat";
-    const legacySettings = rawView === "settings";
-    const legacyWorkItems = rawView === "work-items";
-    // Persist the legacy settings deep-link BEFORE activating the tab — the
-    // activeWorkspace effect re-derives `sidebarView` from this key on tab
-    // switch and would otherwise clobber an immediate setState.
-    if (legacySettings) {
-      try {
-        localStorage.setItem(GLOBAL_PANEL_KEY, "settings");
-      } catch { /* ignore */ }
-    }
     if (isChat && session) {
       // 会话 tab：已开则刷新 session 信息（保留 F1 文件 tab 状态），未开则新建。
       const id = sessionTabId(session.id);
@@ -768,18 +754,10 @@ export function useAppShellState(seed?: {
       activateTab(id);
       return;
     }
-    // 家 tab（overview 落地；legacy work-items 深链 → 开右坞工作项 tab，
-    // workItemKey 记在家 tab 上供坞里的 WorkspaceManager 初始选中。）
+    // 家 tab（overview 落地）。
     const homeId = ensureHomeTab(workspace);
     activateTab(homeId);
-    if (legacyWorkItems) {
-      updateTab(homeId, {
-        ...(itemKey ? { workItemKey: itemKey } : {}),
-        activeFileTabId: WORK_ITEMS_TAB_ID,
-        rightPanelOpen: true,
-      });
-    }
-  }, [workspaces, sessionActivity.sessions, ensureHomeTab, updateTab, activateTab]);
+  }, [workspaces, sessionActivity.sessions, ensureHomeTab, activateTab]);
 
   // Initial restore: once workspaces are loaded, (a) R2 恢复 tab 条全量（URL
   // 深链优先决定 active；URL 为首页则停在首页；URL 为空才用恢复的 active），
@@ -1730,8 +1708,6 @@ export function useAppShellState(seed?: {
     activeWorkspace,
     selectedSession,
     newSessionCwd,
-
-    selectedWorkItemKey,
     fileTabs,
     activeFileTabId,
     rightPanelOpen,

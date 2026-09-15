@@ -25,8 +25,6 @@ export interface SessionTabState {
   workspace: WorkspaceSummary;
   /** kind === "session" 时非空（恢复期由会话列表水合）。 */
   session: SessionInfo | null;
-  /** Legacy work-items 深链（URL item= 参数）在对应 tab 上的高亮键，仅家 tab 使用。 */
-  workItemKey: string | null;
   /** F1：右栏文件面板全套状态跟 tab（fileTabs 不持久化——重载后为空，
    *  持久化最小集只有 tab 身份 + 顺序 + active）。 */
   fileTabs: Tab[];
@@ -52,7 +50,6 @@ export function createSessionTab(workspace: WorkspaceSummary, session: SessionIn
     kind: "session",
     workspace,
     session,
-    workItemKey: null,
     fileTabs: [],
     activeFileTabId: null,
     rightPanelOpen: false,
@@ -65,7 +62,6 @@ export function createNewSessionTab(workspace: WorkspaceSummary, id: string): Se
     kind: "new-session",
     workspace,
     session: null,
-    workItemKey: null,
     fileTabs: [],
     activeFileTabId: null,
     // 右栏默认关闭（沿用原工作区 tab 的默认；右上角按钮或点开文件时展开）。
@@ -79,7 +75,6 @@ export function createHomeTab(workspace: WorkspaceSummary): SessionTabState {
     kind: "workspace-home",
     workspace,
     session: null,
-    workItemKey: null,
     fileTabs: [],
     activeFileTabId: null,
     rightPanelOpen: true,
