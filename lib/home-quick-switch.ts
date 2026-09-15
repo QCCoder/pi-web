@@ -1,5 +1,5 @@
 import type { SessionInfo } from "./types";
-import { isWorkspaceSelectable, type WorkspaceSummary } from "./workspaces/types";
+import { isWorkspaceSelectable, type WorkspaceSummary } from "./workspaces/types.ts";
 
 /** Longest-prefix workspace owner match for a session cwd (nested workspaces:
  *  deeper path wins; unavailable or user-disabled workspaces never own
