@@ -891,6 +891,10 @@ function parseWorkspaceIndex(value: unknown): WorkspaceIndex | WorkspaceIndexV1 
     if (paths.has(path)) throw new WorkspaceValidationError(`Duplicate Workspace path: ${path}`);
     ids.add(id);
     paths.add(path);
+    const sortValue = entry.sort_order;
+    if (sortValue !== undefined && (typeof sortValue !== "number" || !Number.isFinite(sortValue))) {
+      throw new WorkspaceValidationError(`workspaces[${index}].sort_order must be a number`);
+    }
     return {
       id,
       path,
@@ -900,6 +904,7 @@ function parseWorkspaceIndex(value: unknown): WorkspaceIndex | WorkspaceIndexV1 
         entry.last_opened_at,
         `workspaces[${index}].last_opened_at`,
       ),
+      ...(sortValue !== undefined ? { sortOrder: sortValue } : {}),
     };
   });
   // v1 indexes are upgraded in place by `migrateIndexV2` (see below); parse
@@ -920,6 +925,7 @@ function serializeWorkspaceIndex(index: MutableWorkspaceIndex): string {
       name: workspace.name,
       added_at: workspace.addedAt,
       last_opened_at: workspace.lastOpenedAt,
+      ...(workspace.sortOrder !== undefined ? { sort_order: workspace.sortOrder } : {}),
     })),
   }, { lineWidth: 0 });
 }
@@ -971,6 +977,9 @@ function indexEntryFromManifest(
     name: manifest.name,
     addedAt: existing?.addedAt ?? now,
     lastOpenedAt: existing?.lastOpenedAt ?? now,
+    // 手动排序位随条目重建透传（registerWorkspacePath 每次 get/create 都会
+    // 重建条目 —— 不透传会被每次读取抹掉）。
+    ...(existing?.sortOrder !== undefined ? { sortOrder: existing.sortOrder } : {}),
   };
 }
 
@@ -1170,7 +1179,11 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
   const index = stored.exists
     ? stored.index
     : await migrateManagedWorkspaces(workspaceRoot, root);
-  if (index.schemaVersion === 1) await migrateIndexV2(index, root);  const summaries: Array<{ summary: WorkspaceSummary; lastOpenedAt: string }> = [];
+  if (index.schemaVersion === 1) await migrateIndexV2(index, root);  const summaries: Array<{
+    summary: WorkspaceSummary;
+    lastOpenedAt: string;
+    sortOrder: number | undefined;
+  }> = [];
   let snapshotsChanged = false;
   for (const entry of index.workspaces) {
     try {
@@ -1179,6 +1192,7 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
         summaries.push({
           summary: unavailableWorkspaceSummary(entry, "directory-unavailable"),
           lastOpenedAt: entry.lastOpenedAt,
+          sortOrder: entry.sortOrder,
         });
         continue;
       }
@@ -1186,6 +1200,7 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
       summaries.push({
         summary: unavailableWorkspaceSummary(entry, "directory-unavailable"),
         lastOpenedAt: entry.lastOpenedAt,
+        sortOrder: entry.sortOrder,
       });
       continue;
     }
@@ -1195,6 +1210,7 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
         summaries.push({
           summary: unavailableWorkspaceSummary(entry, "config-invalid"),
           lastOpenedAt: entry.lastOpenedAt,
+          sortOrder: entry.sortOrder,
         });
         continue;
       }
@@ -1207,6 +1223,7 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
       summaries.push({
         summary: workspaceSummary(entry.path, manifest),
         lastOpenedAt: entry.lastOpenedAt,
+        sortOrder: entry.sortOrder,
       });
     } catch (error) {
       summaries.push({
@@ -1217,6 +1234,7 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
             : "config-invalid",
         ),
         lastOpenedAt: entry.lastOpenedAt,
+        sortOrder: entry.sortOrder,
       });
     }
   }
@@ -1226,9 +1244,36 @@ export async function discoverWorkspaces(root?: string): Promise<WorkspaceSummar
       if (left.summary.available !== right.summary.available) {
         return left.summary.available ? -1 : 1;
       }
+      // 手动序在前（升序），未设置的条目保持原 MRU 降序兜底 —— 不排序的用户
+      // 看到的列表与引入手动序之前完全一致。
+      const leftOrder = left.sortOrder ?? Number.POSITIVE_INFINITY;
+      const rightOrder = right.sortOrder ?? Number.POSITIVE_INFINITY;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
       return right.lastOpenedAt.localeCompare(left.lastOpenedAt);
     })
     .map(({ summary }) => summary);
+}
+
+/** 手动排序（2026-09）：把全量期望序写入全局索引条目的 `sortOrder`（按位次
+ *  重编 1..N，一次原子写）。未提及的条目剥掉 sortOrder（回落 MRU 段）；未知
+ *  id 静默忽略（列表加载与拖放之间工作区可能已被删除，不值得为此报错）。
+ *  全量语义让 UI 一次 PATCH 表达完整顺序，也天然支持“清空手动序”。 */
+export async function updateWorkspaceOrder(
+  ids: string[],
+  root?: string,
+): Promise<{ updated: true }> {
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
+    throw new WorkspaceValidationError("order must be an array of workspace ids");
+  }
+  await updateWorkspaceIndex((index) => {
+    const position = new Map(ids.map((id, i) => [id, i + 1]));
+    for (const entry of index.workspaces) {
+      const next = position.get(entry.id);
+      if (next !== undefined) entry.sortOrder = next;
+      else delete entry.sortOrder;
+    }
+  }, root);
+  return { updated: true };
 }
 
 export async function createWorkspace(

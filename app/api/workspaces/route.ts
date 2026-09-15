@@ -5,6 +5,7 @@ import {
   discoverWorkspaces,
   getWorkspaceRoot,
   importWorkspace,
+  updateWorkspaceOrder,
   WorkspaceConflictError,
   WorkspaceValidationError,
 } from "@/lib/workspaces/service";
@@ -25,6 +26,27 @@ export async function GET() {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },
+    );
+  }
+}
+
+export async function PATCH(req: Request) {
+  try {
+    const input = await req.json() as { order?: string[] };
+    // 手动排序（设置列表拖拽）：全量期望序 → 索引 sortOrder 重编，一次写入。
+    if (!Array.isArray(input.order)) {
+      throw new WorkspaceValidationError("order must be an array of workspace ids");
+    }
+    return NextResponse.json(await updateWorkspaceOrder(input.order));
+  } catch (error) {
+    const status = error instanceof WorkspaceConflictError
+      ? 409
+      : error instanceof WorkspaceValidationError
+        ? 400
+        : 500;
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status },
     );
   }
 }

@@ -113,6 +113,10 @@ export interface WorkspaceIndexEntry {
   name: string;
   addedAt: string;
   lastOpenedAt: string;
+  /** 手动排序位（2026-09，可选）：升序在前，未设置的条目按 MRU 排在其后。
+   *  存在全局索引而非各 manifest —— 重排 = 一次索引写入，不触发工作区 git 提交；
+   *  `registerWorkspacePath` 重建条目时透传保留。 */
+  sortOrder?: number;
 }
 
 export interface WorkspaceIndex {

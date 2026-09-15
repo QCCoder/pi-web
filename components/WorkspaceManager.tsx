@@ -267,6 +267,8 @@ export function WorkspaceManager({
   const [skillDraft, setSkillDraft] = useState<string[]>([]);
   // 基本信息：改名草稿（随选中工作区重置；空/未变时保存禁用）。
   const [nameDraft, setNameDraft] = useState("");
+  // 列表拖拽排序（HTML5 DnD，同 SessionTabBar 模式：拖到目标上 = 插到它前面）。
+  const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(null);
   const [createWorkItemOpen, setCreateWorkItemOpen] = useState(false);
   const [workItemType, setWorkItemType] = useState<WorkItemType>("bug");
   const [workItemTitle, setWorkItemTitle] = useState("");
@@ -718,6 +720,27 @@ export function WorkspaceManager({
     }
   }, [loadWorkspaces, selectedWorkspace]);
 
+  const saveWorkspaceOrder = useCallback(async (ids: string[]) => {
+    setSaving(true);
+    setError(null);
+    try {
+      // 全量期望序一次提交（服务端重编 sortOrder，只写全局索引，不碰各
+      // manifest —— 不会给工作区 git 产生提交）。
+      await responseJson(
+        await fetch("/api/workspaces", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ order: ids }),
+        }),
+      );
+      await loadWorkspaces();
+    } catch (orderError) {
+      setError(orderError instanceof Error ? orderError.message : String(orderError));
+    } finally {
+      setSaving(false);
+    }
+  }, [loadWorkspaces]);
+
   const createWorkItem = useCallback(async () => {
     if (!selectedWorkspaceId) return;
     setSaving(true);
@@ -1043,7 +1066,13 @@ export function WorkspaceManager({
           background: transparent;
           color: var(--text);
           text-align: left;
-          cursor: pointer;
+          cursor: grab;
+        }
+        .workspace-rail-item:active {
+          cursor: grabbing;
+        }
+        .workspace-rail-item:disabled {
+          cursor: default;
         }
         .workspace-rail-item[data-active="true"] {
           background: var(--bg);
@@ -1826,10 +1855,28 @@ export function WorkspaceManager({
                 disabled={!workspace.available}
                 className="workspace-rail-item"
                 data-active={workspace.id === selectedWorkspaceId}
+                draggable
+                onDragStart={(event) => {
+                  setDraggedWorkspaceId(workspace.id);
+                  event.dataTransfer.effectAllowed = "move";
+                }}
+                onDragEnd={() => setDraggedWorkspaceId(null)}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (!draggedWorkspaceId || draggedWorkspaceId === workspace.id) return;
+                  const ids = workspaceData?.workspaces.map((item) => item.id) ?? [];
+                  const next = ids.filter((id) => id !== draggedWorkspaceId);
+                  next.splice(next.indexOf(workspace.id), 0, draggedWorkspaceId);
+                  setDraggedWorkspaceId(null);
+                  void saveWorkspaceOrder(next);
+                }}
                 onClick={() => {
                   setSelectedWorkspaceId(workspace.id);
                   setSelectedWorkItem(null);
                 }}
+                style={draggedWorkspaceId === workspace.id ? { opacity: 0.55 } : undefined}
               >
                 <strong>
                   {workspace.name}
@@ -1863,6 +1910,19 @@ export function WorkspaceManager({
             {!loading && workspaceData?.workspaces.length === 0 && (
               <div className="workspace-rail-meta">尚未创建 Workspace。</div>
             )}
+            {/* 空白区 drop = 移到末尾（同 SessionTabBar 容器兜底）。 */}
+            <div
+              style={{ minHeight: 24 }}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={() => {
+                if (!draggedWorkspaceId) return;
+                const ids = workspaceData?.workspaces.map((item) => item.id) ?? [];
+                const next = ids.filter((id) => id !== draggedWorkspaceId);
+                next.push(draggedWorkspaceId);
+                setDraggedWorkspaceId(null);
+                void saveWorkspaceOrder(next);
+              }}
+            />
     </aside>
   );
 
