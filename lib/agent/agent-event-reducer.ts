@@ -9,7 +9,7 @@
  *   - tool 解析（normalizeToolCalls 把 pi 的 {id,name,arguments} 归一为 {toolCallId,toolName,input}）；
  *   - tool phase 转移（tool_execution_start/end 维护 running_tools 列表）；
  *   - result 匹配（readCompactResult）；
- *   - compaction 新老事件名（compaction_* 与 auto_compaction_* 都支持，AGENTS.md）；
+ *   - compaction 事件（compaction_*，AGENTS.md）；
  *   - 晚到事件 guard（agent_end 后的 message_* 用 agentRunning 判断丢弃，防 ghost bubble）；
  *   - 乐观气泡去重（message_end(user) 消费 optimisticUserMessageKey）。
  *
@@ -259,13 +259,11 @@ export function applyAgentEvent(
       break;
     }
 
-    case "auto_compaction_start":
     case "compaction_start": {
       runtime = { ...runtime, isCompacting: true, compactError: null, compactResult: null };
       break;
     }
 
-    case "auto_compaction_end":
     case "compaction_end": {
       if (event.errorMessage) {
         runtime = {

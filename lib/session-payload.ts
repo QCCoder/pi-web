@@ -1,5 +1,5 @@
 import { listAllSessions } from "./session-reader";
-import { isSubagentChildSession, loadLegacySubagentChildIds } from "./subagent-child";
+import { isSubagentChildSession } from "./subagent-child";
 import { daemonClient } from "./daemon/client";
 import type { SessionInfo } from "./types";
 
@@ -57,9 +57,8 @@ export async function buildSessionsPayload(
 
   // Tag subagent worker sessions so the sidebar hides them (they stay in the
   // payload so the parent's "open child" action can still resolve by id).
-  const legacyChildIds = loadLegacySubagentChildIds();
   const sessionsWithFlags = merged.map((session) =>
-    isSubagentChildSession(session, legacyChildIds)
+    isSubagentChildSession(session)
       ? { ...session, subagentChild: true }
       : session
   );

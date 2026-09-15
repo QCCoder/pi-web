@@ -131,8 +131,7 @@ sessions, explorer, work-items, repositories, knowledge, workflows
 Each workspace may carry an `AGENTS.md` at its root. **`renderWorkspaceAgents(manifest, capabilities)`** is the
 **capability-driven** generator (redesign decision 9): it emits a title, a collaboration-flow block when `work-items`
 is on, a `<!-- workspace-managed:git:start/end -->` block when the manifest has `git` settings, and the repositories
-block — **without depending on a template id**, so template-free workspaces still get a tailored policy. The legacy
-`renderSoftwareDevelopmentAgents(manifest)` is retained for reference but no longer called by `createWorkspace`.
+block — **without depending on a template id**, so template-free workspaces still get a tailored policy. The legacy software-development template renderer was deleted alongside the template system.
 
 The **repositories** block is *auto-maintained* between managed markers:
 
@@ -350,7 +349,7 @@ reproducible where a `file:` directory pin would live-track the upstream tree �
 - **Child sessions** persist BY DEFAULT with parent-generated ids `pi-subagent-<uuid>` + names `pi-subagent <role>`
   (file `<ts>_pi-subagent-<uuid>.jsonl` under the cwd's session dir; opt-out per role `persist: false` / globally
   `childSessions: false`). `lib/subagent-child.ts` tags them `subagentChild: true` in `GET /api/sessions` by that
-  id/name prefix — the old append-only `~/.pi/agent/subagent-children.txt` registry is retired. They are separate
+  id/name prefix; the old built-in's append-only registry is gone entirely — those sessions were archived away). They are separate
   OS processes, NOT daemon-registry sessions: no live SSE from the daemon, no `parentSession` link, and their file
   operations never appear in the parent stream (only capped summaries do — `SessionChangedFiles` no longer counts
   subagent-touched files).
@@ -572,7 +571,7 @@ lib/
   session-daemon/                   sidecar lifecycle for the session daemon (C2)
     sidecar.ts               ensureSessionDaemonStarted (probe→attach / spawn detached) + pure guards (decideSidecarAction, spawnableDaemonUrl, sidecarSpawnEnv)
   subagent-child.ts          subagentChild tagging for community @henryqw/pi-subagent children
-                             (id/name prefix `pi-subagent` — replaces the old subagent-children.txt registry)
+                             (id/name prefix `pi-subagent` — the only child-detection mechanism)
   (dev-loop/ retired — loops are per-workspace custom definitions; the R&D loop pattern lives in cxin-workspace, see Dev Loop section above)  git-changes.ts            getGitStatus (multi-repo groups) + getGitFileDiff (patch)
   git-status.ts             porcelain-v1 parse, status classify, buildRepoGroups (pure)
   git-discover.ts           walk tree to find nested repo roots (+ scattered files for file-index); IGNORED_NAMES prunes
@@ -787,7 +786,7 @@ The pi-daemon process (`npm run daemon` → `bin/pi-daemon.js` → `lib/daemon/h
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.
 
 ### Compaction SSE events
-Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `auto_compaction_start` / `auto_compaction_end`. `handleAgentEvent` accepts both sets to keep `isCompacting` in sync. Manual compact is a blocking POST — the button stays disabled until the response returns.
+pi emits `compaction_start` / `compaction_end`; `handleAgentEvent` handles exactly these (the old `auto_compaction_*` spellings are gone — pi's version is pinned by this repo). Manual compact is a blocking POST — the button stays disabled until the response returns.
 
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events` — a pure pipe onto the daemon's running-id SSE (the complete set: interactive + children + kit rounds), so running badges update without polling.

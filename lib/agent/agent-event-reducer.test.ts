@@ -272,19 +272,6 @@ describe("applyAgentEvent — compaction (new + legacy event names)", () => {
     assert.deepEqual(res.effects.map((e) => e.kind), ["reloadSession"]);
   });
 
-  it("auto_compaction_* legacy names behave the same", () => {
-    let rt = createDefaultSessionRuntimeState();
-    ({ rt } = step(rt, [], { type: "auto_compaction_start" }));
-    assert.equal(rt.isCompacting, true);
-    const res = applyAgentEvent(
-      rt,
-      { type: "auto_compaction_end", result: { tokensBefore: 50, estimatedTokensAfter: 10 } },
-      ctx(),
-    );
-    assert.equal(res.runtime.compactResult?.reason, "auto");
-    assert.equal(res.runtime.compactResult?.tokensBefore, 50);
-  });
-
   it("compaction_end error sets compactError and skips reload", () => {
     const prev = runningPrev({ isCompacting: true });
     const res = applyAgentEvent(prev, { type: "compaction_end", errorMessage: "boom" }, ctx());

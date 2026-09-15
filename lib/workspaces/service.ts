@@ -520,9 +520,8 @@ async function updateManagedRepositoryInstructions(
   } catch {
     return; // no AGENTS.md to maintain
   }
-  // Resolve each repo to its actual on-disk path (legacy fallback included) so an
-  // existing workspace's repos show their real location in AGENTS.md, not the
-  // new-layout default. New repos naturally resolve to the new layout.
+  // Resolve each repo to its actual on-disk path so an existing workspace's
+  // repos show their real location in AGENTS.md.
   const resolveRelativePath = (repository: WorkspaceRepository): string =>
     workspaceRepositoryPath(workspacePath, repository).relativePath;
   let next = current;

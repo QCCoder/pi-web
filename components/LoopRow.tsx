@@ -22,18 +22,18 @@ export interface LoopRowProps {
   busy: boolean;
   onConfigure: (name: string) => void;
   onAction: (name: string, action: "pause" | "resume" | "stop") => void;
-  /** 可选：名字点击回调（LoopsPanel 传入 → 跨视图 reveal 到工作台文件区；
+  /** 可选：名字点击回调（LoopsDockPanel 传入 → 跨视图 reveal 到工作台文件区；
    *  总览区块不传，名字保持纯展示 span）。 */
   onNameClick?: () => void;
-  /** 可选：整行点击（LoopsPanel 传入 → 右栏 loopConfig 视图；总览不传，行为不变）。 */
+  /** 可选：整行点击（LoopsDockPanel 传入 → 内联推进 LoopsConfig；总览不传，行为不变）。 */
   onRowClick?: () => void;
   /** 可选：「运行」按钮回调（手动起一轮；总览不传，不渲染该按钮）。 */
   onRun?: () => void;
-  /** 「配置」按钮是否渲染（LoopsPanel 行点击已开配置，隐藏按钮；默认 true 供总览）。 */
+  /** 「配置」按钮是否渲染（行点击已开配置的宿主隐藏按钮；默认 true 供总览）。 */
   showConfigureButton?: boolean;
 }
 
-/** loop 单行（总览 Loops 区块与中栏 LoopsPanel 共用，避免两处漂移）。 */
+/** loop 单行（总览 Loops 区块与右坞 LoopsDockPanel 共用，避免两处漂移）。 */
 export function LoopRow({
   loop,
   busy,
