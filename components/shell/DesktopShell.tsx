@@ -8,10 +8,9 @@ import { FilesExplorerPanel } from "../FilesExplorerPanel";
 import { ArchiveModal } from "../ArchiveModal";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceOverview } from "../WorkspaceOverview";
-import { WorkspaceSidebar } from "../WorkspaceSidebar";
-import { ActivityBar } from "../ActivityBar";
+import { ProjectSidebar } from "../ProjectSidebar";
 import { PanelHeader } from "../PanelHeader";
-import { SettingsPanel, PreferencesPage } from "../SettingsPanel";
+import { SettingsPanel } from "../SettingsPanel";
 import { ModelsConfig } from "../ModelsConfig";
 import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
@@ -28,11 +27,13 @@ import type { SessionTabState } from "@/lib/session-tabs";
 import { ChatToolbar } from "./ChatToolbar";
 
 /**
- * The desktop shell — the three-column layout, migrated verbatim from the
- * former single AppShell render: activity rail + resizable middle column +
- * center column (toolbar / workspace tabs / overview|chat) + right file
- * panel. All state comes from the shared shell context; this component owns
- * nothing but the middle-column render helpers.
+ * The desktop shell（2026-09 树形侧栏改版，grill 共识）：左侧单一项目树侧栏
+ * （ProjectSidebar：新建任务 / 项目→会话 / 组尾归档 / 底部设置·模型·插件·
+ * Skills 四入口）+ 中央区（ChatToolbar + SessionTabBar + 总览|聊天|配置整页）
+ * + 右坞（文件/Loops/知识库/工作项 + 文件 tab，不变）。图标栏与「中栏面板」
+ * 已退役——原 configView 三列 split（列表中栏 + 详情 portal 右栏）由中央区
+ * 整页（CenterPage）取代。所有状态来自共享 shell context；本组件只拥有
+ * 中央区页面的渲染分派。
  */
 export function DesktopShell() {
   const s = useShell();
@@ -49,11 +50,9 @@ export function DesktopShell() {
     activeFileTabId,
     rightPanelOpen,
     activeCwd,
-    sidebarView,
-    configView,
-    setConfigView,
-    configPortalNode,
-    setConfigPortalNode,
+    centerPage,
+    setCenterPage,
+    openCenterPage,
     loopFilesReveal,
     settingsPage,
     setSettingsPage,
@@ -75,7 +74,6 @@ export function DesktopShell() {
     workspaceActivity,
     setModelsRefreshKey,
     setSessionKey,
-    handleOpenConfig,
     homeNewSession,
     homeSession,
     mruIds,
@@ -92,7 +90,6 @@ export function DesktopShell() {
     openSessionStatsPanel,
     handleFileLineMention,
     setOpenRepositoryFormRequest,
-    refreshKey,
     explorerRefreshKey,
     createWorkItemRequest,
     openRepositoryFormRequest,
@@ -103,12 +100,10 @@ export function DesktopShell() {
     showChat,
     showPlaceholder,
     activeFileTab,
-    handleRailSwitch,
-    handleSidebarSwitchView,
     handleWorkspaceSettingsSelection,
     handleOpenWorkspace,
-    handleShowOverview,
     closeTab,
+    closeTabs,
     openSessionTab,
     handleSelectTab,
     handleSessionRemoved,
@@ -116,6 +111,7 @@ export function DesktopShell() {
     handleReturnHome,
     handleOpenConversation,
     handleWorkspaceNewSession,
+    handleTabBarNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
     handleRunLoopRound,
@@ -141,126 +137,6 @@ export function DesktopShell() {
 
   // Loop 配置变更 → 总览 Loops 区块刷新信号（创建/删除/frontmatter 保存后 bump）。
   const [loopsRefreshKey, setLoopsRefreshKey] = useState(0);
-
-  // ---- Middle column content (three-column layout) ----------------------------
-// One `sidebarView` drives everything: module views (workbench/knowledge/
-// work-items) render WorkspaceSidebar / the work-items manager; global
-// panels (archive/settings) render the former modals as embedded panels.
-const middleColumnWidth = sidebarWidth;
-
-const renderMiddleColumn = () => {
-  // Desktop config views (模型/Skills/插件): the LIST renders here in the
-  // middle column (under a PanelHeader like every other panel); the DETAIL
-  // portals into the right column's config area (configPortalNode). Mobile
-  // never sets configView — its settings subpages serve the same content
-  // via the components' embedded mode.
-  if (configView) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-        <PanelHeader
-          title={configView === "models" ? "模型" : configView === "skills" ? "Skills" : "插件"}
-          meta={configView === "models" ? "~/.pi/agent/models.json" : settingsCwd ?? undefined}
-        />
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          {configView === "models" ? (
-            <ModelsConfig split={{ portalTarget: configPortalNode }} onSaved={() => setModelsRefreshKey((key) => key + 1)} />
-          ) : configView === "skills" && settingsCwd ? (
-            <SkillsConfig
-              split={{ portalTarget: configPortalNode }}
-              cwd={settingsCwd}
-              globalOnly={!activeWorkspace}
-              workspace={activeWorkspace}
-              onWorkspaceSkillsChange={(updated) => {
-                setWorkspaces((current) =>
-                  current.map((w) => (w.id === updated.id ? updated : w)),
-                );
-              }}
-            />
-          ) : configView === "plugins" && settingsCwd ? (
-            <PluginsConfig
-              split={{ portalTarget: configPortalNode }}
-              cwd={settingsCwd}
-              sessionId={selectedSession?.id ?? null}
-              onReloaded={() => setSessionKey((key) => key + 1)}
-            />
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-  // Global settings panel works at home too. 工作区管理是全局的：列表+详情
-  // 已搬到中央内容区（下方 workspace 分支），中栏回到纯设置索引，首页也可见入口。
-  if (sidebarView === "settings") {
-    return (
-      <SettingsPanel
-        page={settingsPage}
-        onPageChange={setSettingsPage}
-        workspace={activeWorkspace}
-        settingsCwd={settingsCwd ?? ""}
-        workspaceSlot={null}
-        onOpenArchive={activeWorkspace ? () => handleSidebarSwitchView("archive") : undefined}
-        onWorkspaceSkillsChange={(updated) => {
-          setWorkspaces((current) =>
-            current.map((w) => (w.id === updated.id ? updated : w)),
-          );
-        }}
-        onPluginsReloaded={() => setSessionKey((k) => k + 1)}
-        onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
-        sessionId={selectedSession?.id ?? null}
-        // The 模型/Skills/插件 index rows open the right-column config views
-        // instead of in-panel subpages (desktop three-column split).
-        onOpenConfigView={handleOpenConfig}
-      />
-    );
-  }
-  if (activeWorkspace && sidebarView === "archive") {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-        <PanelHeader
-          title="归档"
-          meta={activeWorkspace.name}
-        />
-        <ArchiveModal
-          embedded
-          workspaceId={activeWorkspace.id}
-          workspacePath={activeWorkspace.path}
-          onChanged={() => setRefreshKey((k) => k + 1)}
-        />
-      </div>
-    );
-  }
-  // 工作台会话列表（W-中：中栏只剩这一种模块视图；工作项/知识库/Loops 在家 tab hub）。
-  return (
-    <WorkspaceSidebar
-      activeWorkspace={activeWorkspace}
-      activeView="workbench"
-      workspaces={workspaces}
-      selectedSessionId={selectedSession?.id ?? homeSession?.id ?? null}
-      runningSessionIds={sessionActivity.runningIds}
-      completedSessionIds={sessionActivity.completedIds}
-      allSessions={sessionActivity.sessions}
-      workspacesLoaded={workspacesLoaded}
-      sessionsLoaded={sessionActivity.loaded}
-      refreshKey={refreshKey}
-      explorerRefreshKey={explorerRefreshKey}
-      showFilesSection={false}
-      onSelectWorkspace={handleOpenWorkspace}
-      onShowOverview={handleShowOverview}
-      onCreateWorkspace={handleCreateWorkspace}
-      onImportDirectory={() => setImportPickerOpen(true)}
-      onAddRepository={() => {
-        handleSidebarSwitchView("settings");
-        setSettingsPage("workspace");
-        setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
-      }}
-      onNewSession={handleWorkspaceNewSession}
-      onSelectSession={handleSelectSession}
-      onOpenSessionInNewTab={openSessionTab}
-      onOpenFile={handleOpenFile}
-      onSessionRemoved={handleSessionRemoved}
-    />
-  );
-  };
 
   // 首页上下文（无活动工作区 tab）：composer 选区 / 首页会话归属 → 决定
   // 首页主区新建会话页与右栏文件区的上下文工作区。
@@ -288,38 +164,162 @@ const renderMiddleColumn = () => {
   const showFilesTree = Boolean(panelWorkspace) && !panelActiveFileTab
     && (panelEffTabId === FILES_TAB_ID || !isModuleTabId(panelEffTabId));
 
+  // ---- 中央区整页（CenterPage）------------------------------------------------
+  // 底部四入口（设置/模型/插件/Skills）与项目树「归档」行的渲染面：整页占中央
+  // 区（列表 + 详情并排），tab 条保持可见——点任何会话 tab 即关闭回聊天。
+  // 设置整页 = SettingsPanel（desktop 模式：索引 + 子页面板内推进航，工作区
+  // 子页的 inline-split WorkspaceManager 经 workspaceSlot 注入）。
+  const closeCenterPage = () => setCenterPage(null);
+
+  const renderCenterPage = () => {
+    const page = centerPage;
+    if (!page) return null;
+
+    if (page.kind === "settings") {
+      return (
+        <SettingsPanel
+          desktop
+          page={settingsPage}
+          onPageChange={setSettingsPage}
+          workspace={activeWorkspace}
+          settingsCwd={settingsCwd ?? ""}
+          workspaceMeta={workspaceSettingsName}
+          workspaceSlot={(
+            <div style={{ flex: 1, minHeight: 0, padding: "10px 12px", display: "flex", flexDirection: "column" }}>
+              {/* 工作区列表 + 单个详情并排（inline split）；「添加仓库」深链走
+                  openRepositoryFormRequest → 选中项自动开表单。 */}
+              <WorkspaceManager
+                open
+                embedded
+                initialSection="workspaces"
+                split={{ inline: true }}
+                onSelectedWorkspaceChange={handleWorkspaceSettingsSelection}
+                activeWorkspacePath={activeWorkspace?.path ?? null}
+                openRepositoryFormRequest={openRepositoryFormRequest}
+                onClose={() => {}}
+                onOpenWorkspace={handleOpenWorkspace}
+                onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                onRunLoopRound={handleRunLoopRound}
+                onRunContract={handleRunContract}
+                onOpenConversation={handleOpenConversation}
+                onWorkspaceDeleted={handleWorkspaceDeleted}
+                onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+              />
+            </div>
+          )}
+          onWorkspaceSkillsChange={(updated) => {
+            setWorkspaces((current) =>
+              current.map((w) => (w.id === updated.id ? updated : w)),
+            );
+          }}
+          onPluginsReloaded={() => setSessionKey((k) => k + 1)}
+          onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
+          sessionId={selectedSession?.id ?? null}
+          onCloseOverlay={closeCenterPage}
+        />
+      );
+    }
+
+    const titles = { models: "模型", skills: "Skills", plugins: "插件" } as const;
+    if (page.kind === "models" || page.kind === "skills" || page.kind === "plugins") {
+      const title = titles[page.kind];
+      const meta = page.kind === "models"
+        ? "~/.pi/agent/models.json"
+        : settingsCwd ?? undefined;
+      return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+          <PanelHeader title={title} meta={meta} onClose={closeCenterPage} />
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            {page.kind === "models" ? (
+              <ModelsConfig inline onSaved={() => setModelsRefreshKey((key) => key + 1)} onClose={closeCenterPage} />
+            ) : page.kind === "skills" ? (
+              <SkillsConfig
+                inline
+                cwd={settingsCwd ?? ""}
+                globalOnly={!activeWorkspace}
+                workspace={activeWorkspace}
+                onWorkspaceSkillsChange={(updated) => {
+                  setWorkspaces((current) =>
+                    current.map((w) => (w.id === updated.id ? updated : w)),
+                  );
+                }}
+                onClose={closeCenterPage}
+              />
+            ) : (
+              <PluginsConfig
+                inline
+                cwd={settingsCwd ?? ""}
+                sessionId={selectedSession?.id ?? null}
+                onReloaded={() => setSessionKey((key) => key + 1)}
+                onClose={closeCenterPage}
+              />
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // archive — 工作区作用域（树内组尾入口）。
+    const archiveWorkspace = workspaces.find((w) => w.id === page.workspaceId) ?? null;
+    if (!archiveWorkspace) {
+      return (
+        <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
+          工作区不存在或已删除。
+        </div>
+      );
+    }
+    return (
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+        <PanelHeader title="归档" meta={archiveWorkspace.name} onClose={closeCenterPage} />
+        <ArchiveModal
+          embedded
+          workspaceId={archiveWorkspace.id}
+          workspacePath={archiveWorkspace.path}
+          onChanged={() => setRefreshKey((k) => k + 1)}
+        />
+      </div>
+    );
+  };
+
   return (
     <>
 <div style={{ display: "flex", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)", boxSizing: "border-box" }}>
-    {/* Left icon rail (desktop) — module views + separator + global group
-        (模型/Skills/插件 config icons + archive + bottom-pinned settings).
-        A config icon highlights while its split view is open (configView
-        takes precedence over the middle-column panel). Sits OUTSIDE the
-        resizable middle column — always visible when closed. */}
-      <ActivityBar
-        variant="vertical"
-        activeView={configView ?? sidebarView}
-        capabilities={activeWorkspace?.capabilities ?? []}
-        onSwitch={handleRailSwitch}
-        hasWorkspace={Boolean(activeWorkspace)}
-      />
-
-    {/* Middle column: the single focused panel (module views, global panels,
-        config lists). Width is drag-resizable via the handle below. */}
+    {/* 左侧：项目树侧栏（2026-09 改版：单一侧栏 = 新建任务 + 项目→会话 +
+        组尾归档 + 底部设置/模型/插件/Skills）。宽度沿用可拖拽/折叠机制
+        （sidebar-container 类 + 拖拽把手）；折叠后左上角固定按钮展开。 */}
     <div
       ref={sidebarContainerRef}
       className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarResizing ? " sidebar-resizing" : ""}`}
       style={{
         background: "var(--bg-panel)",
-        borderRight: "1px solid var(--border)",
         display: "flex",
         flexDirection: "column",
         flexShrink: 0,
         zIndex: 200,
-        "--pi-sidebar-width": `${middleColumnWidth}px`,
+        "--pi-sidebar-width": `${sidebarWidth}px`,
       } as React.CSSProperties}
     >
-      {renderMiddleColumn()}
+      <ProjectSidebar
+        workspaces={workspaces}
+        allSessions={sessionActivity.sessions}
+        runningSessionIds={sessionActivity.runningIds}
+        completedSessionIds={sessionActivity.completedIds}
+        selectedSessionId={selectedSession?.id ?? homeSession?.id ?? null}
+        centerPage={centerPage}
+        workspacesLoaded={workspacesLoaded}
+        sessionsLoaded={sessionActivity.loaded}
+        onNewSession={() => {
+          if (activeWorkspace) handleWorkspaceNewSession();
+          else handleReturnHome();
+        }}
+        onSelectSession={handleSelectSession}
+        onOpenSessionInNewTab={openSessionTab}
+        onSessionRemoved={handleSessionRemoved}
+        onCreateWorkspace={handleCreateWorkspace}
+        onImportDirectory={() => setImportPickerOpen(true)}
+        onOpenCenterPage={openCenterPage}
+        workspaceActivity={workspaceActivity}
+      />
     </div>
     {/* Desktop sidebar resize handle (drag to widen/narrow; double-click resets) */}
     {sidebarOpen && (
@@ -349,91 +349,21 @@ const renderMiddleColumn = () => {
           if (id !== activeTabId) handleSelectTab(id);
         }}
         onCloseTab={closeTab}
+        onCloseTabs={closeTabs}
         onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is SessionTabState => Boolean(t)))}
-        onNewSession={handleWorkspaceNewSession}
-        onPickWorkspace={handleOpenWorkspace}
+        onNewSession={handleTabBarNewSession}
       />
 
-      {/* Main content: a config view (模型/Skills/插件 — desktop rail icons)
-          renders its DETAIL here; its LIST lives in the middle column and
-          portals the detail into this container via configPortalNode.
-          The settings › 工作区 page (2026-09) renders here WHOLE — list +
-          detail side by side in ONE container (WorkspaceManager inline
-          split), no portal; 偏好 mounts directly. The 工作项 panel keeps
-          the portal pattern for the selected work item — the list stays in
-          the middle column, the detail opens here (× or any chat/panel
-          intent hands the column back). */}
+      {/* Main content: 中央区整页（CenterPage：设置/模型/插件/Skills/归档——
+          点任何会话 tab 即关闭）优先于 总览/聊天/首页。 */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {(configView || (sidebarView === "settings" && settingsPage !== "index")) ? (
-          configView ? (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title={configView === "models" ? "模型" : configView === "skills" ? "Skills" : "插件"}
-                meta="详情"
-                onClose={() => setConfigView(null)}
-              />
-              <div
-                ref={setConfigPortalNode}
-                style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-              />
-            </div>
-          ) : sidebarView === "settings" && settingsPage === "workspace" ? (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title="工作区设置"
-                meta={workspaceSettingsName ?? activeWorkspace?.name ?? undefined}
-                onClose={() => setSettingsPage("index")}
-              />
-              {/* 工作区列表 + 单个详情都在中央内容区（2026-09 搬家：不再拆中栏窄列
-                  + 右栏 portal）。inline split = 左 300px 列表 + 右详情并排；
-                  「添加仓库」深链仍走 openRepositoryFormRequest → 选中项自动开表单。 */}
-              <div style={{ flex: 1, minHeight: 0, padding: "10px 12px", display: "flex", flexDirection: "column" }}>
-                <WorkspaceManager
-                  open
-                  embedded
-                  initialSection="workspaces"
-                  split={{ inline: true }}
-                  onSelectedWorkspaceChange={handleWorkspaceSettingsSelection}
-                  activeWorkspacePath={activeWorkspace?.path ?? null}
-                  openRepositoryFormRequest={openRepositoryFormRequest}
-                  onClose={() => {}}
-                  onOpenWorkspace={handleOpenWorkspace}
-                  onOpenWorkItemConversation={handleOpenWorkItemConversation}
-                  onRunLoopRound={handleRunLoopRound}
-                  onRunContract={handleRunContract}
-                  onOpenConversation={handleOpenConversation}
-                  onWorkspaceDeleted={handleWorkspaceDeleted}
-                  onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-                />
-              </div>
-            </div>
-          ) : sidebarView === "settings" && settingsPage === "preferences" ? (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title="偏好"
-                meta="主题 / 语言"
-                onClose={() => setSettingsPage("index")}
-              />
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                <PreferencesPage />
-              </div>
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-              <PanelHeader
-                title="详情"
-                onClose={() => setSettingsPage("index")}
-              />
-              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }} />
-            </div>
-          )
-        ) : activeTab?.kind === "workspace-home" ? (
+        {centerPage ? renderCenterPage() : activeTab?.kind === "workspace-home" ? (
           <WorkspaceOverview
             workspace={activeTab.workspace}
             onNewSession={handleWorkspaceNewSession}
             onOpenSettings={() => {
               setOpenRepositoryFormRequest(undefined);
-              handleSidebarSwitchView("settings");
+              setCenterPage({ kind: "settings" });
               setSettingsPage("workspace");
             }}
             onOpenWorkItems={() => updateActiveTab({ activeFileTabId: WORK_ITEMS_TAB_ID, rightPanelOpen: true })}
@@ -448,7 +378,7 @@ const renderMiddleColumn = () => {
               });
             }}
             onAddRepository={() => {
-              handleSidebarSwitchView("settings");
+              setCenterPage({ kind: "settings" });
               setSettingsPage("workspace");
               setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
             }}
@@ -558,7 +488,6 @@ const renderMiddleColumn = () => {
       style={{
         display: "flex",
         flexDirection: "column",
-        borderLeft: "1px solid var(--border)",
         background: "var(--bg)",
         ...(rightPanelWidth != null ? { "--pi-right-panel-width": `${rightPanelWidth}px` } : {}),
       } as React.CSSProperties}

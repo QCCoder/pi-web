@@ -77,7 +77,9 @@ export function createHomeTab(workspace: WorkspaceSummary): SessionTabState {
     session: null,
     fileTabs: [],
     activeFileTabId: null,
-    rightPanelOpen: true,
+    // 右栏默认关闭：打开工作区/会话不自动展开文件区（太乱），只在用户显式
+    // 操作时展开——右上角开关、点开文件、或总览行点仓库/知识库/工作项/Loops。
+    rightPanelOpen: false,
   };
 }
 
@@ -95,6 +97,17 @@ export function resolveOpenSessionTarget(activeTab: SessionTabState | null): Ope
 }
 
 /**
+ * 新建会话分派（2026-09）：活动 tab 是家 tab（= 工作区详情页，新建会话
+ * 的主要入口所在）→ 原地变身（morph，不新增 tab——详情页点「新建会话」
+ * 不该膨胀 tab 条，用户反馈）；活动 tab 是会话/占位（或首页上下文）→
+ * 开新占位 tab（不吃掉正在看的会话）。tab 条「＋」是显式的加 tab 按钮，
+ * 不经此分派（调用方直接 openNewSessionTab）。
+ */
+export function resolveNewSessionTarget(activeTab: SessionTabState | null): "morph" | "new-tab" {
+  return activeTab?.kind === "workspace-home" ? "morph" : "new-tab";
+}
+
+/**
  * X1 邻居规则：关闭 closedId 后激活谁。先左邻、再右邻；一个不剩 → null
  * （回到应用首页）。closedId 不在列表里（已被并发移除）→ null。
  */
@@ -102,6 +115,46 @@ export function nextActiveTabId(tabs: SessionTabState[], closedId: string): stri
   const index = tabs.findIndex((tab) => tab.id === closedId);
   if (index === -1) return null;
   return tabs[index - 1]?.id ?? tabs[index + 1]?.id ?? null;
+}
+
+/**
+ * 右键批量关闭的目标模式：其他（锚 tab 以外的全部）/ 锚左侧 / 锚右侧。
+ * 锚 tab 自身永不在目标集合里（「关闭其他」幸存者就是锚）。
+ */
+export type ContextCloseMode = "others" | "left" | "right";
+
+export function contextCloseTargetIds(
+  tabs: SessionTabState[],
+  anchorId: string,
+  mode: ContextCloseMode,
+): string[] {
+  const index = tabs.findIndex((tab) => tab.id === anchorId);
+  if (index === -1) return [];
+  if (mode === "left") return tabs.slice(0, index).map((tab) => tab.id);
+  if (mode === "right") return tabs.slice(index + 1).map((tab) => tab.id);
+  return tabs.filter((_, i) => i !== index).map((tab) => tab.id);
+}
+
+/**
+ * X1 邻居规则的批量版：一次关掉 closedIds 后激活谁。活动 tab 不在被关
+ * 集合里 → 原样保留；在 → 以它为锚在被关集合之外先左后右找最近存活者
+ * （「关闭其他」时幸存锚自然胜出）；一个不剩 → null（回首页）。
+ */
+export function nextActiveAfterBatchClose(
+  tabs: SessionTabState[],
+  closedIds: ReadonlySet<string>,
+  activeTabId: string | null,
+): string | null {
+  if (!activeTabId || !closedIds.has(activeTabId)) return activeTabId;
+  const index = tabs.findIndex((tab) => tab.id === activeTabId);
+  if (index === -1) return null;
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (!closedIds.has(tabs[i].id)) return tabs[i].id;
+  }
+  for (let i = index + 1; i < tabs.length; i += 1) {
+    if (!closedIds.has(tabs[i].id)) return tabs[i].id;
+  }
+  return null;
 }
 
 /**

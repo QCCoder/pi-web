@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { computeMenuLayout, readViewportWindow } from "@/lib/dropdown-layout";
-import type { SessionTabState } from "@/lib/session-tabs";
+import { contextCloseTargetIds, type SessionTabState } from "@/lib/session-tabs";
 import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 
 /**
@@ -13,6 +13,12 @@ import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/t
  *
  * 右端按钮区（P1）：＋ = 在当前 tab 的工作区开新会话 tab（无活动 tab 时隐藏——
  * 首页有自己的 composer）；⊞ = 工作区选择器下拉 → 开/激活该工作区的家 tab。
+ *
+ * 右键菜单（桌面主路径；移动端无 isMobile 分支——Android 长按若触发
+ * contextmenu 事件同样受益）：关闭 / 关闭其他 / 关闭左侧 / 关闭右侧。
+ * 目标集合由纯函数 contextCloseTargetIds 计算；草稿合并确认在
+ * useAppShellState.closeTabs。定位复用 computeMenuLayout（锚 = tab chip
+ * 本身，与 ⊞ 选择器同一套 portal + 遮罩关闭模式）。
  */
 
 interface Props {
@@ -27,13 +33,18 @@ interface Props {
   onSelectHome: () => void;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  /** 右键菜单批量关闭（关闭其他/左侧/右侧）：目标 id 集合（不含锚 tab）。 */
+  onCloseTabs: (ids: string[]) => void;
   onReorder: (ids: string[]) => void;
   onNewSession: () => void;
-  onPickWorkspace: (workspace: WorkspaceSummary) => void;
+  /** ⊞ 工作区选择器（开/激活家 tab）。可选——桌面端侧栏项目树已接管工作区
+   *  导航（2026-09 改版：⊞ 退役）；移动端保留（无侧栏，⊕ 是直达工作区的
+   *  快捷入口）。 */
+  onPickWorkspace?: (workspace: WorkspaceSummary) => void;
 }
 
-/** 工作区色点：id 哈希 → 固定调色板（同一工作区跨会话/家 tab 颜色一致，
- *  跨工作区 tab 一眼可辨——「上下文甩鞭」的缓解手段之一）。 */
+/** 工作区色点（id 哈希 → 固定调色板）：2026-09 起仅用于 ⊞ 工作区选择器下拉列表辨位，
+ *  tab chips 上的色点已按用户要求移除（同色小点常驻每个 tab 被视为噪音）。 */
 const WORKSPACE_COLORS = [
   "#e05d5d", "#e08b3a", "#c9a227", "#5aa469",
   "#4d9de0", "#7b6ce0", "#b56bb5", "#5aa0a8",
@@ -72,6 +83,7 @@ export function SessionTabBar({
   onSelectHome,
   onSelectTab,
   onCloseTab,
+  onCloseTabs,
   onReorder,
   onNewSession,
   onPickWorkspace,
@@ -83,6 +95,8 @@ export function SessionTabBar({
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerRect, setPickerRect] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ tabId: string; anchor: DOMRect } | null>(null);
+  const [ctxRect, setCtxRect] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
   const availableWorkspaces = workspaces.filter(isWorkspaceSelectable);
 
   useEffect(() => {
@@ -94,6 +108,29 @@ export function SessionTabBar({
       );
     }
   }, [pickerOpen]);
+
+  useEffect(() => {
+    if (!ctxMenu) return;
+    setCtxRect(computeMenuLayout({ anchor: ctxMenu.anchor, menuMinWidth: 160, maxMenuHeight: 240 }, readViewportWindow()));
+  }, [ctxMenu]);
+
+  // Escape 关右键菜单（遮罩已经接管点击关闭）。
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCtxMenu(null);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [ctxMenu]);
+
+  const menuTabIndex = ctxMenu ? tabs.findIndex((t) => t.id === ctxMenu.tabId) : -1;
+  const ctxTargets = (mode: "others" | "left" | "right") =>
+    menuTabIndex === -1 ? [] : contextCloseTargetIds(tabs, ctxMenu!.tabId, mode);
+  const runCtxClose = (ids: string[]) => {
+    setCtxMenu(null);
+    if (ids.length > 0) onCloseTabs(ids);
+  };
 
   useEffect(() => {
     activeRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
@@ -109,9 +146,11 @@ export function SessionTabBar({
   return (
     <div
       ref={containerRef}
+      className="hide-scrollbar"
       role="tablist"
       aria-label="会话"
       onWheel={(event) => {
+        if (ctxMenu) setCtxMenu(null);
         if (!containerRef.current || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
         containerRef.current.scrollLeft += event.deltaY;
       }}
@@ -160,6 +199,7 @@ export function SessionTabBar({
             aria-selected={active}
             draggable
             onDragStart={(event) => {
+              setCtxMenu(null);
               setDraggedId(tab.id);
               event.dataTransfer.effectAllowed = "move";
               event.dataTransfer.setData("text/plain", tab.id);
@@ -181,22 +221,15 @@ export function SessionTabBar({
               event.preventDefault();
               onCloseTab(tab.id);
             }}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setCtxMenu({ tabId: tab.id, anchor: event.currentTarget.getBoundingClientRect() });
+            }}
             title={tabTitle(tab)}
             style={{ ...tabStyle(active), opacity: draggedId === tab.id ? 0.55 : 1 }}
           >
             {(running || completed) && <ActivityIndicator status={running ? "running" : "completed"} />}
             {workspaceStatus && <ActivityIndicator status={workspaceStatus} />}
-            <span
-              aria-hidden
-              title={tab.workspace.name}
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                flexShrink: 0,
-                background: workspaceColor(tab.workspace.id),
-              }}
-            />
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
               {tabLabel(tab)}
             </span>
@@ -244,18 +277,20 @@ export function SessionTabBar({
           ＋
         </button>
       )}
-      <button
-        ref={pickerRef}
-        type="button"
-        title="打开工作区"
-        aria-label="打开工作区"
-        aria-haspopup="menu"
-        aria-expanded={pickerOpen}
-        onClick={() => setPickerOpen((open) => !open)}
-        style={buttonStyle(pickerOpen)}
-      >
-        <WorkspaceIcon />
-      </button>
+      {onPickWorkspace && (
+        <button
+          ref={pickerRef}
+          type="button"
+          title="打开工作区"
+          aria-label="打开工作区"
+          aria-haspopup="menu"
+          aria-expanded={pickerOpen}
+          onClick={() => setPickerOpen((open) => !open)}
+          style={buttonStyle(pickerOpen)}
+        >
+          <WorkspaceIcon />
+        </button>
+      )}
       {pickerOpen && pickerRect && createPortal(
         <>
           <div
@@ -294,7 +329,7 @@ export function SessionTabBar({
                   type="button"
                   role="menuitem"
                   title={`${workspace.name}\n${workspace.path}`}
-                  onClick={() => { setPickerOpen(false); onPickWorkspace(workspace); }}
+                  onClick={() => { setPickerOpen(false); onPickWorkspace?.(workspace); }}
                   style={{
                     width: "100%",
                     display: "flex",
@@ -328,7 +363,87 @@ export function SessionTabBar({
         </>,
         document.body,
       )}
+      {ctxMenu && ctxRect && createPortal(
+        <>
+          <div
+            aria-hidden="true"
+            onContextMenu={(event) => event.preventDefault()}
+            onClick={() => setCtxMenu(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 2000 }}
+          />
+          <div
+            role="menu"
+            aria-label="tab 操作"
+            style={{
+              position: "fixed",
+              top: ctxRect.top,
+              right: ctxRect.right,
+              zIndex: 2001,
+              minWidth: 160,
+              padding: 4,
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              background: "var(--bg)",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
+            }}
+          >
+            <ContextMenuItem label="关闭" hint="中键" onClick={() => { const id = ctxMenu.tabId; setCtxMenu(null); onCloseTab(id); }} />
+            <ContextMenuItem
+              label="关闭其他"
+              disabled={ctxTargets("others").length === 0}
+              onClick={() => runCtxClose(ctxTargets("others"))}
+            />
+            <ContextMenuItem
+              label="关闭左侧"
+              disabled={ctxTargets("left").length === 0}
+              onClick={() => runCtxClose(ctxTargets("left"))}
+            />
+            <ContextMenuItem
+              label="关闭右侧"
+              disabled={ctxTargets("right").length === 0}
+              onClick={() => runCtxClose(ctxTargets("right"))}
+            />
+          </div>
+        </>,
+        document.body,
+      )}
     </div>
+  );
+}
+
+function ContextMenuItem({ label, hint, disabled, onClick }: {
+  label: string;
+  hint?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        justifyContent: "space-between",
+        minHeight: 32,
+        padding: "6px 10px",
+        border: 0,
+        borderRadius: 6,
+        background: "transparent",
+        color: disabled ? "var(--text-dim)" : "var(--text-muted)",
+        cursor: disabled ? "default" : "pointer",
+        textAlign: "left",
+        fontSize: 12,
+        fontWeight: 450,
+      }}
+    >
+      <span>{label}</span>
+      {hint && <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{hint}</span>}
+    </button>
   );
 }
 
@@ -337,8 +452,8 @@ function tabStyle(active: boolean, pinned = false): React.CSSProperties {
     display: "flex",
     alignItems: "center",
     gap: 6,
-    minWidth: pinned ? 72 : 110,
-    maxWidth: pinned ? 72 : 200,
+    minWidth: pinned ? 72 : 140,
+    maxWidth: pinned ? 72 : 140,
     height: 36,
     padding: pinned ? "0 12px" : "0 4px 0 10px",
     flexShrink: 0,

@@ -59,7 +59,8 @@ interface SessionTabState {
 | `handleSessionForked` | **K1**：新 tab 承接 fork 结果，原 tab 不动 |
 | `handleCloseWorkspaceTab` → `closeTab(id)` | **X1** 邻居规则（先左后右，替代今天的 MRU 回落）；关占位 tab 前草稿确认（草稿键 `new:<tabId>`）；最后一个 tab → 首页 |
 | `handleOpenWorkspaceToChat`（＋picker 落 chat） | **退役**；⊞ 统一走 `ensureHomeTab`（overview 落地，P1） |
-| `handleWorkspaceNewSession`（中栏＋新建 / Ctrl+Alt+N / tab 条＋） | 开新 `new-session` 占位 tab（U1 豁免：同工作区可并存多个 composer） |
+| `handleWorkspaceNewSession`（中栏＋新建 / Ctrl+Alt+N / 总览与移动端工作区菜单的「新建会话」） | 活动 tab 是家 tab（工作区详情页）→ **原地变身**（2026-09：`resolveNewSessionTarget` morph 分支，家 tab 同位置换成 composer 占位，不新增 tab；首条消息后按现有转正流程变会话 tab）；否则开新 `new-session` 占位 tab（U1 豁免：同工作区可并存多个 composer） |
+| `handleTabBarNewSession`（tab 条＋） | 显式加 tab 按钮：永远开新 `new-session` 占位 tab，不做家 tab 原地变身 |
 | `handleShowOverview`（工作台「总览」按钮） | 开/激活当前工作区家 tab |
 | `handleOpenSessionFromHome`（首页分组点会话） | 开会话 tab 并激活（今天开工作区 tab 的行为改为开会话 tab） |
 | `runLoopAndOpen` / `handleOpenWorkItemConversation` / `handleRunContract` | 语义照旧，落点从「workspace tab + 选中会话」改为「（新）会话 tab」；run-contract 预填草稿键改 `new:<tabId>` |

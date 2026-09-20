@@ -29,6 +29,10 @@ export function ChatToolbar() {
   const {
     sidebarOpen,
     setSidebarOpen,
+    activeWorkspace,
+    handleShowOverview,
+    openCenterPage,
+    centerPage,
     activeTopPanel,
     setActiveTopPanel,
     toggleTopPanel,
@@ -60,6 +64,11 @@ export function ChatToolbar() {
   const handleSidebarToggle = useCallback(() => {
     setSidebarOpen((open) => !open);
   }, [setSidebarOpen]);
+  // 工作区作用域的两个快捷入口（树形侧栏改版配套：树不再打开总览，归档
+  // 不再挂组尾——两个入口回到工具条，作用于当前工作区上下文）。无活动
+  // 工作区时禁用置灰。
+  const workspaceHomeEnabled = Boolean(activeWorkspace);
+  const archiveActive = centerPage?.kind === "archive" && activeWorkspace != null && centerPage.workspaceId === activeWorkspace.id;
 
   return (
 <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
@@ -88,6 +97,54 @@ export function ChatToolbar() {
     )}
   </button>
 )}
+  {!isMobile && (
+    <>
+      {/* 工作区首页（总览家 tab）——树形侧栏改版后总览的固定入口，作用于当前工作区。 */}
+      <button
+        onClick={() => { if (activeWorkspace) handleShowOverview(); }}
+        disabled={!workspaceHomeEnabled}
+        title={workspaceHomeEnabled ? `工作区首页（${activeWorkspace!.name} 总览）` : "工作区首页（无活动工作区）"}
+        aria-label="工作区首页"
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+          background: "none", border: "none",
+          color: workspaceHomeEnabled ? "var(--text-muted)" : "var(--text-dim)",
+          cursor: workspaceHomeEnabled ? "pointer" : "default", flexShrink: 0, transition: "color 0.12s",
+        }}
+        onMouseEnter={(e) => { if (workspaceHomeEnabled) e.currentTarget.style.color = "var(--text)"; }}
+        onMouseLeave={(e) => { if (workspaceHomeEnabled) e.currentTarget.style.color = "var(--text-muted)"; }}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5" />
+        </svg>
+      </button>
+      {/* 归档（当前工作区回收站）——中央区整页；取代树内组尾归档行。 */}
+      <button
+        onClick={() => { if (activeWorkspace) openCenterPage({ kind: "archive", workspaceId: activeWorkspace.id }); }}
+        disabled={!workspaceHomeEnabled}
+        title={workspaceHomeEnabled ? `归档（${activeWorkspace!.name}）` : "归档（无活动工作区）"}
+        aria-label="归档"
+        aria-pressed={archiveActive}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+          background: "none", border: "none", borderRight: "1px solid var(--border)",
+          color: archiveActive ? "var(--text)" : workspaceHomeEnabled ? "var(--text-muted)" : "var(--text-dim)",
+          cursor: workspaceHomeEnabled ? "pointer" : "default", flexShrink: 0, transition: "color 0.12s",
+        }}
+        onMouseEnter={(e) => { if (workspaceHomeEnabled && !archiveActive) e.currentTarget.style.color = "var(--text)"; }}
+        onMouseLeave={(e) => { if (workspaceHomeEnabled && !archiveActive) e.currentTarget.style.color = "var(--text-muted)"; }}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="3 6 5 6 21 6" />
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          <line x1="10" y1="11" x2="10" y2="17" />
+          <line x1="14" y1="11" x2="14" y2="17" />
+        </svg>
+      </button>
+    </>
+  )}
   <button
     onClick={(e) => {
       const rect = e.currentTarget.getBoundingClientRect();

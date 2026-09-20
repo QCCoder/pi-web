@@ -2,16 +2,35 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const appShellSource = await readFile(
-  new URL("./AppShell.tsx", import.meta.url),
+/**
+ * 2026-09 树形侧栏改版（grill 共识）导航结构断言：
+ * 左侧 = 单一项目树侧栏（新建任务 / 项目→会话 / 组尾归档 / 底部设置·模型·
+ * 插件·Skills 四入口），图标栏 + 中栏面板双轨退役；配置面全部走中央区整页
+ * （CenterPage），configPortalNode 三列 portal 机制退役；桌面 SessionTabBar
+ * 的 ⊞ 工作区选择器退役（移动端保留）。移动端整体不动。
+ */
+const projectSidebarSource = await readFile(
+  new URL("./ProjectSidebar.tsx", import.meta.url),
   "utf8",
 );
-const activityBarSource = await readFile(
-  new URL("./ActivityBar.tsx", import.meta.url),
+const desktopShellSource = await readFile(
+  new URL("./shell/DesktopShell.tsx", import.meta.url),
   "utf8",
 );
-const workspaceSidebarSource = await readFile(
-  new URL("./WorkspaceSidebar.tsx", import.meta.url),
+const shellStateSource = await readFile(
+  new URL("./shell/useAppShellState.ts", import.meta.url),
+  "utf8",
+);
+const sessionTabBarSource = await readFile(
+  new URL("./SessionTabBar.tsx", import.meta.url),
+  "utf8",
+);
+const mobileShellSource = await readFile(
+  new URL("./shell/MobileShell.tsx", import.meta.url),
+  "utf8",
+);
+const settingsPanelSource = await readFile(
+  new URL("./SettingsPanel.tsx", import.meta.url),
   "utf8",
 );
 const workspaceOverviewSource = await readFile(
@@ -38,110 +57,114 @@ const pluginsConfigSource = await readFile(
   new URL("./PluginsConfig.tsx", import.meta.url),
   "utf8",
 );
-const settingsPanelSource = await readFile(
-  new URL("./SettingsPanel.tsx", import.meta.url),
-  "utf8",
-);
 
-test("workspace selection always lands on the unconditional overview dashboard", () => {
-  // The overview capability is retired — no capability check picks the view.
-  assert.doesNotMatch(appShellSource, /capabilities\.includes\("overview"\)/);
-  assert.match(appShellSource, /view: "overview",/);
-  assert.match(appShellSource, /workspace=\$\{encodeURIComponent\(workspace\.id\)\}/);
-  assert.doesNotMatch(appShellSource, /directoryMode|requestedCwd/);
+test("project sidebar: 新建任务 on top, tree body, 归档 footer per group, four bottom entries", () => {
+  // 顶部显眼按钮 = 新会话 composer（复用现有行为）；折叠由 ChatToolbar 的 ☰
+  // 开关承担（不在侧栏内）。
+  assert.match(projectSidebarSource, /新建任务/);
+  assert.doesNotMatch(projectSidebarSource, /onCollapse/);
+  // 树主体：分区标题「工作区」+ ＋（新建工作区/导入目录）+ groupSessionsByWorkspace。
+  assert.match(projectSidebarSource, /工作区/);
+  assert.doesNotMatch(projectSidebarSource, />项目</);
+  assert.match(projectSidebarSource, /新建工作区…/);
+  assert.match(projectSidebarSource, /导入目录…/);
+  assert.match(projectSidebarSource, /groupSessionsByWorkspace/);
+  // 会话行直挂节点下（SessionRow 共享，rounded）+ 默认 5 条截断 + 显示更多。
+  // 节点整行（图标与标题同效）= 展开/折叠，不再经树打开总览（家 tab）。
+  assert.match(projectSidebarSource, /SessionRow/);
+  assert.doesNotMatch(projectSidebarSource, /onOpenWorkspace/);
+  assert.match(projectSidebarSource, /SESSION_PREVIEW_COUNT = 5/);
+  assert.match(projectSidebarSource, /显示更多/);
+  // 组尾暗淡「归档」。
+  assert.match(projectSidebarSource, /onOpenArchive/);
+  // 底部四入口：设置/模型/插件/Skills —— 顺序固定。
+  const bottomBlock = projectSidebarSource.slice(
+    projectSidebarSource.indexOf("BOTTOM_ENTRIES"),
+    projectSidebarSource.indexOf("function loadCollapsed"),
+  );
+  const kinds = [...bottomBlock.matchAll(/kind: "(settings|models|skills|plugins)",/g)].map((m) => m[1]);
+  assert.deepEqual(kinds, ["settings", "models", "skills", "plugins"]);
+  // 折叠持久化 + 骨架门控（未加载不渲染假空态）。
+  assert.match(projectSidebarSource, /pi-tree-collapsed/);
+  assert.match(projectSidebarSource, /workspacesLoaded \|\| !sessionsLoaded/);
 });
 
-test("activity bar order is 工作台 → 知识库 → 工作项 (standalone 仓库/Loop views removed)", () => {
-  // The MODULE group only — the config/archive/settings defs live outside
-  // ACTIVITY_VIEW_ORDER (slice up to the first config-view def).
-  const orderBlock = activityBarSource.slice(
-    activityBarSource.indexOf("ACTIVITY_VIEW_ORDER"),
-    activityBarSource.indexOf("RAIL_GLOBAL_VIEWS"),
-  );
-  const views = [...orderBlock.matchAll(/view: "([a-z-]+)",/g)].map((m) => m[1]);
-  assert.deepEqual(views, ["workbench", "knowledge", "work-items"]);
-  // workbench is always-on (capability: null) and labeled 工作台.
-  assert.match(activityBarSource, /view: "workbench",\s*capability: null,\s*label: "工作台"/);
+test("desktop shell: single tree sidebar, no icon rail; center pages precede overview/chat", () => {
+  // 图标栏退役：不再渲染 ActivityBar；中栏机制（renderMiddleColumn）由
+  // ProjectSidebar 常驻取代。
+  assert.doesNotMatch(desktopShellSource, /ActivityBar/);
+  assert.match(desktopShellSource, /<ProjectSidebar/);
+  assert.doesNotMatch(desktopShellSource, /renderMiddleColumn/);
+  // 中央区整页分支优先于 总览/聊天：点任何会话 tab 即回。
+  assert.match(desktopShellSource, /centerPage \? renderCenterPage\(\)/);
+  // 配置面全部走中央区整页（inline 模式，无 portal）。
+  assert.doesNotMatch(desktopShellSource, /configPortalNode/);
+  assert.match(desktopShellSource, /<ModelsConfig inline/);
+  assert.match(desktopShellSource, /<SkillsConfig[\s\S]*?inline/);
+  assert.match(desktopShellSource, /<PluginsConfig[\s\S]*?inline/);
+  // 桌面 SessionTabBar 不传 onPickWorkspace（⊞ 退役）；设置经 SettingsPanel
+  // desktop 模式（子页面板内推进航）。
+  assert.doesNotMatch(desktopShellSource, /onPickWorkspace/);
+  assert.match(desktopShellSource, /<SettingsPanel[\s\S]*?desktop/);
+  assert.match(desktopShellSource, /split=\{\{ inline: true \}\}/);
 });
 
-test("desktop rail gains 模型/Skills/插件 config icons; their content renders in the RIGHT column", () => {
-  // Rail global order (vertical): models → skills → plugins → archive → settings.
-  assert.match(
-    activityBarSource,
-    /RAIL_GLOBAL_VIEWS: SidebarView\[\] = \[\s*"models",\s*"skills",\s*"plugins",\s*"archive",\s*"settings",\s*\]/,
-  );
-  // The vertical rail's global group: config trio + workspace-gated archive + settings.
-  assert.match(
-    activityBarSource,
-    /MODELS_VIEW,\s*SKILLS_VIEW,\s*PLUGINS_VIEW,\s*\.\.\.\(hasWorkspace \? \[ARCHIVE_VIEW\] : \[\]\),\s*SETTINGS_VIEW/,
-  );
-  // The mobile bottom bar keeps 5 tabs — settings is its ONLY global icon
-  // (configs stay in the settings index subpages on mobile).
-  assert.match(activityBarSource, /: \[SETTINGS_VIEW\];/);
-  // Persistence/validation surface is UNCHANGED: config views are right-column
-  // content, never restorable as a middle-column sidebarView.
-  assert.match(activityBarSource, /GLOBAL_ACTIVITY_VIEWS: SidebarView\[\] = \["archive", "settings"\]/);
-  assert.doesNotMatch(activityBarSource, /concat\(RAIL_GLOBAL_VIEWS\)/);
-  assert.match(activityBarSource, /export function isConfigView\(view: SidebarView\): view is ConfigView/);
-  // AppShell: configView state (session-only), rail highlight precedence, and
-  // the desktop-only right-column branch that precedes overview/chat (the
-  // settings › 工作区 split view rides the same branch — see its own test).
-  assert.match(appShellSource, /const \[configView, setConfigView\] = useState<ConfigView \| null>\(null\)/);
-  assert.match(appShellSource, /activeView=\{configView \?\? sidebarView\}/);
-  assert.match(
-    appShellSource,
-    /\{!isMobile && \(configView \|\| \(sidebarView === "settings" && settingsPage !== "index"\)\) \? \(/,
-  );
-  assert.match(appShellSource, /isConfigView\(view\)/);
-  // Reset on workspace switch — config views are session-only.
-  assert.match(appShellSource, /setConfigView\(null\);\s*\n\s*if \(!activeWorkspace\)/);
+test("shell state: centerPage replaces sidebarView/configView; any tab activation closes it", () => {
+  // CenterPage 是唯一中央区整页状态（含工作区作用域的 archive）。
+  assert.match(shellStateSource, /export type CenterPage =/);
+  assert.match(shellStateSource, /\| \{ kind: "archive"; workspaceId: string \}/);
+  assert.doesNotMatch(shellStateSource, /setSidebarView|useState<SidebarView/);
+  assert.doesNotMatch(shellStateSource, /setConfigView|useState<ConfigView/);
+  assert.doesNotMatch(shellStateSource, /configPortalNode/);
+  // activateTab 清 centerPage（配置页只是盖在聊天上的一层）。
+  assert.match(shellStateSource, /setCenterPage\(null\);/);
+  // 旧持久化键（pi-active-panel / pi-active-view）退役。
+  assert.doesNotMatch(shellStateSource, /pi-active-panel/);
+  assert.doesNotMatch(shellStateSource, /pi-active-view/);
+  // toggle 语义：同页再点一次 = 关。
+  assert.match(shellStateSource, /sameCenterPage\(current, page\) \? null : page/);
 });
 
-test("workspace sidebar renders the merged workbench view with collapsible sections", () => {
-  // The workbench view stacks 会话 above 文件 (work-items/knowledge are their
-  // own rail views now, not workbench sections).
-  for (const label of ["会话", "文件"]) {
-    assert.match(workspaceSidebarSource, new RegExp(`label="${label}"`));
+test("session tab bar: ⊞ workspace picker optional (desktop drops it, mobile keeps it)", () => {
+  assert.match(sessionTabBarSource, /onPickWorkspace\?: \(workspace: WorkspaceSummary\) => void/);
+  assert.match(sessionTabBarSource, /\{onPickWorkspace && \(/);
+  assert.match(mobileShellSource, /onPickWorkspace=\{handleOpenWorkspace\}/);
+});
+
+test("settings panel: desktop center-page mode keeps 工作区/偏好 rows only", () => {
+  // desktop 模式：模型/Skills/插件（侧栏底部四入口）与归档（项目树组尾）
+  // 不在设置索引重复；移动端保留全行索引 + 内嵌子页。
+  assert.match(settingsPanelSource, /desktop\?: boolean;/);
+  assert.match(settingsPanelSource, /\{!desktop && \(/);
+  assert.match(settingsPanelSource, /\{!desktop && onOpenArchive && \(/);
+  // 子页面板内推进航（‹ 设置 返回）。
+  assert.match(settingsPanelSource, /backLabel: "设置"/);
+  assert.doesNotMatch(settingsPanelSource, /onOpenConfigView/);
+});
+
+test("config trio: inline page mode replaces the three-column portal split", () => {
+  for (const source of [modelsConfigSource, skillsConfigSource, pluginsConfigSource]) {
+    assert.match(source, /inline\?: boolean;/);
+    assert.doesNotMatch(source, /portalTarget/);
+    assert.doesNotMatch(source, /if \(splitMode\) \{/);
   }
-  assert.match(workspaceSidebarSource, /＋ 新建会话/);
-  // The standalone 仓库 view is gone — only its capability fetch gate remains.
-  assert.doesNotMatch(workspaceSidebarSource, /case "repositories":/);
-  assert.match(workspaceSidebarSource, /hasCapability\("repositories"\)/);
-  assert.match(workspaceSidebarSource, /导入目录…/);
-  // Workbench section collapse state persists per workspace, parsed defensively.
-  assert.match(workspaceSidebarSource, /pi-workbench-sections:/);
-  // The 会话/文件 split height is drag-resizable (pointer-based handle between
-  // the sections) and persists per workspace; double-click resets to 40%.
-  assert.match(workspaceSidebarSource, /pi-workbench-split:/);
-  assert.match(workspaceSidebarSource, /workbench-split-handle/);
-  // The 文件 header carries a manual refresh (external deletions/edits have no
-  // event — only agent turns auto-refresh) that also refreshes git status.
-  assert.match(workspaceSidebarSource, /explorerRefreshKey \+ manualExplorerKey/);
-  assert.match(workspaceSidebarSource, /setManualExplorerKey/);
-  // The sidebar view is CONTROLLED from AppShell (lifted state).
-  assert.match(workspaceSidebarSource, /activeView: SidebarView;/);
 });
 
-test("workspace overview dashboard surfaces work items and repositories", () => {
+test("workspace overview dashboard surfaces work items and repositories (unchanged)", () => {
   assert.match(workspaceOverviewSource, /活跃工作项/);
   assert.match(workspaceOverviewSource, /onSwitchSidebarView/);
-  // The loop-kit teardown removed the Loop section and its trigger/manage actions.
-  assert.doesNotMatch(workspaceOverviewSource, /Loop 动态|onTriggerLoop|onOpenLoops/);
-  // The 3-card stat strip is gone (replaced by richer sections).
-  assert.doesNotMatch(workspaceOverviewSource, /StatCard/);
-  // The removed 仓库 sidebar view's add/manage entry lives here now: repo rows
-  // open the workbench file tree, the header carries the add-repository form.
   assert.match(workspaceOverviewSource, /＋ 添加仓库/);
   assert.match(workspaceOverviewSource, /onSwitchSidebarView\("workbench"\)/);
 });
 
-test("home landing uses a dedicated mobile two-zone layout", () => {
+test("home landing uses a dedicated mobile layout (workspace sheet + grouped recents)", () => {
   assert.match(homeLandingSource, /useIsMobile\(\)/);
-  assert.match(homeLandingSource, /WorkspaceChip/);
+  assert.match(homeLandingSource, /WorkspaceSheet/);
+  assert.match(homeLandingSource, /HomeSessionGroups/);
 });
 
 test("workspace settings and work items render as center pages", () => {
-  assert.match(appShellSource, /<WorkspaceManager[\s\S]*embedded/);
+  assert.match(desktopShellSource, /<WorkspaceManager[\s\S]*embedded/);
   assert.match(workspaceManagerSource, /workspace-manager-page/);
   assert.match(workspaceManagerSource, /进入 Workspace/);
   assert.match(
@@ -152,85 +175,16 @@ test("workspace settings and work items render as center pages", () => {
 
 test("deleting the active workspace returns to the home context", () => {
   assert.match(
-    appShellSource,
-    /handleWorkspaceDeleted[\s\S]*handleCloseWorkspaceTab\(workspace\.id\)/,
+    shellStateSource,
+    /handleWorkspaceDeleted[\s\S]*?activateTab\(null\);\s*\n\s*navigateUrl\("tab=home"\)/,
   );
-  assert.match(appShellSource, /activateTab\(null\);\s*navigateUrl\("tab=home"\)/);
   assert.match(workspaceManagerSource, /onWorkspaceDeleted\?\.\(workspace\)/);
 });
 
-test("mobile navigation is the horizontal Activity Bar variant (no bespoke items)", () => {
-  assert.doesNotMatch(appShellSource, /mobileNavigationItems/);
-  // Both ActivityBar variants render in AppShell: the desktop vertical rail
-  // and the mobile horizontal bottom bar.
-  assert.match(appShellSource, /variant="vertical"/);
-  assert.match(appShellSource, /variant="horizontal"/);
-  assert.match(activityBarSource, /variant: "vertical" \| "horizontal"/);
-});
-
-test("desktop config views split into middle-column list + right-column detail (portal)", () => {
-  // Each config component gains a `split` mode: the list pane renders inline
-  // (middle column) and the detail/footer portal into the right column.
-  for (const source of [modelsConfigSource, skillsConfigSource, pluginsConfigSource]) {
-    assert.match(source, /split\?: \{ portalTarget: HTMLElement \| null \}/);
-    assert.match(source, /createPortal\(/);
-    assert.match(source, /if \(splitMode\) \{/);
-  }
-  // AppShell owns the portal target: the right column renders the target div
-  // (callback ref → state) and the middle column passes it to the split panel.
-  assert.match(appShellSource, /const \[configPortalNode, setConfigPortalNode\]/);
-  assert.match(appShellSource, /ref=\{setConfigPortalNode\}/);
-  assert.match(appShellSource, /split=\{\{ portalTarget: configPortalNode \}\}/);
-  // Opening a config view also opens the middle column (its list lives there).
-  assert.match(appShellSource, /handleOpenConfig[\s\S]*?setSidebarOpen\(true\)/);
-  // Any panel switch hands the middle column back from the config list.
-  assert.match(appShellSource, /setConfigView\(null\);\s*\n\s*setSidebarView\(view\)/);
-});
-
-test("desktop settings › 工作区 splits into middle-column list + right-column detail (portal)", () => {
-  // WorkspaceManager gains the config components' `split` mode: the workspace
-  // LIST (rail) stays in the middle column while the selected workspace's
-  // settings DETAIL portals into the right column's config area. One instance
-  // keeps all state (selection, drafts, save flow) — only the layout splits.
-  assert.match(workspaceManagerSource, /split\?: \{ portalTarget: HTMLElement \| null \}/);
-  assert.match(workspaceManagerSource, /import \{ createPortal \} from "react-dom";/);
-  assert.match(workspaceManagerSource, /createPortal\(contentPane, portalTarget\)/);
-  // AppShell wires it: the settings workspaceSlot keeps `panel` only on mobile
-  // (the desktop split needs the rail visible) and passes split on desktop
-  // only — mobile renders the single-column panel subpage unchanged.
-  assert.match(appShellSource, /panel=\{isMobile\}/);
-  assert.match(appShellSource, /split=\{isMobile \? undefined : \{ portalTarget: configPortalNode \}\}/);
-  assert.match(appShellSource, /onSelectedWorkspaceChange=\{handleWorkspaceSettingsSelection\}/);
-  // The right column hosts the portal container for the workspace-settings
-  // case too (configView takes precedence when both apply) — its × returns to
-  // the settings index.
-  assert.match(
-    appShellSource,
-    /\{!isMobile && \(configView \|\| \(sidebarView === "settings" && settingsPage !== "index"\)\) \? \(/,
-  );
-  assert.match(appShellSource, /title="工作区设置"/);
-  assert.match(appShellSource, /onClose=\{\(\) => setSettingsPage\("index"\)\}/);
-});
-
 test("home skills use an explicit global context instead of the user home directory", () => {
-  assert.match(appShellSource, /<SkillsConfig[\s\S]*globalOnly=\{!activeWorkspace\}/);
+  assert.match(desktopShellSource, /<SkillsConfig[\s\S]*?globalOnly=\{!activeWorkspace\}/);
   assert.match(skillsConfigSource, /scope=global/);
   assert.match(skillsConfigSource, /globalOnly\?: boolean/);
-});
-
-test("settings index hides 模型/Skills/插件 rows on desktop (rail icons are the entry); mobile keeps subpages", () => {
-  assert.match(
-    settingsPanelSource,
-    /onOpenConfigView\?: \(view: "models" \| "skills" \| "plugins"\) => void/,
-  );
-  // Desktop (onOpenConfigView provided): the three rows are REMOVED from the
-  // settings index — rail icons are the entry; mobile keeps them as subpages.
-  assert.match(settingsPanelSource, /\{!onOpenConfigView && \(/);
-  for (const page of ["models", "skills", "plugins"]) {
-    assert.match(settingsPanelSource, new RegExp(`onPageChange\\("${page}"\\)`));
-  }
-  // AppShell passes the handler on desktop only — mobile keeps subpages.
-  assert.match(appShellSource, /onOpenConfigView=\{isMobile \? undefined : handleOpenConfig\}/);
 });
 
 test("workspace directory slug is derived from the complete name at submit time", () => {

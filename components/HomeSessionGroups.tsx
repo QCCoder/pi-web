@@ -9,13 +9,15 @@ import { SessionRow } from "./SessionRow";
 /**
  * 全局会话分组列表（按工作区分组，每组列出该工作区全部会话，组内按修改
  * 时间降序，分组按组内最新会话活跃度降序——排序由 lib/home-quick-switch 的
- * groupSessionsByWorkspace 负责）。宿主（2026-09 全局左栏后）：桌面中栏的
- * **唯一**会话面板（工作台与首页同体）+ 移动端首页的「最近会话」区（HomeLanding）。
+ * groupSessionsByWorkspace 负责）。宿主（2026-09 全局左栏 + 方案 A 后）：桌面
+ * 中栏的会话面板（工作台与首页同体，WorkspaceSidebar）+ 移动端首页
+ * （HomeLanding 最近区，即移动端唯一的全局跨工作区列表——工作区 tab 落地
+ * 总览，本工作区会话在总览「会话」区块）。
  *
  * 交互：
  * - 组头 = 工作区名 + 会话总数，点击 = 打开该工作区；
  * - 组头右侧 chevron 折叠/展开该组（默认全展开，状态不持久化）；
- * - 会话行 = 共享 SessionRow（运行/完成徽章 + 相对时间 + Cmd/中键/hover 新 tab
+ * - 会话行 = 共享 SessionRow（运行/完成徽章 + 相对时间 + Cmd/中键新 tab
  *   + 行内归档——原「切换器无管理操作」契约随全局左栏升级作废）；
  *   点击 = C1 分派（当前 tab 变身；首页/家 tab 上=开新 tab；Cmd/中键=新 tab）。
  */
@@ -27,7 +29,7 @@ interface Props {
   selectedSessionId?: string | null;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onSelectSession: (session: SessionInfo) => void;
-  /** C1 并行手势：Cmd/Ctrl-点击、中键、hover「新 tab」（桌面传入；移动端首页不传）。 */
+  /** C1 并行手势：Cmd/Ctrl-点击、中键（桌面传入；移动端首页不传；无可见按钮）。 */
   onOpenSessionInNewTab?: (session: SessionInfo) => void;
   /** 行内归档后回调（shell 从 allSessions 移除）。 */
   onSessionRemoved?: (id: string) => void;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { ReactNode } from "react";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { LoopRow } from "./LoopRow";
 import { LoopsConfig, type LoopConfigTarget } from "./LoopsConfig";
@@ -25,9 +26,12 @@ interface Props {
   onChanged?: () => void;
   /** 「运行」——手动起一轮并打开轮会话 tab（useAppShellState.handleRunLoopDirect）。 */
   onRunLoop: (name: string) => void;
+  /** 列表视图顶部的宿主头（如移动端工作区 tab「Loops」子页的 ‹返回
+   *  PanelHeader；配置视图自带 PanelHeader，不用它）。桌面不传。 */
+  listHeader?: ReactNode;
 }
 
-export function LoopsDockPanel({ workspace, refreshKey, onChanged, onRunLoop }: Props) {
+export function LoopsDockPanel({ workspace, refreshKey, onChanged, onRunLoop, listHeader }: Props) {
   const [configTarget, setConfigTarget] = useState<LoopConfigTarget | null>(null);
   const { loops, busy, refresh, runAction } = useKitLoops(workspace.id, refreshKey);
 
@@ -57,7 +61,9 @@ export function LoopsDockPanel({ workspace, refreshKey, onChanged, onRunLoop }: 
   }
 
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 14px" }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      {listHeader}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 14px" }}>
       {loops.length === 0 ? (
         <div style={{ display: "flex", gap: 10, alignItems: "center", color: "var(--text-muted)", fontSize: 12 }}>
           <span>暂无 loop（文件即声明：.pi/loops/&lt;name&gt;/LOOP.md）</span>
@@ -90,6 +96,7 @@ export function LoopsDockPanel({ workspace, refreshKey, onChanged, onRunLoop }: 
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

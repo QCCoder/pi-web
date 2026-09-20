@@ -2,7 +2,6 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { visibleActivityViews, GLOBAL_ACTIVITY_VIEWS, isConfigView, type SidebarView, type ConfigView } from "../ActivityBar";
 import { type SettingsPage } from "../SettingsPanel";
 import { useSessionActivity } from "@/hooks/useSessionActivity";
 import { useGlobalAgentEvents } from "@/hooks/useGlobalAgentEvents";
@@ -28,7 +27,9 @@ import {
   homeTabId,
   newSessionTabId,
   resolveOpenSessionTarget,
+  resolveNewSessionTarget,
   nextActiveTabId,
+  nextActiveAfterBatchClose,
   tabQuery,
   serializeTabs,
   parseStoredTabs,
@@ -36,6 +37,26 @@ import {
 } from "@/lib/session-tabs";
 
 type SessionCopyField = "file" | "id";
+
+/** 中央区整页（2026-09 树形侧栏改版，grill 共识）：底部四入口
+ *  （设置/模型/插件/Skills）与项目树「归档」行打开的中央区页面——取代旧
+ *  「中栏面板 + configView 三列 split」双轨。点任何会话 tab（activateTab）
+ *  即关闭回到聊天；从不持久化。归档是工作区作用域，带 workspaceId。 */
+export type CenterPage =
+  | { kind: "settings" }
+  | { kind: "models" }
+  | { kind: "skills" }
+  | { kind: "plugins" }
+  | { kind: "archive"; workspaceId: string };
+
+/** 两次打开指向同一页（归档比 workspaceId）→ 底部入口再点一次 = 关闭（toggle）。 */
+function sameCenterPage(current: CenterPage | null, next: CenterPage): boolean {
+  if (current == null || current.kind !== next.kind) return false;
+  if (current.kind === "archive" && next.kind === "archive") {
+    return current.workspaceId === next.workspaceId;
+  }
+  return true;
+}
 
 /** 工作区家 tab（总览）内的 hub 子视图：overview 仪表盘 / 工作项管理面 /
  * 知识库浏览（W-中收敛，docs/session-tabs-design.md Phase 2）。 */
@@ -48,8 +69,9 @@ type AutoNameStatus =
 const LANGUAGE_MENU_WIDTH = 176;
 // Desktop sidebar is drag-resizable (handle between sidebar and center). Width is
 // persisted in localStorage; clamped to these bounds. Mobile keeps a fixed drawer.
-const SIDEBAR_DEFAULT_WIDTH = 260;
+// 默认宽 = 最小宽（200px）——树侧栏不需要老三栏时代的中栏宽度。
 const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_DEFAULT_WIDTH = SIDEBAR_MIN_WIDTH;
 const SIDEBAR_MAX_WIDTH = 560;
 const SIDEBAR_WIDTH_KEY = "pi-sidebar-width";
 
@@ -124,111 +146,25 @@ export function useAppShellState(seed?: {
   const activeFileTabId = activeTab?.activeFileTabId ?? null;
   const rightPanelOpen = activeTab?.rightPanelOpen ?? false;
   const activeCwd = activeTab?.workspace.path ?? null;
-  // Middle-column panel selection — one `sidebarView` for everything (module
-  // views + the global archive/settings panels). Module views persist per
-  // workspace under `pi-active-view:<wsId>`; the global panels persist under
-  // the shared `pi-active-panel` key (settings survives workspace switches —
-  // archive is transient and falls back to the per-workspace module view).
-  // Stale stored values (the former sessions/explorer split, removed views)
-  // fail the visible-views check and fall back to "workbench".
-  const GLOBAL_PANEL_KEY = "pi-active-panel";
-  const [sidebarView, setSidebarView] = useState<SidebarView>("workbench");
-  // Config views (模型/Skills/插件) are strict three-column views on desktop:
-  // the rail icon puts the config's LIST in the middle column (temporarily
-  // replacing the sidebarView panel) and its DETAIL in the right column — the
-  // middle-column split panel portals the detail across via configPortalNode.
-  // Clicking the active config icon again toggles it off; any panel switch
-  // hands the middle column back to sidebarView. Session-only state, never
-  // persisted; reset when the active workspace changes. Mobile never sets it
-  // (its bar has no config icons — the settings index subpages serve the same
-  // content there via the components' embedded mode).
-  const [configView, setConfigView] = useState<ConfigView | null>(null);
-  // The right column's config portal target (the div under the config view's
-  // PanelHeader). The middle-column split panel (ModelsConfig/SkillsConfig/
-  // PluginsConfig in `split` mode) portals its DETAIL pane into this node —
-  // callback-ref + state so the portal re-renders as soon as the node mounts
-  // (same commit, before paint; null target simply renders nothing).
-  const [configPortalNode, setConfigPortalNode] = useState<HTMLDivElement | null>(null);
-  // Loops 面板 → 工作台文件区的定位意图（一次性信号，非持久视图状态——无需清空
-  // 点位）：loop 名点击时写入 `loops/<name>`，nonce 保证同一路径可重复触发；
-  // 两 shell 把它透传给 WorkspaceSidebar（filesReveal → FileExplorer reveal +
-  // openFilesRequest 展开文件 section）。
-  const [loopFilesReveal, setLoopFilesReveal] = useState<{ path: string; nonce: number } | null>(null);
-  const handleOpenConfig = useCallback((view: ConfigView) => {
-    setConfigView((current) => (current === view ? null : view));
-    // The config view takes over the right column — drop a stale work-item
-    // detail so closing the config view doesn't resurrect it.
-    // The config LIST lives in the middle column — make sure the column is
-    // visible when a config view opens (desktop-only entry point; mobile
-    // serves the same content via the settings subpages and never gets here).
-    setSidebarOpen(true);
+  // 中央区整页（CenterPage）：设置/模型/插件/Skills/归档。会话 tab 的任何
+  // 激活（activateTab）都会把它清空——配置页只是盖在聊天之上的一层，点
+  // tab 即回。从不持久化；toggle 语义由 sameCenterPage 提供（同页再点关）。
+  const [centerPage, setCenterPage] = useState<CenterPage | null>(null);
+  const openCenterPage = useCallback((page: CenterPage) => {
+    setCenterPage((current) => (sameCenterPage(current, page) ? null : page));
+    // 从底部入口进设置总是回到索引页；深链（总览「添加仓库」等）随后自行
+    // setSettingsPage 覆盖（同批状态更新，后写者胜）。
+    if (page.kind === "settings") setSettingsPage("index");
   }, []);
-  useEffect(() => {
-    setConfigView(null);
-    if (!activeWorkspace) {
-      const storedGlobal = localStorage.getItem(GLOBAL_PANEL_KEY) as SidebarView | null;
-      setSidebarView(storedGlobal === "settings" ? "settings" : "workbench");
-      return;
-    }
-    const visible = visibleActivityViews(activeWorkspace.capabilities);
-    const storedGlobal = localStorage.getItem(GLOBAL_PANEL_KEY) as SidebarView | null;
-    if (storedGlobal === "settings" && visible.includes("settings")) {
-      setSidebarView("settings");
-      return;
-    }
-    const stored = localStorage.getItem(`pi-active-view:${activeWorkspace.id}`) as SidebarView | null;
-    setSidebarView(stored && visible.includes(stored) && !GLOBAL_ACTIVITY_VIEWS.includes(stored) ? stored : "workbench");
-  }, [activeWorkspace]);
-  const handleSidebarSwitchView = useCallback((view: SidebarView) => {
-    // Defensive: a config view is right-column content, never a middle-column
-    // panel — route it to the config handler instead of switching panels.
-    if (isConfigView(view)) {
-      handleOpenConfig(view);
-      return;
-    }
-    // A config view temporarily owns the middle column (its list renders
-    // there) — any panel switch must hand the column back.
-    setConfigView(null);
-    setSidebarView(view);
-    if (GLOBAL_ACTIVITY_VIEWS.includes(view)) {
-      try { localStorage.setItem(GLOBAL_PANEL_KEY, view); } catch { /* ignore */ }
-      if (view === "settings") setSettingsPage("index");
-    } else {
-      // 离开全局面板（如设置）切到模块视图 = 终结粘性：否则工作区切换 effect
-      // 里 storedGlobal==="settings" 的分支永远劫持每工作区视图（用户点过
-      // 工作台也无效）。停留在设置时切工作区的粘性由进入设置时写入的键保留。
-      try { localStorage.removeItem(GLOBAL_PANEL_KEY); } catch { /* ignore */ }
-      if (activeWorkspace) {
-        try { localStorage.setItem(`pi-active-view:${activeWorkspace.id}`, view); } catch { /* ignore */ }
-      }
-    }
-  }, [activeWorkspace, handleOpenConfig]);
-  // The rail's switch behavior: a DIFFERENT icon switches the panel (opening
-  // the column if collapsed); the ACTIVE icon toggles the column (VS Code
-  // collapse). Config icons toggle the three-column config view (list in the
-  // middle column + detail in the right; opening also opens the column). On
-  // mobile, module views toggle the drawer; settings opens as a full-screen
-  // overlay (the drawer renders full-screen for global panels).
-  const handleRailSwitch = useCallback((view: SidebarView) => {
-    if (isConfigView(view)) {
-      handleOpenConfig(view);
-      return;
-    }
-    // While a config view owns the middle column (its list renders there),
-    // any other rail click hands the column back to that panel — never a
-    // column toggle.
-    if (configView !== null) {
-      handleSidebarSwitchView(view);
-      setSidebarOpen(true);
-      return;
-    }
-    if (view === sidebarView) {
-      setSidebarOpen((open) => !open);
-      return;
-    }
-    handleSidebarSwitchView(view);
-    setSidebarOpen(true);
-  }, [sidebarView, configView, handleSidebarSwitchView, handleOpenConfig]);
+  // Loops 面板 → 文件区（桌面右栏「文件」tab / 移动端「文件」tab）的定位意图
+  // （一次性信号，非持久视图状态——无需清空点位）：loop 名点击时写入
+  // `loops/<name>`，nonce 保证同一路径可重复触发；两 shell 把它透传给
+  // FilesExplorerPanel（reveal 展开树定位；DesktopShell 激活右栏文件 tab、
+  // MobileShell 切到「文件」tab）。
+  const [loopFilesReveal, setLoopFilesReveal] = useState<{ path: string; nonce: number } | null>(null);
+  const handleOpenConfig = useCallback((view: "models" | "skills" | "plugins") => {
+    setCenterPage({ kind: view });
+  }, []);
   const [refreshKey, setRefreshKey] = useState(0);
   const sessionActivity = useSessionActivity(
     selectedSession?.id ?? null,
@@ -266,10 +202,10 @@ export function useAppShellState(seed?: {
   // later reopen never flashes a stale header — the manager re-reports on
   // mount.
   useEffect(() => {
-    if (!(sidebarView === "settings" && settingsPage === "workspace")) {
+    if (centerPage?.kind !== "settings" || settingsPage !== "workspace") {
       setWorkspaceSettingsName(null);
     }
-  }, [sidebarView, settingsPage]);
+  }, [centerPage, settingsPage]);
   // Home create-workspace wizard — the one remaining WorkspaceManager modal
   // (creating a workspace is a focused flow; managing one lives in the
   // settings › workspace panel page).
@@ -298,8 +234,8 @@ export function useAppShellState(seed?: {
   // shell-agnostic.
   const [chatFocusKey, setChatFocusKey] = useState(0);
   const focusChat = useCallback(() => setChatFocusKey((key) => key + 1), []);
-  const [panelFocus, setPanelFocus] = useState<{ view: SidebarView; key: number } | null>(null);
-  const focusPanel = useCallback((view: SidebarView) => {
+  const [panelFocus, setPanelFocus] = useState<{ view: string; key: number } | null>(null);
+  const focusPanel = useCallback((view: string) => {
     setPanelFocus((prev) => ({ view, key: (prev?.key ?? 0) + 1 }));
   }, []);
 
@@ -546,6 +482,8 @@ export function useAppShellState(seed?: {
     setWorkspaceManagerOpen(false);
     setProjectTrustDialogOpen(false);
     setActiveTopPanel(null);
+    // 中央区整页让位：任何 tab 激活（含点当前 tab）都回到聊天/总览。
+    setCenterPage(null);
     if (id) {
       // MRU 记的是工作区 id（首页 composer 默认工作区的选源）；新 tab 尚未
       // 进入 tabsRef 时跳过本次（best-effort，不影响正确性）。
@@ -592,12 +530,15 @@ export function useAppShellState(seed?: {
     return id;
   }, [workspaces, activeWorkspace, activateTab, navigateUrl, focusChat]);
 
+  /** 占位 tab id 生成：U1 豁免（同工作区可并存多个 composer），id 即草稿键隔离键。 */
+  const freshNewSessionTabId = useCallback((): string => newSessionTabId(
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  ), []);
+
   const openNewSessionTab = useCallback((workspace: WorkspaceSummary): string => {
-    const id = newSessionTabId(
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
+    const id = freshNewSessionTabId();
     setTabs((prev) => [...prev, createNewSessionTab(workspace, id)]);
     activateTab(id);
     setSessionKey((k) => k + 1);
@@ -607,7 +548,7 @@ export function useAppShellState(seed?: {
     focusChat();
     navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`);
     return id;
-  }, [activateTab, navigateUrl, focusChat]);
+  }, [activateTab, navigateUrl, focusChat, freshNewSessionTabId]);
 
   /** X1 关 tab：草稿确认（会话 tab 用 session.id 键，占位 tab 用 tab.id 键）
    *  → 邻居规则回落（先左后右；一个不剩 → 首页）。会话删除/归档的自动关
@@ -626,6 +567,42 @@ export function useAppShellState(seed?: {
     setTabs(remaining);
     if (activeTabId !== id) return;
     const nextId = nextActiveTabId(tabs, id);
+    if (nextId) {
+      activateTab(nextId);
+      const nextTab = remaining.find((t) => t.id === nextId);
+      navigateUrl(nextTab ? tabQuery(nextTab) : null);
+    } else {
+      activateTab(null);
+      navigateUrl("tab=home");
+    }
+  }, [tabs, activeTabId, activateTab, navigateUrl]);
+
+  /** 批量关 tab（右键菜单的 关闭其他/关闭左侧/关闭右侧）：草稿确认只弹
+   *  一次（合并计数，确认后统一丢弃）→ 移除 → 激活回落 nextActiveAfterBatchClose
+   *  （X1 批量版：活动 tab 幸存则保留，被关则先左后右找最近存活，全灭→首页）。
+   *  运行中的会话 tab 照常关闭——关 tab 仅摘 UI，不终止会话（daemon 继续，
+   *  徽章来自全局流）。空集合 no-op。 */
+  const closeTabs = useCallback((ids: string[], options?: { skipDraftConfirm?: boolean }) => {
+    const idSet = new Set(ids);
+    const targets = tabs.filter((t) => idSet.has(t.id));
+    if (targets.length === 0) return;
+    if (!options?.skipDraftConfirm) {
+      const draftKeys = targets.map((t) => (t.kind === "session" && t.session ? t.session.id : t.id));
+      const dirtyKeys = draftKeys.filter((key) => {
+        const draft = getDraft(key);
+        return Boolean(draft && (draft.value || draft.images.length > 0));
+      });
+      if (dirtyKeys.length > 0) {
+        const noun = dirtyKeys.length === 1 ? "1 个含未发送草稿" : `${dirtyKeys.length} 个含未发送草稿`;
+        if (!window.confirm(`要关闭的 ${targets.length} 个 tab 中有${noun}，关闭将丢弃草稿。确定关闭吗？`)) return;
+        for (const key of dirtyKeys) clearDraft(key);
+      }
+    }
+    const closedIds = new Set(targets.map((t) => t.id));
+    const remaining = tabs.filter((t) => !closedIds.has(t.id));
+    setTabs(remaining);
+    if (!activeTabId || !closedIds.has(activeTabId)) return;
+    const nextId = nextActiveAfterBatchClose(tabs, closedIds, activeTabId);
     if (nextId) {
       activateTab(nextId);
       const nextTab = remaining.find((t) => t.id === nextId);
@@ -852,7 +829,6 @@ export function useAppShellState(seed?: {
   // openSessionTab 内回退当前上下文工作区或忽略）。首页保持纯启动器。
   const handleOpenSessionFromHome = useCallback((session: SessionInfo) => {
     setWorkspaceManagerOpen(false);
-    setConfigView(null);
     openSessionTab(session);
   }, [openSessionTab]);
 
@@ -865,7 +841,6 @@ export function useAppShellState(seed?: {
     // U1：该会话已有 tab → 聚焦即可（会话全局唯一 tab）。
     const existingId = sessionTabId(session.id);
     if (tabs.some((t) => t.id === existingId)) {
-      setConfigView(null);
       activateTab(existingId);
       setSessionKey((k) => k + 1);
       setSystemPrompt(null);
@@ -881,7 +856,6 @@ export function useAppShellState(seed?: {
       return;
     }
     // C1 morph：当前会话/占位 tab 原地变身（保留 F1 文件 tab 状态）。
-    setConfigView(null);
     const owner = workspaceForSession(session, workspaces) ?? activeTab?.workspace ?? null;
     if (!owner) return;
     const fresh = createSessionTab(owner, session);
@@ -924,17 +898,45 @@ export function useAppShellState(seed?: {
    *  工作区的家 tab；移动端由 MobileShell 用本地栈接管（onShowOverview prop）。 */
   const handleShowOverview = useCallback(() => {
     if (!activeWorkspace) return;
-    setConfigView(null);
     const id = ensureHomeTab(activeWorkspace);
     activateTab(id);
     navigateUrl(`workspace=${encodeURIComponent(activeWorkspace.id)}&view=overview`);
   }, [activeWorkspace, ensureHomeTab, activateTab, navigateUrl]);
 
+  /** 新建会话（中栏 header ＋ / 家 tab 快捷按钮 / 移动端工作区菜单 /
+   *  Ctrl+Alt+N）：活动 tab 是家 tab（= 工作区详情页）→ 原地变身
+   *  （resolveNewSessionTarget；2026-09 用户反馈：详情页点「新建会话」
+   *  不新增 tab）——家 tab 同位置换成 composer 占位，F1 文件 tab/右栏状态
+   *  保留，首条消息后按现有 handleSessionCreated 转正；回头路 =「总览」/⊞
+   *  走 ensureHomeTab 重建家 tab。活动 tab 是会话/占位 → 开新占位 tab
+   *  （U1 豁免：同工作区可并存多个 composer，不吃掉正在看的会话）。 */
   const handleWorkspaceNewSession = useCallback(() => {
-    // 新建会话 = 开一个新的占位 tab（U1 豁免：同工作区可并存多个 composer）；
-    // 当前会话视图不被替换。
     if (!activeWorkspace) return;
-    setConfigView(null);
+    if (activeTab && resolveNewSessionTarget(activeTab) === "morph") {
+      const id = freshNewSessionTabId();
+      setTabs((prev) => prev.map((t) => (t.id === activeTab.id
+        ? {
+            ...createNewSessionTab(activeTab.workspace, id),
+            fileTabs: t.fileTabs,
+            activeFileTabId: t.activeFileTabId,
+            rightPanelOpen: t.rightPanelOpen,
+          }
+        : t)));
+      activateTab(id);
+      setSessionKey((k) => k + 1);
+      setBranchTree([]);
+      setBranchActiveLeafId(null);
+      setSystemPrompt(null);
+      focusChat();
+      navigateUrl(`workspace=${encodeURIComponent(activeWorkspace.id)}&view=chat`);
+      return;
+    }
+    openNewSessionTab(activeWorkspace);
+  }, [activeWorkspace, activeTab, activateTab, navigateUrl, focusChat, freshNewSessionTabId, openNewSessionTab]);
+
+  /** tab 条「＋」：显式的加 tab 按钮——永远开新占位 tab，不做家 tab 原地变身。 */
+  const handleTabBarNewSession = useCallback(() => {
+    if (!activeWorkspace) return;
     openNewSessionTab(activeWorkspace);
   }, [activeWorkspace, openNewSessionTab]);
 
@@ -947,6 +949,7 @@ export function useAppShellState(seed?: {
     // Opening the manager from home; don't run it through activateTab (which
     // would close the very modal we're opening).
     setWorkspaceManagerOpen(true);
+    setCenterPage(null);
     setActiveTabId(null);
     navigateUrl("tab=home&view=create-workspace");
   }, [navigateUrl]);
@@ -1127,10 +1130,9 @@ export function useAppShellState(seed?: {
     workspace: WorkspaceSummary,
     item: WorkItemRecord,
   ) => {
-    // Opening the conversation is an explicit “show me the chat” intent — drop
-    // the right-column config/work-item-detail views so the chat is visible
-    // (the button itself lives inside the portaled work-item detail).
-    setConfigView(null);
+    // Opening the conversation is an explicit “show me the chat” intent — the
+    // chat tabs own the center; any open centerPage yields via activateTab
+    // inside openSessionTab/openNewSessionTab below.
     // Latest conversation first: a kit round (or run-contract prefill) session is
     // APPENDED to `conversations`, so the most recent entry is the live/latest
     // contract run. Resolve via /locate (daemon probe + forced disk scan) — never the
@@ -1199,7 +1201,6 @@ export function useAppShellState(seed?: {
       window.alert(`起轮失败：${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    setConfigView(null);
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/locate`);
       if (response.ok) {
@@ -1252,7 +1253,6 @@ export function useAppShellState(seed?: {
     const text = pattern
       ? `/skill:${pattern} ${verb} ${item.key}`
       : `${verb} ${item.key}`;
-    setConfigView(null);
     const tabId = openNewSessionTab(workspace);
     // 草稿键 = 占位 tab id（U1：多 composer 并存互不互踩，修复旧 new:<wsPath> 隐患）；
     // composerEpoch 强制已挂载的 ChatInput 重读草稿。
@@ -1541,12 +1541,9 @@ export function useAppShellState(seed?: {
     setMruIds,
     navReady,
     setNavReady,
-    sidebarView,
-    setSidebarView,
-    configView,
-    setConfigView,
-    configPortalNode,
-    setConfigPortalNode,
+    centerPage,
+    setCenterPage,
+    openCenterPage,
     loopFilesReveal,
     setLoopFilesReveal,
     refreshKey,
@@ -1617,8 +1614,6 @@ export function useAppShellState(seed?: {
     topPanelPos,
     setTopPanelPos,
     handleOpenConfig,
-    handleSidebarSwitchView,
-    handleRailSwitch,
     handleWorkspaceSettingsSelection,
     focusChat,
     focusPanel,
@@ -1655,6 +1650,7 @@ export function useAppShellState(seed?: {
     openSessionTab,
     openNewSessionTab,
     closeTab,
+    closeTabs,
     handleSelectTab,
     handleSessionRemoved,
     activateTab,
@@ -1669,6 +1665,7 @@ export function useAppShellState(seed?: {
 
     handleShowOverview,
     handleWorkspaceNewSession,
+    handleTabBarNewSession,
     handleReturnHome,
 
     handleCreateWorkspace,
@@ -1712,7 +1709,6 @@ export function useAppShellState(seed?: {
     activeFileTabId,
     rightPanelOpen,
     activeCwd,
-    GLOBAL_PANEL_KEY,
     sessionActivity,
     clampSidebarWidth,
     effectiveNewSessionCwd,

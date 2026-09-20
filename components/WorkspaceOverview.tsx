@@ -4,10 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkItemRecord, WorkItemType } from "@/lib/work-items/types";
 import type { WorkspaceRepositoryState, WorkspaceSummary } from "@/lib/workspaces/types";
-import type { LoopConfigTarget } from "./LoopsConfig";
-import { LoopRow } from "./LoopRow";
 import { STATUS_LABELS } from "./WorkspaceManager";
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { WorkspaceSessionList } from "./WorkspaceSessionList";
 import { useKitLoops } from "@/hooks/useKitLoops";
 
 interface Props {
@@ -23,30 +21,14 @@ interface Props {
   /** Open the workspace settings' add-repository form (AppShell wires it). */
   onAddRepository: () => void;
   onSessionDeleted?: (id: string) => void;
-  /** 打开 loop 配置（移动端 overview 栈；新建走 { kind: "new" }）。桌面不再传
-   *  ——右坞 Loops tab 承接配置/新建，桌面只传 onOpenLoopsTab 渲染摘要行。 */
-  onOpenLoopConfig?: (target: LoopConfigTarget) => void;
-  /** 「运行」——手动起一轮并打开轮会话（移动端全量区块的行按钮）。 */
-  onRunLoop?: (name: string) => void;
   /** loop 变更刷新信号（创建/删除/frontmatter 保存后由 shell bump）。 */
   loopsRefreshKey?: number;
-  /** 右坞 Loops tab 入口（桌面传）：传入时 Loops 区块瘦身为摘要行（决策 #10）——
-   *  点击开右坞 Loops tab，状态/操作/配置只住 tab；不传（移动端）保持全量区块。 */
-  onOpenLoopsTab?: () => void;
+  /** 右坞 Loops tab 入口：Loops 区块渲染为摘要行（决策 #10）——点击开右坞
+   *  Loops tab，状态/操作/配置只住 tab。2026-09 菜单化后必传（移动端工作区
+   *  tab 已改用 WorkspaceHomeMenu，不再渲染本组件）。 */
+  onOpenLoopsTab: () => void;
 }
 
-function formatRelativeTime(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  if (diff < 0) return "刚刚"; // clock skew / future
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "刚刚";
-  if (mins < 60) return `${mins} 分钟前`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} 天前`;
-  return new Date(dateStr).toLocaleDateString();
-}
 
 const sectionStyle: React.CSSProperties = { marginTop: 26 };
 
@@ -104,16 +86,12 @@ export function WorkspaceOverview({
   onSwitchSidebarView,
   onAddRepository,
   onSessionDeleted,
-  onOpenLoopConfig,
-  onRunLoop,
   loopsRefreshKey,
   onOpenLoopsTab,
 }: Props) {
-  const isMobile = useIsMobile();
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const { loops, busy: loopsBusy, runAction: loopAction } = useKitLoops(workspace.id, loopsRefreshKey);
+  const { loops } = useKitLoops(workspace.id, loopsRefreshKey);
 
   const hasWorkItems = workspace.capabilities.includes("work-items");
   const hasRepositories = workspace.capabilities.includes("repositories");
@@ -132,8 +110,7 @@ export function WorkspaceOverview({
           signal: controller.signal,
         })
         : null,
-      fetch("/api/sessions", { signal: controller.signal }),
-    ]).then(async ([itemsResponse, repositoriesResponse, sessionsResponse]) => {
+    ]).then(async ([itemsResponse, repositoriesResponse]) => {
       if (itemsResponse?.ok) {
         const data = await itemsResponse.json() as { items?: WorkItemRecord[] };
         setWorkItems(data.items ?? []);
@@ -144,10 +121,6 @@ export function WorkspaceOverview({
         };
         setRepositories(data.repositories ?? []);
       }
-      if (sessionsResponse.ok) {
-        const data = await sessionsResponse.json() as { sessions?: SessionInfo[] };
-        setSessions(data.sessions ?? []);
-      }
     }).catch((error) => {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         console.error("Failed to load workspace overview:", error);
@@ -155,23 +128,6 @@ export function WorkspaceOverview({
     });
     return () => controller.abort();
   }, [workspace.id, hasWorkItems, hasRepositories, hasKnowledge]);
-
-  const wsPath = workspace.path.replace(/\/+$/, "");
-  const recentSessions = useMemo(() => {
-    const path = workspace.path;
-    const prefix = `${wsPath}/`;
-    return sessions
-      .filter((session) =>
-        !session.subagentChild
-        && (
-          session.cwd === path
-          || session.cwd.startsWith(prefix)
-          || session.projectRoot === path
-        ),
-      )
-      .sort((a, b) => b.modified.localeCompare(a.modified))
-      .slice(0, 5);
-  }, [sessions, wsPath, workspace.path]);
 
   // 活跃工作项：非终态（status 非 done/cancelled、未归档），按 updatedAt 倒序取前 5。
   const activeWorkItems = useMemo(
@@ -416,245 +372,46 @@ export function WorkspaceOverview({
           </section>
         )}
 
-        {/* Loops：桌面（onOpenLoopsTab 传入）瘦身为摘要行（决策 #10）——状态/操作/
-            配置只住右坞 Loops tab；移动端保持全量区块（状态/暂停恢复/停止/运行 +
-            配置/新建走 onOpenLoopConfig → overview 栈），常驻渲染（无 loop 也有
-            「新建」入口）。 */}
+        {/* Loops：摘要行（决策 #10，2026-09 菜单化后唯一形态）——状态/操作/
+            配置只住右坞 Loops tab；无 loop 也有入口（空态文案）。 */}
         <section style={sectionStyle}>
           <h2 style={{ ...sectionHeaderStyle, margin: "0 0 10px" }}>Loops</h2>
-          {onOpenLoopsTab ? (
-            <button onClick={onOpenLoopsTab} style={cardRowStyle}>
-              <span style={{ display: "flex", alignItems: "center", color: "var(--text-muted)", flexShrink: 0 }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M17 2l4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" />
-                  <path d="M7 22l-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" />
-                </svg>
+          <button onClick={onOpenLoopsTab} style={cardRowStyle}>
+            <span style={{ display: "flex", alignItems: "center", color: "var(--text-muted)", flexShrink: 0 }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M17 2l4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+                <path d="M7 22l-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" />
+              </svg>
+            </span>
+            <span style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+              <span style={{ fontWeight: 500 }}>
+                {loops.length === 0 ? "暂无 loop" : `${loops.length} 个 loop`}
               </span>
-              <span style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                <span style={{ fontWeight: 500 }}>
-                  {loops.length === 0 ? "暂无 loop" : `${loops.length} 个 loop`}
-                </span>
-                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                  {(() => {
-                    const running = loops.filter((loop) => loop.running).length;
-                    const paused = loops.filter((loop) => loop.paused).length;
-                    if (loops.length === 0) return "文件即声明：.pi/loops/&lt;name&gt;/LOOP.md";
-                    const parts: string[] = [];
-                    if (running > 0) parts.push(`${running} 个运行中`);
-                    if (paused > 0) parts.push(`${paused} 个已暂停`);
-                    if (running === 0 && paused === 0) parts.push("全部就绪");
-                    return parts.join(" · ");
-                  })()}
-                </span>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                {(() => {
+                  const running = loops.filter((loop) => loop.running).length;
+                  const paused = loops.filter((loop) => loop.paused).length;
+                  if (loops.length === 0) return "文件即声明：.pi/loops/&lt;name&gt;/LOOP.md";
+                  const parts: string[] = [];
+                  if (running > 0) parts.push(`${running} 个运行中`);
+                  if (paused > 0) parts.push(`${paused} 个已暂停`);
+                  if (running === 0 && paused === 0) parts.push("全部就绪");
+                  return parts.join(" · ");
+                })()}
               </span>
-              <span style={{ color: "var(--text-dim)", fontSize: 14 }}>›</span>
-            </button>
-          ) : loops.length === 0 ? (
-            <div style={{ display: "flex", gap: 10, alignItems: "center", color: "var(--text-muted)", fontSize: 12 }}>
-              <span>暂无 loop（文件即声明：loops/&lt;name&gt;/LOOP.md）</span>
-              <button onClick={() => onOpenLoopConfig?.({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {loops.map((loop) => (
-                <LoopRow
-                  key={loop.name}
-                  loop={loop}
-                  busy={loopsBusy}
-                  onConfigure={(name) => onOpenLoopConfig?.({ kind: "loop", name })}
-                  onAction={(name, action) => void loopAction(name, action)}
-                  onRun={onRunLoop ? () => onRunLoop(loop.name) : undefined}
-                />
-              ))}
-              <div>
-                <button onClick={() => onOpenLoopConfig?.({ kind: "new" })} style={sectionHeaderLinkStyle}>＋ 新建 Loop</button>
-              </div>
-            </div>
-          )}
+            </span>
+            <span style={{ color: "var(--text-dim)", fontSize: 14 }}>›</span>
+          </button>
         </section>
 
-        {/* Recent sessions */}
-        <section style={sectionStyle}>
-          <h2 style={{ ...sectionHeaderStyle, margin: "0 0 12px" }}>最近会话</h2>
-          {recentSessions.length === 0 ? (
-            <div style={emptyHintStyle}>
-              还没有会话。点击上方「新建会话」开始。
-            </div>
-          ) : (
-            <div>
-              {recentSessions.map((session) => (
-                <RecentSessionRow
-                  key={session.id}
-                  session={session}
-                  isMobile={isMobile}
-                  onOpen={() => onSelectSession(session)}
-                  onRemoved={(id) => setSessions((prev) => prev.filter((item) => item.id !== id))}
-                  onDeleted={onSessionDeleted}
-                />
-              ))}
-            </div>
-          )}
-        </section>
+        {/* 会话（本工作区）——共享 WorkspaceSessionList（移动端工作区 tab 的会话
+            子页同体）；全局跨工作区列表住首页/桌面中栏（HomeSessionGroups）。 */}
+        <WorkspaceSessionList
+          workspace={workspace}
+          onSelectSession={onSelectSession}
+          onSessionDeleted={onSessionDeleted}
+        />
       </div>
     </main>
-  );
-}
-
-function RecentSessionRow({
-  session,
-  isMobile,
-  onOpen,
-  onRemoved,
-  onDeleted,
-}: {
-  session: SessionInfo;
-  isMobile: boolean;
-  onOpen: () => void;
-  onRemoved: (id: string) => void;
-  onDeleted?: (id: string) => void;
-}) {
-  const [hovered, setHovered] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-
-  const title = session.name || session.firstMessage || "未命名会话";
-
-  const performDelete = async () => {
-    setDeleting(true);
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
-        method: "DELETE",
-      });
-      if (response.ok) {
-        onRemoved(session.id);
-        onDeleted?.(session.id);
-      }
-    } catch {
-      // ignore network errors — row stays, user can retry
-    }
-    setDeleting(false);
-    setConfirming(false);
-  };
-
-  const showDelete = isMobile || hovered || confirming;
-
-  return (
-    <div
-      role="button"
-      tabIndex={confirming ? -1 : 0}
-      onClick={confirming ? undefined : onOpen}
-      onKeyDown={(e) => {
-        if (!confirming && (e.key === "Enter" || e.key === " ")) {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "11px 12px",
-        marginBottom: 8,
-        border: "1px solid var(--border)",
-        borderRadius: 10,
-        background: hovered && !confirming ? "var(--bg-hover)" : "var(--bg-panel)",
-        cursor: confirming ? "default" : "pointer",
-        transition: "background 0.12s",
-      }}
-    >
-      <span
-        style={{
-          flex: 1,
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          fontSize: 13,
-          color: "var(--text)",
-        }}
-      >
-        {title}
-      </span>
-
-      {confirming ? (
-        <div
-          style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <span style={{ fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>确认删除？</span>
-          <button
-            onClick={performDelete}
-            disabled={deleting}
-            style={{
-              padding: "4px 10px",
-              fontSize: 11,
-              border: "1px solid rgba(239,68,68,0.4)",
-              borderRadius: 6,
-              background: "rgba(239,68,68,0.1)",
-              color: "#ef4444",
-              cursor: deleting ? "not-allowed" : "pointer",
-            }}
-          >
-            删除
-          </button>
-          <button
-            onClick={() => setConfirming(false)}
-            disabled={deleting}
-            style={{
-              padding: "4px 10px",
-              fontSize: 11,
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              background: "var(--bg)",
-              color: "var(--text-muted)",
-              cursor: deleting ? "not-allowed" : "pointer",
-            }}
-          >
-            取消
-          </button>
-        </div>
-      ) : (
-        <>
-          <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-            {formatRelativeTime(session.modified)} · {session.messageCount} 条
-          </span>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setConfirming(true);
-            }}
-            aria-label="删除会话"
-            title="删除会话"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 28,
-              height: 28,
-              padding: 0,
-              flexShrink: 0,
-              border: "none",
-              borderRadius: 7,
-              background: "transparent",
-              color: "var(--text-dim)",
-              cursor: "pointer",
-              opacity: showDelete ? 1 : 0,
-              transition: "opacity 0.12s, color 0.12s",
-              pointerEvents: showDelete ? "auto" : "none",
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="3 6 5 6 21 6" />
-              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-              <path d="M10 11v6" />
-              <path d="M14 11v6" />
-              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-            </svg>
-          </button>
-        </>
-      )}
-    </div>
   );
 }

@@ -43,19 +43,22 @@ interface Props {
   /** The 工作区 subpage content — AppShell builds a panel-mode WorkspaceManager
    *  node (it owns that component's wide prop surface) and passes it in. */
   workspaceSlot: ReactNode;
-  /** Switch the middle column to the archive panel (index row — the mobile path
-   *  to the archive; desktop additionally has the rail icon). */
+  /** Switch to the archive panel (index row — the mobile path to the archive;
+   *  desktop has the project-tree 归档 row instead). */
   onOpenArchive?: () => void;
-  /** Desktop only: route the 模型/Skills/插件 index rows to the RIGHT-column
-   *  config views (rail icons) instead of in-panel subpages. When absent
-   *  (mobile), the rows keep navigating to the built-in subpages below. */
-  onOpenConfigView?: (view: "models" | "skills" | "plugins") => void;
+  /** Desktop center-page mode（2026-09 树形侧栏改版）：设置作为中央区整页
+   *  渲染——索引只列 工作区/偏好（模型/Skills/插件 在侧栏底部四入口，归档
+   *  在项目树），子页面板内推进航（‹ 设置 返回）。缺省（移动端抽屉）保持
+   *  原样：全行索引 + 内嵌子页。 */
+  desktop?: boolean;
+  /** 工作区子页 header 的 meta（选中工作区名，WorkspaceManager 上报）。 */
+  workspaceMeta?: string | null;
   onWorkspaceSkillsChange?: (workspace: WorkspaceSummary) => void;
   onPluginsReloaded?: () => void;
   /** Fired when the models config is saved so the owner can refresh model lists. */
   onModelsSaved?: () => void;
   sessionId: string | null;
-  /** × close — rendered when running as a mobile full-screen overlay. */
+  /** × close — mobile full-screen overlay & desktop center page. */
   onCloseOverlay?: () => void;
 }
 
@@ -182,7 +185,8 @@ export function SettingsPanel({
   settingsCwd,
   workspaceSlot,
   onOpenArchive,
-  onOpenConfigView,
+  desktop = false,
+  workspaceMeta = null,
   onWorkspaceSkillsChange,
   onPluginsReloaded,
   onModelsSaved,
@@ -190,21 +194,22 @@ export function SettingsPanel({
   onCloseOverlay,
 }: Props) {
   const title = page === "index" ? "设置" : SUBPAGE_TITLES[page];
-  // Desktop split mode (onOpenConfigView provided): the index ALWAYS fills
-  // the middle column — subpages render in the RIGHT column (AppShell), the
-  // index row just highlights. Mobile keeps the in-panel subpage navigation
-  // (back arrow + page swap inside the drawer).
-  const desktopSplit = Boolean(onOpenConfigView);
-  const back = page !== "index" && !desktopSplit
+  // 子页面板内推进航（‹ 设置 返回）——桌面中央区页与移动端抽屉同构；索引
+  // 只在 index 页渲染（子页换入换出）。
+  const back = page !== "index"
     ? { onBack: () => onPageChange("index"), backLabel: "设置" }
     : {};
-  const showIndex = desktopSplit || page === "index";
+  const showIndex = page === "index";
+  const meta = page === "workspace" ? workspaceMeta ?? undefined
+    : page === "models" ? "~/.pi/agent/models.json"
+    : page === "skills" || page === "plugins" ? shortenPath(settingsCwd)
+    : undefined;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <PanelHeader
         title={title}
-        meta={page === "models" ? "~/.pi/agent/models.json" : page === "skills" || page === "plugins" ? shortenPath(settingsCwd) : undefined}
+        meta={meta}
         onClose={onCloseOverlay}
         {...back}
       />
@@ -220,40 +225,37 @@ export function SettingsPanel({
           <IndexRow
             label="工作区"
             hint={workspace?.name ?? "管理全部工作区"}
-            active={desktopSplit && page === "workspace"}
             onClick={() => onPageChange("workspace")}
           />
-          {/* 模型/Skills/插件：桌面端有 rail 直达图标（三栏视图），设置里不再重复列出；
-              手机端无 rail 图标，这三行是唯一入口，保留并进入子页。 */}
-          {!onOpenConfigView && (
+          {/* 模型/Skills/插件：桌面端在侧栏底部四入口（中央区整页），设置里不再
+              重复；手机端这三行是唯一入口，进入内嵌子页。归档同理：桌面在项目
+              树组尾，手机在设置索引行。 */}
+          {!desktop && (
             <>
               <IndexRow label="模型" hint="API Key / 默认模型" onClick={() => onPageChange("models")} />
               <IndexRow label="Skills" onClick={() => onPageChange("skills")} />
               <IndexRow label="插件" onClick={() => onPageChange("plugins")} />
             </>
           )}
-          <IndexRow label="偏好" hint="主题 / 语言" active={desktopSplit && page === "preferences"} onClick={() => onPageChange("preferences")} />
-          {/* 归档：桌面 rail 已有图标（与设置同一全局组），不再重复；手机端无
-              rail 图标，设置索引是唯一入口。 */}
-          {!onOpenConfigView && onOpenArchive && (
+          <IndexRow label="偏好" hint="主题 / 语言" onClick={() => onPageChange("preferences")} />
+          {!desktop && onOpenArchive && (
             <IndexRow label="归档" hint="回收站" onClick={onOpenArchive} />
           )}
         </div>
       )}
-      {/* Mobile: the 工作区 subpage swaps in-place (panel-mode manager,
-          single column in the drawer). Desktop renders the manager in the
-          CENTER area (DesktopShell) — no slot here. */}
-      {page === "workspace" && !desktopSplit && (
+      {/* 子页面（板内推进航）：mobile 传 panel-mode WorkspaceManager，desktop
+          传 inline-split（列表+详情并排）——两者都在本面板内渲染。 */}
+      {page === "workspace" && (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {workspaceSlot}
         </div>
       )}
-      {page === "models" && !desktopSplit && (
+      {page === "models" && (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <ModelsConfig embedded onSaved={onModelsSaved} />
         </div>
       )}
-      {page === "skills" && !desktopSplit && settingsCwd && (
+      {page === "skills" && settingsCwd && (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <SkillsConfig
             embedded
@@ -264,7 +266,7 @@ export function SettingsPanel({
           />
         </div>
       )}
-      {page === "plugins" && !desktopSplit && settingsCwd && (
+      {page === "plugins" && settingsCwd && (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <PluginsConfig
             embedded
@@ -274,7 +276,7 @@ export function SettingsPanel({
           />
         </div>
       )}
-      {page === "preferences" && !desktopSplit && (
+      {page === "preferences" && (
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
           <PreferencesPage />
         </div>

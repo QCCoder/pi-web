@@ -164,6 +164,15 @@ html.pi-keyboard-open .mobile-bottom-tabbar {
   background: var(--text-dim);
 }
 
+/* 隐藏滚动条但保留滚动能力（横滚 tab 条等噪音场景；滚动靠滚轮/触摸板/代码滚动）。 */
+.hide-scrollbar {
+  scrollbar-width: none; /* Firefox / Chrome 121+ / Safari 18.2+ */
+  -ms-overflow-style: none; /* 老 Edge */
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none; /* Chromium / WebKit */
+}
+
 :root {
   --font-mono: var(--font-noto-mono), 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, 'PingFang SC', 'Microsoft YaHei', monospace;
 }
@@ -905,7 +914,7 @@ span.linenumber {
 }
 
 /* Desktop sidebar: animate width. Width is a CSS var so the user can drag
-   the resize handle (see AppShell `sidebarWidth`); 260px is the default. */
+   the resize handle (see AppShell `sidebarWidth`); 200px (= the min) is the default. */
 @media (min-width: 641px) {
   .sidebar-container {
     position: relative;
@@ -913,8 +922,8 @@ span.linenumber {
     transition: width 0.2s ease, min-width 0.2s ease;
   }
   .sidebar-container.sidebar-open {
-    width: var(--pi-sidebar-width, 260px);
-    min-width: var(--pi-sidebar-width, 260px);
+    width: var(--pi-sidebar-width, 200px);
+    min-width: var(--pi-sidebar-width, 200px);
   }
   .sidebar-container.sidebar-closed {
     width: 0;
@@ -924,8 +933,8 @@ span.linenumber {
   /* keep inner content at the sidebar width so it doesn't reflow during the
      open/close animation or while dragging the resize handle */
   .sidebar-container > * {
-    width: var(--pi-sidebar-width, 260px);
-    min-width: var(--pi-sidebar-width, 260px);
+    width: var(--pi-sidebar-width, 200px);
+    min-width: var(--pi-sidebar-width, 200px);
   }
   /* while actively dragging, jump instantly instead of animating each move */
   .sidebar-container.sidebar-resizing {
@@ -968,44 +977,6 @@ span.linenumber {
   background: var(--accent);
   width: 2px;
   margin-left: -1px;
-  opacity: 1;
-}
-
-/* Workbench 会话/文件 vertical split handle (workbench view, both sections
-   open). Same pattern as the sidebar handle: ::before is the invisible grab
-   zone, ::after the visible guide line that brightens on hover/drag.
-   touch-action:none keeps touch drags from scrolling instead of resizing. */
-.workbench-split-handle {
-  flex-shrink: 0;
-  height: 7px;
-  cursor: row-resize;
-  background: transparent;
-  position: relative;
-  z-index: 5;
-  touch-action: none;
-}
-.workbench-split-handle::before {
-  content: "";
-  position: absolute;
-  inset: -5px 0;             /* 17px grab zone straddling the boundary */
-}
-.workbench-split-handle::after {
-  content: "";
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  top: 50%;
-  height: 1px;
-  margin-top: -0.5px;
-  background: var(--border);
-  transition: background 0.12s ease, height 0.12s ease, opacity 0.12s ease;
-  opacity: 0.7;
-}
-.workbench-split-handle:hover::after,
-.workbench-split-handle:active::after {
-  background: var(--accent);
-  height: 2px;
-  margin-top: -1px;
   opacity: 1;
 }
 

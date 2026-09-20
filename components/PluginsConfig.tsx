@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
@@ -580,7 +579,7 @@ export function PluginsConfig({
   onClose,
   onReloaded,
   embedded,
-  split,
+  inline = false,
 }: {
   cwd: string;
   sessionId: string | null;
@@ -588,11 +587,10 @@ export function PluginsConfig({
   onReloaded?: () => void;
   /** Embedded (middle-column panel) mode: fill container, no overlay/header. */
   embedded?: boolean;
-  /** Split (three-column) mode: the package list renders inline (the middle
-   *  column) while the detail/add panel + footer portal into the right
-   *  column's config area (`portalTarget` = AppShell's config portal node).
-   *  Modal/embedded modes are unchanged. */
-  split?: { portalTarget: HTMLElement | null };
+  /** 中央区整页模式（2026-09 树形侧栏改版）：列表 + 详情并排在同一页面
+   *  （左固定宽列表列 + 右 banner/详情/页脚）——取代旧三列 portal split。
+   *  Modal/embedded 模式不变。 */
+  inline?: boolean;
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -722,11 +720,10 @@ export function PluginsConfig({
 
   const addBusy = busyKey?.startsWith("install:") ?? false;
 
-  const splitMode = split != null;
-  const portalTarget = split?.portalTarget ?? null;
+  const pageMode = inline;
 
   // Context banner (project-trust notice) — it explains the detail pane's
-  // install semantics, so in split mode it travels with the detail into the
+  // install semantics, so in page mode it travels with the detail into the
   // right column.
   const contextBanners = (
     <>
@@ -747,11 +744,11 @@ export function PluginsConfig({
     </>
   );
 
-  // Left: package list — shared by every mode. In split mode it fills the
-  // middle column (width 100%); in modal/embedded mode it is the fixed-width
-  // left pane of the internal two-pane body.
+  // Left: package list — shared by every mode. In page mode it fills the
+  // fixed-width left column of the one-page split; in modal/embedded mode it
+  // is the fixed-width left pane of the internal two-pane body.
   const listPane = (
-    <div style={splitMode
+    <div style={pageMode
       ? { width: "100%", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)" }
       : {
           width: isMobile ? "100%" : embedded ? 160 : 245,
@@ -1006,27 +1003,20 @@ export function PluginsConfig({
     </div>
   );
 
-  if (splitMode) {
-    // Split (three-column) mode: the package list renders inline (middle
-    // column, under AppShell's PanelHeader) while the banner + detail/add
-    // panel + footer portal into the right column's config area. One
+  if (pageMode) {
+    // Inline（中央区整页）mode：list + detail side by side in ONE page. One
     // component instance keeps every bit of state — selection, install flow.
     return (
-      <>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }}>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", background: "var(--bg)", overflow: "hidden" }}>
+        <div style={{ width: 280, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)" }}>
           {listPane}
         </div>
-        {portalTarget
-          ? createPortal(
-              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
-                {contextBanners}
-                {detailPane}
-                {footerPane}
-              </div>,
-              portalTarget,
-            )
-          : null}
-      </>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", background: "var(--bg)" }}>
+          {contextBanners}
+          {detailPane}
+          {footerPane}
+        </div>
+      </div>
     );
   }
 

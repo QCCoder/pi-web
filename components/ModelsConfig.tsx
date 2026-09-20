@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { createPortal } from "react-dom";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
@@ -1644,15 +1643,14 @@ function AddProviderPicker({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, embedded, onSaved, split }: {
+export function ModelsConfig({ onClose, embedded, onSaved, inline }: {
   onClose?: () => void;
   embedded?: boolean;
   onSaved?: () => void;
-  /** Split (three-column) mode: the provider/model tree renders inline (the
-   *  middle column) while the detail pane + save footer portal into the right
-   *  column's config area (`portalTarget` = AppShell's config portal node).
-   *  Modal/embedded modes are unchanged. */
-  split?: { portalTarget: HTMLElement | null };
+  /** 中央区整页模式（2026-09 树形侧栏改版）：列表 + 详情并排在同一页面
+   *  （左固定宽列表列 + 右详情/页脚）——取代旧三列 portal split
+   *  （configPortalNode 已退役）。Modal/embedded 模式不变。 */
+  inline?: boolean;
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -1849,14 +1847,13 @@ export function ModelsConfig({ onClose, embedded, onSaved, split }: {
     );
   })();
 
-  const splitMode = split != null;
-  const portalTarget = split?.portalTarget ?? null;
+  const pageMode = inline === true;
 
-  // Left: provider/model tree — shared by every mode. In split mode it fills
-  // the middle column (width 100%); in modal/embedded mode it is the
-  // fixed-width left pane of the internal two-pane body.
+  // Left: provider/model tree — shared by every mode. In page mode it fills
+  // the fixed-width left column of the one-page split; in modal/embedded mode
+  // it is the fixed-width left pane of the internal two-pane body.
   const listPane = (
-    <div style={splitMode
+    <div style={pageMode
       ? { width: "100%", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)" }
       : {
           width: isMobile ? "100%" : embedded ? 160 : 210,
@@ -1983,8 +1980,8 @@ export function ModelsConfig({ onClose, embedded, onSaved, split }: {
     </div>
   );
 
-  // Right: detail — shared by every mode (portaled into the right column in
-  // split mode).
+  // Right: detail — shared by every mode (the right column of the one-page
+  // split in inline mode).
   const detailPane = (
     <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
       {loading ? null : detailContent ?? (
@@ -1996,8 +1993,7 @@ export function ModelsConfig({ onClose, embedded, onSaved, split }: {
   );
 
   // Footer — save/cancel for the models.json draft. Stays with the detail
-  // pane: embedded renders it in-panel, split portals it into the right
-  // column.
+  // pane in every mode.
   const footerPane = (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
           {saveError && <span style={{ fontSize: 12, color: "#f87171", flex: 1 }}>{saveError}</span>}
@@ -2027,25 +2023,21 @@ export function ModelsConfig({ onClose, embedded, onSaved, split }: {
         </div>
   );
 
-  if (splitMode) {
-    // Split (three-column) mode: the tree renders inline (middle column, under
-    // AppShell's PanelHeader) while the detail + footer portal into the right
-    // column's config area. One component instance keeps every bit of state —
-    // selection, drafts, save flow — no lifting needed.
+  if (pageMode) {
+    // Inline（中央区整页）mode：list + detail side by side in ONE page（左固
+    // 定宽列表列 + 右 banner/detail/footer）。One component instance keeps
+    // every bit of state — selection, drafts, save flow — no lifting needed.
     return (
       <>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)", overflow: "hidden" }}>
-          {listPane}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", background: "var(--bg)", overflow: "hidden" }}>
+          <div style={{ width: 280, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)" }}>
+            {listPane}
+          </div>
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", background: "var(--bg)" }}>
+            {detailPane}
+            {footerPane}
+          </div>
         </div>
-        {portalTarget
-          ? createPortal(
-              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
-                {detailPane}
-                {footerPane}
-              </div>,
-              portalTarget,
-            )
-          : null}
         {pickerOpen && (
           <AddProviderPicker
             oauthProviders={oauthProviders}

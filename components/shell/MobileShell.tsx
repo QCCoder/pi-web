@@ -5,18 +5,18 @@ import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar } from "../TabBar";
 import { ArchiveModal } from "../ArchiveModal";
-import { LoopsConfig, type LoopConfigTarget } from "../LoopsConfig";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { WorkspaceManager } from "../WorkspaceManager";
-import { WorkspaceSidebar } from "../WorkspaceSidebar";
-import { WorkspaceOverview } from "../WorkspaceOverview";
+import { FilesExplorerPanel } from "../FilesExplorerPanel";
+import { WorkspaceHomeMenu } from "../WorkspaceHomeMenu";
+import { WorkspaceSessionList } from "../WorkspaceSessionList";
+import { LoopsDockPanel } from "../LoopsDockPanel";
 import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
 import { HomeLanding } from "../HomeLanding";
 import { HomeNewSession } from "../HomeNewSession";
 import { SessionTabBar } from "../SessionTabBar";
 import type { SessionTabState } from "@/lib/session-tabs";
-import { ACTIVITY_VIEW_ORDER, SETTINGS_VIEW } from "../ActivityBar";
 import { useI18n } from "@/hooks/useI18n";
 import { useShell } from "./context";
 import { ChatToolbar } from "./ChatToolbar";
@@ -24,15 +24,19 @@ import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { getFileName } from "@/lib/file-paths";
 
 /**
- * The mobile tab keys. W-中收敛（2026-09）：底部 tab 只剩 会话/工作台/设置——
- * 知识库/工作项/Loops 的入口 = 工作台 tab 的 overview 栈页（与桌面家 tab hub
- * 同构）。Tapping a tab SWITCHES the main area (no drawer); tapping the active
- * tab is a no-op. Secondary pages (archive) live on a per-tab stack with ‹返回
- * headers; settings manages its own in-panel subpage navigation.
+ * The mobile tab keys. 2026-09 会话/文件分 tab + 方案 A：底部 tab =
+ * 会话/工作区/文件/设置——「工作区」落地即总览（WorkspaceOverview，与桌面
+ * 家 tab 同构的心智：活跃工作项/会话/仓库/知识库/Loops 全部 1 跳；loop 配置/
+ * 工作项/知识库子页走 overview 栈，‹返回回总览）；「文件」= FilesExplorerPanel
+ * （与桌面右栏钉死的「文件」tab 同体，[文件|改动] 分段 + ⟳ 刷新）；全局跨
+ * 工作区会话列表只住首页（HomeLanding）。Tapping a tab SWITCHES the main area
+ * (no drawer); tapping the active tab is a no-op. Secondary pages (archive) live
+ * on a per-tab stack with ‹返回 headers; settings manages its own in-panel
+ * subpage navigation.
  */
-type MobileTab = "chat" | "workbench" | "settings";
+type MobileTab = "chat" | "workbench" | "files" | "settings";
 
-const TAB_ORDER: MobileTab[] = ["chat", "workbench", "settings"];
+const TAB_ORDER: MobileTab[] = ["chat", "workbench", "files", "settings"];
 
 const CHAT_TAB_DEF = {
   view: "chat" as const,
@@ -45,16 +49,49 @@ const CHAT_TAB_DEF = {
   ),
 };
 
+/** 工作台/设置 tab 定义（原 ActivityBar 常量的本地化——ActivityBar 组件随
+ *  桌面图标栏退役，2026-09 树形侧栏改版；移动端不动）。 */
+const WORKBENCH_TAB_DEF = {
+  label: "工作台",
+  icon: (
+    <svg width={19} height={19} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" aria-hidden={true as const}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+    </svg>
+  ),
+};
+
+const SETTINGS_TAB_DEF = {
+  label: "设置",
+  icon: (
+    <svg width={19} height={19} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" aria-hidden={true as const}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  ),
+};
+
+const FILES_TAB_DEF = {
+  label: "文件",
+  icon: (
+    <svg width={19} height={19} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" aria-hidden={true as const}>
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </svg>
+  ),
+};
+
 function tabLabel(tab: MobileTab): string {
-  if (tab === "workbench") return "工作台";
+  if (tab === "workbench") return "工作区";
+  if (tab === "files") return FILES_TAB_DEF.label;
   if (tab === "chat") return CHAT_TAB_DEF.label;
-  return SETTINGS_VIEW.label;
+  return SETTINGS_TAB_DEF.label;
 }
 
 function tabIcon(tab: MobileTab) {
-  if (tab === "workbench") return ACTIVITY_VIEW_ORDER[0].icon;
+  if (tab === "workbench") return WORKBENCH_TAB_DEF.icon;
+  if (tab === "files") return FILES_TAB_DEF.icon;
   if (tab === "chat") return CHAT_TAB_DEF.icon;
-  return SETTINGS_VIEW.icon;
+  return SETTINGS_TAB_DEF.icon;
 }
 
 /** Per-workspace tab persistence（旧模块 tab 值 knowledge/work-items/loops 归到
@@ -96,12 +133,10 @@ export function MobileShell() {
     rightPanelOpen,
     activeCwd,
     workspaces,
-    workspacesLoaded,
     workspaceActivity,
     refreshKey,
     explorerRefreshKey,
     createWorkItemRequest,
-    setCreateWorkItemRequest,
     openRepositoryFormRequest,
     sessionActivity,
     modelsRefreshKey,
@@ -116,13 +151,14 @@ export function MobileShell() {
     settingsCwd,
     handleOpenWorkspace,
     closeTab,
-    openSessionTab,
+    closeTabs,
     handleSelectTab,
     handleSessionRemoved,
     handleCreateWorkspace,
     handleReturnHome,
     handleOpenConversation,
     handleWorkspaceNewSession,
+    handleTabBarNewSession,
     handleSelectSession,
     handleOpenWorkItemConversation,
     handleRunLoopRound,
@@ -146,7 +182,6 @@ export function MobileShell() {
     updateActiveTab,
     setRefreshKey,
     setImportPickerOpen,
-    setOpenRepositoryFormRequest,
   } = s;
 
   // ---- Active tab -------------------------------------------------------------
@@ -182,6 +217,13 @@ export function MobileShell() {
     if (TAB_ORDER.includes(panelFocus.view as MobileTab)) setTab(panelFocus.view as MobileTab);
   }, [panelFocus]);
 
+  // Loops 面板 reveal 信号 → 切到「文件」tab（与桌面激活右栏「文件」tab 同构；
+  // FilesExplorerPanel 自己会把分段切回「文件」——用户停在「改动」时树未渲染）。
+  const loopFilesRevealNonce = loopFilesReveal?.nonce;
+  useEffect(() => {
+    if (loopFilesRevealNonce !== undefined) setTab("files");
+  }, [loopFilesRevealNonce]);
+
   // ---- Secondary pages (per-tab stack, Q6) ------------------------------------
   // Archive: secondary page of the 设置 tab. The settings and work-items
   // panels own their internal subpage navigation (their embedded variants
@@ -192,15 +234,18 @@ export function MobileShell() {
     if (tab !== "settings") setArchiveOpen(false);
   }, [tab]);
 
-  // 工作台 tab 的总览栈（D2 + W-中）：「总览」推入 WorkspaceOverview；Loops
-  // 「配置/新建」再推 loop 配置栈页；「工作项管理/知识库浏览」是家 tab hub 的
-  // 移动镜像。离开工作台 tab 或切换工作区即丢弃。
+  // 工作区 tab 的子页栈（2026-09 菜单化：落地 = WorkspaceHomeMenu，栈只存
+  // 子页）：会话/工作项/知识库/Loops 管理，‹返回回菜单；离开工作区 tab 或
+  // 切换工作区即丢弃。
   type OverviewPage =
-    | { page: "overview" }
-    | { page: "loop-config"; target: LoopConfigTarget }
+    | { page: "sessions" }
     | { page: "work-items" }
-    | { page: "knowledge" };
+    | { page: "knowledge" }
+    | { page: "loops" };
   const [overviewStack, setOverviewStack] = useState<OverviewPage | null>(null);
+  // Loops 子页（LoopsDockPanel）的变更信号：创建/删除/保存后 bump → 重新拉取
+  // （与桌面右坞 Loops tab 的 loopsRefreshKey 同构，本 shell 内自持）。
+  const [loopsRefreshKey, setLoopsRefreshKey] = useState(0);
   useEffect(() => {
     if (tab !== "workbench") setOverviewStack(null);
   }, [tab]);
@@ -210,147 +255,142 @@ export function MobileShell() {
     setOverviewStack(null);
   }, [overviewWorkspaceId]);
 
-  // The knowledge panel's ＋ (add knowledge repo) routes to the settings tab's
-  // 工作区 subpage with the repository form open — the mobile equivalent of the
-  // desktop middle-column switch.
-  const handleKnowledgeAddRepository = useCallback(() => {
-    setSettingsPage("workspace");
-    setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
-    setTab("settings");
-  }, [setSettingsPage, setOpenRepositoryFormRequest]);
-
   const renderTabContent = () => {
     switch (tab) {
       case "chat":
         return null; // rendered separately (persistent mount)
       case "workbench":
-        if (overviewStack && activeWorkspace) {
-          if (overviewStack.page === "loop-config") {
-            return (
-              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-                <PanelHeader
-                  title={overviewStack.target.kind === "new" ? "新建 Loop" : overviewStack.target.name}
-                  meta="Loop 配置"
-                  onBack={() => setOverviewStack({ page: "overview" })}
-                  backLabel="总览"
-                />
-                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                  <LoopsConfig
-                    workspace={activeWorkspace}
-                    target={overviewStack.target}
-                    onClose={() => setOverviewStack({ page: "overview" })}
-                    onOpenLoop={(name) => setOverviewStack({ page: "loop-config", target: { kind: "loop", name } })}
-                  />
-                </div>
-              </div>
-            );
-          }
-          if (overviewStack.page === "work-items") {
-            return (
-              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-                <PanelHeader
-                  title="工作项"
-                  meta={activeWorkspace.name}
-                  onBack={() => setOverviewStack({ page: "overview" })}
-                  backLabel="总览"
-                />
-                <WorkspaceManager
-                  open
-                  embedded
-                  panel
-                  initialSection="work-items"
-                  activeWorkspacePath={activeWorkspace.path}
-                  createWorkItemRequest={createWorkItemRequest}
-                  onClose={() => {}}
-                  onOpenWorkspace={handleOpenWorkspace}
-                  onOpenWorkItemConversation={handleOpenWorkItemConversation}
-                  onRunLoopRound={handleRunLoopRound}
-                  onRunContract={handleRunContract}
-                  onOpenConversation={handleOpenConversation}
-                  onWorkspaceDeleted={handleWorkspaceDeleted}
-                  onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-                />
-              </div>
-            );
-          }
-          if (overviewStack.page === "knowledge") {
-            return (
-              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-                <PanelHeader
-                  title="知识库"
-                  meta={activeWorkspace.name}
-                  onBack={() => setOverviewStack({ page: "overview" })}
-                  backLabel="总览"
-                />
-                <KnowledgeBrowser
-                  workspace={activeWorkspace}
-                  onOpenFile={handleOpenFile}
-                  refreshKey={explorerRefreshKey}
-                />
-              </div>
-            );
-          }
+        if (!activeWorkspace) return null;
+        if (overviewStack?.page === "sessions") {
+          // 会话子页：本工作区全部会话（与桌面总览「会话」区块同体）；全局
+          // 跨工作区列表住首页。
           return (
             <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
               <PanelHeader
-                title="总览"
+                title="会话"
                 meta={activeWorkspace.name}
                 onBack={() => setOverviewStack(null)}
-                backLabel="工作台"
+                backLabel="工作区"
               />
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                <WorkspaceOverview
+              <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 14px 24px", maxWidth: 640, width: "100%", margin: "0 auto" }}>
+                <WorkspaceSessionList
+                  key={activeWorkspace.id}
                   workspace={activeWorkspace}
-                  onNewSession={handleWorkspaceNewSession}
-                  onOpenSettings={() => {
-                    setSettingsPage("workspace");
-                    setTab("settings");
-                  }}
-                  onOpenWorkItems={() => setOverviewStack({ page: "work-items" })}
-                  onCreateWorkItem={(type) => {
-                    setOverviewStack({ page: "work-items" });
-                    setCreateWorkItemRequest({ type, id: Date.now() });
-                  }}
+                  showHeader={false}
                   onSelectSession={handleSelectSession}
-                  onSwitchSidebarView={(view) => {
-                    if (view === "knowledge") setOverviewStack({ page: "knowledge" });
-                    else { setOverviewStack(null); setTab("workbench"); }
-                  }}
-                  onAddRepository={handleKnowledgeAddRepository}
                   onSessionDeleted={handleSessionRemoved}
-                  onOpenLoopConfig={(target) => setOverviewStack({ page: "loop-config", target })}
-                  onRunLoop={(name) => handleRunLoopDirect(activeWorkspace, name)}
                 />
               </div>
             </div>
           );
         }
+        if (overviewStack?.page === "loops") {
+          // Loops 子页：与桌面右坞 Loops tab 同体（LoopsDockPanel：列表+状态/
+          // 暂停恢复/停止/运行 + 内联 LoopsConfig 推导航）。
+          return (
+            <LoopsDockPanel
+              key={activeWorkspace.id}
+              workspace={activeWorkspace}
+              refreshKey={loopsRefreshKey}
+              onChanged={() => setLoopsRefreshKey((key) => key + 1)}
+              onRunLoop={(name) => handleRunLoopDirect(activeWorkspace, name)}
+              listHeader={(
+                <PanelHeader
+                  title="Loops"
+                  meta={activeWorkspace.name}
+                  onBack={() => setOverviewStack(null)}
+                  backLabel="工作区"
+                />
+              )}
+            />
+          );
+        }
+        if (overviewStack?.page === "work-items") {
+          return (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title="工作项"
+                meta={activeWorkspace.name}
+                onBack={() => setOverviewStack(null)}
+                backLabel="工作区"
+              />
+              <WorkspaceManager
+                open
+                embedded
+                panel
+                initialSection="work-items"
+                activeWorkspacePath={activeWorkspace.path}
+                createWorkItemRequest={createWorkItemRequest}
+                onClose={() => {}}
+                onOpenWorkspace={handleOpenWorkspace}
+                onOpenWorkItemConversation={handleOpenWorkItemConversation}
+                onRunLoopRound={handleRunLoopRound}
+                onRunContract={handleRunContract}
+                onOpenConversation={handleOpenConversation}
+                onWorkspaceDeleted={handleWorkspaceDeleted}
+                onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
+              />
+            </div>
+          );
+        }
+        if (overviewStack?.page === "knowledge") {
+          return (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              <PanelHeader
+                title="知识库"
+                meta={activeWorkspace.name}
+                onBack={() => setOverviewStack(null)}
+                backLabel="工作区"
+              />
+              <KnowledgeBrowser
+                workspace={activeWorkspace}
+                onOpenFile={handleOpenFile}
+                refreshKey={explorerRefreshKey}
+              />
+            </div>
+          );
+        }
+        // 菜单化落地（2026-09）：工作区 tab 打开即 WorkspaceHomeMenu——新建会话
+        // + 会话（计数）+ 模块组（工作项/知识库按 capability，Loops 带状态）+
+        // 工作区设置，每行点进上面的子页。仓库不设行（浏览 = 文件 tab，
+        // 管理 = 设置›工作区）。
         return (
-          <WorkspaceSidebar
-            activeWorkspace={activeWorkspace}
-            activeView="workbench"
-            onShowOverview={() => setOverviewStack({ page: "overview" })}
-            workspaces={workspaces}
-            selectedSessionId={selectedSession?.id ?? null}
-            runningSessionIds={sessionActivity.runningIds}
-            completedSessionIds={sessionActivity.completedIds}
-            allSessions={sessionActivity.sessions}
-            workspacesLoaded={workspacesLoaded}
-            sessionsLoaded={sessionActivity.loaded}
-            refreshKey={refreshKey}
-            explorerRefreshKey={explorerRefreshKey}
-            filesReveal={loopFilesReveal}
-            openFilesRequest={loopFilesReveal?.nonce}
-            onSelectWorkspace={handleOpenWorkspace}
-            onCreateWorkspace={handleCreateWorkspace}
-            onImportDirectory={() => setImportPickerOpen(true)}
-            onAddRepository={handleKnowledgeAddRepository}
-            onNewSession={handleWorkspaceNewSession}
-            onSelectSession={handleSelectSession}
-            onOpenSessionInNewTab={openSessionTab}
-            onOpenFile={handleOpenFile}
-            onSessionRemoved={handleSessionRemoved}
-          />
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+            <PanelHeader title="工作区" meta={activeWorkspace.name} />
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+              <WorkspaceHomeMenu
+                key={activeWorkspace.id}
+                workspace={activeWorkspace}
+                loopsRefreshKey={loopsRefreshKey}
+                onNewSession={handleWorkspaceNewSession}
+                onOpenSessions={() => setOverviewStack({ page: "sessions" })}
+                onOpenWorkItems={() => setOverviewStack({ page: "work-items" })}
+                onOpenKnowledge={() => setOverviewStack({ page: "knowledge" })}
+                onOpenLoops={() => setOverviewStack({ page: "loops" })}
+                onOpenSettings={() => {
+                  setSettingsPage("workspace");
+                  setTab("settings");
+                }}
+              />
+            </div>
+          </div>
+        );
+      case "files":
+        // 2026-09 分 tab：文件树/改动从工作台的堆叠段撤出，独立 tab 与桌面右栏
+        // 同体（FilesExplorerPanel 自带 [文件|改动] 分段 + ⟳ 刷新，按工作区持久化）。
+        if (!activeWorkspace) return null;
+        return (
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+            <PanelHeader title="文件" meta={activeWorkspace.name} />
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <FilesExplorerPanel
+                workspace={activeWorkspace}
+                explorerRefreshKey={explorerRefreshKey}
+                onOpenFile={handleOpenFile}
+                reveal={loopFilesReveal ?? undefined}
+              />
+            </div>
+          </div>
         );
       case "settings":
         if (archiveOpen && activeWorkspace) {
@@ -460,8 +500,9 @@ export function MobileShell() {
           if (id !== s.activeTabId) handleSelectTab(id);
         }}
         onCloseTab={closeTab}
+        onCloseTabs={closeTabs}
         onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is SessionTabState => Boolean(t)))}
-        onNewSession={handleWorkspaceNewSession}
+        onNewSession={handleTabBarNewSession}
         onPickWorkspace={handleOpenWorkspace}
       />
       )}
