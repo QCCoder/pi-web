@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { SkillMessageContent } from "./SkillMessageContent";
 import { copyText } from "@/lib/clipboard";
@@ -36,6 +36,68 @@ function getTokenEstimateText(block: AssistantContentBlock): string | null {
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
+
+// Messages larger than this skip markdown rendering entirely. react-markdown +
+// KaTeX + syntax highlighting on multi-hundred-KB payloads (e.g. pasted HAR or
+// log dumps) freezes the browser main thread.
+const MAX_MARKDOWN_CHARS = 100_000;
+
+export function formatMessageBytes(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)} KB`;
+  return `${n} B`;
+}
+
+/**
+ * MarkdownBody with an oversized-content guard: huge messages render as a
+ * click-to-reveal plain-text <pre> instead of running the markdown pipeline.
+ */
+function SafeMarkdownBody({ children, className, ...props }: ComponentProps<typeof MarkdownBody>) {
+  const { t } = useI18n();
+  const [showRaw, setShowRaw] = useState(false);
+
+  if (children.length <= MAX_MARKDOWN_CHARS) {
+    return <MarkdownBody className={className} {...props}>{children}</MarkdownBody>;
+  }
+  if (!showRaw) {
+    return (
+      <button
+        onClick={() => setShowRaw(true)}
+        style={{
+          display: "block",
+          width: "100%",
+          margin: "4px 0",
+          padding: "7px 10px",
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          background: "var(--bg-panel)",
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 12,
+          textAlign: "left",
+        }}
+      >
+        ⚠ {t("i18n.largeMessageReveal", { size: formatMessageBytes(children.length) })}
+      </button>
+    );
+  }
+  return (
+    <div className={className} style={{ maxHeight: 420, overflow: "auto", fontSize: 12, lineHeight: 1.5 }}>
+      <pre
+        style={{
+          margin: 0,
+          padding: "8px 10px",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          fontFamily: "var(--font-mono)",
+          color: "var(--text-muted)",
+        }}
+      >
+        {children}
+      </pre>
+    </div>
+  );
+}
 
 function loadThinkingContent(sessionId: string, entryId: string, blockIndex: number): Promise<string> {
   const key = `${sessionId}:${entryId}:${blockIndex}`;
@@ -243,7 +305,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           )}
           {skill
             ? <SkillMessageContent skill={skill} cwd={cwd} onOpenFile={onOpenFile} />
-            : displayedContent && <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{displayedContent}</MarkdownBody>}
+            : displayedContent && <SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{displayedContent}</SafeMarkdownBody>}
         </div>
 
       </div>
@@ -635,7 +697,7 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile, messageTimestamp, onSe
   if (parsed && typeof messageTimestamp === "number") {
     return <GrillMessageContent grill={parsed.grill} before={parsed.before} after={parsed.after} messageTimestamp={messageTimestamp} cwd={cwd} onOpenFile={onOpenFile} onSend={onSendUserMessage} />;
   }
-  return <MarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</MarkdownBody>;
+  return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
 }
 
 /**
