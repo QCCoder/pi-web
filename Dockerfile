@@ -8,9 +8,12 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY package.json package-lock.json ./
 # bin/ ships before install: postinstall runs `node bin/prepare-terminal.js`
-# (repairs node-pty macOS spawn-helper bits; a safe no-op on linux).
-COPY package.json package-lock.json bin/ ./
+# (repairs node-pty macOS spawn-helper bits; a safe no-op on linux). Kept as
+# its own COPY — a directory source copies its CONTENTS, so folding `bin/`
+# into the line above would flatten the script to /app/prepare-terminal.js.
+COPY bin/ ./bin/
 # npm install (not npm ci): the lockfile is intentionally not updated for the
 # terminal port, so it does not satisfy npm ci's in-sync requirement.
 RUN npm install --no-audit --no-fund
