@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
 import type { PluginScope } from "@/lib/api-types";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { checkPluginUpdates } from "@/lib/plugin-updates";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  // Same per-route guard pair as the parent /api/plugins POST (and
+  // provider-usage/query) — the check sub-route must not be the loose one.
+  if (!isApiRequestAllowed(req)) return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  if (!hasJsonContentType(req)) return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   try {
     const body = await req.json() as {
       cwd?: unknown;

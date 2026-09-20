@@ -45,6 +45,12 @@ export async function POST(req: Request) {
         : { command: promptCommand as { type: string; [key: string]: unknown } }),
     });
 
+    // Mark the prompt as accepted as soon as the daemon accepted the session —
+    // BEFORE the cache/invalidate bookkeeping below. If any of those throws,
+    // the catch must not mislabel an already-accepted prompt as rejected
+    // (downstream reconcile would paper over it, but the flag would lie).
+    promptAccepted = promptCommand.type === "prompt";
+
     // Keep the files-route allowed-roots cache in sync so the new cwd is
     // immediately readable via /api/files (the allow-list lives in the web
     // process — the daemon only tells us where the session landed).
@@ -57,7 +63,6 @@ export async function POST(req: Request) {
     // cache and answers "empty but valid" until the first append lands.
     if (result.sessionFile) cacheSessionPath(result.sessionId, result.sessionFile);
     invalidateSessionListCache();
-    promptAccepted = promptCommand.type === "prompt";
 
     return NextResponse.json({ success: true, sessionId: result.sessionId, data: result.data });
   } catch (error) {

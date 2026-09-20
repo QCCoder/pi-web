@@ -17,7 +17,7 @@
  * scrollTop 实际增大（用户明确向下滚回）或新的输入佐证，否则与未停稳的上滑逐帧拉锯。
  */
 
-/** 程序化贴底（scrollIntoView）后的 scroll 事件忽略窗。 */
+/** 程序化贴底（container.scrollTo，见 useAgentSession 的 scrollToBottom）后的 scroll 事件忽略窗。 */
 export const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
 /** 距底不超过此值视为“在最底部”，滚回底部即恢复自动跟随。 */
 export const SCROLL_NEAR_BOTTOM_PX = 120;
@@ -93,7 +93,7 @@ export function handleScrollEvent(
 }
 
 /**
- * 流式增量帧的跟随决策。true = 调用方执行贴底（scrollIntoView + noteProgrammaticScroll）。
+ * 流式增量帧的跟随决策。true = 调用方执行贴底（container.scrollTo + noteProgrammaticScroll）。
  *
  * 竞态护栏：用户输入刚发生（wheel/touch 已收到、对应 scroll 事件还没派发完成停跟随）
  * 且当前已远离底部时，跳过本帧跟随 —— 此刻贴底会落在底部触发 near-bottom 分支把跟随
