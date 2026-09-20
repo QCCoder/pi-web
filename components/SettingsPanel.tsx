@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
@@ -9,6 +9,10 @@ import { PanelHeader } from "./PanelHeader";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
 import { setupPushSubscription } from "@/lib/push-client";
+import {
+  isThinkingExpandedByDefault,
+  setThinkingExpandedByDefault,
+} from "@/lib/thinking-expansion-preference";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 /** The settings panel's subpages. Controlled by the owner (AppShell) so entry
@@ -110,6 +114,13 @@ function IndexRow({
 export function PreferencesPage() {
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, supportedLocales } = useI18n();
+  // 默认展开思考块（upstream #639）：localStorage 持久 + 广播事件让已挂载的
+  // ThinkingBlock 同步。本面板文案沿用偏好页的中文硬编码风格（外观/语言同）。
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
+
+  useEffect(() => {
+    setThinkingExpanded(isThinkingExpandedByDefault());
+  }, []);
   // Web Push 注册（upstream #728「Settings → General 注册按钮」语义）：iOS 主屏
   // PWA 的授权弹窗必须发生在用户手势内、且重装主屏后无法自动恢复订阅，所以
   // 提供手动注册入口，而不是只在会话完成时惰性触发。
@@ -192,6 +203,49 @@ export function PreferencesPage() {
               </button>
             );
           })}
+        </div>
+      </div>
+      <div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 700, marginBottom: 8, padding: "0 2px" }}>思考过程显示</div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.7, marginBottom: 8, padding: "0 2px" }}>
+          选择消息加载时模型思考块是否默认展开。
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 2px" }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>默认展开思考块</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={thinkingExpanded}
+            aria-label="默认展开思考块"
+            onClick={() => {
+              const next = !thinkingExpanded;
+              setThinkingExpandedByDefault(next);
+              setThinkingExpanded(next);
+            }}
+            style={{
+              width: 36,
+              height: 20,
+              borderRadius: 999,
+              border: "1px solid var(--border)",
+              background: thinkingExpanded ? "var(--accent)" : "var(--bg)",
+              position: "relative",
+              cursor: "pointer",
+              padding: 0,
+              flexShrink: 0,
+            }}
+          >
+            <span aria-hidden style={{
+              position: "absolute",
+              top: 1,
+              left: thinkingExpanded ? 17 : 1,
+              width: 16,
+              height: 16,
+              borderRadius: "50%",
+              background: "#fff",
+              transition: "left 0.15s",
+              boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+            }} />
+          </button>
         </div>
       </div>
       <div>
