@@ -30,6 +30,8 @@ export interface ActiveSessionHandlers {
   resolveExtensionCustomUi?: (request: ExtensionUiCustomRequest) => void;
   editorInsertText?: (text: string) => void;
   finishPromptWithoutStream?: (sid: string) => void;
+  /** prompt_error 到达：活跃 hook 把当前 run 的恢复快照标记为失败（5158faf）。 */
+  markPromptRecoveryFailed?: () => void;
 }
 
 /**
@@ -225,6 +227,10 @@ class GlobalAgentEventManager {
       case "finishPromptWithoutStream":
         // slash 命令的 prompt_done：仅 active（命令从 active 发出）。
         if (isActive) this.active?.finishPromptWithoutStream?.(sid);
+        break;
+      case "markPromptRecoveryFailed":
+        // prompt_error：仅 active（提交只从 active session 发起）。
+        if (isActive) this.active?.markPromptRecoveryFailed?.();
         break;
       case "addNotice":
         if (isActive) this.active?.addNotice?.({ id: effect.id, message: effect.message, type: effect.type });

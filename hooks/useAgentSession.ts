@@ -8,8 +8,16 @@ import type {
   ExtensionWidgetItem,
   SessionInfo,
   SessionTreeNode,
+  UserMessage,
 } from "@/lib/types";
 import { sendAgentCommand } from "@/lib/agent-client";
+import {
+  createPromptRecoverySnapshot,
+  removeOptimisticPrompt,
+  shouldRestoreFailedPrompt,
+  userMessageKey,
+  type PromptRecoverySnapshot,
+} from "@/lib/prompt-recovery";
 import {
   createScrollFollowState,
   handleScrollEvent,
@@ -100,6 +108,7 @@ function normalizeQueuedMessages(q?: { steering?: string[]; followUp?: string[] 
 
 type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
+type PromptRecoveryState = PromptRecoverySnapshot & { failed: boolean };
 export type NoticeType = "info" | "success" | "warning" | "error";
 
 export type NoticeItem = {
@@ -253,52 +262,6 @@ function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
   }
 }
 
-function extractMessageText(message: Partial<AgentMessage>): string {
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) =>
-      block && typeof block === "object"
-        && (block as { type?: string }).type === "text"
-        && typeof (block as { text?: unknown }).text === "string"
-        ? (block as { text: string }).text
-        : "")
-    .filter(Boolean)
-    .join("\n");
-}
-
-function imageSignature(block: unknown): string {
-  if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "image") return "";
-  const source = (block as { source?: unknown }).source;
-  if (source && typeof source === "object") {
-    const src = source as { type?: unknown; media_type?: unknown; data?: unknown; url?: unknown };
-    return [
-      src.type === "url" ? "url" : "base64",
-      typeof src.media_type === "string" ? src.media_type : "",
-      typeof src.data === "string" ? src.data : "",
-      typeof src.url === "string" ? src.url : "",
-    ].join(":");
-  }
-  const flat = block as { data?: unknown; mimeType?: unknown };
-  return [
-    "base64",
-    typeof flat.mimeType === "string" ? flat.mimeType : "",
-    typeof flat.data === "string" ? flat.data : "",
-    "",
-  ].join(":");
-}
-
-function userMessageKey(message: Partial<AgentMessage>): string {
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return JSON.stringify({ text: content, images: [] });
-  if (!Array.isArray(content)) return JSON.stringify({ text: "", images: [] });
-  return JSON.stringify({
-    text: extractMessageText(message),
-    images: content.map(imageSignature).filter(Boolean),
-  });
-}
-
 function readCompactResult(result: unknown, reason: string): CompactResultInfo | null {
   if (!result || typeof result !== "object") return null;
   const r = result as CompactCommandResult;
@@ -309,6 +272,7 @@ function readCompactResult(result: unknown, reason: string): CompactResultInfo |
 export interface ChatInputHandle {
   insertText: (text: string) => void;
   insertIfEmpty: (content: string) => void;
+  replaceMessage: (message: UserMessage) => void;
   prependText: (text: string) => void;
   addImages: (files: File[]) => void;
 }
@@ -396,6 +360,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
+  const promptRecoveryRef = useRef<PromptRecoveryState | null>(null);
+  const messagesRef = useRef(messages);
+
+  // 失败提交的恢复快照（upstream 5158faf）：run 失败且乐观消息没落到 session 文件时，
+  // 下次加载把原文装回输入框。PromptRecoveryState = 快照 + failed 标记。
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // 写 SessionRuntimeStore：key 用 runtimeKeyRef（响应式 runtimeKey 的镜像，覆盖新会话
   // pre-id 写入——agentRunning/optimisticKey 等在 ensureNewSession 之前就要可见）。
@@ -569,6 +541,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const revision = res.headers.get("etag") ?? undefined;
           const d = await res.json() as SessionData;
           if (sessionIdRef.current !== sid) return null;
+          // A prompt whose run failed (prompt_error / 发送异常) restores its text
+          // into the composer only when the session file never got it (upstream
+          // 5158faf). A successful later run invalidates the snapshot by runId.
+          const persistedMessages = d.context.messages;
+          const recovery = promptRecoveryRef.current;
+          if (recovery?.failed && recovery.runId === promptRunIdRef.current) {
+            promptRecoveryRef.current = null;
+            if (shouldRestoreFailedPrompt(recovery, persistedMessages)) {
+              opts.chatInputRef?.current?.replaceMessage(recovery.message);
+            }
+          }
           // Daemon-created session whose .jsonl hasn't been written yet answers
           // an empty-but-valid placeholder (no revision). Live SSE events may
           // already have appended messages to the cache slice — don't let the
@@ -623,7 +606,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (loadSessionAbortRef.current === ac) loadSessionAbortRef.current = null;
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applySessionData, reuseStableMessages, patchRuntime]);
+  }, [applySessionData, reuseStableMessages, patchRuntime, opts.chatInputRef]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -832,6 +815,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       patchRuntime({ optimisticUserMessageKey: null });
+      // Run 结束且未失败：恢复快照作废（upstream 5158faf 的 agent_end 语义）。
+      if (promptRecoveryRef.current && !promptRecoveryRef.current.failed) {
+        promptRecoveryRef.current = null;
+      }
       if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
       patchRuntime({ agentRunning: false, agentPhase: null, retryInfo: null });
       dispatch({ type: "end" });
@@ -988,6 +975,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     // 新会话尚无缓存条目（runtimeKey=newSessionCwd）：建最小占位承载乐观消息，
     // promote 后 loadSession(真id) 用文件数据覆盖。已有条目则追加。
+    promptRecoveryRef.current = {
+      ...createPromptRecoverySnapshot(
+        promptRunId,
+        userMsg as UserMessage,
+        messagesRef.current,
+      ),
+      failed: false,
+    };
     {
       const key = runtimeKeyRef.current;
       if (!sessionMessagesCache.has(key)) {
@@ -1045,21 +1040,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Failed to send message:", e);
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      const recovery = promptRecoveryRef.current?.runId === promptRunId
+        ? promptRecoveryRef.current
+        : null;
+      if (recovery) recovery.failed = true;
+      addNotice({ type: "error", message: errorMessage });
       if (e instanceof EventStreamConnectionError) {
-        const optimisticKey = readRuntimeFor(runtimeKeyRef).optimisticUserMessageKey;
-        if (optimisticKey) {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            return last?.role === "user" && userMessageKey(last) === optimisticKey
-              ? prev.slice(0, -1)
-              : prev;
-          });
-        }
-        addNotice({ type: "error", message: e.message });
         // The prompt never reached the agent, so restore the user's text into
-        // the input instead of losing it. Mirrors the shell-command recovery in
-        // executeBash; insertIfEmpty avoids clobbering anything typed since.
-        if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
+        // the input instead of losing it — replacing (not appending) so a
+        // prompt that did persist comes back as an editable message only when
+        // the session file never got it.
+        if (recovery) {
+          const withoutOptimistic = removeOptimisticPrompt(messagesRef.current, recovery);
+          messagesRef.current = withoutOptimistic;
+          setMessages(withoutOptimistic);
+          if (shouldRestoreFailedPrompt(recovery, withoutOptimistic)) {
+            opts.chatInputRef?.current?.replaceMessage(recovery.message);
+          }
+          promptRecoveryRef.current = null;
+        }
       }
       patchRuntime({ optimisticUserMessageKey: null, agentRunning: false, agentPhase: null });
       dispatch({ type: "end" });
@@ -1684,6 +1684,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         request.closed ? (current?.id === request.id ? null : current) : request),
       editorInsertText: (text) => opts.chatInputRef?.current?.insertText(text),
       finishPromptWithoutStream: (sid) => void finishPromptWithoutStream(sid),
+      markPromptRecoveryFailed: () => {
+        const recovery = promptRecoveryRef.current;
+        if (recovery?.runId === promptRunIdRef.current) recovery.failed = true;
+      },
     });
     return () => { globalAgentEvents.setActive(null, null); };
   }, [runtimeKey, onAgentEnd, addNotice, setExtensionDialog, setExtensionCustomUi, finishPromptWithoutStream, opts.chatInputRef]);

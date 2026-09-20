@@ -47,6 +47,7 @@ export type AgentEventEffect =
   | { kind: "refreshAgentState" }
   | { kind: "onAgentEnd" }
   | { kind: "finishPromptWithoutStream" }
+  | { kind: "markPromptRecoveryFailed" }
   | { kind: "addNotice"; id?: string; message: string; type: NoticeType }
   | { kind: "setExtensionDialog"; request: ExtensionUiDialogRequest }
   | { kind: "resolveExtensionCustomUi"; request: ExtensionUiCustomRequest }
@@ -108,6 +109,9 @@ export function applyAgentEvent(
     }
 
     case "prompt_error": {
+      // 提示恢复（upstream 5158faf）：当前 run 失败，活跃 hook 据此把恢复快照
+      // 标记为 failed —— 下次 loadSession 才会判断是否把原文装回输入框。
+      effects.push({ kind: "markPromptRecoveryFailed" });
       effects.push({
         kind: "addNotice",
         type: "error",
