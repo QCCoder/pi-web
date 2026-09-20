@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { invalidateSessionListCache } from "@/lib/session-reader";
+import { getSessionListVersion, invalidateSessionListCache } from "@/lib/session-reader";
 import { listArchivedSessions } from "@/lib/session-archive";
 import { buildSessionsPayload } from "@/lib/session-payload";
 import { daemonProxy } from "@/lib/agent-proxy";
@@ -21,8 +21,11 @@ export async function GET(req: Request) {
     // child tagging) lives in lib/session-payload.ts — shared with the SSR
     // prefetch in app/page.tsx. This route keeps daemonProxy(): it MAY wait
     // for a sidecar spawn (the sidebar list tolerates it); SSR does not.
+    // Capture before awaiting: mutations during the scan still require a later
+    // refresh (搜索的跨窗口同步以此版本比对，见 /api/sessions/version).
+    const sessionListVersion = getSessionListVersion();
     const payload = await buildSessionsPayload(() => daemonProxy());
-    return NextResponse.json(payload);
+    return NextResponse.json({ ...payload, sessionListVersion });
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },
