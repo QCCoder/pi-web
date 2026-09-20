@@ -79,7 +79,7 @@ interface Props {
   forking?: boolean;
   onNavigate?: (entryId: string) => void;
   prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  onEditContent?: (message: UserMessage) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -163,7 +163,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   forking?: boolean;
   onNavigate?: (entryId: string) => void;
   prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  onEditContent?: (message: UserMessage) => void;
 }) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -299,7 +299,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
             }}>
               {canNavigate && (
                 <button
-                  onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(displayedContent); }}
+                  onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(message); }}
                    title={t("i18n.editFromHereTitle")}
                   style={{
                     display: "flex", alignItems: "center", gap: 4,

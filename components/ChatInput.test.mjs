@@ -11,7 +11,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, cycleListIndex, getUpwardMenuMaxHeight, replaceLinksWithMarkdown } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, canRestoreUserMessage, cycleListIndex, getUpwardMenuMaxHeight, getUserMessageDraftImages, getUserMessageText, replaceLinksWithMarkdown } = await jiti.import("./ChatInput.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
 test("preserves pasted HTML links as Markdown without changing plain text layout", () => {
@@ -170,6 +170,50 @@ test("locks built-in command submission until it settles", async () => {
   assert.equal(await first, true);
   assert.deepEqual(callback.pendingStates, [true, false]);
   assert.match(sourceText, /<fieldset\s+disabled=\{builtinCommandPending\}\s+aria-busy=\{builtinCommandPending\}/);
+});
+
+test("restores text and base64 images when editing a user message", () => {
+  const message = {
+    role: "user",
+    content: [
+      { type: "text", text: "Review this image @src/example.ts " },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AQID" } },
+    ],
+  };
+
+  assert.equal(getUserMessageText(message), "Review this image @src/example.ts ");
+  assert.deepEqual(getUserMessageDraftImages(message), [
+    { data: "AQID", mimeType: "image/png" },
+  ]);
+});
+
+test("restores legacy flat image entries when editing a user message", () => {
+  const message = {
+    role: "user",
+    content: [
+      { type: "image", data: "AQID", mimeType: "image/jpeg" },
+    ],
+  };
+
+  assert.deepEqual(getUserMessageDraftImages(message), [
+    { data: "AQID", mimeType: "image/jpeg" },
+  ]);
+});
+
+test("restores a skill-wrapper message as its /skill command form", () => {
+  const message = {
+    role: "user",
+    content: "<skill name=\"demo\" location=\"/tmp/demo\">\nReferences are relative to /tmp/demo.\n\nBody\n</skill>\n\nDo the thing",
+  };
+
+  assert.equal(getUserMessageText(message), "/skill:demo Do the thing");
+});
+
+test("does not restore a historical message over a pending image attachment", () => {
+  assert.equal(canRestoreUserMessage("", 0, 0), true);
+  assert.equal(canRestoreUserMessage("", 1, 0), false);
+  assert.equal(canRestoreUserMessage("", 0, 1), false);
+  assert.equal(canRestoreUserMessage("draft", 0, 0), false);
 });
 
 test("keeps the model selector visible when a model error leaves no options", () => {
