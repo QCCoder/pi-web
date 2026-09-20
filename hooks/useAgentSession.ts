@@ -390,7 +390,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /** 流式跟随决策状态（allowed / lastScrollTop / 意图窗 / 忽略窗）——见 lib/chat-scroll-follow.ts。 */
   const scrollFollowRef = useRef(createScrollFollowState());
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
@@ -1377,7 +1376,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     noteProgrammaticScroll(scrollFollowRef.current, Date.now());
-    messagesEndRef.current?.scrollIntoView({ behavior });
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    // Scroll the chat container itself instead of scrolling a sentinel element:
+    // sentinel-based scrolling propagates to every scrollable ancestor, and on
+    // mobile the keyboard-shifted document layer visibly jumps the whole app on
+    // every streaming follow tick (upstream be428cf).
+    container.scrollTo({ top: container.scrollHeight, behavior });
   }, []);
 
   const markUserScrollIntent = useCallback((event: Event) => {
@@ -1677,7 +1682,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     hasEarlierMessages, loadingEarlier, loadEarlier,
     isNew,
     // Refs
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,

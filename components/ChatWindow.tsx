@@ -237,7 +237,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     toolExecutionUpdates,
     hasEarlierMessages, loadingEarlier, loadEarlier,
     isNew,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, scrollContainerRef,
     lastUserMsgRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
@@ -900,8 +900,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />
             )}
-
-            <div ref={messagesEndRef} />
             </div>
           </div>
         </div>
