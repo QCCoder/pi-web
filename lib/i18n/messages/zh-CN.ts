@@ -61,6 +61,7 @@ export const zhCNLocale: LocalePlugin = {
     "session.messages": "消息",
     "session.tokens": "Token",
     "session.totalActive": "估算活跃耗时",
+    "session.cacheHitRate": "平均缓存命中率",
     "session.copyFile": "复制文件路径",
     "session.copyId": "复制会话 ID",
     "workspace.opening": "正在打开工作区...",

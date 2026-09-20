@@ -6,6 +6,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useShell } from "./context";
+import { computeCacheHitRatePercent } from "@/lib/session-stats";
 
 type SessionCopyField = "file" | "id";
 
@@ -579,9 +580,12 @@ export function ChatToolbar() {
             ];
             const ctx = contextUsage ?? sessionStats.contextUsage;
             const formatCompact = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
+            const cacheHitRate = computeCacheHitRatePercent(sessionStats.tokens);
             const extraTokenRows = [
                ...(sessionStats.cost > 0 ? [[translate("session.cost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
                ...(ctx?.contextWindow ? [[translate("session.context"), `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompact(ctx.contextWindow)}`]] : []),
+               // Cache hit rate = cache reads / (input + cache writes + cache reads) — the denominator covers all input-class tokens.
+               ...(cacheHitRate !== null ? [[translate("session.cacheHitRate"), `${cacheHitRate.toFixed(1)}%`]] : []),
             ];
             const formatDuration = (ms: number) => {
               if (ms <= 0) return "0s";
