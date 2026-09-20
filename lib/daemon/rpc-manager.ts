@@ -16,6 +16,8 @@ import { piSubagentExtension } from "./pi-subagent-host.ts";
 import { raceAbort } from "../abort-race";
 import { buildStalledSnapshot, classifyStall, HEARTBEAT_TICK_MS, stallInterruptMessage, type StalledSessionInfo } from "./session-heartbeat";
 import { findWorkspaceForPath } from "../workspaces/service";
+import { notifySessionComplete } from "../web-push";
+import { isSubagentChildSession } from "../subagent-child";
 
 // ============================================================================
 // SESSION REGISTRY — daemon-process code only (C2 Phase 3)
@@ -36,6 +38,10 @@ export interface AgentEvent {
 }
 
 type EventListener = (event: AgentEvent) => void;
+
+/** Fired once per agent run, when the session settles with nothing left
+ *  running — the Web Push completion trigger (upstream #496). */
+type AgentRunCompleteListener = (sessionId: string) => void;
 
 type PendingUiResponse = {
   resolve: (response: ExtensionUiResponse) => void;
@@ -200,6 +206,9 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallbacks: Array<() => void> = [];
   private _alive = true;
+  /** Set on agent_start, consumed by notifyAgentRunCompleteIfIdle when the
+   *  run settles — gates completion pushes to runs that actually started. */
+  private agentRunNeedsCompletion = false;
   /** Heartbeat: last time this session showed life — any agent event (streaming
    *  delta, tool-execution partial, message boundary) or inbound command. The
    *  heartbeat monitor (see startSessionHeartbeatMonitor) interrupts a session
@@ -207,7 +216,10 @@ export class AgentSessionWrapper {
    *  4-hour-zombie class nothing else notices. */
   private lastActivityAt = Date.now();
 
-  constructor(public readonly inner: AgentSessionLike) {}
+  constructor(
+    public readonly inner: AgentSessionLike,
+    private readonly onAgentRunComplete?: AgentRunCompleteListener,
+  ) {}
 
   get sessionId(): string {
     return this.inner.sessionId;
@@ -233,16 +245,31 @@ export class AgentSessionWrapper {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
       this.lastActivityAt = Date.now();
+      if (event.type === "agent_start") this.agentRunNeedsCompletion = true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
       }
       this.emit(event);
+      if (event.type === "agent_settled") this.notifyAgentRunCompleteIfIdle();
       // Streaming / compaction / tool events flow through here; re-broadcast
       // the running-status snapshot so the sidebar can update live.
       notifyRunningChange();
     });
     this.resetIdleTimer();
     notifyRunningChange();
+  }
+
+  /** Fire-and-forget the completion push once a started run has fully settled
+   *  (queue drained, nothing streaming/compacting/bash). Never throws into the
+   *  event stream — push failures must not touch the session's main flow. */
+  private notifyAgentRunCompleteIfIdle(): void {
+    if (!this.agentRunNeedsCompletion || this.isRunning()) return;
+    this.agentRunNeedsCompletion = false;
+    try {
+      this.onAgentRunComplete?.(this.sessionId);
+    } catch (error) {
+      console.error("[pi-web] completion listener failed:", error instanceof Error ? error.message : error);
+    }
   }
 
   setForceEmptySystemPrompt(force: boolean): void {
@@ -415,6 +442,7 @@ export class AgentSessionWrapper {
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         this.promptRunning = true;
+        this.agentRunNeedsCompletion = true;
         notifyRunningChange();
         this.inner.prompt(command.message as string, {
           ...(promptImages?.length ? { images: promptImages } : {}),
@@ -424,6 +452,9 @@ export class AgentSessionWrapper {
           this.promptRunning = false;
           if (!streamingBehavior) this.emit({ type: "prompt_done" });
           notifyRunningChange();
+          // agent_settled 从 SDK 到达时 prompt promise 往往还未落定
+          // （isRunning() 仍为 true 会跳过），落定后再补一次完成判定。
+          this.notifyAgentRunCompleteIfIdle();
         }).catch((error) => {
           this.promptRunning = false;
           invalidateSessionListCache();
@@ -433,6 +464,7 @@ export class AgentSessionWrapper {
           });
           if (!streamingBehavior) this.emit({ type: "prompt_done" });
           notifyRunningChange();
+          this.notifyAgentRunCompleteIfIdle();
         });
         return null;
       }
@@ -1425,7 +1457,15 @@ export async function startRpcSession(
       inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
     }
 
-    const wrapper = new AgentSessionWrapper(inner);
+    const wrapper = new AgentSessionWrapper(inner, (completedSessionId) => {
+      // Subagent children are internal work — completing them is not a
+      // "your session is done" moment for the human (upstream suppresses
+      // them the same way via suppressCompletionNotifications).
+      if (isSubagentChildSession({ id: completedSessionId, name: inner.sessionManager.getSessionName() })) return;
+      void notifySessionComplete(completedSessionId).catch((error) => {
+        console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
+      });
+    });
     // When all tools are disabled, clear the system prompt entirely.
     // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
     // keep this forced after extension resource discovery and reloads as well.
