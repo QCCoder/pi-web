@@ -384,6 +384,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
   const [historyActiveIndex, setHistoryActiveIndex] = useState(0);
+  const [builtinCommandPending, setBuiltinCommandPending] = useState(false);
+  const builtinCommandPendingRef = useRef(false);
   const [fileIndex, setFileIndex] = useState<{ cwd: string; entries: FileIndexEntry[]; truncated: boolean } | null>(null);
   const [fileIndexLoading, setFileIndexLoading] = useState(false);
   const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
@@ -580,21 +582,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     };
   }, []);
 
+  // A builtin slash command runs outside the normal send path; a second
+  // Enter while one is still in flight must be swallowed (not double-submitted
+  // nor fallen through as a chat message), so submissions lock until settle.
+  const runBuiltinCommand = useCallback(async (msg: string): Promise<boolean> => {
+    if (attachedImages.length || !msg.startsWith("/") || !onBuiltinCommand) return false;
+    if (builtinCommandPendingRef.current) return true;
+    builtinCommandPendingRef.current = true;
+    setBuiltinCommandPending(true);
+    try {
+      const result = await onBuiltinCommand(msg);
+      if (!result.handled) return false;
+      if (!result.error) clearInput();
+      return true;
+    } finally {
+      builtinCommandPendingRef.current = false;
+      setBuiltinCommandPending(false);
+    }
+  }, [attachedImages.length, clearInput, onBuiltinCommand]);
+
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length) return;
     if (isStreaming) return;
     onAudioUnlock?.();
-    if (!attachedImages.length && msg.startsWith("/") && onBuiltinCommand) {
-      const result = await onBuiltinCommand(msg);
-      if (result.handled) {
-        if (!result.error) clearInput();
-        return;
-      }
-    }
+    if (await runBuiltinCommand(msg)) return;
     onSend(msg, attachedImages.length ? attachedImages : undefined);
     clearInput();
-  }, [value, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1177,12 +1192,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
 
   return (
-    <div
+    <fieldset
+      disabled={builtinCommandPending}
+      aria-busy={builtinCommandPending}
       style={{
         flexShrink: 0,
+        minWidth: 0,
+        margin: 0,
+        border: 0,
         background: "transparent",
         padding: "0 16px 8px",
         paddingRight: isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
+        opacity: builtinCommandPending ? 0.5 : 1,
+        transition: "opacity 0.15s",
       }}
     >
       {/* Hidden file input */}
@@ -2399,6 +2421,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
         </div>
       </div>
-    </div>
+    </fieldset>
   );
 });

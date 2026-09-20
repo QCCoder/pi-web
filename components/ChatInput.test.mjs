@@ -141,6 +141,37 @@ test("cycleListIndex wraps in both directions", () => {
   assert.equal(cycleListIndex(-1, 4, 1), 0);
 });
 
+test("locks built-in command submission until it settles", async () => {
+  const sourceText = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const source = ts.createSourceFile("ChatInput.tsx", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findCallback(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "runBuiltinCommand") {
+      return node.initializer.arguments[0];
+    }
+    return ts.forEachChild(node, findCallback);
+  }
+  const callback = new Script(ts.transpileModule(findCallback(source).getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText).runInNewContext({
+    attachedImages: [],
+    attachedImagesRef: { current: [] },
+    builtinCommandPendingRef: { current: false },
+    clearInput() {},
+    onBuiltinCommand: async () => new Promise((resolve) => { callback.resolve = resolve; }),
+    setBuiltinCommandPending(value) { callback.pendingStates.push(value); },
+  });
+  callback.pendingStates = [];
+
+  const first = callback("/reload");
+  assert.deepEqual(callback.pendingStates, [true]);
+  assert.equal(await callback("/reload"), true);
+  assert.deepEqual(callback.pendingStates, [true]);
+  callback.resolve({ handled: true });
+  assert.equal(await first, true);
+  assert.deepEqual(callback.pendingStates, [true, false]);
+  assert.match(sourceText, /<fieldset\s+disabled=\{builtinCommandPending\}\s+aria-busy=\{builtinCommandPending\}/);
+});
+
 test("keeps the model selector visible when a model error leaves no options", () => {
   const html = renderToStaticMarkup(
     React.createElement(
