@@ -63,6 +63,73 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    // Ignore malformed or missing push payloads.
+  }
+  const { title, body, url, tag } = payload;
+  if (typeof title !== "string" || !title || typeof body !== "string" || !body) return;
+
+  // Always surface a system notification. iOS revokes the push subscription
+  // when a service worker handles a push without showing a notification, so
+  // suppressing the notification while a window is visible poisons the
+  // subscription in the background-delivery case. Notifications sharing a tag
+  // replace each other instead of stacking, so a visible window merely sees
+  // the completion notification re-appear.
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      data: { url: typeof url === "string" && url ? url : "/" },
+      ...(typeof tag === "string" && tag ? { tag, renotify: true } : {}),
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+
+  const requestedUrl = typeof event.notification.data?.url === "string"
+    ? event.notification.data.url
+    : "/";
+  let targetUrl = new URL("/", self.location.origin);
+  try {
+    const candidate = new URL(requestedUrl, self.location.origin);
+    if (candidate.origin === self.location.origin) targetUrl = candidate;
+  } catch {
+    // Keep the root URL when notification data is malformed.
+  }
+
+  event.waitUntil(focusOrOpenWindow(targetUrl.href));
+});
+
+async function focusOrOpenWindow(targetUrl) {
+  const windowClients = await self.clients.matchAll({
+    type: "window",
+    includeUncontrolled: true,
+  });
+  const exactClient = windowClients.find((client) => client.url === targetUrl);
+  const candidates = exactClient
+    ? [exactClient, ...windowClients.filter((client) => client !== exactClient)]
+    : windowClients;
+
+  for (const client of candidates) {
+    try {
+      const targetClient = client.url === targetUrl
+        ? client
+        : (await client.navigate(targetUrl)) ?? client;
+      await targetClient.focus();
+      return;
+    } catch {
+      // The window may have closed between matchAll and focus; try the next one.
+    }
+  }
+
+  await self.clients.openWindow(targetUrl);
+}
+
 async function cacheFirst(request) {
   const cached = await caches.match(request);
   if (cached) return cached;
