@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import {
@@ -135,6 +135,66 @@ export function replaceLinksWithMarkdown(
   }
 
   return replaced ? result + text.slice(searchFrom) : null;
+}
+
+const ANCHORED_MENU_GAP = 8;
+
+export function getUpwardMenuMaxHeight(menuBottom: number, visibleTop: number, gap = ANCHORED_MENU_GAP): number {
+  return Math.max(0, Math.floor(menuBottom - visibleTop - gap));
+}
+
+function getVisibleTopBoundary(element: HTMLElement): number {
+  let visibleTop = window.visualViewport?.offsetTop ?? 0;
+
+  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+    const overflowY = window.getComputedStyle(parent).overflowY;
+    if (overflowY === "auto" || overflowY === "scroll" || overflowY === "hidden" || overflowY === "clip") {
+      visibleTop = Math.max(visibleTop, parent.getBoundingClientRect().top + parent.clientTop);
+    }
+  }
+
+  return visibleTop;
+}
+
+function subscribeUpwardMenuMaxHeight(
+  menu: HTMLElement,
+  onChange: (height: number) => void,
+): () => void {
+  let frameId: number | null = null;
+  const update = () => {
+    frameId = null;
+    onChange(getUpwardMenuMaxHeight(
+      menu.getBoundingClientRect().bottom,
+      getVisibleTopBoundary(menu),
+    ));
+  };
+  const scheduleUpdate = () => {
+    if (frameId !== null) cancelAnimationFrame(frameId);
+    frameId = requestAnimationFrame(update);
+  };
+
+  update();
+  const parent = menu.parentElement;
+  const layoutContainer = parent?.parentElement;
+  const anchorObserver = typeof ResizeObserver === "undefined" || !parent
+    ? null
+    : new ResizeObserver(scheduleUpdate);
+  if (parent) anchorObserver?.observe(parent);
+  if (layoutContainer) anchorObserver?.observe(layoutContainer);
+  const viewport = window.visualViewport;
+  viewport?.addEventListener("resize", scheduleUpdate);
+  viewport?.addEventListener("scroll", scheduleUpdate);
+  window.addEventListener("resize", scheduleUpdate);
+  window.addEventListener("scroll", scheduleUpdate, true);
+
+  return () => {
+    anchorObserver?.disconnect();
+    viewport?.removeEventListener("resize", scheduleUpdate);
+    viewport?.removeEventListener("scroll", scheduleUpdate);
+    window.removeEventListener("resize", scheduleUpdate);
+    window.removeEventListener("scroll", scheduleUpdate, true);
+    if (frameId !== null) cancelAnimationFrame(frameId);
+  };
 }
 
 type SlashCommandPaletteItem = SlashCommandInfo | {
@@ -315,6 +375,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
   const [atMenuOpen, setAtMenuOpen] = useState(false);
+  const [atMenuMaxHeight, setAtMenuMaxHeight] = useState<number | null>(null);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
   const [historyActiveIndex, setHistoryActiveIndex] = useState(0);
@@ -334,6 +395,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const atMenuRef = useRef<HTMLDivElement>(null);
   const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const historyItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
@@ -705,6 +767,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!atMenuOpen) return;
     atItemRefs.current[atActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [atActiveIndex, atMenuOpen]);
+
+  // Cap the @ file menu to the visible space above the composer so a long
+  // match list cannot paint through the session tab bar; the list scrolls
+  // inside the cap and remeasures when the surrounding layout shifts.
+  useLayoutEffect(() => {
+    if (!atMenuOpen || atQuery === null) {
+      setAtMenuMaxHeight(null);
+      return;
+    }
+    const menu = atMenuRef.current;
+    if (!menu) return;
+    return subscribeUpwardMenuMaxHeight(menu, (nextHeight) => {
+      setAtMenuMaxHeight((current) => current === nextHeight ? current : nextHeight);
+    });
+  }, [atMenuOpen, atQuery]);
 
   useEffect(() => {
     if (historyActiveIndex >= inputHistory.length) {
@@ -1476,6 +1553,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               : "";
             return (
               <div
+                ref={atMenuRef}
                 style={{
                   position: "absolute",
                   left: 0,
@@ -1487,7 +1565,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   borderRadius: 8,
                   boxShadow: "0 -6px 20px rgba(0,0,0,0.12)",
                   overflow: "hidden",
-                  maxHeight: "min(48vh, 400px)",
+                  boxSizing: "border-box",
+                  display: "flex",
+                  flexDirection: "column",
+                  maxHeight: atMenuMaxHeight === null
+                    ? "min(48vh, 400px)"
+                    : `min(48vh, 400px, ${atMenuMaxHeight}px)`,
                 }}
               >
                 <div
@@ -1500,6 +1583,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     gap: 8,
                     fontSize: 11,
                     color: "var(--text-dim)",
+                    flexShrink: 0,
                   }}
                 >
                   <span>
@@ -1509,7 +1593,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   </span>
                    <span style={{ fontFamily: "var(--font-mono)" }}>{t("chat.tabEnter")}</span>
                 </div>
-                <div style={{ maxHeight: "calc(min(48vh, 400px) - 34px)", overflowY: "auto", padding: 4 }}>
+                <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: 4 }}>
                   {!indexLoading && atMatches.length === 0 ? (
                     <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--text-dim)" }}>
                        {needsServerSearch && !serverResultInUse ? t("chat.searching") : t("chat.noMatchingFiles")}
