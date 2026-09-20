@@ -1,8 +1,19 @@
 FROM node:22-bookworm-slim AS builder
 
+# node-pty falls back to a source build when its bundled prebuild does not
+# match this platform; the toolchain keeps that fallback working (it is a
+# no-op otherwise — the published package ships linux-x64/arm64 prebuilds).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+# bin/ ships before install: postinstall runs `node bin/prepare-terminal.js`
+# (repairs node-pty macOS spawn-helper bits; a safe no-op on linux).
+COPY package.json package-lock.json bin/ ./
+# npm install (not npm ci): the lockfile is intentionally not updated for the
+# terminal port, so it does not satisfy npm ci's in-sync requirement.
+RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
 

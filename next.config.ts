@@ -14,6 +14,9 @@ const nextConfig: NextConfig = {
   // corner during dev) — it overlapped the mobile bottom tab bar.
   devIndicators: false,
   serverExternalPackages: [
+    // Native module — must stay outside the webpack server bundle so its
+    // prebuilt binary loads from node_modules at runtime (upstream same).
+    "node-pty",
     "undici",
     "web-push",
     "@earendil-works/pi-coding-agent",
