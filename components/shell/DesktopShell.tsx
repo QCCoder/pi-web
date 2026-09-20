@@ -108,7 +108,6 @@ export function DesktopShell() {
     closeTab,
     closeTabs,
     openSessionTab,
-    openNewSessionTab,
     handleSelectTab,
     handleSessionRemoved,
     handleCreateWorkspace,
