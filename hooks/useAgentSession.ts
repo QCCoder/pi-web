@@ -23,6 +23,7 @@ import {
 } from "@/lib/chat-scroll-follow";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
 import { getCachedSession, setCachedSession, dropCachedSession, sessionMessagesCache, updateCachedSessionData, makeMinimalSessionData } from "@/lib/stores/session-messages-cache";
 import { useModels, fetchModels, deriveNewSessionDefaultModel, type SelectedModel } from "@/lib/stores/models-store";
 import { useStoreSlice } from "@/lib/stores/create-map-store";
@@ -35,6 +36,10 @@ export interface SessionData {
   filePath: string;
   /** Estimated active time from the session file (upstream #380); absent on placeholder slices. */
   totalActiveMs?: number;
+  /** Cumulative usage over ALL session-file entries (incl. history compacted
+   *  away) — the floor that keeps token/cost counters monotonic across
+   *  compaction / reloads / branch navigation (upstream 93633c8). */
+  stats?: SessionFileStats;
   tree: SessionTreeNode[];
   leafId: string | null;
   context: {
@@ -464,43 +469,45 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (sessionStatsOverride) {
       return { ...sessionStatsOverride, totalActiveMs: data?.totalActiveMs };
     }
-    const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-    let cost = 0;
-    let userMessages = 0;
-    let assistantMessages = 0;
-    let toolResults = 0;
-    let toolCalls = 0;
+    const live: SessionFileStats = {
+      userMessages: 0,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: messages.length,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      cost: 0,
+    };
     for (const msg of messages) {
-      if (msg.role === "user") userMessages += 1;
-      if (msg.role === "toolResult") toolResults += 1;
+      if (msg.role === "user") live.userMessages += 1;
+      if (msg.role === "toolResult") live.toolResults += 1;
       if (msg.role !== "assistant") continue;
-      assistantMessages += 1;
+      live.assistantMessages += 1;
       const u = (msg as import("@/lib/types").AssistantMessage).usage;
-      toolCalls += (msg as import("@/lib/types").AssistantMessage).content.filter((c) => c.type === "toolCall").length;
+      live.toolCalls += (msg as import("@/lib/types").AssistantMessage).content.filter((c) => c.type === "toolCall").length;
       if (!u) continue;
-      tokens.input += u.input ?? 0;
-      tokens.output += u.output ?? 0;
-      tokens.cacheRead += u.cacheRead ?? 0;
-      tokens.cacheWrite += u.cacheWrite ?? 0;
-      cost += u.cost?.total ?? 0;
+      live.tokens.input += u.input ?? 0;
+      live.tokens.output += u.output ?? 0;
+      live.tokens.cacheRead += u.cacheRead ?? 0;
+      live.tokens.cacheWrite += u.cacheWrite ?? 0;
+      live.cost += u.cost?.total ?? 0;
     }
-    tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
-    if (tokens.total === 0 && messages.length === 0) return null;
+    live.tokens.total = live.tokens.input + live.tokens.output + live.tokens.cacheRead + live.tokens.cacheWrite;
+    // Per-field max with the cumulative file stats (upstream 93633c8): after a
+    // compaction the visible context shrinks, but data.stats (refreshed by the
+    // agent_end/compaction_end reload) still counts the compacted-away usage —
+    // the counters never visibly reset; live streaming usage still moves them.
+    const stats = mergeSessionStats(data?.stats, live);
+    if (stats.tokens.total === 0 && messages.length === 0 && !data?.stats) return null;
     return {
       sessionFile: data?.filePath || undefined,
       sessionId: sessionIdRef.current ?? session?.id ?? "",
       sessionName: session?.name,
-      userMessages,
-      assistantMessages,
-      toolCalls,
-      toolResults,
-      totalMessages: messages.length,
-      tokens,
-      cost,
+      ...stats,
       totalActiveMs: data?.totalActiveMs,
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, data?.filePath, data?.totalActiveMs, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, contextUsage, data?.stats, data?.filePath, data?.totalActiveMs, session?.id, session?.name]);
 
   const applySessionData = useCallback((d: SessionData) => {
     // data/messages/entryIds 由 SessionMessagesCache 订阅驱动（setCachedSession / 缓存命中）；

@@ -12,6 +12,7 @@ import {
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
+import { computeSessionFileStats } from "@/lib/session-stats";
 import { deleteArchivedSession, isSessionArchived } from "@/lib/session-archive";
 import { skillMessageTitle } from "@/lib/skill-message";
 import { daemonProxy } from "@/lib/agent-proxy";
@@ -175,6 +176,11 @@ export async function GET(
     const tailMessages = Number.isSafeInteger(tailParam) && tailParam > 0 ? tailParam : undefined;
     const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages, tailMessages });
     const totalActiveMs = computeSessionTotalActiveMs(entries);
+    // Cumulative usage over ALL entries, including history compacted away —
+    // the same aggregation as the SDK's getSessionStats(). Lets the client
+    // keep monotonic token/cost counters across compaction, page reloads and
+    // branch navigation (upstream 93633c8).
+    const stats = computeSessionFileStats(entries);
 
     const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
@@ -211,6 +217,7 @@ export async function GET(
         tree,
         context,
         totalActiveMs,
+        stats,
         revision,
       },
       revision ? { headers: { ETag: revision } } : undefined,
