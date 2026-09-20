@@ -14,9 +14,11 @@ COPY package.json package-lock.json ./
 # its own COPY — a directory source copies its CONTENTS, so folding `bin/`
 # into the line above would flatten the script to /app/prepare-terminal.js.
 COPY bin/ ./bin/
-# npm install (not npm ci): the lockfile is intentionally not updated for the
-# terminal port, so it does not satisfy npm ci's in-sync requirement.
-RUN npm install --no-audit --no-fund
+# npm ci (lockfile regenerated with the terminal/push/auth deps). Known gap:
+# @henryqw/pi-subagent is a file: tgz outside the build context, so container
+# installs fail until that dependency is vendored — tracked for the subagent
+# rework, not worked around here.
+RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
 
