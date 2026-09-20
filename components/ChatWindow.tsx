@@ -788,7 +788,7 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
                     onOpenFile={onOpenFile}
                     onOpenSession={onOpenSession}
                     entryId={entryIds[idx]}
-                    onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
+                    onFork={sessionBusy || isNew ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     onNavigate={sessionBusy ? undefined : handleNavigate}
                     prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}

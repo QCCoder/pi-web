@@ -104,3 +104,14 @@ test("reconcileAgentState ignores stale runs and session switches", () => {
   assert.match(reconcileSource, /\.agentRunning \|\| sessionIdRef\.current !== sid\) return;/);
   assert.match(reconcileSource, /if \(sessionIdRef\.current !== sid \|\| promptRunIdRef\.current !== runId\) return;/);
 });
+
+test("fork is offered on every persisted message including the first (upstream 585d56c)", () => {
+  // 首条用户消息与 tail=100 尾窗头此前被 idx === 0 禁 fork；daemon 半场对
+  // !entry.parentId 的分叉（建空会话并 parentSession 链接）早已支持。
+  const renderSource = chatWindowSource.slice(
+    chatWindowSource.indexOf("const renderMessage = (idx: number"),
+    chatWindowSource.indexOf("if (!isVisible || currentRefIdx === undefined) return view;"),
+  );
+  assert.match(renderSource, /onFork=\{sessionBusy \|\| isNew \? undefined : handleFork\}/);
+  assert.doesNotMatch(renderSource, /idx === 0 && msg\.role === "user"/);
+});
