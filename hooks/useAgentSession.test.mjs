@@ -4,7 +4,7 @@ import test from "node:test";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
-const { resolveComposerDraftKey } = await jiti.import("@/lib/composer-draft-key.ts");
+const { resolveComposerDraftKey, shouldDropRestoreAfterUnmount } = await jiti.import("@/lib/composer-draft-key.ts");
 const { clearDraft, getDraft, restoreDraftSubmission } = await jiti.import("@/lib/draft-store.ts");
 
 const hookSource = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
@@ -55,10 +55,45 @@ test("the effective composer key is threaded from ChatWindow into the hook", () 
 
   // hook 侧：恢复目标守卫、promote 换 key、废弃清理全部使用该键。
   assert.match(hookSource, /composerDraftKey\?: string;/);
-  assert.match(hookSource, /&& targetDraftKey === composerDraftKey/);
   assert.match(hookSource, /const provisionalDraftKey = composerDraftKey \?\? null;/);
   assert.match(hookSource, /const abandonedDraftKey = isNew \? composerDraftKey \?\? null : null;/);
   assert.doesNotMatch(hookSource, /newSessionCwd \? `new:\$\{newSessionCwd\}` : (null|undefined)/);
+});
+
+test("a rejected submission for an existing session persists its draft across unmount", () => {
+  // 回归（T10c 修复轮 2）：卸载守卫曾用完整生效键比较——现有会话切走（hook 卸载）
+  // 后迟到的确定性拒绝被静默丢弃，用户文本无提示丢失。上游语义：守卫只针对临时
+  // 新会话键；session-id 键的草稿卸载后照常持久化。
+  const decision = {
+    hookMounted: false,
+    newSessionPromoted: false,
+    transientNewSessionDraftKey: null, // 现有会话：无临时键
+    targetDraftKey: "session-1",
+  };
+  assert.equal(shouldDropRestoreAfterUnmount(decision), false);
+
+  // drop 决策为 false → 走 store 持久化路径：写入 session 键并可读回。
+  restoreDraftSubmission("session-1", "rejected submission");
+  assert.equal(getDraft("session-1")?.value, "rejected submission");
+
+  clearDraft("session-1");
+});
+
+test("a late restore for an abandoned new session is still dropped", () => {
+  assert.equal(shouldDropRestoreAfterUnmount({
+    hookMounted: false,
+    newSessionPromoted: false,
+    transientNewSessionDraftKey: "new:tab-7",
+    targetDraftKey: "new:tab-7",
+  }), true);
+
+  // promote 之后临时键不再是「废弃中」的键，恢复照常进行。
+  assert.equal(shouldDropRestoreAfterUnmount({
+    hookMounted: false,
+    newSessionPromoted: true,
+    transientNewSessionDraftKey: "new:tab-7",
+    targetDraftKey: "new:tab-7",
+  }), false);
 });
 
 test("reconcileAgentState ignores stale runs and session switches", () => {

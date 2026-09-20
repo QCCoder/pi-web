@@ -12,7 +12,7 @@ import type {
 } from "@/lib/types";
 import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { clearDraft, rekeyDraft, restoreDraftSubmission } from "@/lib/draft-store";
-import { resolveComposerDraftKey } from "@/lib/composer-draft-key";
+import { resolveComposerDraftKey, shouldDropRestoreAfterUnmount } from "@/lib/composer-draft-key";
 import { userMessageKey } from "@/lib/prompt-recovery";
 import {
   createScrollFollowState,
@@ -442,10 +442,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   ) => {
     const draftImages = images?.map(({ data, mimeType }) => ({ data, mimeType }));
     const destinationDraftKey = resolveDraftKeyAlias(targetDraftKey);
+    // 只拦截「临时新会话键」的迟到恢复（废弃清理会删它）；现有会话的 session-id
+    // 键卸载后照常持久化（upstream 6ac87ec：newSessionDraftKey 仅新会话非空）。
     if (
-      !sessionHookMountedRef.current
-      && !newSessionPromotedRef.current
-      && targetDraftKey === composerDraftKey
+      shouldDropRestoreAfterUnmount({
+        hookMounted: sessionHookMountedRef.current,
+        newSessionPromoted: newSessionPromotedRef.current,
+        transientNewSessionDraftKey: isNew ? (composerDraftKey ?? null) : null,
+        targetDraftKey,
+      })
     ) return;
     const input = opts.chatInputRef?.current;
     if (input) {
@@ -453,7 +458,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } else if (destinationDraftKey) {
       restoreDraftSubmission(destinationDraftKey, text, draftImages);
     }
-  }, [composerDraftKey, opts.chatInputRef, resolveDraftKeyAlias]);
+  }, [composerDraftKey, isNew, opts.chatInputRef, resolveDraftKeyAlias]);
 
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) {

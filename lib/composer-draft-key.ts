@@ -16,3 +16,23 @@ export function resolveComposerDraftKey(parts: {
   if (parts.newSessionCwd) return `new:${parts.newSessionCwd}`;
   return undefined;
 }
+
+export interface RestoreDropDecision {
+  /** 活跃 hook 是否仍挂载（卸载后为 false）。 */
+  hookMounted: boolean;
+  /** 临时会话是否已 promote 成真实 session。 */
+  newSessionPromoted: boolean;
+  /** 临时新会话键——仅新会话（isNew）时非空；现有会话为 null（upstream 6ac87ec：
+   *  AppShell 在会话存在时传 newSessionDraftKey = null）。 */
+  transientNewSessionDraftKey: string | null;
+  targetDraftKey: string | undefined;
+}
+
+/** 卸载后是否丢弃挂起的恢复。
+ *
+ *  只针对临时新会话键：废弃一个从未 promote 的新会话时，迟到恢复写进去的草稿
+ *  会被废弃清理删掉，提前 return 避免这种自相交互。现有会话（session-id 键）
+ *  不在此列——草稿持久化到 session 键上，重挂时照常水合。 */
+export function shouldDropRestoreAfterUnmount(o: RestoreDropDecision): boolean {
+  return !o.hookMounted && !o.newSessionPromoted && o.targetDraftKey === o.transientNewSessionDraftKey;
+}
