@@ -18,6 +18,17 @@ export type Tab =
       label: string;
       sessionId: string;
       sessionInfo: SessionInfo;
+    }
+  | {
+      id: string;
+      kind: "terminal";
+      label: string;
+      /** Workspace cwd the terminal is bound to — part of its creation
+       *  identity (same id + different cwd must never reuse a process). */
+      cwd: string;
+      /** True while a close/restart termination is in flight (upstream
+       *  "closing" tab semantics: unresponsive until the DELETE settles). */
+      closing?: boolean;
     };
 
 /** Reserved ids of the right dock's pinned module tabs (right-dock design S1:

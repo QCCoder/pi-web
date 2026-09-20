@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar, FILES_TAB_ID } from "../TabBar";
 import { FilesExplorerPanel } from "../FilesExplorerPanel";
+import { TerminalPanel } from "../TerminalPanel";
 import { ArchiveModal } from "../ArchiveModal";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceOverview } from "../WorkspaceOverview";
@@ -24,6 +25,7 @@ import { SessionTabBar } from "../SessionTabBar";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { useI18n } from "@/hooks/useI18n";
 import { getFileName } from "@/lib/file-paths";
+import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "@/lib/terminal-tab-state";
 import { useShell } from "./context";
 import type { SessionTabState } from "@/lib/session-tabs";
 import { createNewSessionTab } from "@/lib/session-tabs";
@@ -163,9 +165,92 @@ export function DesktopShell() {
   // 两个模块体常驻挂载（display:none 隐藏），LoopsDockPanel 以 key=workspace.id
   // 重置——同工作区切会话 tab 状态存活，换工作区才重建。
   const panelEffTabId = panelActiveFileTabId ?? FILES_TAB_ID;
+  // ---- Workspace terminals（上游 #695 移植）--------------------------------
+  // 终端 tab 由 DesktopShell 自有（不进 useAppShellState）：跨会话 tab/工程
+  // 切换常驻挂载（上游语义：terminal panels stay mounted behind inactive
+  // tabs, hidden panels, and session or project switches），仅 hidden 隐藏。
+  // tab 条挂在工作坞 TabBar 尾部；激活复用 activeFileTabId 通道（终端 id 不
+  // 在 fileTabs/moduleTabs 里 → 文件树/查看器分支自动让位，见 activeTerminalTab）。
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
+  const [terminalsRestored, setTerminalsRestored] = useState(false);
+  const activeTerminalTab = terminalTabs.find((tab) => tab.id === panelActiveFileTabId) ?? null;
   const dockActiveModule = !panelActiveFileTab && isModuleTabId(panelEffTabId) ? panelEffTabId : null;
-  const showFilesTree = Boolean(panelWorkspace) && !panelActiveFileTab
+  const showFilesTree = Boolean(panelWorkspace) && !panelActiveFileTab && !activeTerminalTab
     && (panelEffTabId === FILES_TAB_ID || !isModuleTabId(panelEffTabId));
+
+  // 刷新恢复：sessionStorage 里的终端身份（id+cwd）在挂载时还原；restored tab
+  // 的面板会先 GET 校验服务端实例，过期/服务重启后绝不静默起新 shell（上游语义）。
+  useEffect(() => {
+    try {
+      const saved = restoreTerminalTabs(window.sessionStorage.getItem(TERMINAL_TABS_KEY));
+      setTerminalTabs(saved.tabs);
+      if (saved.tabs.length > 0 && saved.activeId) {
+        const { activeId, open } = saved;
+        if (homeAtDesktop) {
+          setHomeActiveFileTabId(activeId);
+          setHomeRightPanelOpen(open);
+        } else {
+          updateActiveTab({ activeFileTabId: activeId, rightPanelOpen: open });
+        }
+      }
+    } catch { /* storage is optional */ }
+    setTerminalsRestored(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- restore-once on mount
+  }, []);
+
+  // 恢复完成后持续持久化（id+cwd+激活 tab+面板开合；closing 状态不入档）。
+  useEffect(() => {
+    if (!terminalsRestored) return;
+    try {
+      window.sessionStorage.setItem(TERMINAL_TABS_KEY, JSON.stringify({
+        tabs: terminalTabs.map(({ id, cwd }) => ({ id, cwd })),
+        activeId: activeTerminalTab?.id ?? null,
+        open: panelOpen,
+      }));
+    } catch { /* storage is optional */ }
+  }, [terminalTabs, activeTerminalTab, panelOpen, terminalsRestored]);
+
+  const handleOpenTerminal = (cwd: string) => {
+    const existing = terminalTabs.find((tab) => tab.cwd === cwd);
+    const tab = existing ?? newTerminalTab(cwd);
+    if (!existing) setTerminalTabs((tabs) => [...tabs, tab]);
+    if (homeAtDesktop) {
+      setHomeActiveFileTabId(tab.id);
+      setHomeRightPanelOpen(true);
+    } else {
+      updateActiveTab({ activeFileTabId: tab.id, rightPanelOpen: true });
+    }
+  };
+
+  // 显式终止/重启：标记 closing → TerminalPanel 等创建与在途输入落地后 DELETE →
+  // onClosed 回 here。restart 换新 id 重建（新 shell），close 则移除；关闭激活
+  // tab 后回落文件树（本地右栏语义：不自动收起）。
+  const handleTerminalClosed = (tab: TerminalTab) => {
+    const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
+    setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
+    if (panelActiveFileTabId !== tab.id) return;
+    const nextActiveId = replacement?.id ?? null;
+    if (homeAtDesktop) setHomeActiveFileTabId(nextActiveId);
+    else updateActiveTab({ activeFileTabId: nextActiveId });
+  };
+
+  const handleTerminalRestart = (id: string) => {
+    setTerminalTabs((tabs) => tabs.map((item) => item.id === id ? { ...item, closing: "restart" as const } : item));
+  };
+
+  const handleTerminalCloseError = (id: string) => {
+    setTerminalTabs((tabs) => tabs.map((item) => item.id === id ? { ...item, closing: undefined } : item));
+  };
+
+  // 终端 tab 的关闭先于文件 tab 拦截（fileTabs 里没有终端 id，不能漏给 shell 的
+  // handleCloseFileTab）。
+  const handleDockTabClose = (id: string) => {
+    if (terminalTabs.some((tab) => tab.id === id)) {
+      setTerminalTabs((tabs) => tabs.map((tab) => tab.id === id && !tab.closing ? { ...tab, closing: "close" as const } : tab));
+      return;
+    }
+    (homeAtDesktop ? handleCloseHomeFileTab : handleCloseFileTab)(id);
+  };
 
   // ---- 中央区整页（CenterPage）------------------------------------------------
   // 底部四入口（设置/模型/插件/Skills）与项目树「归档」行的渲染面：整页占中央
@@ -525,7 +610,16 @@ export function DesktopShell() {
       >
         <div style={{ flex: 1, overflow: "hidden" }}>
           <TabBar
-            tabs={panelFileTabs}
+            tabs={[
+              ...panelFileTabs,
+              ...terminalTabs.map((tab) => ({
+                id: tab.id,
+                kind: "terminal" as const,
+                label: getFileName(tab.cwd) || tab.cwd,
+                cwd: tab.cwd,
+                closing: Boolean(tab.closing),
+              })),
+            ]}
             activeTabId={panelActiveFileTabId ?? FILES_TAB_ID}
             leadingTabs={panelWorkspace ? [
               { id: FILES_TAB_ID, label: "文件" },
@@ -560,7 +654,7 @@ export function DesktopShell() {
               }] : []),
             ] : undefined}
             onSelectTab={(id: string) => (homeAtDesktop ? setHomeActiveFileTabId(id) : updateActiveTab({ activeFileTabId: id }))}
-            onCloseTab={homeAtDesktop ? handleCloseHomeFileTab : handleCloseFileTab}
+            onCloseTab={handleDockTabClose}
           />
         </div>
 
@@ -586,6 +680,7 @@ export function DesktopShell() {
               explorerRefreshKey={explorerRefreshKey}
               onOpenFile={handleOpenFile}
               reveal={loopFilesReveal ?? undefined}
+              onOpenTerminal={handleOpenTerminal}
             />
           </div>
         ) : null}
@@ -649,6 +744,21 @@ export function DesktopShell() {
             />
           </div>
         ) : null}
+        {/* Workspace terminals: stay MOUNTED behind inactive tabs / hidden
+            panels / session switches — only the SSE client disconnects when
+            hidden, the server-side pty lives until explicitly closed, the
+            120s lease expires, or the server shuts down（上游 #695 语义）. */}
+        {terminalTabs.map((tab) => (
+          <div key={tab.id} hidden={tab.id !== panelActiveFileTabId} style={{ width: "100%", height: "100%" }}>
+            <TerminalPanel
+              tab={tab}
+              active={panelOpen && tab.id === panelActiveFileTabId}
+              onRestart={() => handleTerminalRestart(tab.id)}
+              onClosed={() => handleTerminalClosed(tab)}
+              onCloseError={() => handleTerminalCloseError(tab.id)}
+            />
+          </div>
+        ))}
         {panelActiveFileTab?.kind === "file" ? (
           <FileViewer
             filePath={panelActiveFileTab.filePath}

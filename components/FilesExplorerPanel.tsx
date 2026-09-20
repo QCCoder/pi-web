@@ -28,6 +28,9 @@ interface Props {
   /** Loops-panel reveal signal: expands the tree to the target path (nonce
    *  re-triggers the same path; effective only while the tree shows). */
   reveal?: { path: string; nonce: number };
+  /** 打开/聚焦该工作区路径的集成终端 tab（desktop 右坞接线；上游 Explorer
+   *  头部的终端动作，#695。不传则无入口——移动端工作台不接终端）。 */
+  onOpenTerminal?: (cwd: string) => void;
 }
 
 /** Workbench [ 文件 | 改动 ] segmented switch — shared by this panel and the
@@ -117,7 +120,7 @@ export function ExplorerSegmentedTabs({
   );
 }
 
-export function FilesExplorerPanel({ workspace, explorerRefreshKey, onOpenFile, reveal }: Props) {
+export function FilesExplorerPanel({ workspace, explorerRefreshKey, onOpenFile, reveal, onOpenTerminal }: Props) {
   const [explorerTab, setExplorerTab] = useState<"files" | "changes">("files");
   // ⟳ 手动刷新：叠加在 shell 驱动的 explorerRefreshKey 上，同时刷文件树缓存
   // 与 git 状态（外部删除/编辑等无事件的变化只能靠它）。
@@ -178,6 +181,32 @@ export function FilesExplorerPanel({ workspace, explorerRefreshKey, onOpenFile, 
           <div style={{ flex: 1, minWidth: 0, color: "var(--text)", fontSize: "var(--pi-sidebar-fs-meta)", fontWeight: 600 }}>
             文件
           </div>
+        )}
+        {onOpenTerminal && (
+          <button
+            type="button"
+            onClick={() => onOpenTerminal(workspace.path)}
+            title="打开工作区终端"
+            aria-label="打开工作区终端"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 24,
+              height: 24,
+              padding: 0,
+              flexShrink: 0,
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              background: "transparent",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+            </svg>
+          </button>
         )}
         <button
           type="button"

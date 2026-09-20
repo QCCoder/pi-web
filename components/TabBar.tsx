@@ -122,7 +122,11 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTabs
             }}
           >
             <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-              {tab.kind === "file" ? getFileIcon(tab.label, 13) : (
+              {tab.kind === "file" ? getFileIcon(tab.label, 13) : tab.kind === "terminal" ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+                </svg>
+              ) : (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
