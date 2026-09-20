@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { WorkItemRecord } from "@/lib/work-items/types";
+import { isSubagentChildSession } from "@/lib/subagent-child";
 
 interface ArchivedSession {
   id: string;
@@ -59,8 +60,9 @@ export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged, e
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  // 分组折叠态：默认展开，会话内存态（与 SkillsConfig 分组折叠一致，不持久化）。
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // 分组折叠态：默认展开（子代理会话默认收起——多为 loop 轮/委派过程的噪音），
+  // 会话内存态（与 SkillsConfig 分组折叠一致，不持久化）。
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(["子代理会话"]));
   const toggleGroup = useCallback((label: string) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -128,6 +130,50 @@ export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged, e
   }, [after, workspaceId]);
 
   const empty = !loading && sessions.length === 0 && items.length === 0;
+  // 轻量分类：会话拆 普通会话/子代理会话（loop 轮与委派过程的子会话默认收起），
+  // 工作项拆 需求/缺陷。
+  const childSessions = sessions.filter((s) => isSubagentChildSession(s));
+  const normalSessions = sessions.filter((s) => !isSubagentChildSession(s));
+  const requirements = items.filter((item) => item.type === "requirement");
+  const bugs = items.filter((item) => item.type === "bug");
+
+  const sessionSection = (label: string, list: typeof sessions) =>
+    list.length > 0 ? (
+      <Section label={`${label} (${list.length})`} collapsed={collapsed.has(label)} onToggle={() => toggleGroup(label)}>
+        {list.map((s) => (
+          <ArchiveRow
+            key={`s-${s.id}`}
+            title={s.name || s.firstMessage || "未命名会话"}
+            sub={s.cwd}
+            isBusy={busy === s.id}
+            isConfirming={confirmDelete === `s-${s.id}`}
+            onRestore={() => restoreSession(s.id)}
+            onDelete={() => setConfirmDelete(`s-${s.id}`)}
+            onConfirmDelete={() => purgeSession(s.id)}
+            onCancelDelete={() => setConfirmDelete(null)}
+          />
+        ))}
+      </Section>
+    ) : null;
+
+  const itemSection = (label: string, list: WorkItemRecord[]) =>
+    list.length > 0 ? (
+      <Section label={`${label} (${list.length})`} collapsed={collapsed.has(label)} onToggle={() => toggleGroup(label)}>
+        {list.map((item) => (
+          <ArchiveRow
+            key={`i-${item.id}`}
+            title={item.title}
+            sub={item.key}
+            isBusy={busy === item.id}
+            isConfirming={confirmDelete === `i-${item.id}`}
+            onRestore={() => restoreItem(item)}
+            onDelete={() => setConfirmDelete(`i-${item.id}`)}
+            onConfirmDelete={() => purgeItem(item)}
+            onCancelDelete={() => setConfirmDelete(null)}
+          />
+        ))}
+      </Section>
+    ) : null;
 
   const body = (
     <div style={{ flex: 1, overflowY: "auto", padding: "8px 8px 12px" }}>
@@ -137,40 +183,10 @@ export function ArchiveModal({ workspaceId, workspacePath, onClose, onChanged, e
             <div style={{ padding: 32, textAlign: "center", color: "var(--text-dim)", fontSize: 13 }}>暂无归档内容</div>
           ) : (
             <>
-              {sessions.length > 0 && (
-                <Section label={`会话 (${sessions.length})`} collapsed={collapsed.has("会话")} onToggle={() => toggleGroup("会话")}>
-                  {sessions.map((s) => (
-                    <ArchiveRow
-                      key={`s-${s.id}`}
-                      title={s.name || s.firstMessage || "未命名会话"}
-                      sub={s.cwd}
-                      isBusy={busy === s.id}
-                      isConfirming={confirmDelete === `s-${s.id}`}
-                      onRestore={() => restoreSession(s.id)}
-                      onDelete={() => setConfirmDelete(`s-${s.id}`)}
-                      onConfirmDelete={() => purgeSession(s.id)}
-                      onCancelDelete={() => setConfirmDelete(null)}
-                    />
-                  ))}
-                </Section>
-              )}
-              {items.length > 0 && (
-                <Section label={`需求与 Bug (${items.length})`} collapsed={collapsed.has("需求与 Bug")} onToggle={() => toggleGroup("需求与 Bug")}>
-                  {items.map((item) => (
-                    <ArchiveRow
-                      key={`i-${item.id}`}
-                      title={item.title}
-                      sub={item.key}
-                      isBusy={busy === item.id}
-                      isConfirming={confirmDelete === `i-${item.id}`}
-                      onRestore={() => restoreItem(item)}
-                      onDelete={() => setConfirmDelete(`i-${item.id}`)}
-                      onConfirmDelete={() => purgeItem(item)}
-                      onCancelDelete={() => setConfirmDelete(null)}
-                    />
-                  ))}
-                </Section>
-              )}
+              {sessionSection("会话", normalSessions)}
+              {sessionSection("子代理会话", childSessions)}
+              {itemSection("需求", requirements)}
+              {itemSection("缺陷", bugs)}
             </>
           )}
         </div>

@@ -70,9 +70,12 @@ test("project sidebar: 新建任务 on top, tree body, 归档 footer per group, 
   assert.match(projectSidebarSource, /导入目录…/);
   assert.match(projectSidebarSource, /groupSessionsByWorkspace/);
   // 会话行直挂节点下（SessionRow 共享，rounded）+ 默认 5 条截断 + 显示更多。
-  // 节点整行（图标与标题同效）= 展开/折叠，不再经树打开总览（家 tab）。
+  // 节点整行 = 展开/折叠；hover 右侧出 工作区首页/归档 快捷按钮
+  // （WorkspaceNodeRow；不再单独挂组尾归档行）。
   assert.match(projectSidebarSource, /SessionRow/);
-  assert.doesNotMatch(projectSidebarSource, /onOpenWorkspace/);
+  assert.match(projectSidebarSource, /WorkspaceNodeRow/);
+  assert.match(projectSidebarSource, /onOpenWorkspace/);
+  assert.match(projectSidebarSource, /onOpenArchive/);
   assert.match(projectSidebarSource, /SESSION_PREVIEW_COUNT = 5/);
   assert.match(projectSidebarSource, /显示更多/);
   // 组尾暗淡「归档」。

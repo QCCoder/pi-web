@@ -15,9 +15,9 @@ import { SessionRow } from "./SessionRow";
  *
  *   [＋ 新建任务]           ← 新会话 composer 入口（复用现有行为）；折叠
  *                          由 ChatToolbar 的 ☰ 开关承担（不在侧栏内）
- *   工作区           ＋    ← 分区标题；＋ → 新建工作区 / 导入目录
- *   📂 pi                ← 工作区节点：整行点击 = 展开/折叠（文件夹开/合
- *                           两种形态表达状态；图标与标题同效）
+ *   工作区           ＋    ← 分区标题（与新建任务左对齐）；＋ → 新建/导入
+ *   📂 pi     🏠 🗑      ← 节点（缩进一级）：整行 = 展开/折叠；hover 右侧
+ *                           出现 工作区首页/归档 两个快捷按钮
  *      · 会话行…（默认 5 条，更多收进「显示更多」）
  *   …不可用工作区（暗淡）
  *   ─────────────────
@@ -45,6 +45,10 @@ interface Props {
   workspacesLoaded: boolean;
   sessionsLoaded: boolean;
   onNewSession: () => void;
+  /** 节点行 hover 的「工作区首页」按钮 → 开/激活该工作区总览（家 tab）。 */
+  onOpenWorkspace: (workspace: WorkspaceSummary) => void;
+  /** 节点行 hover 的「归档」按钮 → 中央区归档页（工作区作用域就地）。 */
+  onOpenArchive: (workspace: WorkspaceSummary) => void;
   onSelectSession: (session: SessionInfo) => void;
   onOpenSessionInNewTab: (session: SessionInfo) => void;
   onSessionRemoved: (id: string) => void;
@@ -135,6 +139,8 @@ export function ProjectSidebar({
   workspacesLoaded,
   sessionsLoaded,
   onNewSession,
+  onOpenWorkspace,
+  onOpenArchive,
   onSelectSession,
   onOpenSessionInNewTab,
   onSessionRemoved,
@@ -209,64 +215,22 @@ export function ProjectSidebar({
           return (
             <section key={group.workspace.id} style={{ marginBottom: 4 }}>
               {/* 工作区节点（不选中高亮——树只是组织结构，选中的是会话）：
-                  整行 = 展开/折叠开关（图标与标题点击同效）；文件夹开/合
-                  两种形态表达状态；hover 圆角底。 */}
-              <button
-                type="button"
-                aria-label={isCollapsed ? "展开会话" : "折叠会话"}
-                aria-expanded={!isCollapsed}
-                onClick={() => toggleGroup(group.workspace.id)}
-                title={`${group.workspace.name}（${isCollapsed ? "展开" : "折叠"}会话列表）`}
-                style={{
-                  width: "100%",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "5px 8px 5px 2px",
-                  border: 0,
-                  borderRadius: 8,
-                  background: "transparent",
-                  color: "var(--text)",
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-              >
-                {isCollapsed ? (
-                  /* 合上的文件夹 */
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: "block", flexShrink: 0, color: "var(--accent)" }}>
-                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                  </svg>
-                ) : (
-                  /* 打开的文件夹 */
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: "block", flexShrink: 0, color: "var(--accent)" }}>
-                    <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
-                  </svg>
-                )}
-                <strong style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {group.workspace.name}
-                </strong>
-                {activity === "running" && (
-                  <span title="工作区有会话正在运行" style={{ display: "inline-flex", flexShrink: 0, color: "var(--text)" }}>
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
-                      <g>
-                        <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
-                        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
-                      </g>
-                    </svg>
-                  </span>
-                )}
-                {activity === "completed" && (
-                  <span title="工作区有会话已完成" style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--accent)" }} />
-                  )}
-                  <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)" }}>
-                    {group.sessions.length}
-                  </span>
-                </button>
+                  整行 = 展开/折叠开关；hover 时右侧出现 工作区首页/归档 两个
+                  快捷按钮（取代徽章/计数，SessionRow 同款模式）。左缩进一级。 */}
+              <div style={{ paddingLeft: 8 }}>
+                <WorkspaceNodeRow
+                  workspace={group.workspace}
+                  sessionCount={group.sessions.length}
+                  isCollapsed={isCollapsed}
+                  activity={activity}
+                  onToggle={() => toggleGroup(group.workspace.id)}
+                  onOpenHome={onOpenWorkspace}
+                  onOpenArchive={onOpenArchive}
+                />
+              </div>
 
               {!isCollapsed && (
-                <div>
+                <div style={{ paddingLeft: 8 }}>
                   {group.sessions.length === 0 ? (
                     <div style={{ padding: "4px 10px 4px 14px", color: "var(--text-dim)", fontSize: 11 }}>
                       暂无会话
@@ -397,7 +361,7 @@ export function ProjectSidebar({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "4px 8px 2px 30px",
+          padding: "4px 8px 2px 8px",
           flexShrink: 0,
         }}
       >
@@ -552,5 +516,126 @@ export function ProjectSidebar({
         document.body,
       )}
     </div>
+  );
+}
+
+/** 工作区节点行：整行点击 = 展开/折叠（文件夹开/合两态）；hover 时右侧出现
+ *  工作区首页（🏠 开/激活总览家 tab）与 归档（回收站，中央区整页）两个快捷
+ *  按钮（取代徽章/计数，SessionRow 的 hover-action 同款模式；两按钮
+ *  stopPropagation，不触发折叠）。 */
+function WorkspaceNodeRow({
+  workspace,
+  sessionCount,
+  isCollapsed,
+  activity,
+  onToggle,
+  onOpenHome,
+  onOpenArchive,
+}: {
+  workspace: WorkspaceSummary;
+  sessionCount: number;
+  isCollapsed: boolean;
+  activity: "running" | "completed" | undefined;
+  onToggle: () => void;
+  onOpenHome: (workspace: WorkspaceSummary) => void;
+  onOpenArchive: (workspace: WorkspaceSummary) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={isCollapsed ? "展开会话" : "折叠会话"}
+      aria-expanded={!isCollapsed}
+      onClick={onToggle}
+      title={`${workspace.name}（${isCollapsed ? "展开" : "折叠"}会话列表）`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "5px 6px 5px 2px",
+        border: 0,
+        borderRadius: 8,
+        background: hovered ? "var(--bg-hover)" : "transparent",
+        color: "var(--text)",
+        cursor: "pointer",
+        textAlign: "left",
+      }}
+    >
+      {isCollapsed ? (
+        /* 合上的文件夹 */
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: "block", flexShrink: 0, color: "var(--accent)" }}>
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+        </svg>
+      ) : (
+        /* 打开的文件夹 */
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: "block", flexShrink: 0, color: "var(--accent)" }}>
+          <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+        </svg>
+      )}
+      <strong style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {workspace.name}
+      </strong>
+      {hovered ? (
+        <span style={{ display: "flex", gap: 4, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+          <span
+            role="button"
+            tabIndex={0}
+            title={`工作区首页（${workspace.name} 总览）`}
+            aria-label={`工作区首页（${workspace.name}）`}
+            onClick={(e) => { e.stopPropagation(); onOpenHome(workspace); }}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onOpenHome(workspace); } }}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 22, height: 22, borderRadius: 6,
+              background: "var(--bg-hover)", color: "var(--text-muted)", cursor: "pointer",
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5" />
+            </svg>
+          </span>
+          <span
+            role="button"
+            tabIndex={0}
+            title={`归档（${workspace.name} 回收站）`}
+            aria-label={`归档（${workspace.name}）`}
+            onClick={(e) => { e.stopPropagation(); onOpenArchive(workspace); }}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onOpenArchive(workspace); } }}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 22, height: 22, borderRadius: 6,
+              background: "var(--bg-hover)", color: "var(--text-muted)", cursor: "pointer",
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </span>
+        </span>
+      ) : (
+        <>
+          {activity === "running" && (
+            <span title="工作区有会话正在运行" style={{ display: "inline-flex", flexShrink: 0, color: "var(--text)" }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+                <g>
+                  <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
+                  <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
+                </g>
+              </svg>
+            </span>
+          )}
+          {activity === "completed" && (
+            <span title="工作区有会话已完成" style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--accent)" }} />
+          )}
+          <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)" }}>
+            {sessionCount}
+          </span>
+        </>
+      )}
+    </button>
   );
 }
