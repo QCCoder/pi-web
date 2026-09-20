@@ -32,6 +32,19 @@ export interface ActiveSessionHandlers {
   finishPromptWithoutStream?: (sid: string) => void;
 }
 
+/**
+ * App 级（跨 session）handlers — 由 shell 状态层（useAppShellState）注册一次。
+ * 与 active handlers 相反：它们只关心「任何一个 session」的事件，不区分前台。
+ * 目前是浏览器通知链路的触发点（upstream #356/#496 移植）：后台 session 完成
+ * 的页内通知、扩展 UI 请求的「需要人工处理」提醒。
+ */
+export interface AppSessionHandlers {
+  /** 任一后台 session 完成（active 的完成走 active.onAgentEnd → 完成音路径）。 */
+  onBackgroundSessionCompleted?: (sid: string) => void;
+  /** 任一 session 发出阻塞式扩展 UI 请求（select/confirm/input/editor/open custom）。 */
+  onAttentionNeeded?: (sid: string, request: ExtensionUiDialogRequest | ExtensionUiCustomRequest) => void;
+}
+
 export type GlobalConnectStatus = "connected" | "timeout" | "closed";
 
 class GlobalAgentEventManager {
@@ -44,11 +57,17 @@ class GlobalAgentEventManager {
   private pinned = new Set<string>();
   private activeSid: string | null = null;
   private active: ActiveSessionHandlers | null = null;
+  private app: AppSessionHandlers | null = null;
 
   /** hook 注册当前 active session 的 UI effect handlers（切换时重新注册）。 */
   setActive(sid: string | null, handlers: ActiveSessionHandlers | null): void {
     this.activeSid = sid;
     this.active = handlers;
+  }
+
+  /** shell 状态层注册 app 级 handlers（浏览器通知触发点，AppShell 生命周期）。 */
+  setAppHandlers(handlers: AppSessionHandlers | null): void {
+    this.app = handlers;
   }
 
   /** 由 useGlobalAgentEvents(runningIds) 驱动：新 running id 连上，停止的断开。 */
@@ -198,7 +217,10 @@ class GlobalAgentEventManager {
         this.refreshAgentState(sid);
         break;
       case "onAgentEnd":
+        // active 的完成走既有链路（完成音 + shell handleAgentEnd）；后台
+        // session 的完成送达 app 级 handler（页内通知 fallback）。
         if (isActive) this.active?.onAgentEnd?.();
+        else this.app?.onBackgroundSessionCompleted?.(sid);
         break;
       case "finishPromptWithoutStream":
         // slash 命令的 prompt_done：仅 active（命令从 active 发出）。
@@ -208,9 +230,13 @@ class GlobalAgentEventManager {
         if (isActive) this.active?.addNotice?.({ id: effect.id, message: effect.message, type: effect.type });
         break;
       case "setExtensionDialog":
+        // 阻塞式扩展 UI 请求 = 需要人工处理（任意 session，不限于 active —
+        // 后台 session 等输入正是最需要提醒的时刻）。
+        this.app?.onAttentionNeeded?.(sid, effect.request);
         if (isActive) this.active?.setExtensionDialog?.(effect.request);
         break;
       case "resolveExtensionCustomUi":
+        if (!effect.request.closed) this.app?.onAttentionNeeded?.(sid, effect.request);
         if (isActive) this.active?.resolveExtensionCustomUi?.(effect.request);
         break;
       case "setDocumentTitle":

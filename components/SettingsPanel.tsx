@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { ReactNode } from "react";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
@@ -7,6 +8,7 @@ import { PluginsConfig } from "./PluginsConfig";
 import { PanelHeader } from "./PanelHeader";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
+import { setupPushSubscription } from "@/lib/push-client";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 /** The settings panel's subpages. Controlled by the owner (AppShell) so entry
@@ -108,6 +110,32 @@ function IndexRow({
 export function PreferencesPage() {
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, supportedLocales } = useI18n();
+  // Web Push 注册（upstream #728「Settings → General 注册按钮」语义）：iOS 主屏
+  // PWA 的授权弹窗必须发生在用户手势内、且重装主屏后无法自动恢复订阅，所以
+  // 提供手动注册入口，而不是只在会话完成时惰性触发。
+  const [pushRegistering, setPushRegistering] = useState(false);
+  const [pushStatus, setPushStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const registerPush = async () => {
+    if (pushRegistering) return;
+    setPushRegistering(true);
+    setPushStatus(null);
+    try {
+      if (typeof window === "undefined" || !("Notification" in window)) {
+        throw new Error("浏览器不支持或未授权通知");
+      }
+      const permission = Notification.permission === "default"
+        ? await Notification.requestPermission()
+        : Notification.permission;
+      if (permission !== "granted") throw new Error("通知权限未授予");
+      const ok = await setupPushSubscription(locale);
+      if (!ok) throw new Error("订阅失败（需先安装为 PWA / 支持 Push API）");
+      setPushStatus({ ok: true, message: "推送已注册，后台通知就绪。" });
+    } catch (cause) {
+      setPushStatus({ ok: false, message: `注册失败：${cause instanceof Error ? cause.message : String(cause)}` });
+    } finally {
+      setPushRegistering(false);
+    }
+  };
   return (
     <div style={{ padding: "12px 10px", display: "flex", flexDirection: "column", gap: 18 }}>
       <div>
@@ -165,6 +193,37 @@ export function PreferencesPage() {
             );
           })}
         </div>
+      </div>
+      <div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 700, marginBottom: 8, padding: "0 2px" }}>后台推送（iOS 主屏应用）</div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.7, marginBottom: 8, padding: "0 2px" }}>
+          将本站添加到主屏幕后（iPhone 需 iOS 16.4+），会话完成且页面不在前台时可在锁屏收到系统通知。若通知不再送达，可回到这里重新注册。注册必须由点击触发。
+        </div>
+        <button
+          type="button"
+          disabled={pushRegistering}
+          onClick={() => void registerPush()}
+          style={{
+            padding: "8px 14px",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg)",
+            color: pushRegistering ? "var(--text-dim)" : "var(--text)",
+            cursor: pushRegistering ? "default" : "pointer",
+            fontSize: 12,
+            fontWeight: 500,
+          }}
+        >
+          {pushRegistering ? "注册中…" : "注册推送"}
+        </button>
+        {pushStatus && (
+          <div
+            role="status"
+            style={{ fontSize: 11, marginTop: 8, padding: "0 2px", color: pushStatus.ok ? "var(--accent)" : "#b91c1c" }}
+          >
+            {pushStatus.message}
+          </div>
+        )}
       </div>
       <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.7, padding: "0 2px" }}>
         完成提示音的开关在聊天输入框的控件行里；系统提示词、分支导航等会话级工具在聊天顶栏。

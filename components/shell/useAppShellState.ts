@@ -2,9 +2,18 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useI18n } from "@/hooks/useI18n";
 import { type SettingsPage } from "../SettingsPanel";
 import { useSessionActivity } from "@/hooks/useSessionActivity";
 import { useGlobalAgentEvents } from "@/hooks/useGlobalAgentEvents";
+import { globalAgentEvents } from "@/lib/sse/global-agent-events";
+import {
+  claimExtensionAttentionNotification,
+  shouldShowBrowserNotification,
+  showBrowserNotification,
+} from "@/lib/browser-notifications";
+import { setupPushSubscription } from "@/lib/push-client";
+import { isSubagentChildSession } from "@/lib/subagent-child";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
@@ -178,6 +187,15 @@ export function useAppShellState(seed?: {
   // running 集永远不含 daemon 会话）。
   // 全局 SSE：为每个 running session 维护一条事件流，后台 session 事件不丢（决策 8 / B4b）。
   useGlobalAgentEvents(sessionActivity.runningIds);
+
+  // Web Push 订阅自愈（upstream #496 AppShell 接线）：权限已授权的访客在加载
+  // 时静默恢复订阅（endpoint 可能因 PWA 重装/过期失效，靠每次触发重发 upsert）。
+  const { locale, t: translate } = useI18n();
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+    void setupPushSubscription(locale);
+  }, [locale]);
   const [sessionKey, setSessionKey] = useState(0);
   // Composer prefill epoch — bumped when a handler writes a NEW-session draft
   // (contract prefill, D11) for a composer that may ALREADY be mounted with
@@ -1260,10 +1278,102 @@ export function useAppShellState(seed?: {
     setComposerEpoch((epoch) => epoch + 1);
   }, [openNewSessionTab]);
 
+  // ---- 浏览器通知 + Web Push（upstream #356 / #496 / #728 的页内接线）------
+  // 本地是 daemon 推送（服务端 Web Push 直发 SW，通知不依赖页面存活）为主，
+  // 页内 Notification API 为辅（不支持 PushManager 的浏览器兜底 + 可见性判定）。
+  const notifiedAttentionRequestIdsRef = useRef<Set<string>>(new Set());
+
+  /** 页内系统通知（SW showNotification 优先，Notification 构造器兜底）；权限
+   *  授权后顺带确保 Web Push 订阅在册（每次完成触发一次 upsert 自愈）。 */
+  const deliverSessionNotification = useCallback(({
+    targetSession,
+    title,
+    body,
+    tag,
+  }: {
+    targetSession: SessionInfo | null;
+    title: string;
+    body: string;
+    tag?: string;
+  }) => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+
+    const fire = () => {
+      const sessionUrl = targetSession ? `/?session=${encodeURIComponent(targetSession.id)}` : "/";
+      void showBrowserNotification({
+        title,
+        body,
+        sessionUrl,
+        tag,
+        onClick: () => {
+          window.focus();
+          if (targetSession) openSessionTab(targetSession);
+        },
+      });
+    };
+
+    if (Notification.permission === "granted") {
+      fire();
+      void setupPushSubscription(locale);
+    } else if (Notification.permission === "default") {
+      // 首次后台完成时惰性请求授权；拒绝后不再打扰（denied 无分支即静默）。
+      void Notification.requestPermission().then((p) => {
+        if (p === "granted") {
+          fire();
+          void setupPushSubscription(locale);
+        }
+      });
+    }
+  }, [openSessionTab, locale]);
+
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
-  }, []);
+    // 活动 session 完成通知：页面可见且有焦点时静默（完成音已由 ChatWindow 播）。
+    // 后台 session 的完成走 globalAgentEvents 的 app 级 handler（下方 effect）。
+    if (selectedSession?.subagentChild) return;
+    if (!shouldShowBrowserNotification()) return;
+    deliverSessionNotification({
+      targetSession: selectedSession,
+      title: selectedSession?.name ?? translate("i18n.sessionComplete"),
+      body: translate("i18n.taskFinished"),
+      tag: selectedSession ? `pi-session-complete:${selectedSession.id}` : "pi-session-complete",
+    });
+  }, [deliverSessionNotification, selectedSession, translate]);
+
+  // App 级通知触发点（任意 session，不限 active）：后台 session 完成、扩展
+  // UI 请求等待人工处理。subagent 子会话跳过（与 daemon 端推送抑制对齐）。
+  useEffect(() => {
+    globalAgentEvents.setAppHandlers({
+      onBackgroundSessionCompleted: (sid) => {
+        if (isSubagentChildSession({ id: sid })) return;
+        if (!shouldShowBrowserNotification()) return;
+        const info = sessionActivity.sessions.find((s) => s.id === sid) ?? null;
+        deliverSessionNotification({
+          targetSession: info,
+          title: info?.name ?? translate("i18n.sessionComplete"),
+          body: translate("i18n.taskFinished"),
+          tag: `pi-session-complete:${sid}`,
+        });
+      },
+      onAttentionNeeded: (sid, request) => {
+        if (isSubagentChildSession({ id: sid })) return;
+        if (!shouldShowBrowserNotification()) return;
+        // 同一请求只提醒一次（replay/多流重复事件去重）。
+        if (!claimExtensionAttentionNotification(request, notifiedAttentionRequestIdsRef.current)) return;
+        const info = sessionActivity.sessions.find((s) => s.id === sid) ?? null;
+        deliverSessionNotification({
+          targetSession: info,
+          title: translate("i18n.attentionNeeded"),
+          body: request.method === "select" || request.method === "confirm"
+            ? request.title
+            : translate("i18n.extensionInputNeeded"),
+          tag: `pi-extension-ui:${request.id}`,
+        });
+      },
+    });
+    return () => globalAgentEvents.setAppHandlers(null);
+  }, [deliverSessionNotification, sessionActivity.sessions, translate]);
 
   const handleAutoName = useCallback(async () => {
     const sessionId = selectedSession?.id;
