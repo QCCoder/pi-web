@@ -237,3 +237,79 @@ test("keeps the model selector visible when a model error leaves no options", ()
   assert.match(html, /title="No available models"/);
 });
 
+
+test("desktop Enter/Alt+Enter streaming send paths preserve newline, IME and completion behavior", () => {
+  const source = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findHandler(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "handleKeyDown") {
+      return node.initializer.arguments[0];
+    }
+    return ts.forEachChild(node, findHandler);
+  }
+  // Execute the component's actual callback without mounting the rest of the UI.
+  const script = new Script(ts.transpileModule(findHandler(source).getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  // 本地分叉（T6 设计）：移动端 Enter=换行、发送走按钮，因此没有上游的
+  // Ctrl/Cmd+Alt+Enter 移动路径 —— 相关用例断言保持原生行为。
+  const cases = [
+    ["Enter steers", {}, {}, "steer"],
+    ["Alt+Enter follows up", { altKey: true }, {}, "followup"],
+    ["idle Alt+Enter sends", { altKey: true }, { isStreaming: false }, "send"],
+    ["Shift+Enter inserts a newline", { shiftKey: true }, {}, "native"],
+    ["Alt+Shift+Enter keeps native behavior", { altKey: true, shiftKey: true }, {}, "native"],
+    ["composition ref blocks sending", { altKey: true }, { isComposingRef: { current: true } }, "native"],
+    ["native composition blocks sending", { altKey: true, nativeEvent: { isComposing: true } }, {}, "native"],
+    ["IME keyCode blocks sending", { altKey: true, nativeEvent: { keyCode: 229 } }, {}, "native"],
+    ["composition grace blocks sending", { altKey: true }, { lastCompositionEndAtRef: { current: 950 } }, "prevented"],
+    ["mobile Alt+Enter keeps native behavior", { altKey: true }, { isMobile: true }, "native"],
+    ["mobile Ctrl+Alt+Enter keeps native behavior", { altKey: true, ctrlKey: true }, { isMobile: true }, "native"],
+    ["mobile Cmd+Alt+Enter keeps native behavior", { altKey: true, metaKey: true }, { isMobile: true }, "native"],
+    ["mobile composition grace swallows Enter", { altKey: true }, { isMobile: true, lastCompositionEndAtRef: { current: 950 } }, "prevented"],
+    ["Enter falls back to follow-up", {}, { onSteer: undefined }, "followup"],
+    ["Alt+Enter falls back to steer", { altKey: true }, { onFollowUp: undefined }, "steer"],
+    ["slash completion takes priority", { altKey: true }, { slashMenuOpen: true, slashQuery: "help" }, "slash"],
+    ["file completion takes priority", { altKey: true }, { atMenuOpen: true, atQuery: {} }, "file"],
+    ["history selection takes priority", { altKey: true }, { historyMenuOpen: true }, "history"],
+  ];
+  for (const [name, keys, state, expected] of cases) {
+    let action = "native";
+    const handler = script.runInNewContext({
+      Date: { now: () => 1000 },
+      COMPOSITION_END_ENTER_GRACE_MS: 100,
+      isMobile: false, isStreaming: true,
+      isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
+      historyMenuOpen: false, inputHistory: ["previous"], historyActiveIndex: 0,
+      setHistoryMenuOpen() {}, setHistoryActiveIndex() {},
+      slashMenuOpen: false, slashQuery: null, filteredSlashCommands: [{}], slashActiveIndex: 0,
+      setSlashMenuOpen() {}, setSlashActiveIndex() {}, getNextSlashIndex: () => 0,
+      atMenuOpen: false, atQuery: null, atMatches: [{}], atActiveIndex: 0,
+      setAtMenuOpen() {}, setAtActiveIndex() {}, cycleListIndex: (i) => i,
+      onSteer() {}, onFollowUp() {}, onAbort() {},
+      sendQueued(mode) { action = mode; }, handleSend() { action = "send"; },
+      applySlashCommand() { action = "slash"; },
+      applyAtCompletion() { action = "file"; },
+      applyHistoryInput() { action = "history"; },
+      value: "",
+      ...state,
+    });
+    handler({
+      key: "Enter", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+      nativeEvent: { isComposing: false, keyCode: 13 },
+      preventDefault() { action = "prevented"; },
+      ...keys,
+    });
+    assert.equal(action, expected, name);
+  }
+});
+
+test("shows the follow-up shortcut in the button tooltip on desktop only", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(ChatInput, {
+      onSend() {}, onAbort() {}, onFollowUp() {}, isStreaming: true,
+    })),
+  );
+
+  assert.match(html, /title="Queue this message after the agent finishes \(Alt\/Option\+Enter\)"/);
+  assert.match(html, /aria-keyshortcuts="Alt\+Enter"/);
+});
