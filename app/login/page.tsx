@@ -2,12 +2,8 @@
 
 import Image from "next/image";
 import { useState, type FormEvent } from "react";
+import { safeDestination } from "@/lib/safe-destination";
 import { I18nProvider, useI18n } from "@/hooks/useI18n";
-
-function safeDestination(): string {
-  const destination = new URLSearchParams(window.location.search).get("next");
-  return destination?.startsWith("/") && !destination.startsWith("//") ? destination : "/";
-}
 
 function LoginForm() {
   const { t } = useI18n();
@@ -36,7 +32,7 @@ function LoginForm() {
         setError(await failureMessage(response));
         return;
       }
-      window.location.replace(safeDestination());
+      window.location.replace(safeDestination(window.location.search));
     } catch {
       setError(t("auth.loginFailed"));
     } finally {
