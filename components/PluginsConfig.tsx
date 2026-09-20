@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
+import type { PluginPackageInfo, PluginUpdateResult, PluginsResponse } from "@/lib/api-types";
 import { useI18n } from "@/hooks/useI18n";
 
 type PluginScope = PluginPackageInfo["scope"];
@@ -423,7 +423,11 @@ function PackageDetail({
   actionError,
   actionMessage,
   sessionId,
+  updateStatus,
+  checkingUpdate,
+  updateError,
   onAction,
+  onCheckUpdate,
   onReloadSession,
 }: {
   pkg: PluginPackageInfo;
@@ -432,7 +436,11 @@ function PackageDetail({
   actionError: string | null;
   actionMessage: string | null;
   sessionId: string | null;
+  updateStatus?: PluginUpdateResult;
+  checkingUpdate: boolean;
+  updateError: string | null;
   onAction: (action: PluginAction, pkg: PluginPackageInfo) => void;
+  onCheckUpdate: () => void;
   onReloadSession: () => void;
 }) {
   const { t } = useI18n();
@@ -440,6 +448,8 @@ function PackageDetail({
   const busy = busyKey?.endsWith(key) ?? false;
   const reloadBusy = busyKey === "reload";
   const enabled = !pkg.disabled;
+  const canCheckForUpdates = pkg.canCheckForUpdates;
+  const updateAvailable = updateStatus?.state === "update-available";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20, maxWidth: 680 }}>
@@ -493,11 +503,21 @@ function PackageDetail({
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
-            onClick={() => onAction("update", pkg)}
-            disabled={busy || reloadBusy}
-            style={buttonStyle(busy || reloadBusy)}
+            onClick={updateAvailable || !canCheckForUpdates ? () => onAction("update", pkg) : onCheckUpdate}
+            disabled={busy || reloadBusy || checkingUpdate}
+            title={updateAvailable ? t("i18n.updateAvailable") : undefined}
+            style={{
+              ...buttonStyle(busy || reloadBusy || checkingUpdate),
+              ...(updateAvailable ? { background: "var(--accent)", color: "white", borderColor: "var(--accent)" } : {}),
+            }}
           >
-             {busyKey === `update:${key}` ? t("i18n.updating") : t("i18n.update")}
+             {busyKey === `update:${key}`
+               ? t("i18n.updating")
+               : checkingUpdate
+                 ? t("i18n.checking")
+                 : updateAvailable || !canCheckForUpdates
+                   ? t("i18n.update")
+                   : t("i18n.check")}
           </button>
           <button
             onClick={onReloadSession}
@@ -529,7 +549,41 @@ function PackageDetail({
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.status")}</div>
         <div style={{ color: statusColor(pkg.status), textTransform: "capitalize" }}>{pkg.status}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.version")}</div>
-         <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionSummary(pkg, t)}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionSummary(pkg, t)}</span>
+            {updateAvailable && (
+              <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono)" }} title={updateStatus.displayName}>
+                {t("i18n.updateAvailable")}
+              </span>
+            )}
+            {canCheckForUpdates && (checkingUpdate || (updateStatus && !updateAvailable)) && (
+              <span
+                style={{
+                  fontSize: 11,
+                  color: checkingUpdate
+                    ? "var(--text-dim)"
+                    : updateStatus?.state === "up-to-date"
+                      ? "#16a34a"
+                      : updateStatus?.state === "error"
+                        ? "#ef4444"
+                        : "var(--text-dim)",
+                }}
+              >
+                {checkingUpdate
+                  ? t("i18n.checking")
+                  : updateStatus?.state === "up-to-date"
+                    ? t("i18n.upToDate")
+                    : updateStatus?.state === "unsupported"
+                      ? t("i18n.automaticChecksUnavailable")
+                      : updateStatus?.message || t("i18n.checkFailed")}
+              </span>
+            )}
+          </div>
+          {updateError && (
+            <span style={{ fontSize: 12, color: "#ef4444" }}>{updateError}</span>
+          )}
+        </div>
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.package")}</div>
         <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
           {pkg.packageName ?? t("i18n.unknown")}
@@ -604,6 +658,11 @@ export function PluginsConfig({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [updateStatuses, setUpdateStatuses] = useState<Record<string, PluginUpdateResult>>({});
+  const [checkingUpdates, setCheckingUpdates] = useState<Set<string>>(new Set());
+  const [checkingAll, setCheckingAll] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updatingAll, setUpdatingAll] = useState(false);
 
   const packages = useMemo(() => data?.packages ?? [], [data?.packages]);
   const selectedPackage = packages.find((pkg) => packageKey(pkg) === selected) ?? null;
@@ -636,8 +695,78 @@ export function PluginsConfig({
   }, [cwd]);
 
   useEffect(() => {
+    setUpdateStatuses({});
+    setUpdateError(null);
     void loadPlugins();
   }, [loadPlugins]);
+
+  const checkForUpdates = useCallback(async (pkg?: PluginPackageInfo) => {
+    const targets = pkg ? [pkg] : packages.filter((item) => item.canCheckForUpdates);
+    const keys = targets.map(packageKey);
+    if (keys.length === 0) return;
+
+    setUpdateError(null);
+    setCheckingUpdates((current) => new Set([...current, ...keys]));
+    if (!pkg) setCheckingAll(true);
+    try {
+      const res = await fetch("/api/plugins/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cwd,
+          source: pkg?.source,
+          scope: pkg?.scope,
+        }),
+      });
+      const data = (await res.json()) as {
+        updates?: PluginUpdateResult[];
+        error?: string;
+      };
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setUpdateStatuses((current) => {
+        const next = { ...current };
+        for (const update of data.updates ?? []) {
+          next[packageKey(update)] = update;
+        }
+        return next;
+      });
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckingUpdates((current) => {
+        const next = new Set(current);
+        for (const key of keys) next.delete(key);
+        return next;
+      });
+      if (!pkg) setCheckingAll(false);
+    }
+  }, [cwd, packages]);
+
+  const updateAllPluginsAction = useCallback(async () => {
+    setUpdatingAll(true);
+    setActionError(null);
+    setActionMessage(null);
+    setUpdateError(null);
+    try {
+      const res = await fetch("/api/plugins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "update", cwd }),
+      });
+      const next = (await res.json()) as PluginsResponse & { error?: string };
+      if (!res.ok || next.error) throw new Error(next.error ?? `HTTP ${res.status}`);
+      setData(next);
+      setUpdateStatuses({});
+      setActionMessage(t("i18n.packagesUpdated"));
+      if (sessionId) {
+        setActionMessage(`${t("i18n.packagesUpdated")} ${t("i18n.openSessionToReload")}`);
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUpdatingAll(false);
+    }
+  }, [cwd, sessionId, t]);
 
   const runAction = useCallback(async (action: PluginAction, pkg: PluginPackageInfo) => {
     const key = packageKey(pkg);
@@ -657,6 +786,11 @@ export function PluginsConfig({
         setSelected(next.packages[0] ? packageKey(next.packages[0]) : null);
         if (next.packages.length === 0) setAddMode(true);
         setActionMessage("Package removed.");
+        setUpdateStatuses((current) => {
+          const nextStatuses = { ...current };
+          delete nextStatuses[key];
+          return nextStatuses;
+        });
       } else {
         const messages: Record<Exclude<PluginAction, "remove">, string> = {
           install: "Package installed.",
@@ -665,6 +799,13 @@ export function PluginsConfig({
           enable: "Package enabled.",
         };
         setActionMessage(messages[action]);
+        if (action === "update") {
+          setUpdateStatuses((current) => {
+            const nextStatuses = { ...current };
+            delete nextStatuses[key];
+            return nextStatuses;
+          });
+        }
       }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -719,6 +860,11 @@ export function PluginsConfig({
   }, [loadPlugins, onReloaded, sessionId]);
 
   const addBusy = busyKey?.startsWith("install:") ?? false;
+  const availableUpdateCount = Object.values(updateStatuses).filter(
+    (status) => status.state === "update-available",
+  ).length;
+  const hasCheckablePackages = packages.some((pkg) => pkg.canCheckForUpdates);
+  const footerBusy = loading || busyKey !== null || checkingUpdates.size > 0 || updatingAll;
 
   const pageMode = inline;
 
@@ -825,6 +971,11 @@ export function PluginsConfig({
                               background: statusColor(pkg.status),
                             }}
                           />
+                          {updateStatuses[packageKey(pkg)]?.state === "update-available" && (
+                            <span title={t("i18n.updateAvailable")} style={{ flexShrink: 0, color: "var(--accent)", fontSize: 11, fontWeight: 700 }}>
+                              ↑
+                            </span>
+                          )}
                           <div style={{ minWidth: 0, flex: 1 }}>
                             <div
                               style={{
@@ -945,7 +1096,11 @@ export function PluginsConfig({
                 actionError={actionError}
                 actionMessage={actionMessage}
                 sessionId={sessionId}
+                updateStatus={updateStatuses[packageKey(selectedPackage)]}
+                checkingUpdate={checkingUpdates.has(packageKey(selectedPackage))}
+                updateError={updateError}
                 onAction={runAction}
+                onCheckUpdate={() => void checkForUpdates(selectedPackage)}
                 onReloadSession={reloadSession}
               />
             ) : (
@@ -981,7 +1136,12 @@ export function PluginsConfig({
       }}
     >
           <div style={{ minWidth: 0, flex: 1, fontSize: 11, color: "var(--text-dim)", overflow: "hidden" }}>
-            {data?.diagnostics.length ? (
+            {availableUpdateCount > 0 ? (
+              <span style={{ fontSize: 12, color: "var(--accent)" }}>
+                {availableUpdateCount}{" "}
+                {availableUpdateCount === 1 ? t("i18n.update") : t("i18n.updates")}
+              </span>
+            ) : data?.diagnostics.length ? (
               <span
                 title={data.diagnostics.map((d) => `${d.type}: ${d.source ? `${d.source}: ` : ""}${d.message}`).join("\n")}
                 style={{ color: data.diagnostics.some((d) => d.type === "error") ? "#ef4444" : "#d97706" }}
@@ -994,7 +1154,26 @@ export function PluginsConfig({
               </span>
             )}
           </div>
-          <button onClick={() => void loadPlugins()} disabled={loading || busyKey !== null} style={buttonStyle(loading || busyKey !== null)}>
+          {hasCheckablePackages && (
+            <button
+              onClick={() => void (availableUpdateCount > 0 ? updateAllPluginsAction() : checkForUpdates())}
+              disabled={footerBusy}
+              title={availableUpdateCount > 0 ? t("i18n.updateAllPluginsHint") : undefined}
+              style={{
+                ...buttonStyle(footerBusy),
+                ...(availableUpdateCount > 0 ? { background: "var(--accent)", color: "white", borderColor: "var(--accent)" } : {}),
+              }}
+            >
+              {updatingAll
+                ? t("i18n.updating")
+                : checkingAll
+                  ? t("i18n.checking")
+                  : availableUpdateCount > 0
+                    ? `${t("i18n.updateAllPlugins")} (${availableUpdateCount})`
+                    : t("i18n.checkUpdates")}
+            </button>
+          )}
+          <button onClick={() => void loadPlugins()} disabled={footerBusy} style={buttonStyle(footerBusy)}>
              {t("i18n.refresh")}
           </button>
           <button onClick={onClose} style={buttonStyle(false)}>
