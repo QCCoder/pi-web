@@ -10,14 +10,9 @@ import type {
   SessionTreeNode,
   UserMessage,
 } from "@/lib/types";
-import { sendAgentCommand } from "@/lib/agent-client";
-import {
-  createPromptRecoverySnapshot,
-  removeOptimisticPrompt,
-  shouldRestoreFailedPrompt,
-  userMessageKey,
-  type PromptRecoverySnapshot,
-} from "@/lib/prompt-recovery";
+import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { clearDraft, rekeyDraft, restoreDraftSubmission } from "@/lib/draft-store";
+import { userMessageKey } from "@/lib/prompt-recovery";
 import {
   createScrollFollowState,
   handleScrollEvent,
@@ -108,7 +103,6 @@ function normalizeQueuedMessages(q?: { steering?: string[]; followUp?: string[] 
 
 type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
-type PromptRecoveryState = PromptRecoverySnapshot & { failed: boolean };
 export type NoticeType = "info" | "success" | "warning" | "error";
 
 export type NoticeItem = {
@@ -161,7 +155,7 @@ export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: () => void;
-  onSessionCreated?: (session: SessionInfo) => void;
+  onSessionCreated?: (session: SessionInfo, sourceDraftKey?: string) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   /** 变化时强制重新加载当前 session（替代原 key={sessionKey} 的整树重建）。 */
@@ -275,6 +269,8 @@ export interface ChatInputHandle {
   replaceMessage: (message: UserMessage) => void;
   prependText: (text: string) => void;
   addImages: (files: File[]) => void;
+  rekeyDraft: (previousKey: string, nextKey: string) => void;
+  restoreSubmission: (text: string, images?: Array<{ data: string; mimeType: string }>, targetDraftKey?: string) => void;
 }
 
 export interface AttachedImage {
@@ -360,14 +356,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
-  const promptRecoveryRef = useRef<PromptRecoveryState | null>(null);
-  const messagesRef = useRef(messages);
-
-  // 失败提交的恢复快照（upstream 5158faf）：run 失败且乐观消息没落到 session 文件时，
-  // 下次加载把原文装回输入框。PromptRecoveryState = 快照 + failed 标记。
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
+  const draftKeyAliasesRef = useRef(new Map<string, string>());
+  const sessionHookMountedRef = useRef(true);
 
   // 写 SessionRuntimeStore：key 用 runtimeKeyRef（响应式 runtimeKey 的镜像，覆盖新会话
   // pre-id 写入——agentRunning/optimisticKey 等在 ensureNewSession 之前就要可见）。
@@ -421,6 +411,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
+  // 与 ChatWindow 传给 ChatInput 的 draftKey 同源：恢复/换key 都落在同一个 composer 上。
+  const composerDraftKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined);
+
+  const resolveComposerDraftKey = useCallback((key: string | undefined) => {
+    if (!key) return undefined;
+    let resolved = key;
+    const visited = new Set<string>();
+    while (!visited.has(resolved)) {
+      visited.add(resolved);
+      const next = draftKeyAliasesRef.current.get(resolved);
+      if (!next) break;
+      resolved = next;
+    }
+    return resolved;
+  }, []);
+
+  // 被明确拒绝/失败的提交：原文（含图片）并回目标 composer 草稿，不覆盖已输入内容
+  // （upstream 6ac87ec 的 draft 路线，取代 5158faf 的快照恢复）。
+  const restoreSubmission = useCallback((
+    text: string,
+    images: AttachedImage[] | undefined,
+    targetDraftKey: string | undefined,
+  ) => {
+    const draftImages = images?.map(({ data, mimeType }) => ({ data, mimeType }));
+    const destinationDraftKey = resolveComposerDraftKey(targetDraftKey);
+    const newSessionDraftKey = newSessionCwd ? `new:${newSessionCwd}` : null;
+    if (
+      !sessionHookMountedRef.current
+      && !newSessionPromotedRef.current
+      && targetDraftKey === newSessionDraftKey
+    ) return;
+    const input = opts.chatInputRef?.current;
+    if (input) {
+      input.restoreSubmission(text, draftImages, destinationDraftKey);
+    } else if (destinationDraftKey) {
+      restoreDraftSubmission(destinationDraftKey, text, draftImages);
+    }
+  }, [newSessionCwd, opts.chatInputRef, resolveComposerDraftKey]);
 
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) {
@@ -541,17 +569,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const revision = res.headers.get("etag") ?? undefined;
           const d = await res.json() as SessionData;
           if (sessionIdRef.current !== sid) return null;
-          // A prompt whose run failed (prompt_error / 发送异常) restores its text
-          // into the composer only when the session file never got it (upstream
-          // 5158faf). A successful later run invalidates the snapshot by runId.
-          const persistedMessages = d.context.messages;
-          const recovery = promptRecoveryRef.current;
-          if (recovery?.failed && recovery.runId === promptRunIdRef.current) {
-            promptRecoveryRef.current = null;
-            if (shouldRestoreFailedPrompt(recovery, persistedMessages)) {
-              opts.chatInputRef?.current?.replaceMessage(recovery.message);
-            }
-          }
           // Daemon-created session whose .jsonl hasn't been written yet answers
           // an empty-but-valid placeholder (no revision). Live SSE events may
           // already have appended messages to the cache slice — don't let the
@@ -606,7 +623,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (loadSessionAbortRef.current === ac) loadSessionAbortRef.current = null;
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applySessionData, reuseStableMessages, patchRuntime, opts.chatInputRef]);
+  }, [applySessionData, reuseStableMessages, patchRuntime]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -692,6 +709,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
     newSessionPromotedRef.current = true;
+    const provisionalDraftKey = newSessionCwd ? `new:${newSessionCwd}` : null;
+    if (provisionalDraftKey && provisionalDraftKey !== sid) {
+      draftKeyAliasesRef.current.set(provisionalDraftKey, sid);
+      const input = opts.chatInputRef?.current;
+      if (input) input.rekeyDraft(provisionalDraftKey, sid);
+      else rekeyDraft(provisionalDraftKey, sid);
+    }
     onSessionCreated?.({
       id: sid,
       path: "",
@@ -701,8 +725,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       modified: new Date().toISOString(),
       messageCount,
       firstMessage,
-    });
-  }, [isNew, newSessionCwd, onSessionCreated]);
+    }, provisionalDraftKey ?? undefined);
+  }, [isNew, newSessionCwd, onSessionCreated, opts.chatInputRef]);
 
   const ensureNewSession = useCallback(async () => {
     if (sessionIdRef.current) return sessionIdRef.current;
@@ -815,10 +839,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       patchRuntime({ optimisticUserMessageKey: null });
-      // Run 结束且未失败：恢复快照作废（upstream 5158faf 的 agent_end 语义）。
-      if (promptRecoveryRef.current && !promptRecoveryRef.current.failed) {
-        promptRecoveryRef.current = null;
-      }
       if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
       patchRuntime({ agentRunning: false, agentPhase: null, retryInfo: null });
       dispatch({ type: "end" });
@@ -951,14 +971,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return;
-    if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
+    if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) {
+      restoreSubmission(message, images, composerDraftKey);
+      return;
+    }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
-      if (!bashCmd) return;
+      if (!bashCmd) {
+        restoreSubmission(message, images, composerDraftKey);
+        return;
+      }
       await executeBashRef.current?.(bashCmd, isExcluded);
       return;
     }
@@ -975,14 +1001,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     // 新会话尚无缓存条目（runtimeKey=newSessionCwd）：建最小占位承载乐观消息，
     // promote 后 loadSession(真id) 用文件数据覆盖。已有条目则追加。
-    promptRecoveryRef.current = {
-      ...createPromptRecoverySnapshot(
-        promptRunId,
-        userMsg as UserMessage,
-        messagesRef.current,
-      ),
-      failed: false,
-    };
     {
       const key = runtimeKeyRef.current;
       if (!sessionMessagesCache.has(key)) {
@@ -1003,8 +1021,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 
+    let promptRequestStarted = false;
+    let sentSessionId: string | null = null;
     try {
-      let sentSessionId: string | null = null;
       if (isNew && newSessionCwd) {
         const selectedModel = newSessionModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
@@ -1019,16 +1038,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           await ensureSseConnected(sid);
+          promptRequestStarted = true;
           await sendAgentCommand(sid, {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
           });
           promoteNewSession(1, message);
+        } else {
+          throw new Error("No active session for the prompt");
         }
       } else if (session) {
         sentSessionId = session.id;
         await ensureSseConnected(session.id);
+        promptRequestStarted = true;
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
@@ -1040,31 +1063,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Failed to send message:", e);
-      const errorMessage = e instanceof Error ? e.message : String(e);
-      const recovery = promptRecoveryRef.current?.runId === promptRunId
-        ? promptRecoveryRef.current
-        : null;
-      if (recovery) recovery.failed = true;
-      addNotice({ type: "error", message: errorMessage });
-      if (e instanceof EventStreamConnectionError) {
-        // The prompt never reached the agent, so restore the user's text into
-        // the input instead of losing it — replacing (not appending) so a
-        // prompt that did persist comes back as an editable message only when
-        // the session file never got it.
-        if (recovery) {
-          const withoutOptimistic = removeOptimisticPrompt(messagesRef.current, recovery);
-          messagesRef.current = withoutOptimistic;
-          setMessages(withoutOptimistic);
-          if (shouldRestoreFailedPrompt(recovery, withoutOptimistic)) {
-            opts.chatInputRef?.current?.replaceMessage(recovery.message);
-          }
-          promptRecoveryRef.current = null;
-        }
+      // 明确被拒（服务端 prompt_rejected/accepted:false，或请求未发出）才立即回滚
+      // 并恢复草稿；派发后的传输失败是含糊的——服务端可能已受理，保持 SSE 等
+      // reconcile 确认空闲（upstream 6ac87ec）。
+      const definitivelyRejected = !promptRequestStarted || isPromptRejectedError(e);
+      if (!definitivelyRejected && sentSessionId) {
+        void waitForPromptSettlement(sentSessionId, promptRunId);
+        return;
       }
-      patchRuntime({ optimisticUserMessageKey: null, agentRunning: false, agentPhase: null });
+      patchRuntime({ optimisticUserMessageKey: null });
+      setMessages((prev) => {
+        const optimisticIndex = prev.lastIndexOf(userMsg);
+        return optimisticIndex === -1
+          ? prev
+          : [...prev.slice(0, optimisticIndex), ...prev.slice(optimisticIndex + 1)];
+      });
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      restoreSubmission(message, images, composerDraftKey);
+      // 拒绝只描述本次提交：另一标签页/漏掉的事件可能仍在同一 session 上跑真实
+      // 的回合，保留 SSE 连接直到服务端状态确认 wrapper 空闲。
+      if (sentSessionId) {
+        void reconcileAgentState(sentSessionId);
+        return;
+      }
+      patchRuntime({ agentRunning: false, agentPhase: null });
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureSseConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, patchRuntime, dispatch, setMessages]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureSseConnected, promoteNewSession, waitForPromptSettlement, addNotice, composerDraftKey, reconcileAgentState, restoreSubmission, patchRuntime, dispatch, setMessages]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (readRuntimeFor(runtimeKeyRef).agentRunning || readRuntimeFor(runtimeKeyRef).bashRunning) return;
@@ -1083,11 +1108,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to execute shell command:", e);
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      opts.chatInputRef?.current?.insertIfEmpty(inputText);
+      restoreSubmission(inputText, undefined, composerDraftKey);
     } finally {
       patchRuntime({ bashRunning: false, pendingBash: null });
     }
-  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session, patchRuntime]);
+  }, [addNotice, composerDraftKey, ensureNewSession, loadSession, promoteNewSession, restoreSubmission, session, patchRuntime]);
   executeBashRef.current = executeBash;
 
   const handleAbort = useCallback(async () => {
@@ -1278,28 +1303,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // the real user message when pi delivers it (user message_end event). An
   // optimistic chat bubble here would duplicate the queue panel and turn into
   // a ghost message if the queue is recalled.
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "steer",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
-      console.error("Failed to steer:", e);
-    }
-  }, []);
-
-  const handlePromptWithStreamingBehavior = useCallback(async (
+  // 让 AgentSession.prompt 原子地决定「排队跟随当前回合」还是「回合已结束就开新
+  // 轮」——直接发 steer/follow_up 可能把消息滞留在已空闲的队列里（upstream 6ac87ec）。
+  const sendStreamingPrompt = useCallback(async (
     message: string,
     behavior: "steer" | "followUp",
     images?: AttachedImage[],
   ) => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    const restore = () => restoreSubmission(message, images, composerDraftKey);
+    if (!sid) {
+      restore();
+      addNotice({ type: "error", message: "No active session for the queued message" });
+      return;
+    }
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -1309,24 +1326,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
-      console.error("Failed to queue prompt:", e);
+      console.error("Failed to submit streaming prompt:", e);
+      // 派发后的传输失败是含糊的：服务端可能已受理排队消息，此时恢复会招来重复回合。
+      if (isPromptRejectedError(e)) restore();
+      addNotice({
+        type: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
     }
-  }, []);
+  }, [addNotice, composerDraftKey, restoreSubmission]);
+
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
+    await sendStreamingPrompt(message, "steer", images);
+  }, [sendStreamingPrompt]);
+
+  const handlePromptWithStreamingBehavior = useCallback(async (
+    message: string,
+    behavior: "steer" | "followUp",
+    images?: AttachedImage[],
+  ) => {
+    await sendStreamingPrompt(message, behavior, images);
+  }, [sendStreamingPrompt]);
 
   const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "follow_up",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
-      console.error("Failed to follow up:", e);
-    }
-  }, []);
+    await sendStreamingPrompt(message, "followUp", images);
+  }, [sendStreamingPrompt]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1507,7 +1531,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dropCachedSession(runtimeKeyRef.current);
       setSessionRuntime(runtimeKeyRef.current, createDefaultSessionRuntimeState());
     }
+    sessionHookMountedRef.current = true;
     return () => {
+      sessionHookMountedRef.current = false;
+      // 新建会话中途放弃（没发过消息、没 promote 过）：清掉该临时草稿，避免
+      // 下次同 cwd 的新建会话吃到残稿。microtask 给「同 tick 内切换到真 session」
+      // 的场景留一次反悔机会（upstream 6ac87ec）。
+      const abandonedDraftKey = isNew && newSessionCwd ? `new:${newSessionCwd}` : null;
+      if (abandonedDraftKey) {
+        queueMicrotask(() => {
+          if (!sessionHookMountedRef.current && !newSessionPromotedRef.current) {
+            clearDraft(abandonedDraftKey);
+          }
+        });
+      }
       bashRecoveryIdRef.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1684,10 +1721,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         request.closed ? (current?.id === request.id ? null : current) : request),
       editorInsertText: (text) => opts.chatInputRef?.current?.insertText(text),
       finishPromptWithoutStream: (sid) => void finishPromptWithoutStream(sid),
-      markPromptRecoveryFailed: () => {
-        const recovery = promptRecoveryRef.current;
-        if (recovery?.runId === promptRunIdRef.current) recovery.failed = true;
-      },
     });
     return () => { globalAgentEvents.setActive(null, null); };
   }, [runtimeKey, onAgentEnd, addNotice, setExtensionDialog, setExtensionCustomUi, finishPromptWithoutStream, opts.chatInputRef]);

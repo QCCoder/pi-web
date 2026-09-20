@@ -9,11 +9,19 @@ import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
 // file-access allow-list with the daemon-returned cwd and invalidates the
 // session-list cache so the new .jsonl shows up immediately.
 export async function POST(req: Request) {
+  // Prompt 拒绝标注（upstream 6ac87ec）：建会话请求携带的 prompt 未被受理就
+  // 以错误应答时，附上 code/accepted 供客户端区分拒绝与含糊失败。
+  let commandType: string | undefined;
+  let promptAccepted = false;
   try {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
+    commandType = typeof body.type === "string" ? body.type : undefined;
 
     if (!body.cwd || typeof body.cwd !== "string") {
-      return NextResponse.json({ error: "cwd is required" }, { status: 400 });
+      return NextResponse.json({
+        error: "cwd is required",
+        ...(commandType === "prompt" ? { code: "prompt_rejected", accepted: false } : {}),
+      }, { status: 400 });
     }
 
     const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = body as {
@@ -49,9 +57,15 @@ export async function POST(req: Request) {
     // cache and answers "empty but valid" until the first append lands.
     if (result.sessionFile) cacheSessionPath(result.sessionId, result.sessionFile);
     invalidateSessionListCache();
+    promptAccepted = promptCommand.type === "prompt";
 
     return NextResponse.json({ success: true, sessionId: result.sessionId, data: result.data });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: daemonErrorStatus(error) });
+    return NextResponse.json({
+      error: error instanceof Error ? error.message : String(error),
+      ...(commandType === "prompt" && !promptAccepted
+        ? { code: "prompt_rejected", accepted: false }
+        : {}),
+    }, { status: daemonErrorStatus(error) });
   }
 }

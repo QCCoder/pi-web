@@ -11,17 +11,29 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  // Prompt 拒绝标注（upstream 6ac87ec）：prompt 命令未被受理就以错误应答时，
+  // 附上 code/accepted，客户端据此区分「确定被拒（回滚+恢复草稿）」与
+  // 「派发后传输失败（含糊，等 reconcile 定夺）」。
+  let commandType: string | undefined;
+  let promptAccepted = false;
 
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
+    commandType = typeof body.type === "string" ? body.type : undefined;
     if (typeof body.type !== "string") {
       return NextResponse.json({ error: "command type is required" }, { status: 400 });
     }
     const client = await daemonProxy();
     const result = await client.sendSessionCommand(id, body);
+    promptAccepted = body.type === "prompt";
     return NextResponse.json({ success: true, data: result.data });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: daemonErrorStatus(error) });
+    return NextResponse.json({
+      error: error instanceof Error ? error.message : String(error),
+      ...(commandType === "prompt" && !promptAccepted
+        ? { code: "prompt_rejected", accepted: false }
+        : {}),
+    }, { status: daemonErrorStatus(error) });
   }
 }
 
