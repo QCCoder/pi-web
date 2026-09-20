@@ -820,6 +820,13 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const [editDraft, setEditDraft] = useState("");
   const [savingFile, setSavingFile] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // One rendered-first default decision per opened file (upstream 51e0510's
+  // defaultPreviewEligibleRef latch). Consumed when the first chunk arrives, so
+  // finishing pagination of a >256KB markdown/html file — or an SSE/refresh
+  // repagination — can never force-flip the mode while the user is reading.
+  // Upstream remounts the viewer per file tab (keyed); this instance persists
+  // across filePath changes, so the latch is re-armed in the initial-load effect.
+  const defaultPreviewEligibleRef = useRef(true);
 
   const fetchContent = useCallback((filePath: string, offset = 0) => {
     return fetch(getFileApiUrl(filePath, "read", sourceSessionId, { offset: offset || undefined }))
@@ -876,6 +883,8 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     setSaveError(null);
     setWrapLines(false);
     setWatching(false);
+    // Re-arm the rendered-first default for the newly opened file.
+    defaultPreviewEligibleRef.current = true;
 
     if (esRef.current) {
       esRef.current.close();
@@ -916,19 +925,25 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
   useEffect(() => {
+    // Wait for the first chunk: the default decision is made exactly once per
+    // opened file and consumed whether or not it fires — a file that starts
+    // truncated (paged source reading) is never force-flipped to preview later.
+    if (!data) return;
+    const eligible = defaultPreviewEligibleRef.current;
+    defaultPreviewEligibleRef.current = false;
     // HTML gets the same rendered-first treatment as markdown: a generated page
     // is usually more useful viewed than read as source. Both have a preview
     // mode already; the source tab stays one click away. (upstream 51e0510)
-    // Only offer the rendered default when the whole file is here — the preview
-    // modes need complete content (truncated files keep the source view).
+    // Only decide on the complete file — the preview modes need full content.
     if (
-      (data?.language === "markdown" || data?.language === "html")
-      && !data?.truncated
+      eligible
+      && !data.truncated
+      && (data.language === "markdown" || data.language === "html")
       && initialDisplayMode !== "diff"
     ) {
       setDisplayMode("preview");
     }
-  }, [data?.language, data?.truncated, initialDisplayMode]);
+  }, [data, initialDisplayMode]);
 
   useEffect(() => {
     if (data && displayMode !== "edit") setEditDraft(data.content);
