@@ -39,6 +39,8 @@ interface FileData {
   content: string;
   language: string;
   size: number;
+  nextOffset: number;
+  truncated: boolean;
   modified: number;
   editable: boolean;
 }
@@ -806,6 +808,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const [gitDiff, setGitDiff] = useState<GitFileDiffResponse | null>(null);
   const [gitDiffLoading, setGitDiffLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("source");
   const [wrapLines, setWrapLines] = useState(false);
@@ -818,8 +821,8 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const [savingFile, setSavingFile] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const fetchContent = useCallback((filePath: string) => {
-    return fetch(getFileApiUrl(filePath, "read", sourceSessionId))
+  const fetchContent = useCallback((filePath: string, offset = 0) => {
+    return fetch(getFileApiUrl(filePath, "read", sourceSessionId, { offset: offset || undefined }))
       .then((r) => r.json())
       .then((d: FileData & { error?: string }) => {
         if (d.error) {
@@ -827,7 +830,11 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
           return null;
         }
         setError(null);
-        setData(d);
+        // "Load more" responses append to what is already on screen; a fresh
+        // read (offset 0, e.g. the SSE change refetch) replaces it.
+        setData((current) => offset && current
+          ? { ...d, content: current.content + d.content }
+          : d);
         return d;
       })
       .catch((e) => {
@@ -909,10 +916,12 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
   useEffect(() => {
-    if (data?.language === "markdown" && initialDisplayMode !== "diff") {
+    // Only offer the rendered default when the whole file is here — the preview
+    // modes need complete content (truncated files keep the source view).
+    if (data?.language === "markdown" && !data?.truncated && initialDisplayMode !== "diff") {
       setDisplayMode("preview");
     }
-  }, [data?.language, initialDisplayMode]);
+  }, [data?.language, data?.truncated, initialDisplayMode]);
 
   useEffect(() => {
     if (data && displayMode !== "edit") setEditDraft(data.content);
@@ -1011,7 +1020,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     if (data && editDraft !== data.content && !window.confirm("Discard unsaved changes?")) return;
     setEditDraft(data?.content ?? "");
     setSaveError(null);
-    setDisplayMode(data?.language === "markdown" ? "preview" : "source");
+    setDisplayMode(data?.language === "markdown" && !data?.truncated ? "preview" : "source");
   }, [data, editDraft]);
 
   useEffect(() => {
@@ -1057,7 +1066,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const content = data?.content ?? "";
   const isHtml = language === "html";
   const isMarkdown = language === "markdown";
-  const hasPreview = isHtml || isMarkdown;
+  const hasPreview = !data?.truncated && (isHtml || isMarkdown);
   const markdownDirectory = getFileDirectory(filePath);
   const lines = content.split("\n");
   const effectiveDisplayMode = isDeletedDiff ? "diff" : displayMode;
@@ -1073,7 +1082,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     : `${language} · ${lines.length} lines · ${formatSize(data!.size)}`;
 
   return (
-    <div className="file-viewer-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    <div className="file-viewer-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative" }}>
       <div
         className="file-viewer-toolbar"
         style={{
@@ -1131,7 +1140,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
           )}
 
           <div className="file-viewer-actions">
-            {effectiveDisplayMode !== "edit" && data?.editable && (
+            {effectiveDisplayMode !== "edit" && data?.editable && !data?.truncated && (
               <button
                 type="button"
                 onClick={() => {
@@ -1207,8 +1216,38 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
         </div>
       </div>
 
+      {data?.truncated && (
+        <div
+          className="file-viewer-load-more"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            padding: "5px 8px",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            color: "var(--text-dim)",
+            fontSize: 11,
+          }}
+        >
+          <span>{formatSize(data.nextOffset)} / {formatSize(data.size)}</span>
+          <button
+            type="button"
+            className="file-viewer-mode-button"
+            disabled={loadingMore}
+            onClick={() => {
+              setLoadingMore(true);
+              void fetchContent(filePath, data.nextOffset).finally(() => setLoadingMore(false));
+            }}
+          >
+            {loadingMore ? t("i18n.loading") : t("i18n.loadMore")}
+          </button>
+        </div>
+      )}
+
       {/* Content area */}
-      <div ref={contentRef} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
+      <div ref={contentRef} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)", paddingBottom: data?.truncated ? 48 : undefined }}>
         {effectiveDisplayMode === "edit" ? (
           <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
             {saveError && (

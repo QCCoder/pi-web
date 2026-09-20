@@ -22,6 +22,7 @@ import {
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { isApiRequestAllowed } from "@/lib/request-security";
+import { readTextPreviewChunk } from "@/lib/text-preview";
 import {
   inspectUploadTargets,
   parseUploadConflictStrategy,
@@ -602,13 +603,18 @@ export async function GET(
       if (documentMime) {
         return streamFile(filePath, stat, documentMime, request.headers.get("range"));
       }
-      if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
-        return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
+      const rawOffset = request.nextUrl.searchParams.get("offset");
+      if (rawOffset !== null && !/^\d+$/.test(rawOffset)) {
+        return NextResponse.json({ error: "Invalid text preview offset" }, { status: 400 });
       }
-      const content = fs.readFileSync(filePath, "utf-8");
+      const offset = Number(rawOffset ?? 0);
+      if (!Number.isSafeInteger(offset) || offset > stat.size) {
+        return NextResponse.json({ error: "Invalid text preview offset" }, { status: 400 });
+      }
+      const chunk = readTextPreviewChunk(filePath, stat.size, offset);
       const language = getLanguage(filePath);
       return NextResponse.json({
-        content,
+        ...chunk,
         language,
         size: stat.size,
         modified: stat.mtimeMs,
