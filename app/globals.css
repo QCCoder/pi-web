@@ -317,6 +317,11 @@ pre, code {
 
 /* react-markdown output styles */
 .markdown-body {
+  /* Keep wide markdown (long inline code, wide images) from stretching the
+     flex column and shifting the mobile layout sideways (upstream 0ada6c7). */
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   font-size: 14px;
   line-height: 1.7;
   color: var(--text);
@@ -565,6 +570,11 @@ pre, code {
 
 .markdown-code-block {
   position: relative;
+  /* Fill the column instead of sizing to content so a wide code block cannot
+     widen the page on narrow viewports (upstream 0ada6c7). */
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin: 6px 0;
   border: 1px solid var(--border);
   border-radius: 7px;
