@@ -29,10 +29,6 @@ export function ChatToolbar() {
   const {
     sidebarOpen,
     setSidebarOpen,
-    activeWorkspace,
-    handleShowOverview,
-    openCenterPage,
-    centerPage,
     activeTopPanel,
     setActiveTopPanel,
     toggleTopPanel,
@@ -64,11 +60,6 @@ export function ChatToolbar() {
   const handleSidebarToggle = useCallback(() => {
     setSidebarOpen((open) => !open);
   }, [setSidebarOpen]);
-  // 工作区作用域的两个快捷入口（树形侧栏改版配套：树不再打开总览，归档
-  // 不再挂组尾——两个入口回到工具条，作用于当前工作区上下文）。无活动
-  // 工作区时禁用置灰。
-  const workspaceHomeEnabled = Boolean(activeWorkspace);
-  const archiveActive = centerPage?.kind === "archive" && activeWorkspace != null && centerPage.workspaceId === activeWorkspace.id;
 
   return (
 <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
