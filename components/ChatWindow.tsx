@@ -1,6 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
@@ -31,6 +31,10 @@ import {
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  /** 会话搜索深跳转目标（上游 1cbd96f）：定位 entryId（+ blockIndex）并滚动
+   *  高亮；完成后经 onSearchTargetHandled 注销。 */
+  searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
+  onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -146,7 +150,7 @@ function withAssistantBlocks(
   return next;
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, children, t }: { messageCount: number; toolCallCount: number; hasExpandedChild?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, reveal, children, t }: { messageCount: number; toolCallCount: number; hasExpandedChild?: boolean; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(false);
   // 分组内的块在流式气泡里被展开过（如盯着看长 bash 输出），message_end 后块移入
   // 分组 —— 分组要跟着张开一次，否则展开的块藏进折叠头里，看起来仍是被收起。
@@ -154,6 +158,10 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, ch
   useEffect(() => {
     if (hasExpandedChild) setExpanded(true);
   }, [hasExpandedChild]);
+  // 搜索深跳转命中分组内的消息：临时强制张开让高亮目标可见（上游 1cbd96f）。
+  useLayoutEffect(() => {
+    if (reveal) setExpanded(true);
+  }, [reveal]);
   const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
 
@@ -161,7 +169,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, ch
     <div style={{ marginBottom: 14 }}>
       <button
         type="button"
-        aria-expanded={expanded}
+        aria-expanded={expanded || reveal}
         onClick={() => setExpanded((v) => !v)}
         style={{
           display: "flex",
@@ -186,7 +194,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, ch
           {parts.join(" · ")}
         </span>
       </button>
-      {expanded && (
+      {(expanded || reveal) && (
         <div style={{ marginTop: 8 }}>
           {children}
         </div>
@@ -195,7 +203,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, ch
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, draftKeyOverride, inputLeadingControl }: Props) {
+export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTargetHandled, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, draftKeyOverride, inputLeadingControl }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -239,6 +247,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     isNew,
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef,
+    scrollToMessage,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
@@ -331,6 +340,59 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
     prevScrollDistanceRef.current = null;
   }, [visibleCount, scrollContainerRef]);
+
+  // --- 会话搜索深跳转（上游 1cbd96f）---
+  // 命中 entry 不在当前窗口时，多翻一页更早的消息再找（上游语义：一页 200 条；
+  // 更深或其他分支的命中只打开会话、不定位）。找到后放大渲染窗口到全覆盖，
+  // 交由下方 useLayoutEffect 滚动 + 高亮。
+  const [pendingSearchScroll, setPendingSearchScroll] = useState<Props["searchTarget"]>(null);
+  const searchMessage = messages[entryIds.indexOf(pendingSearchScroll?.entryId ?? "")];
+  const searchBlock = searchMessage?.role === "assistant"
+    ? (pendingSearchScroll?.blockIndex === undefined
+      ? (searchMessage.content as AssistantContentBlock[]).find((block) => block.type === "text")
+      : (searchMessage.content as AssistantContentBlock[])[pendingSearchScroll.blockIndex])
+    : undefined;
+  const searchHistoryRef = useRef({ entryIds, hasEarlierMessages, loadingEarlier });
+  searchHistoryRef.current = { entryIds, hasEarlierMessages, loadingEarlier };
+
+  useEffect(() => {
+    if (!searchTarget || loading) return;
+    let cancelled = false;
+    const locate = async () => {
+      let found = searchHistoryRef.current.entryIds.includes(searchTarget.entryId);
+      if (!found && !sessionBusy && searchHistoryRef.current.hasEarlierMessages && !searchHistoryRef.current.loadingEarlier) {
+        await loadEarlier(200);
+        found = !cancelled && searchHistoryRef.current.entryIds.includes(searchTarget.entryId);
+      }
+      if (cancelled) return;
+      if (found) {
+        prevScrollDistanceRef.current = null;
+        setVisibleCount((current) => Math.max(current, (searchHistoryRef.current.entryIds.length + 200) * 2));
+        setPendingSearchScroll(searchTarget);
+      } else {
+        onSearchTargetHandled?.(searchTarget);
+      }
+    };
+    void locate();
+    return () => { cancelled = true; };
+  }, [searchTarget, loading, sessionBusy, loadEarlier, onSearchTargetHandled]);
+
+  useLayoutEffect(() => {
+    if (!pendingSearchScroll || pendingSearchScroll !== searchTarget) return;
+    const selector = `[data-entry-id="${CSS.escape(pendingSearchScroll.entryId)}"]`;
+    const element = scrollContainerRef.current?.querySelector<HTMLElement>(
+      searchMessage?.role === "user" ? selector : `${selector} [data-search-target]`,
+    );
+    if (element) {
+      scrollToMessage(element);
+      element.animate([
+        { backgroundColor: "var(--bg-selected)" },
+        { backgroundColor: "transparent" },
+      ], { duration: 2500 });
+    }
+    setPendingSearchScroll(null);
+    onSearchTargetHandled?.(pendingSearchScroll);
+  }, [pendingSearchScroll, searchTarget, searchMessage, scrollContainerRef, scrollToMessage, onSearchTargetHandled]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -413,7 +475,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   // WITHOUT touching messages/entryIds/isStreaming, so omitting it makes the
   // cache below short-circuit the re-render — and the subagent panel / "open →"
   // button never appears while the subagent is running.
-  const historyRenderKey = useMemo(() => ({}), [messages, entryIds, visibleCount, sessionBusy, isNew, streamState.isStreaming, forkingEntryId, modelNames, messageCwd, onOpenFile, handleFork, handleNavigate, handleEditContent, session?.id, t, toolExecutionUpdates]);
+  const historyRenderKey = useMemo(() => ({}), [messages, entryIds, visibleCount, sessionBusy, isNew, streamState.isStreaming, forkingEntryId, modelNames, messageCwd, onOpenFile, handleFork, handleNavigate, handleEditContent, session?.id, t, toolExecutionUpdates, pendingSearchScroll]);
   const historyRenderCacheRef = useRef<{ key: object; nodes: ReactNode } | null>(null);
 
   // Partial tool results streamed via tool_execution_update, surfaced to the
@@ -741,11 +803,14 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+                    searchBlock={entryIds[idx] === pendingSearchScroll?.entryId ? searchBlock : undefined}
                   />
                 );
-                if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
+                if (!isVisible || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${keyPrefix}-${entryKey}`} ref={attachVisibleRef(idx, currentRefIdx)}>
+                  // data-entry-id：搜索深跳转的定位锚点（上游 1cbd96f）。attachRef=false
+                  // 的消息（处理详情分组内）也要带锚点——命中可能落在分组里。
+                  <div key={`${keyPrefix}-${entryKey}`} data-entry-id={entryIds[idx]} ref={options.attachRef === false ? undefined : attachVisibleRef(idx, currentRefIdx)}>
                     {view}
                   </div>
                 );
@@ -809,6 +874,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     <ProcessDetailsGroup
                        messageCount={processCount}
                        t={t}
+                      reveal={Boolean(pendingSearchScroll && (visibleProcessIndices.some((index) => entryIds[index] === pendingSearchScroll.entryId) || (searchBlock && finalSplit.processBlocks.includes(searchBlock))))}
                       hasExpandedChild={(() => {
                         // 分组内是否有用户展开着的 toolCall（含从流式气泡移入的）。
                         const ids: string[] = [];

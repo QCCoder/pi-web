@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar, FILES_TAB_ID } from "../TabBar";
@@ -25,6 +25,7 @@ import { SessionTabBar } from "../SessionTabBar";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { useI18n } from "@/hooks/useI18n";
 import { getFileName } from "@/lib/file-paths";
+import type { SessionInfo } from "@/lib/types";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "@/lib/terminal-tab-state";
 import { useShell } from "./context";
 import type { SessionTabState } from "@/lib/session-tabs";
@@ -142,6 +143,20 @@ export function DesktopShell() {
 
   // Loop 配置变更 → 总览 Loops 区块刷新信号（创建/删除/frontmatter 保存后 bump）。
   const [loopsRefreshKey, setLoopsRefreshKey] = useState(0);
+
+  // ---- 会话全文搜索深跳转（上游 1cbd96f）------------------------------------
+  // searchTarget 归 DesktopShell 自有（不进 useAppShellState）：搜索结果行选择
+  // 会话时先记下 entryId/blockIndex，再走常规 handleSelectSession 打开会话；
+  // 中央 ChatWindow 定位完成后经 handleSearchTargetHandled 注销（按 target 身份
+  // 比较，避免误清后来的新目标）。
+  const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
+  const handleSelectSearchHit = useCallback((session: SessionInfo, entryId?: string, blockIndex?: number) => {
+    setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
+    handleSelectSession(session);
+  }, [handleSelectSession]);
+  const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
+    setSearchTarget((current) => current === target ? null : current);
+  }, []);
 
   // 首页上下文（无活动工作区 tab）：composer 选区 / 首页会话归属 → 决定
   // 首页主区新建会话页与右栏文件区的上下文工作区。
@@ -403,6 +418,8 @@ export function DesktopShell() {
         onOpenWorkspace={handleOpenWorkspace}
         onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
         onSelectSession={handleSelectSession}
+        onSelectSearchHit={handleSelectSearchHit}
+        sessionListVersion={sessionActivity.listVersion}
         onOpenSessionInNewTab={openSessionTab}
         onSessionRemoved={handleSessionRemoved}
         onCreateWorkspace={handleCreateWorkspace}
@@ -482,6 +499,8 @@ export function DesktopShell() {
               <ChatWindow
                 reloadSignal={sessionKey}
                 session={selectedSession}
+                searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
+                onSearchTargetHandled={handleSearchTargetHandled}
                 newSessionCwd={effectiveNewSessionCwd}
                 draftKeyOverride={activeTab?.kind === "new-session" ? activeTab.id : undefined}
                 inputLeadingControl={

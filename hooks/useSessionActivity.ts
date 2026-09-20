@@ -42,6 +42,10 @@ export function useSessionActivity(
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set(seed?.runningIds ?? []));
   const [loaded, setLoaded] = useState(() => seed != null);
   const [completedIds, setCompletedIds] = useState<Set<string>>(() => loadIds(COMPLETED_KEY));
+  /** 会话列表版本（服务端磁盘目录缓存代数）：/api/sessions 响应携带，作为
+   *  搜索的跨窗口 refreshKey 暴露给视图层。 */
+  const [listVersion, setListVersion] = useState<number | null>(null);
+  const listVersionRef = useRef<number | null>(null);
   const previousRunningRef = useRef<Set<string>>(loadIds(LAST_RUNNING_KEY));
   const receivedSnapshotRef = useRef(false);
 
@@ -49,9 +53,13 @@ export function useSessionActivity(
     try {
       const response = await fetch("/api/sessions");
       if (!response.ok) return;
-      const data = await response.json() as { sessions?: SessionInfo[]; runningSessionIds?: string[] };
+      const data = await response.json() as { sessions?: SessionInfo[]; runningSessionIds?: string[]; sessionListVersion?: number };
       const nextSessions = data.sessions ?? [];
       setSessions(nextSessions);
+      if (typeof data.sessionListVersion === "number") {
+        listVersionRef.current = data.sessionListVersion;
+        setListVersion(data.sessionListVersion);
+      }
       if (!receivedSnapshotRef.current) setRunningIds(new Set(data.runningSessionIds ?? []));
       const existing = new Set(nextSessions.map((session) => session.id));
       setCompletedIds((current) => new Set([...current].filter((id) => existing.has(id))));
@@ -61,6 +69,29 @@ export function useSessionActivity(
       setLoaded(true);
     }
   }, []);
+
+  // 跨窗口同步（上游 1cbd96f 的 sessionListVersion 比对轮询）：本窗口看不到
+  // 的会话增删（其他窗口/归档/CLI 改动触发服务端 invalidation）靠版本变化
+  // 察觉并重拉列表——搜索结果（refreshKey=listVersion）随之自动重跑。
+  // 上游语义：只在前台轮询轻量版本端点；发现变化复用已失效缓存，不 force。
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void (async () => {
+        try {
+          const res = await fetch("/api/sessions/version");
+          if (!res.ok) return;
+          const data = await res.json() as { sessionListVersion?: number };
+          if (typeof data.sessionListVersion !== "number") return;
+          if (data.sessionListVersion !== listVersionRef.current) await loadSessions();
+        } catch {
+          // Keep the last known state; the next tick retries.
+        }
+      })();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [loadSessions]);
 
   useEffect(() => {
     // Coalesce bursts of refreshKey bumps (an archive cascade or a work-item
@@ -128,5 +159,5 @@ export function useSessionActivity(
     return () => window.removeEventListener("storage", sync);
   }, []);
 
-  return { sessions, runningIds, completedIds, loaded };
+  return { sessions, runningIds, completedIds, loaded, listVersion };
 }

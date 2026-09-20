@@ -644,9 +644,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [patchRuntime]);
 
-  /** L3：把更早的一页消息前置到当前窗口（顶部哨兵触发）。锚点 = 当前窗口头部
-   *  entryId；分支用当前 activeLeafId（会话继续追加也不影响旧分支锚点）。 */
-  const loadEarlier = useCallback(async () => {
+  /** L3：把更早的一页消息前置到当前窗口（顶部哨兵触发；搜索深跳转传更大的
+   *  limit 多翻一页）。锚点 = 当前窗口头部 entryId；分支用当前 activeLeafId
+   *  （会话继续追加也不影响旧分支锚点）。 */
+  const loadEarlier = useCallback(async (limit = 100) => {
     const sid = session?.id;
     if (!sid) return;
     if (earlierInFlightRef.current) return;
@@ -660,7 +661,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         patchRuntime({ hasEarlierMessages: false, loadingEarlier: false });
         return;
       }
-      const params = new URLSearchParams({ before: anchor, limit: "100", deferThinking: "1", deferMedia: "1" });
+      const params = new URLSearchParams({ before: anchor, limit: String(limit), deferThinking: "1", deferMedia: "1" });
       if (activeLeafId) params.set("leafId", activeLeafId);
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/earlier?${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1385,6 +1386,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     container.scrollTo({ top: container.scrollHeight, behavior });
   }, []);
 
+  /** 搜索深跳转（上游 1cbd96f）：把命中消息滚到视口顶部附近（16px 偏移）。
+   *  跳转 = 离开尾部的强信号：先刷新用户滚动意图窗，让随后的 scroll 事件按
+   *  「用户主动离开底部」判定停掉流式跟随（chat-scroll-follow 的上滑/远离底部
+   *  两分支都覆盖），滚回底部才恢复。 */
+  const scrollToMessage = useCallback((element: HTMLElement) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    noteUserScrollIntent(scrollFollowRef.current, Date.now());
+    initialScrollDoneRef.current = true;
+    pendingScrollToUserRef.current = false;
+    container.scrollTo({
+      top: element.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 16,
+      behavior: "instant",
+    });
+  }, []);
+
   const markUserScrollIntent = useCallback((event: Event) => {
     if (event instanceof KeyboardEvent) {
       if (!SCROLL_KEYS.has(event.key)) return;
@@ -1690,6 +1707,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    scrollToMessage,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
   };

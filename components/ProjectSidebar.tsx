@@ -6,8 +6,10 @@ import type { SessionInfo } from "@/lib/types";
 import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { computeMenuLayout, readViewportWindow, type MenuLayout } from "@/lib/dropdown-layout";
+import { useI18n } from "@/hooks/useI18n";
 import type { CenterPage } from "./shell/useAppShellState";
 import { SessionRow } from "./SessionRow";
+import { SessionSearch } from "./SessionSearch";
 
 /**
  * 项目树侧栏（2026-09 grill 共识：左侧 = 单一树形侧栏，取代图标栏 + 中栏
@@ -50,6 +52,10 @@ interface Props {
   /** 节点行 hover 的「归档」按钮 → 中央区归档页（工作区作用域就地）。 */
   onOpenArchive: (workspace: WorkspaceSummary) => void;
   onSelectSession: (session: SessionInfo) => void;
+  /** 搜索结果命中行：带 entryId/blockIndex 的深跳转（打开会话并定位到具体消息）。 */
+  onSelectSearchHit: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
+  /** 会话列表版本（跨窗口同步）：变化时让进行中的搜索重新执行。 */
+  sessionListVersion: number | null;
   onOpenSessionInNewTab: (session: SessionInfo) => void;
   onSessionRemoved: (id: string) => void;
   onCreateWorkspace: () => void;
@@ -142,6 +148,8 @@ export function ProjectSidebar({
   onOpenWorkspace,
   onOpenArchive,
   onSelectSession,
+  onSelectSearchHit,
+  sessionListVersion,
   onOpenSessionInNewTab,
   onSessionRemoved,
   onCreateWorkspace,
@@ -149,6 +157,11 @@ export function ProjectSidebar({
   onOpenCenterPage,
   workspaceActivity,
 }: Props) {
+  const { t } = useI18n();
+  // 会话全文搜索（上游 1cbd96f 移植）：开关 + 输入框 + 结果列表（SessionSearch
+  // 活跃时替换树主体；结果行带片段预览，点击深跳转到具体消息）。
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
+  const [sessionSearchQuery, setSessionSearchQuery] = useState("");
   // 折叠状态：SSR 先空（服务端无 localStorage），挂载后读取持久化值——避免
   // 服务端/客户端首帧不一致的 hydration mismatch（同 sidebarWidth 的模式）。
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -326,7 +339,7 @@ export function ProjectSidebar({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      {/* 顶部：新建任务（主体 = 当前工作区/首页快速路径）+ ▾（选工作区新建）。 */}
+      {/* 顶部：新建任务（主体 = 当前工作区/首页快速路径）+ 搜索开关。 */}
       <div style={{ display: "flex", alignItems: "stretch", gap: 4, padding: "10px 8px 6px", flexShrink: 0 }}>
         <button
           type="button"
@@ -353,7 +366,66 @@ export function ProjectSidebar({
           </svg>
           新建任务
         </button>
+        <button
+          type="button"
+          onClick={() => setSessionSearchOpen((open) => !open)}
+          title={t("sidebar.toggleSessionSearch")}
+          aria-label={t("sidebar.toggleSessionSearch")}
+          aria-expanded={sessionSearchOpen}
+          aria-controls="session-search-input"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 34,
+            flexShrink: 0,
+            border: sessionSearchOpen ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)",
+            borderRadius: 8,
+            background: sessionSearchOpen ? "var(--bg-selected)" : "var(--bg-hover)",
+            color: sessionSearchOpen ? "var(--accent)" : "var(--text-muted)",
+            cursor: "pointer",
+          }}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+          </svg>
+        </button>
       </div>
+
+      {/* 会话全文搜索输入框（上游同款：Escape 清空，展开时置顶）。 */}
+      {sessionSearchOpen && (
+        <div style={{ padding: "0 8px 6px", flexShrink: 0 }}>
+          <input
+            id="session-search-input"
+            type="search"
+            autoFocus
+            value={sessionSearchQuery}
+            maxLength={200}
+            aria-label={t("sidebar.searchSessions")}
+            placeholder={t("sidebar.searchSessions")}
+            onChange={(event) => setSessionSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setSessionSearchQuery("");
+              }
+            }}
+            style={{
+              display: "block",
+              width: "100%",
+              height: 29,
+              minWidth: 0,
+              padding: "0 10px",
+              border: "1px solid var(--border)",
+              borderRadius: 7,
+              background: "var(--bg)",
+              color: "var(--text)",
+              fontSize: 12,
+              outline: "none",
+            }}
+          />
+        </div>
+      )}
 
       {/* 分区标题：工作区 + ＋（新建工作区 / 导入目录）——标题左缩进对齐
           节点名称（文件夹图标右侧），整体往右。 */}
@@ -394,7 +466,18 @@ export function ProjectSidebar({
         </button>
       </div>
 
-      <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto" }}>{renderBody()}</div>
+      {/* 搜索活跃（开+有词）时 SessionSearch 用结果列表替换树主体；结果点击 =
+          onSelectSearchHit（带 entryId/blockIndex 的深跳转）。refreshKey 用列表
+          版本：其他窗口的会话变化经同步刷新后，进行中的搜索自动重跑。 */}
+      <SessionSearch
+        open={sessionSearchOpen}
+        query={sessionSearchQuery}
+        refreshKey={sessionListVersion}
+        selectedSessionId={selectedSessionId}
+        onSelectSession={onSelectSearchHit}
+      >
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto" }}>{renderBody()}</div>
+      </SessionSearch>
 
       {/* 底部四入口：设置 / 模型 / 插件 / Skills（全局配置心智，打开 = 中央区
           整页）。圆角按钮 + 内缩，hover/选中有圆角底。 */}
