@@ -916,9 +916,16 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
   useEffect(() => {
+    // HTML gets the same rendered-first treatment as markdown: a generated page
+    // is usually more useful viewed than read as source. Both have a preview
+    // mode already; the source tab stays one click away. (upstream 51e0510)
     // Only offer the rendered default when the whole file is here — the preview
     // modes need complete content (truncated files keep the source view).
-    if (data?.language === "markdown" && !data?.truncated && initialDisplayMode !== "diff") {
+    if (
+      (data?.language === "markdown" || data?.language === "html")
+      && !data?.truncated
+      && initialDisplayMode !== "diff"
+    ) {
       setDisplayMode("preview");
     }
   }, [data?.language, data?.truncated, initialDisplayMode]);
@@ -1020,7 +1027,11 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     if (data && editDraft !== data.content && !window.confirm("Discard unsaved changes?")) return;
     setEditDraft(data?.content ?? "");
     setSaveError(null);
-    setDisplayMode(data?.language === "markdown" && !data?.truncated ? "preview" : "source");
+    setDisplayMode(
+      (data?.language === "markdown" || data?.language === "html") && !data?.truncated
+        ? "preview"
+        : "source",
+    );
   }, [data, editDraft]);
 
   useEffect(() => {
