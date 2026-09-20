@@ -103,3 +103,7 @@ export interface PluginsResponse {
   diagnostics: PluginDiagnostic[];
   projectResourcesLoaded: boolean;
 }
+
+export interface PushConfigResponse {
+  publicKey: string;
+}

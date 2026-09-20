@@ -15,6 +15,7 @@ const nextConfig: NextConfig = {
   devIndicators: false,
   serverExternalPackages: [
     "undici",
+    "web-push",
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",
