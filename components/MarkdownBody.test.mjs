@@ -10,13 +10,19 @@ const jiti = createJiti(import.meta.url, {
 });
 const { MarkdownBody } = await jiti.import("./MarkdownBody.tsx");
 const { normalizeDisplayMath } = await jiti.import("../lib/markdown.ts");
+const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
-function renderMarkdown(markdown) {
+function renderMarkdown(markdown, props = {}) {
   return renderToStaticMarkup(
-    React.createElement(MarkdownBody, {
-      cwd: "/home/me/project",
-      onOpenFile() {},
-    }, markdown),
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(MarkdownBody, {
+        cwd: "/home/me/project",
+        onOpenFile() {},
+        ...props,
+      }, markdown),
+    ),
   );
 }
 
@@ -103,4 +109,19 @@ test("does not normalize escaped delimiters or link destinations", () => {
 
   assert.equal(normalizeDisplayMath(escaped), escaped);
   assert.equal(normalizeDisplayMath(link), link);
+});
+
+test("previews completed Mermaid diagrams by default", () => {
+  const html = renderMarkdown("```mermaid\ngraph TD\n  A --> B\n```");
+
+  assert.match(html, /mermaid-block-loading/);
+  assert.match(html, />Source</);
+  assert.doesNotMatch(html, /A --&gt; B/);
+});
+
+test("keeps Mermaid source visible while the response is streaming", () => {
+  const html = renderMarkdown("```mermaid\ngraph TD\n  A --> B\n```", { isStreaming: true });
+
+  assert.match(html, /A --&gt; B/);
+  assert.doesNotMatch(html, /mermaid-block-loading/);
 });
