@@ -20,6 +20,20 @@ function hostnameFromAuthority(value: string): string | null {
   }
 }
 
+function normalizeAuthority(value: string): string | null {
+  if (!value || /[\s/@\\]/.test(value)) return null;
+  try {
+    const parsed = new URL(`http://${value}`);
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      return null;
+    }
+    const hostname = normalizeHostname(parsed.hostname);
+    return parsed.port ? `${hostname}:${parsed.port}` : hostname;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeConfiguredHostname(value: string | undefined): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
@@ -70,6 +84,39 @@ export function isApiRequestHostAllowed(
   );
 }
 
+/**
+ * A relay can report the external scheme in `x-forwarded-proto`; Next folds
+ * that into request.url, while a rewriting relay (Azure Dev Tunnels, upstream
+ * #497) may stamp Origin with the *backend* authority's scheme — the two then
+ * disagree on scheme alone for a request that really is same-origin (measured
+ * live: 403 before this relaxation). Accept that pairing only when the
+ * Origin's authority still equals the Host header (which a cross-origin page
+ * cannot forge), Fetch Metadata still reports a same-origin request (upstream
+ * b80ed3d hardening; non-browser clients without Fetch Metadata keep the
+ * exact-origin comparison), and a proxy is actually in front. Direct requests
+ * keep the exact-origin comparison; no forwarded header means no behavior
+ * change (fail-closed).
+ */
+function isProxyRewrittenSameOrigin(request: Request, origin: string): boolean {
+  if (
+    request.headers.get("sec-fetch-site") !== "same-origin"
+    || !request.headers.get("x-forwarded-proto")
+  ) return false;
+
+  const host = request.headers.get("host");
+  if (!host) return false;
+
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    return false;
+  }
+
+  const originAuthority = normalizeAuthority(originHost);
+  return originAuthority !== null && originAuthority === normalizeAuthority(host);
+}
+
 /** Reject browser cross-site API requests while preserving non-browser clients. */
 export function isApiRequestOriginAllowed(request: Request): boolean {
   const origin = request.headers.get("origin");
@@ -78,7 +125,9 @@ export function isApiRequestOriginAllowed(request: Request): boolean {
   if (!origin) return true;
 
   const requestOrigin = getRequestOrigin(request);
-  return requestOrigin !== null && canonicalOrigin(origin) === requestOrigin;
+  if (requestOrigin !== null && canonicalOrigin(origin) === requestOrigin) return true;
+
+  return isProxyRewrittenSameOrigin(request, origin);
 }
 
 export function shouldCheckApiRequestOrigin(request: Request): boolean {
