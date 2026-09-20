@@ -205,6 +205,9 @@ export class AgentSessionWrapper {
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallbacks: Array<() => void> = [];
+  /** Guards session_shutdown against double emission when shutdown is
+   *  delivered out of band and destroy() only finishes the dispose. */
+  private sessionShutdownEmitted = false;
   private _alive = true;
   /** Set on agent_start, consumed by notifyAgentRunCompleteIfIdle when the
    *  run settles — gates completion pushes to runs that actually started. */
@@ -782,8 +785,46 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
-    for (const cb of [...this.onDestroyCallbacks]) cb();
-    notifyRunningChange();
+
+    const finishDispose = () => {
+      try {
+        // SDK dispose aborts retry/compaction/bash, invalidates the extension
+        // runner and runs the registered per-session resource cleanups (MCP
+        // children and friends). In a long-lived daemon, skipping it leaks
+        // those resources for every session torn down here.
+        this.inner.dispose?.();
+      } finally {
+        for (const cb of [...this.onDestroyCallbacks]) cb();
+        notifyRunningChange();
+      }
+    };
+
+    // Every dispose path funnels through destroy() (idle timeout, heartbeat
+    // kill, session delete, fork-destroy, process exit), so notifying
+    // extensions here covers them all (upstream d728526): without
+    // session_shutdown, extensions holding per-session resources (MCP child
+    // processes) never reap them. Await when possible so handlers finish
+    // before the runner is invalidated; a handler that never settles only
+    // defers dispose, it cannot resurrect the wrapper.
+    if (this.sessionShutdownEmitted) {
+      finishDispose();
+      return;
+    }
+    this.sessionShutdownEmitted = true;
+    const runner = this.inner.extensionRunner;
+    const emit = runner?.emit;
+    if (typeof emit !== "function") {
+      finishDispose();
+      return;
+    }
+    void (async () => emit.call(runner, { type: "session_shutdown", reason: "quit" }))()
+      .catch((error) => {
+        console.error(
+          "[pi-web] session_shutdown before dispose failed:",
+          error instanceof Error ? error.message : error,
+        );
+      })
+      .finally(finishDispose);
   }
 
   private resolveExtensionUiResponse(response: ExtensionUiResponse): void {

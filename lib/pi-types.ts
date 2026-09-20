@@ -73,6 +73,9 @@ interface ExtensionRunnerLike {
     sourceInfo: SlashCommandInfo["sourceInfo"];
   }>;
   setUIContext?(uiContext?: unknown, mode?: "tui" | "rpc" | "json" | "print"): void;
+  /** Generic extension event emitter (SDK ExtensionRunner.emit). The daemon
+   *  lifecycle only ever sends session_shutdown through it. */
+  emit?(event: { type: "session_shutdown"; reason: "quit" }): Promise<unknown>;
 }
 
 type DialogOptionsLike = {
@@ -167,4 +170,7 @@ export interface AgentSessionLike {
   setActiveToolsByName(names: string[]): void;
   abortCompaction(): void;
   getContextUsage(): ContextUsage | undefined;
+  /** SDK AgentSession.dispose — invalidates the extension runner and runs
+   *  registered session-resource cleanups. Called by the wrapper's destroy. */
+  dispose?(): void;
 }
