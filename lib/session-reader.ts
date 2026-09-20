@@ -123,6 +123,11 @@ export function invalidateSessionListCache(): void {
   globalThis.__piSessionListCache = undefined;
 }
 
+/** 列表版本（invalidation 代数）：会话全文搜索的跨窗口同步用它做轻量轮询比对。 */
+export function getSessionListVersion(): number {
+  return globalThis.__piSessionListGeneration ?? 0;
+}
+
 function getPathCache(): Map<string, string> {
   if (!globalThis.__piSessionPathCache) globalThis.__piSessionPathCache = new Map();
   return globalThis.__piSessionPathCache;
