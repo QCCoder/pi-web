@@ -12,6 +12,7 @@ import type {
 } from "@/lib/types";
 import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { clearDraft, rekeyDraft, restoreDraftSubmission } from "@/lib/draft-store";
+import { resolveComposerDraftKey } from "@/lib/composer-draft-key";
 import { userMessageKey } from "@/lib/prompt-recovery";
 import {
   createScrollFollowState,
@@ -154,6 +155,9 @@ export type BuiltinSlashCommandResult =
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  /** 生效 composer 草稿键（ChatWindow 用 resolveComposerDraftKey 解析，override 优先）。
+   *  恢复/换key/废弃清理都必须落在这个键上——它是 ChatInput 实际挂载的键。 */
+  composerDraftKey?: string;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey?: string) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -294,7 +298,7 @@ const EMPTY_ENTRY_IDS: string[] = [];
 /** 新会话乐观消息的最小 SessionData 占位（promote 后被 loadSession 的文件数据覆盖）。 */
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, composerDraftKey: composerDraftKeyOverride, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, reloadSignal, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
@@ -411,10 +415,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
-  // 与 ChatWindow 传给 ChatInput 的 draftKey 同源：恢复/换key 都落在同一个 composer 上。
-  const composerDraftKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined);
+  // 与 ChatWindow 传给 ChatInput 的 draftKey 同一个值（ChatWindow 传入 override 优先
+  // 的解析结果；独立使用 hook 时按同一规则回退）。恢复/换key/废弃清理全用它。
+  const composerDraftKey = composerDraftKeyOverride
+    ?? resolveComposerDraftKey({ sessionId: session?.id, newSessionCwd });
 
-  const resolveComposerDraftKey = useCallback((key: string | undefined) => {
+  const resolveDraftKeyAlias = useCallback((key: string | undefined) => {
     if (!key) return undefined;
     let resolved = key;
     const visited = new Set<string>();
@@ -435,12 +441,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     targetDraftKey: string | undefined,
   ) => {
     const draftImages = images?.map(({ data, mimeType }) => ({ data, mimeType }));
-    const destinationDraftKey = resolveComposerDraftKey(targetDraftKey);
-    const newSessionDraftKey = newSessionCwd ? `new:${newSessionCwd}` : null;
+    const destinationDraftKey = resolveDraftKeyAlias(targetDraftKey);
     if (
       !sessionHookMountedRef.current
       && !newSessionPromotedRef.current
-      && targetDraftKey === newSessionDraftKey
+      && targetDraftKey === composerDraftKey
     ) return;
     const input = opts.chatInputRef?.current;
     if (input) {
@@ -448,7 +453,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } else if (destinationDraftKey) {
       restoreDraftSubmission(destinationDraftKey, text, draftImages);
     }
-  }, [newSessionCwd, opts.chatInputRef, resolveComposerDraftKey]);
+  }, [composerDraftKey, opts.chatInputRef, resolveDraftKeyAlias]);
 
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) {
@@ -709,7 +714,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
     newSessionPromotedRef.current = true;
-    const provisionalDraftKey = newSessionCwd ? `new:${newSessionCwd}` : null;
+    const provisionalDraftKey = composerDraftKey ?? null;
     if (provisionalDraftKey && provisionalDraftKey !== sid) {
       draftKeyAliasesRef.current.set(provisionalDraftKey, sid);
       const input = opts.chatInputRef?.current;
@@ -726,7 +731,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       messageCount,
       firstMessage,
     }, provisionalDraftKey ?? undefined);
-  }, [isNew, newSessionCwd, onSessionCreated, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, composerDraftKey, onSessionCreated, opts.chatInputRef]);
 
   const ensureNewSession = useCallback(async () => {
     if (sessionIdRef.current) return sessionIdRef.current;
@@ -1537,7 +1542,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 新建会话中途放弃（没发过消息、没 promote 过）：清掉该临时草稿，避免
       // 下次同 cwd 的新建会话吃到残稿。microtask 给「同 tick 内切换到真 session」
       // 的场景留一次反悔机会（upstream 6ac87ec）。
-      const abandonedDraftKey = isNew && newSessionCwd ? `new:${newSessionCwd}` : null;
+      const abandonedDraftKey = isNew ? composerDraftKey ?? null : null;
       if (abandonedDraftKey) {
         queueMicrotask(() => {
           if (!sessionHookMountedRef.current && !newSessionPromotedRef.current) {

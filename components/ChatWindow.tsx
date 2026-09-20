@@ -17,6 +17,7 @@ import { useShell } from "./shell/context";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { resolveComposerDraftKey } from "@/lib/composer-draft-key";
 import { deriveSessionChangedFiles } from "@/lib/session-changed-files";
 import { deriveSessionSubagents } from "@/lib/session-subagents";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -188,6 +189,13 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, hasExpandedChild, re
 
 export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTargetHandled, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, embedded, draftKeyOverride, inputLeadingControl }: Props) {
   const { t } = useI18n();
+  // 生效 composer 草稿键（override 优先）——ChatInput 的 draftKey 与 useAgentSession
+  // 的恢复/换key/废弃清理共用这一个值，避免恢复写进永不挂载的幽灵键。
+  const composerDraftKey = resolveComposerDraftKey({
+    draftKeyOverride,
+    sessionId: session?.id,
+    newSessionCwd,
+  });
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
   // Composer prefill epoch from the shell state (contract prefill, D11) —
@@ -239,6 +247,8 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, reloadSignal, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
+    // 恢复/换key 必须落在真实 composer 键上（override 优先，upstream 6ac87ec）。
+    composerDraftKey,
   });
 
   const sessionBusy = agentRunning || bashRunning;
@@ -554,7 +564,7 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
       onAudioUnlock={unlockAudio}
       changedFiles={!embedded && onOpenFile ? { count: changedFiles.length, open: changedFilesOpen, onToggle: toggleChangedFiles } : undefined}
       subagents={!embedded && onOpenSession ? { count: sessionSubagents.length, open: subagentsOpen, onToggle: toggleSubagents } : undefined}
-      draftKey={draftKeyOverride ?? session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
+      draftKey={composerDraftKey}
       cwd={session?.cwd ?? newSessionCwd}
     />
   );
