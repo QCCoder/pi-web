@@ -359,6 +359,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
   /** 流式跟随决策状态（allowed / lastScrollTop / 意图窗 / 忽略窗）——见 lib/chat-scroll-follow.ts。 */
+  /** True while ChatWindow is restoring the session's saved reading position:
+   *  neither the initial snap-to-bottom nor streaming follow may fire — both
+   *  would override the restore (upstream 430fe4d, deferInitialScroll 的本地等价). */
+  const pendingScrollRestoreRef = useRef(false);
   const scrollFollowRef = useRef(createScrollFollowState());
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1439,14 +1443,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    *  跳转 = 离开尾部的强信号：先刷新用户滚动意图窗，让随后的 scroll 事件按
    *  「用户主动离开底部」判定停掉流式跟随（chat-scroll-follow 的上滑/远离底部
    *  两分支都覆盖），滚回底部才恢复。 */
-  const scrollToMessage = useCallback((element: HTMLElement) => {
+  const scrollToMessage = useCallback((element: HTMLElement, viewportOffset = 16) => {
     const container = scrollContainerRef.current;
     if (!container) return;
     noteUserScrollIntent(scrollFollowRef.current, Date.now());
     initialScrollDoneRef.current = true;
     pendingScrollToUserRef.current = false;
     container.scrollTo({
-      top: element.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 16,
+      top: element.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - viewportOffset,
       behavior: "instant",
     });
   }, []);
@@ -1658,6 +1662,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const followTailEntryId = entryIds.length > 0 ? entryIds[entryIds.length - 1] : null;
 
   useEffect(() => {
+    // ChatWindow 正在恢复该会话的阅读位置：不贴底也不跟随，等它落位。
+    if (pendingScrollRestoreRef.current) return;
     if (messages.length > 0) {
       if (pendingScrollToUserRef.current) {
         // Just sent a prompt: jump to the bottom so the user message and the
@@ -1762,14 +1768,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isNew,
     // Refs
     sessionIdRef, scrollContainerRef,
-    lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
+    lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef, pendingScrollRestoreRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
-    scrollToMessage,
+    scrollToMessage, scrollToBottom,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
   };

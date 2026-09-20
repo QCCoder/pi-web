@@ -28,6 +28,14 @@ import {
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import {
+  findChatScrollAnchor,
+  readChatScrollPosition,
+  writeChatScrollPosition,
+  type ChatScrollAnchorCandidate,
+  type ChatScrollPosition,
+} from "@/lib/chat-scroll-position";
+import { SCROLL_NEAR_BOTTOM_PX } from "@/lib/chat-scroll-follow";
 
 interface Props {
   session: SessionInfo | null;
@@ -238,7 +246,8 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
     isNew,
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef,
-    scrollToMessage,
+    scrollToMessage, scrollToBottom, initialScrollDoneRef,
+    pendingScrollRestoreRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
@@ -252,7 +261,6 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
   });
 
   const sessionBusy = agentRunning || bashRunning;
-
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {
     registerAbortHandler(sessionBusy ? handleAbort : null);
@@ -262,6 +270,102 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
   // Only render the last N messages initially. When the user scrolls to the
   // top, load another page while keeping the scroll position stable.
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
+
+  // --- Per-session reading position (upstream 430fe4d) ---
+  // 会话稳定不重挂，所以“切走”没有 unmount：渲染期检测 session 切换，若有上次
+  // 的非底部阅读位置，则挂起恢复（抑制 hook 的初始贴底与流式跟随），在布局
+  // effect 里落位。滚动期间经 rAF 节流连续捕捉，避免“清理时 DOM 已是新会话”
+  // 的时序陷阱。锚点不在已加载/已渲染窗口内则回落贴底（不移植上游的逐页回翻）。
+  const pendingRestoreRef = useRef<Extract<ChatScrollPosition, { atBottom: false }> | null>(null);
+  const prevSessionIdRef = useRef<string | null>(session?.id ?? null);
+  if ((session?.id ?? null) !== prevSessionIdRef.current) {
+    prevSessionIdRef.current = session?.id ?? null;
+    const saved = session?.id && !searchTarget ? readChatScrollPosition(session.id) : null;
+    const restorable = saved && !saved.atBottom ? saved : null;
+    pendingRestoreRef.current = restorable;
+    pendingScrollRestoreRef.current = restorable !== null;
+  }
+
+  // 应用恢复：锚点已渲染 → scrollToMessage 落位（自带用户意图标记，follow gate
+  // 保持关闭）；锚点在已加载窗口但未渲染（visible 页窗裁掉）→ 先放大渲染窗再试；
+  // 锚点不在已加载窗口 → 放弃并贴底（保持既有首滚行为）。
+  useLayoutEffect(() => {
+    const pending = pendingRestoreRef.current;
+    if (!pending || !session?.id || searchTarget) {
+      if (pending && (!session?.id || searchTarget)) {
+        pendingRestoreRef.current = null;
+        pendingScrollRestoreRef.current = false;
+      }
+      return;
+    }
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const element = container.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(pending.anchorEntryId)}"]`);
+    if (element) {
+      pendingRestoreRef.current = null;
+      pendingScrollRestoreRef.current = false;
+      scrollToMessage(element, pending.anchorOffset);
+      return;
+    }
+    if (entryIds.includes(pending.anchorEntryId)) {
+      // 在缓存里但被渲染页窗裁掉：放开整窗再试一轮（下一轮 effect 依赖变化触发）。
+      if (visibleCount < entryIds.length) {
+        setVisibleCount(entryIds.length);
+        return;
+      }
+    }
+    // 放弃：回落到既有贴底首滚。
+    pendingRestoreRef.current = null;
+    pendingScrollRestoreRef.current = false;
+    initialScrollDoneRef.current = true;
+    scrollToBottom("instant");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, searchTarget, loading, messages.length, entryIds, visibleCount, scrollToMessage, scrollContainerRef]);
+
+  // 捕捉：scroll 事件 rAF 节流测量一次。贴底存 {atBottom:true}；否则用
+  // findChatScrollAnchor 记录视口顶锚点（候选=带 data-entry-id 的已渲染消息）。
+  const scrollCaptureFrameRef = useRef<number | null>(null);
+  const captureChatScrollPosition = useCallback(() => {
+    const sid = session?.id;
+    const container = scrollContainerRef.current;
+    if (!sid || !container) return;
+    if (container.scrollHeight - container.scrollTop - container.clientHeight <= SCROLL_NEAR_BOTTOM_PX) {
+      writeChatScrollPosition(sid, { atBottom: true });
+      return;
+    }
+    const viewportTop = container.getBoundingClientRect().top;
+    const candidates: ChatScrollAnchorCandidate[] = [];
+    for (const element of container.querySelectorAll<HTMLElement>("[data-entry-id]")) {
+      const rect = element.getBoundingClientRect();
+      candidates.push({ entryId: element.dataset.entryId ?? "", top: rect.top, bottom: rect.bottom });
+    }
+    const anchor = findChatScrollAnchor(candidates, viewportTop);
+    if (anchor) {
+      writeChatScrollPosition(sid, { atBottom: false, anchorEntryId: anchor.anchorEntryId, anchorOffset: anchor.anchorOffset });
+    }
+  }, [session?.id, scrollContainerRef]);
+  const scheduleChatScrollCapture = useCallback(() => {
+    if (scrollCaptureFrameRef.current !== null) return;
+    scrollCaptureFrameRef.current = requestAnimationFrame(() => {
+      scrollCaptureFrameRef.current = null;
+      captureChatScrollPosition();
+    });
+  }, [captureChatScrollPosition]);
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || !session?.id) return;
+    const onScroll = () => scheduleChatScrollCapture();
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", onScroll);
+      if (scrollCaptureFrameRef.current !== null) {
+        cancelAnimationFrame(scrollCaptureFrameRef.current);
+        scrollCaptureFrameRef.current = null;
+      }
+    };
+  }, [session?.id, scrollContainerRef, scheduleChatScrollCapture]);
+
+
   const sentinelRef = useRef<HTMLDivElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
 
