@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FileExplorer } from "./FileExplorer";
 import { ChangesPanel } from "./ChangesPanel";
 import { useGitStatus } from "@/hooks/useGitStatus";
+import { useI18n } from "@/hooks/useI18n";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 /**
@@ -121,10 +122,14 @@ export function ExplorerSegmentedTabs({
 }
 
 export function FilesExplorerPanel({ workspace, explorerRefreshKey, onOpenFile, reveal, onOpenTerminal }: Props) {
+  const { t } = useI18n();
   const [explorerTab, setExplorerTab] = useState<"files" | "changes">("files");
   // ⟳ 手动刷新：叠加在 shell 驱动的 explorerRefreshKey 上，同时刷文件树缓存
   // 与 git 状态（外部删除/编辑等无事件的变化只能靠它）。
   const [manualExplorerKey, setManualExplorerKey] = useState(0);
+  // 快速文件搜索开关（#591，upstream b24ecad）：本地 Explorer 的工具栏在本面板，
+  // 故开关状态也收在这里（上游放在 SessionSidebar 头部工具栏）。
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
 
   const { status: gitStatus, gitStatusByPath, changedDirectoryPaths } = useGitStatus(
     workspace.path,
@@ -210,6 +215,31 @@ export function FilesExplorerPanel({ workspace, explorerRefreshKey, onOpenFile, 
         )}
         <button
           type="button"
+          onClick={() => setFileSearchOpen((open) => !open)}
+          title={t("sidebar.searchFiles")}
+          aria-label={t("sidebar.searchFiles")}
+          aria-pressed={fileSearchOpen}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 24,
+            height: 24,
+            padding: 0,
+            flexShrink: 0,
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            background: fileSearchOpen ? "var(--bg-selected)" : "transparent",
+            color: fileSearchOpen ? "var(--accent)" : "var(--text-dim)",
+            cursor: "pointer",
+          }}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+          </svg>
+        </button>
+        <button
+          type="button"
           onClick={() => setManualExplorerKey((key) => key + 1)}
           title="刷新文件树与改动状态"
           aria-label="刷新文件树与改动状态"
@@ -249,6 +279,8 @@ export function FilesExplorerPanel({ workspace, explorerRefreshKey, onOpenFile, 
             gitStatusByPath={gitStatusByPath}
             changedDirectoryPaths={changedDirectoryPaths}
             reveal={reveal}
+            fileSearchOpen={fileSearchOpen}
+            onFileSearchOpenChange={setFileSearchOpen}
           />
         )}
       </div>
