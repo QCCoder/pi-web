@@ -16,7 +16,9 @@ import { SkillsConfig } from "../SkillsConfig";
 import { PluginsConfig } from "../PluginsConfig";
 import { LoopsDockPanel } from "../LoopsDockPanel";
 import { HomeNewSession } from "../HomeNewSession";
+import { WorkspaceSelector } from "../WorkspaceSelector";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
+import { isWorkspaceSelectable } from "@/lib/workspaces/types";
 import { LOOPS_TAB_ID, KNOWLEDGE_TAB_ID, WORK_ITEMS_TAB_ID, isModuleTabId } from "@/lib/tab-types";
 import { SessionTabBar } from "../SessionTabBar";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
@@ -24,6 +26,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { getFileName } from "@/lib/file-paths";
 import { useShell } from "./context";
 import type { SessionTabState } from "@/lib/session-tabs";
+import { createNewSessionTab } from "@/lib/session-tabs";
 import { ChatToolbar } from "./ChatToolbar";
 
 /**
@@ -313,7 +316,6 @@ export function DesktopShell() {
           if (activeWorkspace) handleWorkspaceNewSession();
           else handleReturnHome();
         }}
-        onNewSessionInWorkspace={openNewSessionTab}
         onOpenWorkspace={handleOpenWorkspace}
         onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
         onSelectSession={handleSelectSession}
@@ -398,6 +400,26 @@ export function DesktopShell() {
                 session={selectedSession}
                 newSessionCwd={effectiveNewSessionCwd}
                 draftKeyOverride={activeTab?.kind === "new-session" ? activeTab.id : undefined}
+                inputLeadingControl={
+                  // 新会话占位 tab：composer 控制行带工作区选择器（与首页同款）。
+                  // 改选 = 原地重定向 tab（同 id 保草稿，F1 文件 tab/右栏状态保留）。
+                  activeTab?.kind === "new-session" ? (
+                    <WorkspaceSelector
+                      workspaces={workspaces.filter(isWorkspaceSelectable)}
+                      selected={activeTab.workspace}
+                      onSelect={(id) => {
+                        const target = workspaces.find((w) => w.id === id);
+                        if (!target || target.id === activeTab.workspace.id || !isWorkspaceSelectable(target)) return;
+                        updateActiveTab((tab) => ({
+                          ...createNewSessionTab(target, tab.id),
+                          fileTabs: tab.fileTabs,
+                          activeFileTabId: tab.activeFileTabId,
+                          rightPanelOpen: tab.rightPanelOpen,
+                        }));
+                      }}
+                    />
+                  ) : undefined
+                }
                 onAgentEnd={handleAgentEnd}
                 onSessionCreated={handleSessionCreated}
                 onSessionForked={handleSessionForked}

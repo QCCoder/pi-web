@@ -59,10 +59,14 @@ const pluginsConfigSource = await readFile(
 );
 
 test("project sidebar: 新建任务 on top, tree body, 归档 footer per group, four bottom entries", () => {
-  // 顶部显眼按钮 = 新会话 composer（复用现有行为）；折叠由 ChatToolbar 的 ☰
-  // 开关承担（不在侧栏内）。
+  // 新建任务 = 上下文快速路径：工作区内开新占位 tab（**composer 控制行带
+  // 工作区选择器**，改选 = 原地重定向 tab）；首页回首页 composer（同款选择器）；
+  // 折叠由 ChatToolbar 的 ☰ 开关承担（不在侧栏内）。
   assert.match(projectSidebarSource, /新建任务/);
   assert.doesNotMatch(projectSidebarSource, /onCollapse/);
+  assert.doesNotMatch(projectSidebarSource, /onNewSessionInWorkspace/);
+  assert.match(desktopShellSource, /<WorkspaceSelector/);
+  assert.match(desktopShellSource, /createNewSessionTab\\(target, tab\\.id\\)/);
   // 树主体：分区标题「工作区」+ ＋（新建工作区/导入目录）+ groupSessionsByWorkspace。
   assert.match(projectSidebarSource, /工作区/);
   assert.doesNotMatch(projectSidebarSource, />项目</);

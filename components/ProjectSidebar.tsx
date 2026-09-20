@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
-import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
+import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { computeMenuLayout, readViewportWindow, type MenuLayout } from "@/lib/dropdown-layout";
 import type { CenterPage } from "./shell/useAppShellState";
 import { SessionRow } from "./SessionRow";
@@ -45,8 +45,6 @@ interface Props {
   workspacesLoaded: boolean;
   sessionsLoaded: boolean;
   onNewSession: () => void;
-  /** 「新建任务 ▾」：在指定工作区开新会话占位 tab（不经当前工作区）。 */
-  onNewSessionInWorkspace: (workspace: WorkspaceSummary) => void;
   /** 节点行 hover 的「工作区首页」按钮 → 开/激活该工作区总览（家 tab）。 */
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   /** 节点行 hover 的「归档」按钮 → 中央区归档页（工作区作用域就地）。 */
@@ -141,7 +139,6 @@ export function ProjectSidebar({
   workspacesLoaded,
   sessionsLoaded,
   onNewSession,
-  onNewSessionInWorkspace,
   onOpenWorkspace,
   onOpenArchive,
   onSelectSession,
@@ -177,16 +174,6 @@ export function ProjectSidebar({
   const [plusOpen, setPlusOpen] = useState(false);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [plusRect, setPlusRect] = useState<MenuLayout | null>(null);
-  const [newTaskOpen, setNewTaskOpen] = useState(false);
-  const newTaskRef = useRef<HTMLButtonElement>(null);
-  const [newTaskRect, setNewTaskRect] = useState<MenuLayout | null>(null);
-  useEffect(() => {
-    if (!newTaskOpen) return;
-    const rect = newTaskRef.current?.getBoundingClientRect();
-    if (rect) {
-      setNewTaskRect(computeMenuLayout({ anchor: rect, menuMinWidth: 200, maxMenuHeight: 320 }, readViewportWindow()));
-    }
-  }, [newTaskOpen]);
   // 「显示更多」展开的工作区（会话内临时态，不持久化）。
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
   useEffect(() => {
@@ -366,31 +353,6 @@ export function ProjectSidebar({
           </svg>
           新建任务
         </button>
-        <button
-          ref={newTaskRef}
-          type="button"
-          title="选择工作区新建任务"
-          aria-label="选择工作区新建任务"
-          aria-haspopup="menu"
-          aria-expanded={newTaskOpen}
-          onClick={() => setNewTaskOpen((open) => !open)}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "0 8px",
-            border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))",
-            borderRadius: 8,
-            background: newTaskOpen ? "var(--bg-hover)" : "color-mix(in srgb, var(--accent) 10%, transparent)",
-            color: "var(--accent)",
-            cursor: "pointer",
-            flexShrink: 0,
-          }}
-        >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </button>
       </div>
 
       {/* 分区标题：工作区 + ＋（新建工作区 / 导入目录）——标题左缩进对齐
@@ -489,66 +451,6 @@ export function ProjectSidebar({
         })}
       </div>
 
-      {newTaskOpen && newTaskRect && createPortal(
-        <>
-          <div aria-hidden="true" onClick={() => setNewTaskOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 2000 }} />
-          <div
-            role="menu"
-            aria-label="选择工作区新建任务"
-            style={{
-              position: "fixed",
-              top: newTaskRect.top,
-              right: newTaskRect.right,
-              zIndex: 2001,
-              minWidth: 200,
-              maxHeight: newTaskRect.maxHeight,
-              overflowY: "auto",
-              padding: 4,
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              background: "var(--bg)",
-              boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
-            }}
-          >
-            {workspaces.filter(isWorkspaceSelectable).map((workspace) => (
-              <button
-                key={workspace.id}
-                type="button"
-                role="menuitem"
-                title={`在 ${workspace.name} 新建任务`}
-                onClick={() => { setNewTaskOpen(false); onNewSessionInWorkspace(workspace); }}
-                style={{
-                  width: "100%",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 7,
-                  minHeight: 34,
-                  padding: "6px 9px",
-                  border: 0,
-                  borderRadius: 6,
-                  background: "transparent",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  textAlign: "left",
-                  fontSize: 12,
-                  fontWeight: 450,
-                }}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                </svg>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-                  {workspace.name}
-                </span>
-              </button>
-            ))}
-            {workspaces.filter(isWorkspaceSelectable).length === 0 && (
-              <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-dim)" }}>没有可用工作区</div>
-            )}
-          </div>
-        </>,
-        document.body,
-      )}
       {plusOpen && plusRect && createPortal(
         <>
           <div aria-hidden="true" onClick={() => setPlusOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 2000 }} />
