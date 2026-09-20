@@ -5,6 +5,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
 import type { DiscoveredModel } from "@/lib/model-discovery";
+import { ProviderUsageSummary } from "./ProviderUsageSummary";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -1329,6 +1330,8 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
           </>
         )}
       </div>
+
+      <ProviderUsageSummary providerId={provider.id} enabled={provider.loggedIn} />
     </div>
   );
 }
@@ -1461,6 +1464,8 @@ function ApiKeyDetail({ provider, onRefresh }: { provider: ApiKeyProvider; onRef
            {removing ? t("i18n.removing") : t("i18n.disconnect")}
         </button>
       )}
+
+      <ProviderUsageSummary providerId={provider.id} enabled={provider.configured} />
     </div>
   );
 }
