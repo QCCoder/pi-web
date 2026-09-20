@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { Script } from "node:vm";
 import test from "node:test";
+import ts from "typescript";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
@@ -9,7 +11,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, getUpwardMenuMaxHeight, replaceLinksWithMarkdown } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, cycleListIndex, getUpwardMenuMaxHeight, replaceLinksWithMarkdown } = await jiti.import("./ChatInput.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
 test("preserves pasted HTML links as Markdown without changing plain text layout", () => {
@@ -77,6 +79,66 @@ test("file mention menu remeasures when its layout container shifts the anchor",
   const block = source.slice(start, start + 1800);
   assert.match(block, /const layoutContainer = parent\?\.parentElement;/);
   assert.match(block, /anchorObserver\?\.observe\(layoutContainer\)/);
+});
+
+test("file mention arrows wrap around the match list", () => {
+  const source = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findHandler(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "handleKeyDown") {
+      return node.initializer.arguments[0];
+    }
+    return ts.forEachChild(node, findHandler);
+  }
+  const script = new Script(ts.transpileModule(findHandler(source).getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+
+  function move(key, atActiveIndex, length) {
+    let next = null;
+    const handler = script.runInNewContext({
+      Date: { now: () => 1000 },
+      COMPOSITION_END_ENTER_GRACE_MS: 100,
+      isMobile: false, isStreaming: false,
+      isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
+      historyMenuOpen: false, inputHistory: [], historyActiveIndex: 0,
+      setHistoryActiveIndex() {}, setHistoryMenuOpen() {}, applyHistoryInput() {},
+      slashMenuOpen: false, slashQuery: null, filteredSlashCommands: [], slashActiveIndex: 0,
+      setSlashActiveIndex() {}, setSlashMenuOpen() {}, applySlashCommand() {}, getNextSlashIndex() { return 0; },
+      atMenuOpen: true, atQuery: {}, atMatches: Array.from({ length }, () => ({})), atActiveIndex,
+      onSteer() {}, onFollowUp() {}, onAbort() {},
+      sendQueued() {}, handleSend() {},
+      value: "@file",
+      setAtMenuOpen() {},
+      applyAtCompletion() {},
+      cycleListIndex,
+      setAtActiveIndex(update) {
+        next = typeof update === "function" ? update(atActiveIndex) : update;
+      },
+    });
+    handler({
+      key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+      nativeEvent: { isComposing: false, keyCode: 0 },
+      preventDefault() {},
+    });
+    return next;
+  }
+
+  assert.equal(move("ArrowDown", 0, 3), 1);
+  assert.equal(move("ArrowDown", 2, 3), 0);
+  assert.equal(move("ArrowUp", 0, 3), 2);
+  assert.equal(move("ArrowUp", 1, 3), 0);
+  assert.equal(move("ArrowDown", 0, 1), 0);
+  assert.equal(move("ArrowDown", 0, 0), 0);
+});
+
+test("cycleListIndex wraps in both directions", () => {
+  assert.equal(cycleListIndex(0, 3, 1), 1);
+  assert.equal(cycleListIndex(2, 3, 1), 0);
+  assert.equal(cycleListIndex(0, 3, -1), 2);
+  assert.equal(cycleListIndex(1, 3, -1), 0);
+  assert.equal(cycleListIndex(0, 1, 1), 0);
+  assert.equal(cycleListIndex(4, 0, 1), 0);
+  assert.equal(cycleListIndex(-1, 4, 1), 0);
 });
 
 test("keeps the model selector visible when a model error leaves no options", () => {
