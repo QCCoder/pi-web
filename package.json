@@ -42,7 +42,7 @@
     "start:lan": "next start -H 0.0.0.0 -p 30141",
     "daemon": "node bin/pi-daemon.js",
     "lint": "eslint .",
-    "test": "node --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"packages/pi-loop/**/*.test.mjs\" \"public/**/*.test.mjs\"",
+    "test": "node --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"packages/pi-loop/**/*.test.mjs\" \"public/**/*.test.mjs\"",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {

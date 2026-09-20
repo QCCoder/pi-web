@@ -60,3 +60,12 @@ test("the effective composer key is threaded from ChatWindow into the hook", () 
   assert.match(hookSource, /const abandonedDraftKey = isNew \? composerDraftKey \?\? null : null;/);
   assert.doesNotMatch(hookSource, /newSessionCwd \? `new:\$\{newSessionCwd\}` : (null|undefined)/);
 });
+
+test("reconcileAgentState ignores stale runs and session switches", () => {
+  const reconcileSource = hookSource.slice(
+    hookSource.indexOf("const reconcileAgentState = useCallback"),
+    hookSource.indexOf("const ensureSseConnected = useCallback"),
+  );
+  assert.match(reconcileSource, /\.agentRunning \|\| sessionIdRef\.current !== sid\) return;/);
+  assert.match(reconcileSource, /if \(sessionIdRef\.current !== sid \|\| promptRunIdRef\.current !== runId\) return;/);
+});

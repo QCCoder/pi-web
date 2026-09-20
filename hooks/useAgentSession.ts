@@ -906,7 +906,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // If the server reports idle while we still think it's running, finish
   // through the same path as prompt_done.
   const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!readRuntimeFor(runtimeKeyRef).agentRunning) return;
+    if (!readRuntimeFor(runtimeKeyRef).agentRunning || sessionIdRef.current !== sid) return;
     const runId = promptRunIdRef.current;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
@@ -914,8 +914,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
       // A slow response can straddle a run boundary (previous run finished
       // and the user already started the next one while this request was in
-      // flight) — everything in it is stale, drop it.
-      if (promptRunIdRef.current !== runId) return;
+      // flight) — everything in it is stale, drop it. Same for a session
+      // switch while the fetch was in flight: the old session's queued /
+      // compaction state must never land in the new session's runtime slice
+      // (upstream 6ac87ec).
+      if (sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
       const state = data.state;
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the "Stop compaction" UI stuck. No state
