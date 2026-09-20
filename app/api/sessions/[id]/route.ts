@@ -275,6 +275,17 @@ export async function DELETE(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
+    // Daemon-created sessions seed the path cache before pi's first append
+    // creates the .jsonl (pi flushes lazily on write). Nothing on disk to
+    // read or unlink: treat as already deleted — the wrapper teardown above
+    // has happened, so invalidate both caches and answer ok (upstream
+    // edf0deb; mirrors GET's empty placeholder for the same state).
+    if (!existsSync(filePath)) {
+      invalidateSessionPathCache(id);
+      invalidateSessionListCache();
+      return NextResponse.json({ ok: true });
+    }
+
     // Read only the bounded header before deleting.
     const parentSessionPath = readSessionHeader(filePath)?.parentSession;
 
