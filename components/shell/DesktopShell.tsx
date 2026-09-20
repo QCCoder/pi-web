@@ -105,6 +105,7 @@ export function DesktopShell() {
     closeTab,
     closeTabs,
     openSessionTab,
+    openNewSessionTab,
     handleSelectTab,
     handleSessionRemoved,
     handleCreateWorkspace,
@@ -312,6 +313,7 @@ export function DesktopShell() {
           if (activeWorkspace) handleWorkspaceNewSession();
           else handleReturnHome();
         }}
+        onNewSessionInWorkspace={openNewSessionTab}
         onOpenWorkspace={handleOpenWorkspace}
         onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
         onSelectSession={handleSelectSession}
