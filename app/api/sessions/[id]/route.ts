@@ -11,6 +11,7 @@ import {
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
+import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { deleteArchivedSession, isSessionArchived } from "@/lib/session-archive";
 import { skillMessageTitle } from "@/lib/skill-message";
 import { daemonProxy } from "@/lib/agent-proxy";
@@ -173,6 +174,7 @@ export async function GET(
     const tailParam = Number(searchParams.get("tail") ?? "");
     const tailMessages = Number.isSafeInteger(tailParam) && tailParam > 0 ? tailParam : undefined;
     const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages, tailMessages });
+    const totalActiveMs = computeSessionTotalActiveMs(entries);
 
     const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
@@ -208,6 +210,7 @@ export async function GET(
         leafId,
         tree,
         context,
+        totalActiveMs,
         revision,
       },
       revision ? { headers: { ETag: revision } } : undefined,
