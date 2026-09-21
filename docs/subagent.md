@@ -1,106 +1,109 @@
-# Subagent (community `@henryqw/pi-subagent`)
+# Subagents (built-in, ported from upstream v0.9.1)
 
-The `delegate_task` tool delegates a task to an **isolated pi child process** —
-a real `pi` CLI invocation (`--mode json -p`) with its own context window,
-model, and tool allow-list. The package is
-`@henryqw/pi-subagent`, vendored in-repo at `vendor/henryqw-pi-subagent-7.1.0.tgz`
-(a packed tarball of the A2-enhanced branch `feat/project-roles-and-child-sessions` @
-b2007f4 — project-level roles + persisted child sessions; an immutable snapshot where a
-`file:` directory pin would live-track the upstream tree; 7.1.0 was never published to
-npm and the package's later majors require pi SDK ≥0.86, so the vendored snapshot is
-the long-term pin until pi-web bumps its SDK). pi-web's built-in `lib/subagent/` was
-deleted in this switch (A3).
+Subagents are **in-process child `AgentSession`s** owned by the same daemon
+registry as interactive sessions and kit rounds — live SSE, steer and abort all
+flow through the existing session surface. Ported from upstream
+`agegr/pi-web` v0.9.1 (commits `b77a25f` queue / `2661247` worktrees /
+`a31d5c5` persistence / `bbe2f7d` profiles / `e3fbbf6` extension-tool
+selectors) plus the two post-release fixes `9d282da` (provider stream errors
+report as failed runs) and `20a2579` (session id in foreground completion
+text). The community `@henryqw/pi-subagent` package (2026-08-30 switch, A3)
+was removed in this port; its `delegate_task` result panel stays for history.
 
-## How it's attached (daemon-side)
+## Tools
 
-- `lib/daemon/pi-subagent-host.ts` is the host adapter: it jiti-imports the
-  package's extension entry (`extensions/subagent.ts` — not exposed via the
-  package's `exports` map), presents the pi CLI process identity the package's
-  ephemeral executor requires (`PI_CODING_AGENT=true`, process title
-  `pi-rpc`, `argv[1]` → pi's bundled CLI), and wraps the factory with pi-web's
-  timeout policy.
-- `lib/rpc-manager.ts` attaches it to **every** session (global capability —
-  still not in `WORKSPACE_EXTENSION_FACTORIES` or `ALL_WORKSPACE_CAPABILITIES`).
-- Each delegation spawns `node <pi-cli> --mode json -p …` — the SAME pi version
-  the daemon hosts, sharing `~/.pi/agent` settings and auth.
+`Agent` (delegate to a profile; `subagent_type`, `prompt`, `description`,
+`run_in_background`, `resume`, `input_files`, `model`, `thinking`,
+`max_turns`, `inherit_context`, `isolation: worktree`),
+`get_subagent_result` (poll/wait a run), `steer_subagent` (message a running
+child). Attached **globally to every session** in
+`lib/daemon/rpc-manager.ts` (`createSubagentExtension`), same posture the
+community package had. Children strip these tools again at creation and on
+reopen (`SUBAGENT_CONTROL_TOOL_NAMES`) — no recursive orchestration.
 
-## Roles
+## Profiles
 
-Markdown with YAML frontmatter. Discovery (precedence: built-in < project <
-user — same name wins upward):
+Markdown + YAML frontmatter, discovery `builtin < global < workspace <
+project` (same name wins upward). Builtin: `general-purpose`, `explore`,
+`plan`.
 
-- built-in `implementer` / `reviewer` (package-shipped)
-- **project**: `<cwd>/.pi/agents/pi-subagent/*.md` — trust-gated by pi's
-  project trust; `.pi/agents` is NOT a trust-requiring resource, so plain
-  workspaces are trusted by default
-- **user**: `~/.pi/agent/config/pi-subagent/*.md`
+- global: `~/.pi/agent/agents/*.md`
+- workspace: `<cwd>/.agents/agents/*.md`
+- project: `<cwd>/.pi/agents/*.md` (flat — NOT the community package's
+  `.pi/agents/pi-subagent/` subdirectory)
 
-```markdown
----
-name: scout
-description: Fast codebase recon
-tools: [read, grep, find, ls, bash]
-extensions: []
-skills: []
-# isolation: worktree   # optional — run the child in a throwaway git worktree
-# persist: false        # optional — opt this role out of persisted child sessions
----
-System prompt body...
-```
+Frontmatter keys: `description`, `display_name`, `tools` (builtin names +
+`ext:<extension>[/<tool>]` selectors), `load_skills`/`skills`,
+`load_extensions`/`extensions`, `model` (`provider/modelId`), `thinking`,
+`max_turns`, `inherit_context`, `run_in_background`, `prompt_mode`
+(`append`|`replace`), `color`, `isolation` (`worktree`|`off`),
+`persist_session`, `enabled`. Unmanaged keys (e.g. another runtime's
+`allowed_subagents`) round-trip untouched on save; the reader accepts the
+community package's `skills:`/`extensions:` aliases, so old role files are
+mostly readable (their `tools:` arrays must name builtin tools to survive
+`parseTools` filtering; move them out of the `pi-subagent/` subdirectory).
 
-`tools` / `extensions` / `skills` are **mandatory arrays** (empty is fine);
-legacy pi-web agent files without them fail to parse loudly. There is no
-`model` key — per-delegation `model`/`modelClass` (fast/balanced/frontier/fav)
-routes through `~/.pi/agent/config/pi-task-models.json`, which MUST exist or
-delegation errors with "Run /task-models".
+Managed in the settings panel (`Agents` section, `AgentsConfig.tsx`):
+enable/disable per profile, create/edit with the full field set, scope
+(global/project), overridden-by-higher-scope badges
+(`lib/subagent-profile-precedence.ts`).
 
-> Migration note: the old `<workspace>/.pi/agents/*.md` layout is NOT read.
-> Workspace/loop roles move to `<workspace>/.pi/agents/pi-subagent/*.md` with
-> the mandatory frontmatter arrays added.
+## Settings
 
-## Tool modes & results
+`~/.pi/agent/agents/settings.json` — `builtInEnabled` (fork default:
+**true** unless explicitly disabled; upstream defaults off — this fork swaps
+the built-ins in for the always-on community package, so continuity for
+pi-loop kit rounds requires on-by-default; a damaged file fails OPEN) and
+`maxConcurrent` (per-parent FIFO queue, default 10, max 32;
+`lib/subagent-queue.ts` — separate parents never block each other).
 
-- **single**: `{ role, task }` — one child.
-- **parallel**: `{ tasks: [{ role, task }] }` — up to 8, FIFO-capped by
-  `maxSubagents` (default 5; `PI_SUBAGENT_MAX_SUBAGENTS` env or config).
-- **chain**: `{ chain: [{ role, task }] }` — sequential, `{previous}` carries
-  the prior output. `background: true` returns immediately.
+## Runs, persistence, timeouts
 
-Tool results carry `details.entries[]` with `{ role, status, summary, model,
-thinkingLevel, session?: { id, cwd } }`. `MessageView`'s `delegate_task` panel
-renders one row per entry; the `open →` button jumps to `session.id`.
+Every run appends `pi-web:subagent` (meta + resource snapshot),
+`pi-web:subagent-status`, `pi-web:subagent-result` custom entries to the
+child session file — crash recovery derives `interrupted` from their absence.
+Children keep the **`pi-subagent-<uuid>` id prefix** (created via
+`NewSessionOptions.id`; names = the run's description), so
+`lib/subagent-child.ts` prefix detection, sidebar hiding, locate/open and
+completion-push suppression all work unchanged across the eras.
 
-## Child sessions & tagging
+**Timeout philosophy: upstream semantics.** No idle kill, no hard runtime
+cap — a quiet build runs to completion; limits are the opt-in `max_turns`
+soft limit (steer-to-wrap-up at N, abort at N+1). The daemon heartbeat
+monitor **exempts subagent children** (`rpc-manager.ts`) — killing a hidden
+silent child mid-build was the community package's kill semantics this fork
+rejected; recovery belongs to the parent (`steer_subagent` /
+`get_subagent_result(wait)` / abort). The settled-idle 10-min teardown still
+applies as ordinary registry cleanup.
 
-Children persist by default as `pi-subagent-<uuid>`-id sessions (named
-`pi-subagent <role>`; file `<ts>_pi-subagent-<uuid>.jsonl` under the cwd's
-session dir). `lib/subagent-child.ts` tags them `subagentChild: true` in
-`GET /api/sessions` by that id/name prefix — the sidebar hides them, the
-parent's result card still opens them (cold, from disk). The old
-`~/.pi/agent/subagent-children.txt` registry is retired.
+Model routing: per-profile `model`/`thinking`, else inherit the parent's
+model. The community package's `pi-task-models.json` routing key
+(`pi-subagent/delegateTask`) is inert now — pin models per profile instead.
 
-## Timeouts (philosophy difference — read this)
+## Web surface
 
-The package KILLS children on timeout: idle (no recognized pi events for
-`idleMs`) → SIGTERM→SIGKILL; hard cap `maxMs` → SIGKILL. The deleted built-in
-never aborted a quiet build (inactivity budget, heartbeat monitor owned hung
-children). Mitigation (A3 criterion ③): pi-web pins **idle 30 min / max
-120 min** in `pi-subagent-host.ts` — output-producing builds renew the idle
-deadline (`bash_execution_update` counts as activity), so only a totally
-silent build can die. The timeout policy is pinned in `pi-subagent-host.ts`
-and explicitly passed to the extension factory — it WINS over the package's
-per-machine config file, so the `timeout.*` keys there are inert under
-pi-web. Remaining effective keys in
-`~/.pi/agent/config/pi-subagent/pi-subagent.json`: `maxSubagents` (or the
-`PI_SUBAGENT_MAX_SUBAGENTS` env) and `childSessions: false` global opt-out.
+- `app/api/subagents/profiles` — profile CRUD (fs, file-access-guarded)
+- `app/api/subagents/settings` — enabled / maxConcurrent
+- `app/api/subagents/[id]` — run status / steer / abort (proxies daemon
+  `GET|POST /v1/subagents/:id`)
+- `components/AgentsConfig.tsx` — settings panel (SettingsUi kit +
+  ModelSelector ported verbatim from upstream)
+- `components/MessageView.tsx` — `pi-web:subagent` result details get an
+  open-session button; the legacy `delegate_task` panel renders history
+- `lib/session-subagents.ts` — drawer derivation understands BOTH transports
 
 ## Module layout
 
 | File | Responsibility |
 |------|----------------|
-| `lib/daemon/pi-subagent-host.ts` | Daemon host adapter: process identity, extension load, timeout policy |
-| `lib/daemon/pi-subagent-roles.test.mjs` | Role discovery + precedence tests against the package's `loadRoles` |
-| `lib/subagent-child.ts` | `subagentChild` tagging (id/name prefix) |
-| `lib/rpc-manager.ts` | Attaches the extension to every session |
-| `components/MessageView.tsx` | `delegate_task` result panel + `open →` jump (`session.id`) |
-| `vendor/henryqw-pi-subagent-7.1.0.tgz` | Vendored package snapshot (byte-identical to HenryQW/pi-packages `feat/project-roles-and-child-sessions` @ b2007f4) — `package.json` pins `file:./vendor/…` so `npm ci` works inside Docker |
+| `lib/subagents.ts` | Profiles (parse/save/delete/scope precedence), run metadata readers, extension-tool selectors |
+| `lib/subagent-extension.ts` | Agent / get_subagent_result / steer_subagent tools; legacy `pi-subagents` suppression |
+| `lib/subagent-runtime.ts` | Controller: start/resume/get/steer/abort/notifyParent; per-parent queue; worktrees |
+| `lib/subagent-queue.ts` | FIFO per-parent concurrency queue |
+| `lib/subagent-settings.ts` | settings.json (fork default ON, fail open) |
+| `lib/subagent-prompt.ts`, `lib/subagent-input.ts` | Prompt plan (chatOnly/replace) and input-file loading |
+| `lib/subagent-profile-precedence.ts` | Higher-scope override badges |
+| `lib/daemon/rpc-manager.ts` | Global attach + `SUBAGENT_CONTROLLER` wiring onto the daemon registry; child reopen guard; heartbeat exemption |
+| `lib/subagent-child.ts` | `pi-subagent-` prefix tagging (unchanged from the community era) |
+| `app/api/subagents/*` | Web routes (profiles/settings direct; run control proxied) |
+| `components/AgentsConfig.tsx` | Settings panel |

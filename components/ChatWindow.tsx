@@ -604,7 +604,8 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
     [messages, streamState.streamingMessage, messageCwd],
   );
 
-  // Subagent children delegated in this session (delegate_task transport) —
+  // Subagent children delegated in this session (Agent tool + legacy
+  // delegate_task transports) —
   // the durable entry into child sessions, which are hidden from every
   // session list. Includes RUNNING delegations via the streaming partials.
   const sessionSubagents = useMemo(

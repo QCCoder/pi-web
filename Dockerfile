@@ -14,13 +14,8 @@ COPY package.json package-lock.json ./
 # its own COPY — a directory source copies its CONTENTS, so folding `bin/`
 # into the line above would flatten the script to /app/prepare-terminal.js.
 COPY bin/ ./bin/
-# The vendored @henryqw/pi-subagent tgz is a file: dependency — it must exist
-# before `npm ci` resolves it (same directory-contents rule as bin/ above).
-COPY vendor/ ./vendor/
-# npm ci (lockfile regenerated with the terminal/push/auth deps).
-# @henryqw/pi-subagent ships as a vendored tgz inside the build context
-# (vendor/) — the 7.1.0 snapshot of HenryQW/pi-packages branch
-# feat/project-roles-and-child-sessions @ b2007f4, never published to npm.
+# npm ci (lockfile regenerated with the terminal/push/auth deps). Subagents
+# are the built-in in-process system — no external subagent package anymore.
 RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
