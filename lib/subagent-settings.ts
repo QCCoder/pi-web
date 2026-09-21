@@ -48,7 +48,11 @@ export function readSubagentSettings(
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
   const stored = readStoredSettings(settingsPath);
-  return settingsValue(stored.builtInEnabled === true, readMaxConcurrent(stored.maxConcurrent));
+  // Fork divergence from upstream (ADR 0003): upstream defaults the built-in
+  // subagents OFF; this fork swaps them in for the always-on community
+  // `@henryqw/pi-subagent` package, so continuity — especially for pi-loop kit
+  // rounds — requires them ON unless explicitly disabled in the file.
+  return settingsValue(stored.builtInEnabled !== false, readMaxConcurrent(stored.maxConcurrent));
 }
 
 export function isBuiltInSubagentsEnabled(
@@ -57,7 +61,7 @@ export function isBuiltInSubagentsEnabled(
   try {
     return readSubagentSettings(settingsPath).builtInEnabled;
   } catch {
-    return false;
+    return true;
   }
 }
 
