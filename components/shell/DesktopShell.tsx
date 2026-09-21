@@ -14,6 +14,7 @@ import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
 import { ModelsConfig } from "../ModelsConfig";
 import { SkillsConfig } from "../SkillsConfig";
+import { AgentsConfig } from "../AgentsConfig";
 import { PluginsConfig } from "../PluginsConfig";
 import { LoopsDockPanel } from "../LoopsDockPanel";
 import { HomeNewSession } from "../HomeNewSession";
@@ -323,8 +324,8 @@ export function DesktopShell() {
       );
     }
 
-    const titles = { models: "模型", skills: "Skills", plugins: "插件" } as const;
-    if (page.kind === "models" || page.kind === "skills" || page.kind === "plugins") {
+    const titles = { models: "模型", skills: "Skills", plugins: "插件", agents: "Agents" } as const;
+    if (page.kind === "models" || page.kind === "skills" || page.kind === "plugins" || page.kind === "agents") {
       const title = titles[page.kind];
       const meta = page.kind === "models"
         ? "~/.pi/agent/models.json"
@@ -348,9 +349,18 @@ export function DesktopShell() {
                 }}
                 onClose={closeCenterPage}
               />
-            ) : (
+            ) : page.kind === "plugins" ? (
               <PluginsConfig
                 inline
+                cwd={settingsCwd ?? ""}
+                sessionId={selectedSession?.id ?? null}
+                onReloaded={() => setSessionKey((key) => key + 1)}
+                onClose={closeCenterPage}
+              />
+            ) : (
+              <AgentsConfig
+                embedded
+                key={settingsCwd ?? ""}
                 cwd={settingsCwd ?? ""}
                 sessionId={selectedSession?.id ?? null}
                 onReloaded={() => setSessionKey((key) => key + 1)}

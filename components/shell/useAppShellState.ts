@@ -56,6 +56,7 @@ export type CenterPage =
   | { kind: "models" }
   | { kind: "skills" }
   | { kind: "plugins" }
+  | { kind: "agents" }
   | { kind: "archive"; workspaceId: string };
 
 /** 两次打开指向同一页（归档比 workspaceId）→ 底部入口再点一次 = 关闭（toggle）。 */
@@ -171,7 +172,7 @@ export function useAppShellState(seed?: {
   // FilesExplorerPanel（reveal 展开树定位；DesktopShell 激活右栏文件 tab、
   // MobileShell 切到「文件」tab）。
   const [loopFilesReveal, setLoopFilesReveal] = useState<{ path: string; nonce: number } | null>(null);
-  const handleOpenConfig = useCallback((view: "models" | "skills" | "plugins") => {
+  const handleOpenConfig = useCallback((view: "models" | "skills" | "plugins" | "agents") => {
     setCenterPage({ kind: view });
   }, []);
   const [refreshKey, setRefreshKey] = useState(0);
