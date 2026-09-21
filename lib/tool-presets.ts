@@ -4,9 +4,10 @@ export interface ToolEntry {
   active: boolean;
 }
 
-export type ToolPreset = "none" | "default" | "full";
+export type ToolPreset = "none" | "read-only" | "default" | "full";
 
 export const PRESET_NONE: string[] = [];
+export const PRESET_READ_ONLY: string[] = ["read", "grep", "find", "ls"];
 export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write"];
 export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls"];
 
@@ -22,6 +23,7 @@ export function getPresetFromTools(tools: ToolEntry[]): ToolPreset {
     .sort()
     .join(",");
 
+  if (active === [...PRESET_READ_ONLY].sort().join(",")) return "read-only";
   if (active === [...PRESET_DEFAULT].sort().join(",")) return "default";
   if (active === [...PRESET_FULL].sort().join(",")) return "full";
   return "default";
@@ -29,6 +31,7 @@ export function getPresetFromTools(tools: ToolEntry[]): ToolPreset {
 
 export function getToolNamesForPreset(preset: ToolPreset): string[] {
   if (preset === "none") return [...PRESET_NONE];
+  if (preset === "read-only") return [...PRESET_READ_ONLY];
   if (preset === "full") return [...PRESET_FULL];
   return [...PRESET_DEFAULT];
 }

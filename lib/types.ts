@@ -289,6 +289,15 @@ export interface SessionTreeNode {
   compressedEntryIds?: string[];
 }
 
+export type SubagentSessionStatus =
+  | "starting"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "interrupted";
+
 export interface SessionInfo {
   path: string;
   id: string;
@@ -308,6 +317,15 @@ export interface SessionInfo {
   /** True for subagent worker sessions — hidden from the sidebar session list,
    *  but still openable by id from the parent's subagent result card. */
   subagentChild?: boolean;
+  /** Live view onto a built-in subagent run when this session IS a subagent
+   *  child (built-in runs carry the meta entry; prefix-tagged legacy children
+   *  from the community-package era have no run info and stay as-is). */
+  subagentRun?: {
+    profile: string;
+    description: string;
+    status: SubagentSessionStatus;
+    parentSessionId: string;
+  };
 }
 
 export interface SessionContext {
