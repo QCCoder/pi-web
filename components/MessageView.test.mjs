@@ -166,3 +166,29 @@ test("apply_patch renders split diff on wide viewports and unified rows on mobil
   assert.doesNotMatch(mobileHtml, splitGrid);
   assert.match(mobileHtml, /brand new line/);
 });
+
+test("renders user-message images as buttons that open a larger preview (upstream e851d30)", () => {
+  const html = renderMessage({
+    role: "user",
+    content: [
+      { type: "text", text: "inspect this" },
+      { type: "image", data: "YWJj", mimeType: "image/png" },
+    ],
+    timestamp: Date.now(),
+  });
+
+  assert.match(html, /<button[^>]+aria-label="Preview image"[^>]*>/);
+  assert.match(html, /<img[^>]+src="data:image\/png;base64,YWJj"/);
+});
+
+test("renders custom-message images as buttons that open a larger preview (upstream e851d30)", () => {
+  const html = renderMessage({
+    role: "custom",
+    customType: "extension",
+    content: [{ type: "image", data: "YWJj", mimeType: "image/png" }],
+    timestamp: Date.now(),
+  });
+
+  assert.match(html, /<button[^>]+aria-label="Preview image"[^>]*>/);
+  assert.match(html, /<img[^>]+src="data:image\/png;base64,YWJj"/);
+});

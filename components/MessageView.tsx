@@ -2,6 +2,7 @@
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, Fragment, type ComponentProps } from "react";
 import { MarkdownBody } from "./MarkdownBody";
+import { ImagePreview } from "./ImagePreview";
 import { SkillMessageContent } from "./SkillMessageContent";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
@@ -299,13 +300,14 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                     ? `data:${flat.mimeType};base64,${flat.data}`
                     : "";
                 return (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    key={i}
-                    src={src}
-                    alt=""
-                    style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid rgba(59,130,246,0.15)" }}
-                  />
+                  <ImagePreview key={i} src={src}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={src}
+                      alt=""
+                      style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid rgba(59,130,246,0.15)" }}
+                    />
+                  </ImagePreview>
                 );
               })}
             </div>
@@ -1642,13 +1644,14 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
                   const src = imageSource(img);
                   if (!src) return null;
                   return (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      key={i}
-                      src={src}
-                      alt=""
-                      style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
-                    />
+                    <ImagePreview key={i} src={src}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={src}
+                        alt=""
+                        style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+                      />
+                    </ImagePreview>
                   );
                 })}
               </div>

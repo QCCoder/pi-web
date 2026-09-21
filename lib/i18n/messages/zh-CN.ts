@@ -233,6 +233,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.followUp": "后续消息",
     "chat.send": "发送",
     "chat.attachImage": "附加图片",
+    "chat.previewImage": "预览图片",
     "chat.moreControls": "更多控件",
     "chat.collapseControls": "收起控件",
     "chat.shell": "Shell",
