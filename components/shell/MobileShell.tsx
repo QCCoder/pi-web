@@ -483,7 +483,16 @@ export function MobileShell() {
   const showTabBarRow = Boolean(s.activeTabId) || Boolean(s.homeSession) || s.homeNewSession.open;
 
   return (
-    <div style={{ display: "flex", flexDirection: showRail ? "row" : "column", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{
+      display: "flex", flexDirection: showRail ? "row" : "column",
+      height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)",
+      // black-translucent 沉浸式状态栏（本批 #12）：根容器统一让出安全区，
+      // 底部不由这里管（底部 tab 栏/键盘体系各自已带 safe-area-inset-bottom）。
+      paddingTop: "env(safe-area-inset-top)",
+      paddingLeft: "env(safe-area-inset-left)",
+      paddingRight: "env(safe-area-inset-right)",
+      boxSizing: "border-box",
+    }}>
       {showRail && <MobileSideRail tabs={tabsAvailable} active={tab} onSelect={switchTab} />}
       <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, height: "100%" }}>
       <ChatToolbar />

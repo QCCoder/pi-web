@@ -386,7 +386,7 @@ export function DesktopShell() {
 
   return (
     <>
-<div style={{ display: "flex", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)", boxSizing: "border-box" }}>
+<div style={{ display: "flex", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)", boxSizing: "border-box", paddingTop: "env(safe-area-inset-top)", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }}>
     {/* 左侧：项目树侧栏（2026-09 改版：单一侧栏 = 新建任务 + 项目→会话 +
         组尾归档 + 底部设置/模型/插件/Skills）。宽度沿用可拖拽/折叠机制
         （sidebar-container 类 + 拖拽把手）；折叠后左上角固定按钮展开。 */}
