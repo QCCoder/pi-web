@@ -3,12 +3,13 @@
 The `delegate_task` tool delegates a task to an **isolated pi child process** —
 a real `pi` CLI invocation (`--mode json -p`) with its own context window,
 model, and tool allow-list. The package is
-`@henryqw/pi-subagent`, pinned locally at `../pi-subagent-upstream/henryqw-pi-subagent-7.1.0.tgz`
+`@henryqw/pi-subagent`, vendored in-repo at `vendor/henryqw-pi-subagent-7.1.0.tgz`
 (a packed tarball of the A2-enhanced branch `feat/project-roles-and-child-sessions` @
 b2007f4 — project-level roles + persisted child sessions; an immutable snapshot where a
-`file:` directory pin would live-track the upstream tree; swap to the npm version once
-the upstream PR merges). pi-web's built-in `lib/subagent/` was deleted in this
-switch (A3).
+`file:` directory pin would live-track the upstream tree; 7.1.0 was never published to
+npm and the package's later majors require pi SDK ≥0.86, so the vendored snapshot is
+the long-term pin until pi-web bumps its SDK). pi-web's built-in `lib/subagent/` was
+deleted in this switch (A3).
 
 ## How it's attached (daemon-side)
 
@@ -102,4 +103,4 @@ pi-web. Remaining effective keys in
 | `lib/subagent-child.ts` | `subagentChild` tagging (id/name prefix) |
 | `lib/rpc-manager.ts` | Attaches the extension to every session |
 | `components/MessageView.tsx` | `delegate_task` result panel + `open →` jump (`session.id`) |
-| `package.json` | `"@henryqw/pi-subagent": "file:../pi-subagent-upstream/henryqw-pi-subagent-7.1.0.tgz"` (temporary local tgz pin — immutable snapshot, swap to npm when upstream merges) |
+| `vendor/henryqw-pi-subagent-7.1.0.tgz` | Vendored package snapshot (byte-identical to HenryQW/pi-packages `feat/project-roles-and-child-sessions` @ b2007f4) — `package.json` pins `file:./vendor/…` so `npm ci` works inside Docker |
