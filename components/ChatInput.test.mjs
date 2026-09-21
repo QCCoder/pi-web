@@ -340,8 +340,8 @@ test("desktop Enter/Alt+Enter streaming send paths preserve newline, IME and com
   const script = new Script(ts.transpileModule(findHandler(source).getText(source), {
     compilerOptions: { target: ts.ScriptTarget.ES2020 },
   }).outputText);
-  // 本地分叉（T6 设计）：移动端 Enter=换行、发送走按钮，因此没有上游的
-  // Ctrl/Cmd+Alt+Enter 移动路径 —— 相关用例断言保持原生行为。
+  // 本地分叉（T6 设计）：移动端 Enter=换行、发送走按钮；Ctrl/Cmd+Enter（无 Alt）
+  // 为外接键盘强发（本批 #9），Alt 族组合保持原生（T10 桌面专属）。
   const cases = [
     ["Enter steers", {}, {}, "steer"],
     ["Alt+Enter follows up", { altKey: true }, {}, "followup"],
@@ -355,6 +355,10 @@ test("desktop Enter/Alt+Enter streaming send paths preserve newline, IME and com
     ["mobile Alt+Enter keeps native behavior", { altKey: true }, { isMobile: true }, "native"],
     ["mobile Ctrl+Alt+Enter keeps native behavior", { altKey: true, ctrlKey: true }, { isMobile: true }, "native"],
     ["mobile Cmd+Alt+Enter keeps native behavior", { altKey: true, metaKey: true }, { isMobile: true }, "native"],
+    ["mobile Ctrl+Enter force-sends", { ctrlKey: true }, { isMobile: true }, "steer"],
+    ["mobile Cmd+Enter force-sends", { metaKey: true }, { isMobile: true }, "steer"],
+    ["mobile idle Ctrl+Enter sends", { ctrlKey: true }, { isMobile: true, isStreaming: false }, "send"],
+    ["mobile Enter alone stays native", {}, { isMobile: true }, "native"],
     ["mobile composition grace swallows Enter", { altKey: true }, { isMobile: true, lastCompositionEndAtRef: { current: 950 } }, "prevented"],
     ["Enter falls back to follow-up", {}, { onSteer: undefined }, "followup"],
     ["Alt+Enter falls back to steer", { altKey: true }, { onFollowUp: undefined }, "steer"],

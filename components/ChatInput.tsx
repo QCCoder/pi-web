@@ -1211,8 +1211,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
       // On desktop, Enter sends (Shift+Enter inserts a newline). On mobile,
       // Enter inserts a newline so users can compose multi-line messages;
-      // sending uses the dedicated send button.
-      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
+      // sending uses the dedicated send button. Ctrl/Cmd+Enter（无 Alt——Alt
+      // 族是 T10 桌面专属）是外接键盘的显式强发路径。
+      const forceSend = (e.ctrlKey || e.metaKey) && !e.altKey;
+      if (e.key === "Enter" && !e.shiftKey && (!isMobile || forceSend)) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
           // Default Enter steers when available; Alt/Option+Enter queues a
