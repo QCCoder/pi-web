@@ -268,6 +268,7 @@ export const enLocale: LocalePlugin = {
     "chat.skillDetails": "Skill details: {name}",
     "chat.skillSnapshot": "Instructions sent with this message",
     "chat.commandCompact": "Compress context, optionally with instructions",
+    "chat.scrollToLatest": "Scroll to latest",
     "chat.commandAutoCompact": "Toggle automatic context compaction in settings",
     "chat.commandReload": "Reload extensions, skills, prompts, and tools",
     "chat.commandName": "Set the session display name",

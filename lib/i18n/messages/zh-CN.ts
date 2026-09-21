@@ -268,6 +268,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.skillDetails": "技能详情：{name}",
     "chat.skillSnapshot": "本条消息实际发送的指令",
     "chat.commandCompact": "压缩上下文，可选附加说明",
+    "chat.scrollToLatest": "回到最新消息",
     "chat.commandAutoCompact": "切换自动上下文压缩（全局设置）",
     "chat.commandReload": "重新加载扩展、技能、提示词和工具",
     "chat.commandName": "设置会话显示名称",

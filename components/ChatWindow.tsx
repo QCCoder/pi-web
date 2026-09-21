@@ -26,6 +26,7 @@ import {
   getNextVisibleCount,
   getVisibleRenderWindow,
   restoreScrollTop,
+  shouldShowScrollToLatest,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 import {
@@ -324,11 +325,15 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
 
   // 捕捉：scroll 事件 rAF 节流测量一次。贴底存 {atBottom:true}；否则用
   // findChatScrollAnchor 记录视口顶锚点（候选=带 data-entry-id 的已渲染消息）。
+  // scroll-to-latest 可见性搭同一班车（upstream 1eb5e66 本地适配：不加监听）。
   const scrollCaptureFrameRef = useRef<number | null>(null);
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const captureChatScrollPosition = useCallback(() => {
     const sid = session?.id;
     const container = scrollContainerRef.current;
     if (!sid || !container) return;
+    const shouldShow = shouldShowScrollToLatest(container.scrollTop, container.clientHeight, container.scrollHeight);
+    setShowScrollToLatest((previous) => (previous === shouldShow ? previous : shouldShow));
     if (container.scrollHeight - container.scrollTop - container.clientHeight <= SCROLL_NEAR_BOTTOM_PX) {
       writeChatScrollPosition(sid, { atBottom: true });
       return;
@@ -620,6 +625,8 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
   useEffect(() => {
     setChangedFilesOpen(false);
     setSubagentsOpen(false);
+    // 换会话后 capture 尚未跑过，可见性沿用上一会话会闪按钮。
+    setShowScrollToLatest(false);
   }, [session?.id]);
   const toggleChangedFiles = useCallback(() => setChangedFilesOpen((v) => !v), []);
   const toggleSubagents = useCallback(() => setSubagentsOpen((v) => !v), []);
@@ -1122,6 +1129,36 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
 
       {!embedded && (
       <div className="relative">
+        {/* scroll-to-latest（upstream 1eb5e66 本地适配）：滚离尾部时浮现于 composer
+            上方；点击走共享 scrollToBottom（内部 noteProgrammaticScroll 武装忽略窗，
+            跟随重挂由 chat-scroll-follow 状态机的近底转换完成，不旁路）。 */}
+        {!isEmptyNew && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "100%",
+              left: 0,
+              right: isMobile ? 0 : CHAT_MINIMAP_WIDTH,
+              display: "flex",
+              justifyContent: "center",
+              paddingBottom: 10,
+              pointerEvents: "none",
+              zIndex: 20,
+            }}
+          >
+            <button
+              type="button"
+              className={`chat-scroll-to-bottom${showScrollToLatest && !pendingScrollRestoreRef.current ? " is-visible" : ""}`}
+              title={t("chat.scrollToLatest")}
+              aria-label={t("chat.scrollToLatest")}
+              onClick={() => scrollToBottom("smooth")}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 5v14M5 12l7 7 7-7" />
+              </svg>
+            </button>
+          </div>
+        )}
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
