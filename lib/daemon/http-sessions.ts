@@ -3,13 +3,16 @@ import { existsSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import {
+  abortSubagent,
   destroyRpcSessionsForCwd,
   getLiveRpcSessionInfos,
   getRpcSession,
   getRunningRpcSessionIds,
   getStalledSessionSnapshot,
+  getSubagentRun,
   hasBusyRpcSessionForCwd,
   startRpcSession,
+  steerSubagent,
   subscribeRunningSessions,
   type AgentSessionWrapper,
 } from "./rpc-manager.ts";
@@ -232,6 +235,40 @@ export function createSessionsRoutes(): DaemonRouteHandler {
       catch { state = undefined; /* session not ready yet */ }
       sendJson(response, 200, { ...liveMeta(session), state });
       return true;
+    }
+    // Built-in subagent run control: read a run's status (live map first,
+    // then persisted custom entries) and steer/abort a live child. Pi Web
+    // proxies these for the Agents settings panel and the Agent tool panel.
+    const subagentControl = url.pathname.match(/^\/v1\/subagents\/([^/]+)$/);
+    if (subagentControl && (request.method === "GET" || request.method === "POST")) {
+      const sid = decodeURIComponent(subagentControl[1]);
+      try {
+        if (request.method === "GET") {
+          const run = await getSubagentRun(sid);
+          if (!run) { sendJson(response, 404, { error: "Subagent not found" }); return true; }
+          sendJson(response, 200, { run });
+          return true;
+        }
+        const body = await readJsonBody(request) as { action?: unknown; message?: unknown };
+        if (body.action === "steer") {
+          if (typeof body.message !== "string" || !body.message.trim()) {
+            sendJson(response, 400, { error: "message required" });
+            return true;
+          }
+          await steerSubagent(sid, body.message);
+        } else if (body.action === "abort") {
+          await abortSubagent(sid);
+        } else {
+          sendJson(response, 400, { error: "action must be steer or abort" });
+          return true;
+        }
+        sendJson(response, 200, { ok: true, run: await getSubagentRun(sid) });
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        sendJson(response, message.includes("not running") ? 409 : 500, { error: message });
+        return true;
+      }
     }
     const sessionEvents = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/events$/);
     if (request.method === "GET" && sessionEvents) {

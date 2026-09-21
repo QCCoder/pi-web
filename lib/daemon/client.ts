@@ -72,6 +72,18 @@ export const daemonClient = {
     request<{ success: boolean; data: unknown }>(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(command),
     }),
+  /** Session-daemon surface: built-in subagent run status (live map first,
+   *  then persisted custom entries from the child session file). */
+  getSubagentRun: (sessionId: string) =>
+    request<{ run: { sessionId: string; status: string; profile: string; description: string; result?: string; error?: string } }>(
+      `/v1/subagents/${encodeURIComponent(sessionId)}`,
+    ),
+  /** Session-daemon surface: steer or abort a live built-in subagent child. */
+  controlSubagent: (sessionId: string, action: "steer" | "abort", message?: string) =>
+    request<{ ok: boolean; run: { sessionId: string; status: string } }>(
+      `/v1/subagents/${encodeURIComponent(sessionId)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, message }) },
+    ),
   /** Session-daemon surface: the complete set of running session ids in the
    *  daemon process (interactive sessions + subagent children + kit heartbeat
    *  rounds — the registry is keyed by real session id). */
