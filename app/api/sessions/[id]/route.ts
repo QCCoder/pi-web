@@ -16,6 +16,7 @@ import { computeSessionFileStats } from "@/lib/session-stats";
 import { deleteArchivedSession, isSessionArchived } from "@/lib/session-archive";
 import { skillMessageTitle } from "@/lib/skill-message";
 import { daemonProxy } from "@/lib/agent-proxy";
+import { jsonResponse } from "@/lib/json-response";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -208,7 +209,10 @@ export async function GET(
     } : null;
 
     const revision = fileStat ? `"${fileStat.size}-${fileStat.mtimeMs}"` : undefined;
-    return NextResponse.json(
+    // gzip 透传 ETag：revision 基于 stat（size+mtimeMs）而非响应体字节，天然与
+    // 压缩无关；Vary: Accept-Encoding 由 jsonResponse 负责，304 早退路径不经过这里。
+    return jsonResponse(
+      req,
       {
         sessionId: id,
         filePath,

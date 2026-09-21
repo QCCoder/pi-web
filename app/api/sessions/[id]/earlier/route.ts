@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { buildEarlierContext, resolveSessionPath } from "@/lib/session-reader";
+import { jsonResponse } from "@/lib/json-response";
 
 /** Older-messages window for tail-first session loading (L3).
  *  GET /api/sessions/[id]/earlier?before=<entryId>&limit=100&leafId=<id>
@@ -45,7 +46,7 @@ export async function GET(
       });
     }
 
-    return NextResponse.json({ context });
+    return jsonResponse(req, { context });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

@@ -3,13 +3,14 @@ import { getSessionListVersion, invalidateSessionListCache } from "@/lib/session
 import { listArchivedSessions } from "@/lib/session-archive";
 import { buildSessionsPayload } from "@/lib/session-payload";
 import { daemonProxy } from "@/lib/agent-proxy";
+import { jsonResponse } from "@/lib/json-response";
 
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const archived = url.searchParams.has("archived");
     if (archived) {
-      return NextResponse.json({ sessions: await listArchivedSessions() });
+      return jsonResponse(req, { sessions: await listArchivedSessions() });
     }
     // A freshly created session writes its .jsonl from the daemon process;
     // the disk scan below is cached 30s, so without an explicit invalidate
@@ -25,7 +26,7 @@ export async function GET(req: Request) {
     // refresh (搜索的跨窗口同步以此版本比对，见 /api/sessions/version).
     const sessionListVersion = getSessionListVersion();
     const payload = await buildSessionsPayload(() => daemonProxy());
-    return NextResponse.json({ ...payload, sessionListVersion });
+    return jsonResponse(req, { ...payload, sessionListVersion });
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },

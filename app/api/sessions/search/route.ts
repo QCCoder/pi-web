@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { listAllSessions } from "@/lib/session-reader";
 import { isSubagentChildSession } from "@/lib/subagent-child";
 import { searchSessionContents } from "@/lib/session-search";
+import { jsonResponse } from "@/lib/json-response";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,7 @@ export async function GET(request: Request) {
     const sessions = query && !request.signal.aborted ? await listAllSessions() : [];
     // 侧栏树隐藏 subagent 子会话——搜索目录与可见会话列表保持一致。
     const visible = sessions.filter((session) => !isSubagentChildSession(session));
-    return NextResponse.json(await searchSessionContents(visible, query, request.signal), { headers });
+    return jsonResponse(request, await searchSessionContents(visible, query, request.signal), { headers });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500, headers });
   }
