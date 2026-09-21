@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -15,6 +15,27 @@ import { useIsMobile } from "@/hooks/useIsMobile";
  * 跨工作区列表住首页/桌面中栏（HomeSessionGroups）。
  */
 const SESSION_PREVIEW_COUNT = 20;
+
+// ── 展开态窗口化（upstream 5f8f47b 技术移植，共识 #11）────────────────────────
+// 行高固定：11px 上下 padding + 2px 边框 + 行内最高元素 28px（删除钮）= 52px，
+// 行距 8 → 节距 60。只挂载可见窗口 + overscan；焦点行强制保留在窗口内
+// （删除确认两步的行滚出窗口不能丢状态——对应上游 inline rename 的保留）。
+const SESSION_ROW_HEIGHT = 52;
+const SESSION_ROW_PITCH = SESSION_ROW_HEIGHT + 8;
+/** 展开但行数不多时窗口化纯属开销，超过该阈值才启用。 */
+const WINDOWING_THRESHOLD = 60;
+
+/** 纯函数：给定总数/滚动位置/视口高，返回应挂载的下标（含焦点行钉住）。 */
+export function getSessionListIndices(count: number, scrollTop: number, viewportHeight: number, focusedIndex = -1): number[] {
+  const overscan = 8;
+  const visibleCount = Math.ceil((viewportHeight || 600) / SESSION_ROW_PITCH) + overscan * 2;
+  const start = Math.max(0, Math.min(Math.floor(scrollTop / SESSION_ROW_PITCH) - overscan, count - visibleCount));
+  const end = Math.min(count, start + visibleCount);
+  const indices = Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset);
+  if (focusedIndex >= 0 && focusedIndex < start) indices.unshift(focusedIndex);
+  if (focusedIndex >= end && focusedIndex < count) indices.push(focusedIndex);
+  return indices;
+}
 
 interface Props {
   workspace: WorkspaceSummary;
@@ -33,6 +54,31 @@ export function WorkspaceSessionList({
   const isMobile = useIsMobile();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [showAllSessions, setShowAllSessions] = useState(false);
+  // 展开态窗口化（仅 showAll 且行数超阈值时激活）：内嵌滚动容器 + ResizeObserver
+  // 测视口，onScroll 经 rAF 节流更新窗口（upstream 5f8f47b 手法）。
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const [listViewportH, setListViewportH] = useState(0);
+  const [listScrollTop, setListScrollTop] = useState(0);
+  const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const listScrollRafRef = useRef<number | null>(null);
+  const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const top = e.currentTarget.scrollTop;
+    if (listScrollRafRef.current != null) return;
+    listScrollRafRef.current = requestAnimationFrame(() => {
+      listScrollRafRef.current = null;
+      setListScrollTop(top);
+    });
+  }, []);
+  useLayoutEffect(() => {
+    const el = listScrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) setListViewportH(entry.contentRect.height);
+    });
+    ro.observe(el);
+    setListViewportH(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
   // 切工作区时重置展开态（宿主也以 key=workspace.id 挂载，这里兜底）。
   useEffect(() => {
     setShowAllSessions(false);
@@ -102,16 +148,56 @@ export function WorkspaceSessionList({
         </div>
       ) : (
         <div>
-          {(showAllSessions ? workspaceSessions : workspaceSessions.slice(0, SESSION_PREVIEW_COUNT)).map((session) => (
-            <RecentSessionRow
-              key={session.id}
-              session={session}
-              isMobile={isMobile}
-              onOpen={() => onSelectSession(session)}
-              onRemoved={(id) => setSessions((prev) => prev.filter((item) => item.id !== id))}
-              onDeleted={onSessionDeleted}
-            />
-          ))}
+          {(() => {
+            // 窗口化仅展开态 + 行数超阈值时激活（共识 #11-i：默认 20 条预览零改动）。
+            if (showAllSessions && workspaceSessions.length > WINDOWING_THRESHOLD) {
+              const virtualIndices = getSessionListIndices(
+                workspaceSessions.length,
+                listScrollTop,
+                listViewportH,
+                workspaceSessions.findIndex((session) => session.id === focusedSessionId),
+              );
+              return (
+                <div
+                  ref={listScrollRef}
+                  onScroll={handleListScroll}
+                  style={{ overflowY: "auto", maxHeight: "min(70vh, 640px)" }}
+                >
+                  <div style={{ position: "relative", height: workspaceSessions.length * SESSION_ROW_PITCH }}>
+                    {virtualIndices.map((index) => {
+                      const session = workspaceSessions[index];
+                      return (
+                        <div
+                          key={session.id}
+                          onFocus={() => setFocusedSessionId(session.id)}
+                          onBlur={() => setFocusedSessionId(null)}
+                          style={{ position: "absolute", top: index * SESSION_ROW_PITCH, left: 0, right: 0, height: SESSION_ROW_HEIGHT }}
+                        >
+                          <RecentSessionRow
+                            session={session}
+                            isMobile={isMobile}
+                            onOpen={() => onSelectSession(session)}
+                            onRemoved={(id) => setSessions((prev) => prev.filter((item) => item.id !== id))}
+                            onDeleted={onSessionDeleted}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            }
+            return (showAllSessions ? workspaceSessions : workspaceSessions.slice(0, SESSION_PREVIEW_COUNT)).map((session) => (
+              <RecentSessionRow
+                key={session.id}
+                session={session}
+                isMobile={isMobile}
+                onOpen={() => onSelectSession(session)}
+                onRemoved={(id) => setSessions((prev) => prev.filter((item) => item.id !== id))}
+                onDeleted={onSessionDeleted}
+              />
+            ));
+          })()}
           {!showAllSessions && workspaceSessions.length > SESSION_PREVIEW_COUNT && (
             <button
               onClick={() => setShowAllSessions(true)}
