@@ -1,6 +1,7 @@
 {
-  "name": "@agegr/pi-web",
+  "name": "@qccoder/pi-web",
   "version": "0.9.1-qcc.1",
+  "private": true,
   "description": "Web UI for the pi coding agent",
   "homepage": "https://github.com/agegr/pi-web#readme",
   "repository": {
