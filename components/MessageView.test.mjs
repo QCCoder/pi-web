@@ -93,3 +93,76 @@ test("renders standalone thinking with the saved default and accessible disclosu
     else globalThis.window = previousWindow;
   }
 });
+
+test("marks apply_patch returned failures as errors even when isError is unset (upstream e70c367)", () => {
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-patch-fail",
+    toolName: "apply_patch",
+    input: {
+      input: "*** Begin Patch\n*** Update File: src/a.ts\n-old\n+new\n*** End Patch",
+    },
+  };
+  const failed = {
+    role: "toolResult",
+    toolCallId: block.toolCallId,
+    content: [{ type: "text", text: "apply_patch failed.\nRecovery: MUST read src/a.ts before retrying." }],
+    details: {
+      result: { appliedFiles: [], failures: [{ filePath: "src/a.ts", message: "context mismatch" }] },
+    },
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(MessageView, {
+      message: {
+        role: "assistant",
+        provider: "openai",
+        model: "gpt-test",
+        content: [block],
+      },
+      toolResults: new Map([[block.toolCallId, failed]]),
+    })),
+  );
+
+  assert.match(html, /border:1px solid rgba\(248,113,113,0\.45\)/);
+  assert.match(html, />apply_patch</);
+  assert.doesNotMatch(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
+});
+
+test("apply_patch renders split diff on wide viewports and unified rows on mobile (本地适配)", async () => {
+  const { rememberBlockExpanded } = await jiti.import("./MessageView.tsx");
+  const { IsMobileContext } = await jiti.import("./shell/context.tsx");
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-patch-view",
+    toolName: "apply_patch",
+    input: {
+      input: "*** Begin Patch\n*** Add File: new.ts\n+brand new line\n*** End Patch",
+    },
+  };
+  const message = {
+    role: "assistant",
+    provider: "openai",
+    model: "gpt-test",
+    content: [block],
+  };
+  rememberBlockExpanded(block.toolCallId, true);
+
+  const splitGrid = /grid-template-columns:minmax\(0, 1fr\) minmax\(0, 1fr\)/;
+  const desktopHtml = renderToStaticMarkup(
+    React.createElement(I18nProvider, { initialLocale: "en" },
+      React.createElement(IsMobileContext.Provider, { value: false },
+        React.createElement(MessageView, { message })),
+    ),
+  );
+  assert.match(desktopHtml, splitGrid);
+  assert.match(desktopHtml, /brand new line/);
+
+  const mobileHtml = renderToStaticMarkup(
+    React.createElement(I18nProvider, { initialLocale: "en" },
+      React.createElement(IsMobileContext.Provider, { value: true },
+        React.createElement(MessageView, { message })),
+    ),
+  );
+  assert.doesNotMatch(mobileHtml, splitGrid);
+  assert.match(mobileHtml, /brand new line/);
+});

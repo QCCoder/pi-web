@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
+import { memo, useState, useRef, useEffect, useMemo, useCallback, Fragment, type ComponentProps } from "react";
 import { MarkdownBody } from "./MarkdownBody";
 import { SkillMessageContent } from "./SkillMessageContent";
 import { copyText } from "@/lib/clipboard";
@@ -9,11 +9,13 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { isThinkingExpandedByDefault, THINKING_EXPANDED_EVENT } from "@/lib/thinking-expansion-preference";
 import { estimateUpdatedTokens, type TokenEstimateCacheEntry } from "@/lib/token-estimate";
-import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
+import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
+import { applyPatchPreviewToFiles, applyPatchResultHasFailures, extractApplyPatchPaths, getApplyPatchInputText, parseApplyPatchInput } from "@/lib/apply-patch";
 import { parseSkillMessage, skillCommandText } from "@/lib/skill-message";
 import { parseGrillMessage } from "@/lib/grill-card";
 import { GrillMessageContent } from "./GrillMessageContent";
-import { isEditToolName } from "@/lib/session-changed-files";
+import { isApplyPatchToolName, isEditToolName } from "@/lib/session-changed-files";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import type {
   AgentMessage,
   UserMessage,
@@ -726,7 +728,8 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile, messageTimestamp, onSe
 const blockExpandedStates = new Map<string, boolean>();
 const BLOCK_EXPANDED_STATES_CAP = 4000;
 
-function rememberBlockExpanded(key: string, next: boolean): void {
+/** 导出供测试预置展开态（与 anyToolCallBlockExpanded 同族的会话内记忆）。 */
+export function rememberBlockExpanded(key: string, next: boolean): void {
   if (blockExpandedStates.size >= BLOCK_EXPANDED_STATES_CAP) blockExpandedStates.clear();
   blockExpandedStates.set(key, next);
 }
@@ -993,6 +996,10 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
   const inputStr = JSON.stringify(block.input, null, 2);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
+  const patchFiles = getApplyPatchFiles(block, result);
+  const patchLabel = isApplyPatchToolName(block.toolName)
+    ? summarizeApplyPatchInput(block)
+    : null;
 
   // delegate_task (community subagent) — render the workflow transport panel.
   const delegateDetails: DelegateTaskDetails | null = (() => {
@@ -1013,7 +1020,8 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
     ? result.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n")
     : null;
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
-  const isError = result?.isError ?? false;
+  const isError = (result?.isError ?? false)
+    || (isApplyPatchToolName(block.toolName) && applyPatchResultHasFailures(result?.details));
 
   return (
     <div
@@ -1047,7 +1055,7 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
           {block.toolName}
         </span>
         <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-          {getToolPreview(block)}
+          {patchLabel ?? getToolPreview(block)}
         </span>
         {duration !== undefined && (
           <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
@@ -1077,8 +1085,8 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
         </div>
       )}
 
-      {/* ── Expanded: input args ── */}
-      {expanded && !isEditTool && (
+      {/* ── Expanded: input args (suppressed when a richer patch view exists) ── */}
+      {expanded && !isEditTool && !patchFiles && (
         <pre
           style={{
             margin: 0,
@@ -1097,8 +1105,22 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
         </pre>
       )}
 
+      {/* ── Expanded: apply_patch split diff (replaces both raw input and result) ── */}
+      {expanded && patchFiles && (
+        <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
+          <SplitFilesView files={patchFiles} />
+        </div>
+      )}
+
       {/* ── Paired result — only shown when expanded ── */}
-      {expanded && result && (
+      {expanded && result && patchFiles && isError && (
+        <PairedResult
+          text={resultText ?? ""}
+          isEmpty={resultIsEmpty}
+          isError={isError}
+        />
+      )}
+      {expanded && result && !patchFiles && (
         resultDiff ? (
           <PairedDiffResult
             diff={resultDiff}
@@ -1135,9 +1157,21 @@ function PairedDiffResult({ diff }: {
 }
 
 function SplitPatchView({ text }: { text: string }) {
-  const { t } = useI18n();
   const files = useMemo(() => parseUnifiedPatch(text), [text]);
   if (!files) return <PatchTextView text={text} />;
+  return <SplitFilesView files={files} />;
+}
+
+/**
+ * Shared split-diff view over parsed files — used by the edit tool's result
+ * diff and by apply_patch calls (upstream e70c367). Responsive (本地适配):
+ * 宽视口左右分栏; 窄视口(手机)降为单列 unified 序(removed 在前、added 在后,
+ * context 只渲染一次), 否则 390px 宽下两侧各不足 200px 无法审阅。判定复用
+ * 全局移动端谓词(useIsMobile), 与 shell 分叉同源。
+ */
+function SplitFilesView({ files }: { files: SplitDiffFile[] }) {
+  const { t } = useI18n();
+  const isMobile = useIsMobile();
   const showFileHeaders = files.length > 1;
 
   return (
@@ -1153,7 +1187,25 @@ function SplitPatchView({ text }: { text: string }) {
             lineHeight: 1.55,
           }}
         >
-          {showFileHeaders && (
+          {showFileHeaders && isMobile && (
+            <div
+              style={{
+                padding: "5px 10px",
+                position: "sticky",
+                top: 0,
+                zIndex: 1,
+                color: "var(--text-dim)",
+                background: "var(--bg-panel)",
+                borderBottom: "1px solid var(--border)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {unifiedFileTitle(file, t("i18n.before"), t("i18n.after"))}
+            </div>
+          )}
+          {showFileHeaders && !isMobile && (
             <div
               style={{
                 display: "grid",
@@ -1170,24 +1222,56 @@ function SplitPatchView({ text }: { text: string }) {
             </div>
           )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)" }}>
-            {file.rows.map((row, rowIndex) => {
-              if (row.type === "hunk") {
-                return null;
-              }
+          {isMobile ? (
+            <div>
+              {file.rows.map((row, rowIndex) => {
+                if (row.type !== "line") return null;
+                return (
+                  <Fragment key={rowIndex}>
+                    {row.left.type === "context" ? (
+                      <SplitDiffCellView cell={row.left} side="unified" />
+                    ) : (
+                      <>
+                        {row.left.type === "removed" && (
+                          <SplitDiffCellView cell={row.left} side="unified" />
+                        )}
+                        {row.right.type === "added" && (
+                          <SplitDiffCellView cell={row.right} side="unified" />
+                        )}
+                      </>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)" }}>
+              {file.rows.map((row, rowIndex) => {
+                if (row.type === "hunk") {
+                  return null;
+                }
 
-              return (
-                <div key={rowIndex} style={{ display: "contents" }}>
-                  <SplitDiffCellView cell={row.left} side="left" />
-                  <SplitDiffCellView cell={row.right} side="right" />
-                </div>
-              );
-            })}
-          </div>
+                return (
+                  <div key={rowIndex} style={{ display: "contents" }}>
+                    <SplitDiffCellView cell={row.left} side="left" />
+                    <SplitDiffCellView cell={row.right} side="right" />
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       ))}
     </div>
   );
+}
+
+function unifiedFileTitle(file: SplitDiffFile, beforeLabel: string, afterLabel: string): string {
+  const before = file.oldPath || beforeLabel;
+  const after = file.newPath || afterLabel;
+  return file.oldPath && file.newPath && file.oldPath !== file.newPath
+    ? `${before} → ${after}`
+    : after;
 }
 
 function SplitDiffHeader({ title, side }: { title: string; side: "left" | "right" }) {
@@ -1208,7 +1292,7 @@ function SplitDiffHeader({ title, side }: { title: string; side: "left" | "right
   );
 }
 
-function SplitDiffCellView({ cell, side }: { cell: SplitDiffCell; side: "left" | "right" }) {
+function SplitDiffCellView({ cell, side }: { cell: SplitDiffCell; side: "left" | "right" | "unified" }) {
   const bg =
     cell.type === "added"
       ? "rgba(34,197,94,0.12)"
@@ -1332,6 +1416,37 @@ function PatchTextView({ text }: { text: string }) {
       })}
     </div>
   );
+}
+
+/**
+ * Split diff rows for an apply_patch-style tool call.
+ *
+ * Prefers parsing the V4A patch document from the call input. The extension's
+ * applied result preview contains the complete old/new file with unchanged
+ * lines, so it is only used as a fallback when the call input is unavailable.
+ * A single call may contain several file operations — each becomes its own
+ * file section. (本地无 rawInput 流式半成品通道, 故只有 input 一个来源优先级。)
+ */
+function getApplyPatchFiles(block: ToolCallContent, result?: ToolResultMessage): SplitDiffFile[] | null {
+  if (!isApplyPatchToolName(block.toolName)) return null;
+
+  const fromInput = parseApplyPatchInput(getApplyPatchInputText(block.input));
+  if (fromInput) return fromInput;
+
+  const details = result && !result.isError ? (result as ToolResultMessage & { details?: unknown }).details : undefined;
+  if (isRecord(details)) {
+    const fromPreview = applyPatchPreviewToFiles(details.preview);
+    if (fromPreview) return fromPreview;
+  }
+
+  return null;
+}
+
+/** Header label listing the files targeted by an apply_patch call. */
+function summarizeApplyPatchInput(block: ToolCallContent): string | null {
+  const paths = extractApplyPatchPaths(getApplyPatchInputText(block.input));
+  if (paths.length === 0) return null;
+  return paths.join(", ").slice(0, 120);
 }
 
 function getResultDiff(result: ToolResultMessage): ResultDiff | null {

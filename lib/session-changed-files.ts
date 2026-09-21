@@ -1,11 +1,12 @@
 import { joinFilePath, normalizeFilePathSlashes } from "./file-paths.ts";
+import { getApplyPatchInputText } from "./apply-patch.ts";
 import type { AgentMessage } from "./types";
 
 /**
  * "Files changed in this session" — a pure derivation from the session message
  * stream (no git involvement, no backend). The data source is tool calls:
- * every `write` / `edit` (and edit-tool-name variants) in THIS session's
- * stream. Subagent children no longer contribute: the community
+ * every `write` / `edit` (and edit-tool-name variants) plus Codex-style
+ * `apply_patch` calls in THIS session's stream. Subagent children no longer contribute: the community
  * @henryqw/pi-subagent package runs children as separate pi processes whose
  * file operations never appear in the parent stream (only capped summaries
  * do) — their own session files list them instead. bash-touched files
@@ -40,6 +41,17 @@ export function isEditToolName(toolName: string): boolean {
 
 function isWriteToolName(toolName: string): boolean {
   return toolName.toLowerCase() === "write";
+}
+
+/** Codex-style patch tools (e.g. the pi-apply-patch extension). Upstream keeps
+ *  this in lib/tool-names.ts; the local fork has no such module — tool-name
+ *  predicates live beside their consumers here. */
+export function isApplyPatchToolName(toolName: string): boolean {
+  const name = toolName.toLowerCase();
+  return name === "apply_patch" ||
+    name.startsWith("apply_patch_") ||
+    name.endsWith(".apply_patch") ||
+    name.endsWith("_apply_patch");
 }
 
 function isAbsoluteLikePath(p: string): boolean {
@@ -115,6 +127,17 @@ function collectFromAssistantMessage(ctx: Ctx, message: AgentMessage): void {
     } else if (isEditToolName(block.toolName)) {
       const p = extractFilePath(block.input);
       if (p) record(ctx.map, ctx.seq.n++, resolveToolPath(p, ctx.cwd), "edit");
+    } else if (isApplyPatchToolName(block.toolName)) {
+      // V4A patch 文档一次可携带多个文件操作。沿用本地"调用即计数"语义
+      // (write/edit 同此, 不等 result —— 见 deriveSessionChangedFiles 头注);
+      // Delete File 不算"改过的文件"(upstream e70c367 同语义), Add 记 write、
+      // Update 记 edit。上游基于 details.result.appliedFiles 的失败感知细化
+      // 在本地架构(纯 assistant 流派生, 无 result 通道)下不适用。
+      const patchText = getApplyPatchInputText(block.input);
+      for (const match of patchText.matchAll(/^\*\*\* (Add|Update) File: (.+)$/gm)) {
+        const p = (match[2] ?? "").trim();
+        if (p) record(ctx.map, ctx.seq.n++, resolveToolPath(p, ctx.cwd), match[1] === "Add" ? "write" : "edit");
+      }
     }
   }
 }
