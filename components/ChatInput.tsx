@@ -24,6 +24,7 @@ import {
 } from "@/lib/file-fuzzy";
 import { abbreviateFilePathParts } from "@/lib/file-paths";
 import { FolderIcon, getFileIcon } from "./FileIcons";
+import { ImagePreview } from "./ImagePreview";
 import { SessionChangedFilesButton } from "./SessionChangedFiles";
 import { SessionSubagentsButton } from "./SessionSubagents";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1514,13 +1515,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
             {attachedImages.map((img, i) => (
               <div key={i} style={{ position: "relative", flexShrink: 0 }}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={img.previewUrl}
-                  alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
-                />
+                <ImagePreview key={img.previewUrl} src={img.previewUrl}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={img.previewUrl}
+                    alt=""
+                    style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
+                  />
+                </ImagePreview>
                 <button
+                  type="button"
                   onClick={() => removeImage(i)}
                   style={{
                     position: "absolute", top: -4, right: -4,
