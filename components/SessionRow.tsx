@@ -8,7 +8,7 @@ import { formatRelativeTime } from "@/lib/format-time";
  * 会话行（全局左栏 2026-09 抽出共享）：运行/完成徽章 + Cmd/中键新 tab
  * C1 并行手势 + 行内「归档」（hover 不再有「新 tab」按钮——手势即可，按钮去掉）。
  * 宿主：HomeSessionGroups（桌面全局左栏 + 首页 + 移动端首页）。
- * `showTime`（默认关）：行尾相对时间（全局列表用）。
+ * `showTime`（默认关）：行尾相对时间（hover 时隐藏——归档按钮出现，把行宽还给标题；全局列表用）。
  */
 const hoverActionBtn: React.CSSProperties = {
   flexShrink: 0,
@@ -104,7 +104,7 @@ export function SessionRow({
       }}
     >
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{label}</span>
-      {showTime && (
+      {showTime && !hovered && (
         <span style={{ flexShrink: 0, fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
           {formatRelativeTime(session.modified)}
         </span>

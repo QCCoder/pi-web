@@ -78,9 +78,9 @@ type AutoNameStatus =
 const LANGUAGE_MENU_WIDTH = 176;
 // Desktop sidebar is drag-resizable (handle between sidebar and center). Width is
 // persisted in localStorage; clamped to these bounds. Mobile keeps a fixed drawer.
-// 默认宽 = 最小宽（200px）——树侧栏不需要老三栏时代的中栏宽度。
+// 默认宽 300px（2026-09 两轮反馈：200 太挤 → 260 仍偏小；拖拽范围不变）。
 const SIDEBAR_MIN_WIDTH = 200;
-const SIDEBAR_DEFAULT_WIDTH = SIDEBAR_MIN_WIDTH;
+const SIDEBAR_DEFAULT_WIDTH = 300;
 const SIDEBAR_MAX_WIDTH = 560;
 const SIDEBAR_WIDTH_KEY = "pi-sidebar-width";
 

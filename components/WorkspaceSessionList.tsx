@@ -140,11 +140,11 @@ function formatRelativeTime(dateStr: string): string {
   if (diff < 0) return "刚刚"; // clock skew / future
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return "刚刚";
-  if (mins < 60) return `${mins} 分钟前`;
+  if (mins < 60) return `${mins}分钟`;
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} 小时前`;
+  if (hours < 24) return `${hours}小时`;
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} 天前`;
+  if (days < 7) return `${days}天`;
   return new Date(dateStr).toLocaleDateString();
 }
 

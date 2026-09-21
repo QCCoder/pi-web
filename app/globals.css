@@ -1072,7 +1072,8 @@ span.linenumber {
 }
 
 /* Desktop sidebar: animate width. Width is a CSS var so the user can drag
-   the resize handle (see AppShell `sidebarWidth`); 200px (= the min) is the default. */
+   the resize handle (see AppShell `sidebarWidth`); 300px is the default
+   (keep in sync with SIDEBAR_DEFAULT_WIDTH in useAppShellState.ts). */
 @media (min-width: 641px) {
   .sidebar-container {
     position: relative;
@@ -1080,8 +1081,8 @@ span.linenumber {
     transition: width 0.2s ease, min-width 0.2s ease;
   }
   .sidebar-container.sidebar-open {
-    width: var(--pi-sidebar-width, 200px);
-    min-width: var(--pi-sidebar-width, 200px);
+    width: var(--pi-sidebar-width, 300px);
+    min-width: var(--pi-sidebar-width, 300px);
   }
   .sidebar-container.sidebar-closed {
     width: 0;
@@ -1091,8 +1092,8 @@ span.linenumber {
   /* keep inner content at the sidebar width so it doesn't reflow during the
      open/close animation or while dragging the resize handle */
   .sidebar-container > * {
-    width: var(--pi-sidebar-width, 200px);
-    min-width: var(--pi-sidebar-width, 200px);
+    width: var(--pi-sidebar-width, 300px);
+    min-width: var(--pi-sidebar-width, 300px);
   }
   /* while actively dragging, jump instantly instead of animating each move */
   .sidebar-container.sidebar-resizing {

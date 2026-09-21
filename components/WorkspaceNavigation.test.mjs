@@ -66,7 +66,7 @@ test("project sidebar: 新建任务 on top, tree body, 归档 footer per group, 
   assert.doesNotMatch(projectSidebarSource, /onCollapse/);
   assert.doesNotMatch(projectSidebarSource, /onNewSessionInWorkspace/);
   assert.match(desktopShellSource, /<WorkspaceSelector/);
-  assert.match(desktopShellSource, /createNewSessionTab\\(target, tab\\.id\\)/);
+  assert.match(desktopShellSource, /createNewSessionTab\(target, tab\.id\)/);
   // 树主体：分区标题「工作区」+ ＋（新建工作区/导入目录）+ groupSessionsByWorkspace。
   assert.match(projectSidebarSource, /工作区/);
   assert.doesNotMatch(projectSidebarSource, />项目</);
