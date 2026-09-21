@@ -784,6 +784,14 @@ export function useAppShellState(seed?: {
           restoredActive = result.activeTabId;
         }
       } catch { /* restore is best-effort */ }
+      // 先把恢复项播进 tabsRef 再应用 URL：applyUrlToTabs 的「复用该工作区
+      // 已有占位 tab」去重读的是 tabsRef.current，若在恢复项合并前运行（ref 为空），
+      // 停在 ?view=chat 的 URL 上每次重开页面都会新建一个占位 tab，与恢复的
+      // 旧 id 去重失效 → 占位 tab 每次刷新 +1 累积。播 ref 只影响本次读取，
+      // 后续 setTabs 会照常重同步。
+      if (restoredTabs.length > 0) {
+        tabsRef.current = restoredTabs;
+      }
       await applyUrlToTabs(params);
       if (restoredTabs.length > 0) {
         // 合并：URL 深链新建的 tab 靠右（浏览器「恢复会话 + 新开 tab」的惯例）；
