@@ -27,6 +27,7 @@ import type {
   ToolCallContent,
   ThinkingContent,
 } from "@/lib/types";
+import type { SubagentToolDetails } from "@/lib/subagent-extension";
 
 function getTokenEstimateText(block: AssistantContentBlock): string | null {
   if (block.type === "text") return block.text;
@@ -986,10 +987,18 @@ function DelegateTaskEntryRow({ entry, onOpenSession }: { entry: DelegateTaskEnt
   );
 }
 
+function isSubagentToolDetails(value: unknown): value is SubagentToolDetails {
+  if (!value || typeof value !== "object") return false;
+  const details = value as Partial<SubagentToolDetails>;
+  return details.kind === "pi-web-subagent" && typeof details.sessionId === "string";
+}
+
 function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
   // 展开状态持久到 toolCallId（流式气泡与历史列表里同一次调用的 id 一致）：
   // AI 继续回复时块从气泡移进历史/分组，展开不丢。
   const [expanded, setExpanded] = usePersistentExpanded(block.toolCallId);
+  const { t } = useI18n();
+  const subagentOpenLabel = t("subagent.open");
   const inputStr = JSON.stringify(block.input, null, 2);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
@@ -1007,6 +1016,12 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
       ...(d.usage ? { usage: d.usage } : {}),
     };
   })();
+
+  // built-in subagent (Agent tool) — result.details carries the run; the open
+  // button jumps to the child session (same locate path as delegate_task).
+  const builtinSubagent = isSubagentToolDetails((result as { details?: unknown } | undefined)?.details)
+    ? (result as { details: SubagentToolDetails }).details
+    : null;
 
   // Result display
   const resultText = result
@@ -1026,6 +1041,7 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
       }}
     >
       {/* ── Tool call header ── */}
+      <div style={{ display: "flex", alignItems: "stretch", minWidth: 0 }}>
       <button
         onClick={() => setExpanded((v) => !v)}
         style={{
@@ -1056,6 +1072,18 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
           <polyline points="2 3.5 5 6.5 8 3.5" />
         </svg>
       </button>
+      {builtinSubagent && onOpenSession && (
+        <button
+          type="button"
+          onClick={() => onOpenSession(builtinSubagent.sessionId)}
+          title={subagentOpenLabel}
+          aria-label={subagentOpenLabel}
+          style={{ width: 32, display: "grid", placeItems: "center", border: "none", borderLeft: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></svg>
+        </button>
+      )}
+      </div>
 
       {/* ── delegate_task progress/result panel (live during run + after) ── */}
       {delegateDetails && delegateDetails.entries.length > 0 && (

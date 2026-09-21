@@ -2,27 +2,32 @@ import type { AgentMessage, ToolResultMessage } from "./types.ts";
 
 /**
  * "Subagents spawned in this session" — a pure derivation from the session
- * message stream (no I/O, no backend). Data source: `delegate_task` /
- * `delegate_flow` tool results and live updates (community @henryqw/pi-subagent
- * transport shape):
+ * message stream (no I/O, no backend). Two transport shapes feed it:
+ *
+ * 1. Legacy community `@henryqw/pi-subagent` (delegate_task / delegate_flow):
  *
  *   details = { mode, entries: [{ id, index, role, status, summary?, model?,
  *               thinkingLevel?, session?: { id, cwd } }] }
  *
- * `session` is stamped at child LAUNCH (the package's prepare step), so
- * running delegations contribute too — ChatWindow feeds the live
- * tool_execution_update partials in as synthetic ToolResultMessages.
+ *   `session` is stamped at child LAUNCH, so running delegations contribute
+ *   too — ChatWindow feeds the live tool_execution_update partials in as
+ *   synthetic ToolResultMessages.
+ *
+ * 2. Built-in subagents (the `Agent` tool): one run per tool call —
+ *
+ *   details = { kind: "pi-web-subagent", sessionId, profile, description,
+ *               status, error?, worktreePath? }
  *
  * Why this exists: a persisted child session is hidden from EVERY session
  * list (subagent-child.ts prefix filter), and kit loop rounds are
- * auto-archived by the spawner's D9 hook — the delegate_task result card in
- * the transcript was the ONLY remaining entry. This derivation gives the
+ * auto-archived by the spawner's D9 hook — the tool result card in the
+ * transcript was the ONLY remaining entry. This derivation gives the
  * parent chat a scroll-free index of everything it delegated, durable across
  * compaction-free history and usable from archived round sessions.
  *
  * Matching is by SHAPE, not tool name: persisted toolResult messages don't
- * always carry `toolName`, and any entry exposing `session.id` through this
- * transport is by construction a jumpable child session.
+ * always carry `toolName`, and any entry exposing a child session id through
+ * either transport is by construction a jumpable child session.
  */
 
 export type SubagentEntryStatus =
@@ -62,10 +67,46 @@ function normalizeStatus(v: unknown): SubagentEntryStatus {
   }
 }
 
+/** Map a built-in run status onto the drawer's six statuses. */
+function mapBuiltinStatus(v: unknown): SubagentEntryStatus {
+  switch (v) {
+    case "running":
+      return "running";
+    case "completed":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "aborted":
+      return "rejected";
+    case "interrupted":
+    case "starting":
+    case "queued":
+    default:
+      return "pending";
+  }
+}
+
 /** Record every entries[].session found in one transport payload. */
 function collectFromDetails(map: Map<string, Accumulator>, seq: { n: number }, details: unknown): void {
   if (!details || typeof details !== "object") return;
-  const entries = (details as { entries?: unknown }).entries;
+  const d = details as Record<string, unknown>;
+  // Built-in shape: one Agent-tool run per payload.
+  if (d.kind === "pi-web-subagent" && typeof d.sessionId === "string" && d.sessionId.length > 0) {
+    const run: Accumulator = {
+      id: d.sessionId,
+      role: typeof d.profile === "string" && d.profile.length > 0 ? d.profile : "agent",
+      status: mapBuiltinStatus(d.status),
+      ...(typeof d.description === "string" && d.description.length > 0 ? { summary: d.description } : {}),
+      ...(typeof d.error === "string" && d.error.length > 0 && mapBuiltinStatus(d.status) === "failed"
+        ? { summary: d.error }
+        : {}),
+      ...(typeof d.worktreePath === "string" && d.worktreePath.length > 0 ? { cwd: d.worktreePath } : {}),
+      lastIndex: seq.n++,
+    };
+    map.set(run.id, run);
+    return;
+  }
+  const entries = d.entries;
   if (!Array.isArray(entries)) return;
   for (const entry of entries) {
     if (!entry || typeof entry !== "object") continue;
