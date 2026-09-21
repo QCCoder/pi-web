@@ -44,21 +44,64 @@ export function findChatScrollAnchor(
 }
 
 // ---------------------------------------------------------------------------
-// Per-session position store（模块级：ChatWindow 会话稳定不重挂，切回同一
-// 会话（含跨 workspace 面板重开）都能读回上次位置。条目极小，量级=访问过的
-// 会话数。）
+// Per-session position store。内存 Map 仍是读路径的权威缓存（rAF 捕捉高频写，
+// 不能每帧 JSON.parse）；每次写穿到 localStorage 单条 blob，LRU 只保留最近
+// 30 个会话——刷新 / 手机 PWA 后台回收（iOS 杀进程连 sessionStorage 一起清）
+// 后按 sessionId 水合回内存（本批 #8 本地改进，共识：key 按 session id）。
+// localStorage 不可用 / 写失败（隐私模式、配额、损坏 blob）→ 退化为纯内存，
+// 行为与旧版完全一致。
 // ---------------------------------------------------------------------------
 
+const STORAGE_KEY = "chat-scroll-positions";
+const MAX_PERSISTED_SESSIONS = 30;
+
 const SESSION_SCROLL_POSITIONS = new Map<string, ChatScrollPosition>();
+
+function loadPersistedPositions(): void {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Record<string, ChatScrollPosition>;
+    for (const [sessionId, position] of Object.entries(parsed)) {
+      if (!SESSION_SCROLL_POSITIONS.has(sessionId)) {
+        SESSION_SCROLL_POSITIONS.set(sessionId, position);
+      }
+    }
+  } catch {
+    // 损坏的 blob 或无 localStorage：保持空缓存，下次写穿会重建。
+  }
+}
+
+function persistPositions(): void {
+  try {
+    // Map 迭代序 = 插入序，writeChatScrollPosition 重插到尾 = 最近使用；
+    // 超量从头部淘汰最旧会话（淘汰同时作用于内存，两级保持一致）。
+    while (SESSION_SCROLL_POSITIONS.size > MAX_PERSISTED_SESSIONS) {
+      const oldest = SESSION_SCROLL_POSITIONS.keys().next().value;
+      if (oldest === undefined) break;
+      SESSION_SCROLL_POSITIONS.delete(oldest);
+    }
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(SESSION_SCROLL_POSITIONS)));
+  } catch {
+    // 写失败（隐私模式/配额）：内存语义不受影响。
+  }
+}
+
+if (typeof window !== "undefined") loadPersistedPositions();
 
 export function readChatScrollPosition(sessionId: string): ChatScrollPosition | null {
   return SESSION_SCROLL_POSITIONS.get(sessionId) ?? null;
 }
 
 export function writeChatScrollPosition(sessionId: string, position: ChatScrollPosition): void {
+  SESSION_SCROLL_POSITIONS.delete(sessionId);
   SESSION_SCROLL_POSITIONS.set(sessionId, position);
+  persistPositions();
 }
 
 export function clearChatScrollPositionsForTest(): void {
   SESSION_SCROLL_POSITIONS.clear();
+  try {
+    if (typeof window !== "undefined") window.localStorage.removeItem(STORAGE_KEY);
+  } catch { /* ignore */ }
 }
