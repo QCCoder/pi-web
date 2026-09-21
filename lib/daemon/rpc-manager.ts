@@ -1588,13 +1588,11 @@ export async function startRpcSession(
 // hiding and the locate/open path work unchanged.
 // ----------------------------------------------------------------------------
 
-function registerSubagentChild(
-  inner: AgentSessionLike,
-  _options?: { exactSystemPrompt?: string; chatOnly?: boolean },
-): void {
+function registerSubagentChild(inner: AgentSessionLike): void {
   // The exact prompt / chatOnly pinning lives in the session file
   // (resourceSnapshot) and is re-applied on every reopen by the guard in
-  // startRpcSession, so no live-wrapper state is needed here.
+  // startRpcSession, so no live-wrapper state is needed here (the runtime's
+  // registerSession options are intentionally ignored).
   const wrapper = new AgentSessionWrapper(inner, (completedSessionId) => {
     // Subagent children are internal work — completing them is not a
     // "your session is done" moment for the human.
@@ -1620,7 +1618,7 @@ async function reopenSubagentSession(sessionId: string, sessionFile: string): Pr
 
 const SUBAGENT_CONTROLLER = createSubagentController({
   getSession: (sessionId) => getRegistry().get(sessionId),
-  registerSession: registerSubagentChild,
+  registerSession: (inner) => registerSubagentChild(inner),
   reopenSession: reopenSubagentSession,
   resolveSessionPath,
   invalidateSessionList: invalidateSessionListCache,
