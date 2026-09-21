@@ -93,6 +93,7 @@ type AgentStateResponse = {
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
   isCompacting?: boolean;
+  autoCompactionEnabled?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
@@ -342,7 +343,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     agentRunning, bashRunning, agentPhase, retryInfo, streamState,
     contextUsage, systemPrompt, thinkingLevel, sessionStatsOverride,
-    isCompacting, compactError, compactResult, currentModelOverride,
+    isCompacting, compactError, compactResult, currentModelOverride, autoCompactionEnabled,
     forkingEntryId, activeLeafId, extensionStatuses, extensionWidgets,
     queuedMessages, pendingBash, toolExecutionUpdates,
     hasEarlierMessages, loadingEarlier,
@@ -625,6 +626,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionStatuses !== undefined) patch.extensionStatuses = liveState.extensionStatuses ?? [];
           if (liveState.extensionWidgets !== undefined) patch.extensionWidgets = liveState.extensionWidgets ?? [];
           if (liveState.queuedMessages !== undefined) patch.queuedMessages = normalizeQueuedMessages(liveState.queuedMessages);
+          if (liveState.autoCompactionEnabled !== undefined) patch.autoCompactionEnabled = liveState.autoCompactionEnabled ?? true;
           if (Object.keys(patch).length > 0) patchRuntime(patch);
         } else if (!agentState.running) {
           patchRuntime({ queuedMessages: { steering: [], followUp: [] } });
@@ -941,6 +943,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // (wrapper destroyed) means nothing is compacting.
       const reconcilePatch: Partial<SessionRuntimeState> = {
         isCompacting: state?.isCompacting ?? false,
+        autoCompactionEnabled: state?.autoCompactionEnabled ?? true,
         queuedMessages: normalizeQueuedMessages(state?.queuedMessages),
       };
       patchRuntime(reconcilePatch);
@@ -1272,6 +1275,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           patchRuntime({ compactResult: readCompactResult(result, "manual") });
           if (await loadSession(sid, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
+        }
+
+        case "auto-compact": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          // Read the live wrapper (this POST starts it if idle) so the toggle
+          // follows settings.json, not the runtime default of `true` — idle
+          // sessions have no wrapper and React defaulted to enabled (upstream f2d600b).
+          const liveState = await sendAgentCommand<AgentStateResponse>(sid, { type: "get_state" });
+          const nextEnabled = !(liveState?.autoCompactionEnabled ?? true);
+          await sendAgentCommand(sid, {
+            type: "set_auto_compaction",
+            enabled: nextEnabled,
+          });
+          patchRuntime({ autoCompactionEnabled: nextEnabled });
+          return complete({
+            handled: true,
+            message: nextEnabled
+              ? "Auto-compaction enabled"
+              : "Auto-compaction disabled",
+          });
         }
 
         case "reload": {
@@ -1757,7 +1780,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveInDaemon,
     agentRunning, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
-    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats, autoCompactionEnabled,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,

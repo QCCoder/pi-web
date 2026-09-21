@@ -115,3 +115,19 @@ test("fork is offered on every persisted message including the first (upstream 5
   assert.match(renderSource, /onFork=\{sessionBusy \|\| isNew \? undefined : handleFork\}/);
   assert.doesNotMatch(renderSource, /idx === 0 && msg\.role === "user"/);
 });
+
+test("auto-compact slash command toggles session auto-compaction (upstream f2d600b)", () => {
+  const commandSource = hookSource.slice(
+    hookSource.indexOf('case "auto-compact"'),
+    hookSource.indexOf('case "reload"'),
+  );
+  assert.ok(commandSource.length > 0, "auto-compact case not found before reload case");
+  // 先读实时 wrapper 状态再翻转（idle 会话无 wrapper, 不能用 runtime 默认 true 覆盖 settings.json）。
+  assert.match(commandSource, /sendAgentCommand<AgentStateResponse>\(sid, \{ type: "get_state" \}\)/);
+  assert.match(commandSource, /!\(liveState\?\.autoCompactionEnabled \?\? true\)/);
+  assert.match(commandSource, /type: "set_auto_compaction"/);
+  assert.match(commandSource, /patchRuntime\(\{ autoCompactionEnabled: nextEnabled \}\)/);
+  // 状态镜像 wrapper：加载/重连/轮询时跟随服务端变化（本地适配: useState → runtime slice patch）。
+  assert.match(hookSource, /autoCompactionEnabled: state\?\.autoCompactionEnabled \?\? true/);
+  assert.match(hookSource, /liveState\.autoCompactionEnabled !== undefined\) patch\.autoCompactionEnabled/);
+});

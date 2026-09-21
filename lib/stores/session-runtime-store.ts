@@ -52,6 +52,8 @@ export interface SessionRuntimeState {
 
   // --- 压缩 ---
   isCompacting: boolean;
+  /** 会话自动压缩开关的镜像（/auto-compact 切换, get_state/live 同步; upstream f2d600b）。 */
+  autoCompactionEnabled: boolean;
   compactError: string | null;
   compactResult: CompactResultInfo | null;
 
@@ -93,6 +95,7 @@ export const EMPTY_RUNTIME: SessionRuntimeState = {
   extensionWidgets: [],
   queuedMessages: { steering: [], followUp: [] },
   isCompacting: false,
+  autoCompactionEnabled: true,
   compactError: null,
   compactResult: null,
   activeLeafId: null,
@@ -122,6 +125,7 @@ export function createDefaultSessionRuntimeState(): SessionRuntimeState {
     extensionWidgets: [],
     queuedMessages: { steering: [], followUp: [] },
     isCompacting: false,
+    autoCompactionEnabled: true,
     compactError: null,
     compactResult: null,
     activeLeafId: null,
