@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
+import { AgentsConfig } from "./AgentsConfig";
 import { PanelHeader } from "./PanelHeader";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
@@ -24,6 +25,7 @@ export type SettingsPage =
   | "models"
   | "skills"
   | "plugins"
+  | "agents"
   | "preferences";
 
 const SUBPAGE_TITLES: Record<Exclude<SettingsPage, "index">, string> = {
@@ -31,6 +33,7 @@ const SUBPAGE_TITLES: Record<Exclude<SettingsPage, "index">, string> = {
   models: "模型",
   skills: "Skills",
   plugins: "插件",
+  agents: "Agents",
   preferences: "偏好",
 };
 
@@ -348,6 +351,7 @@ export function SettingsPanel({
               <IndexRow label="模型" hint="API Key / 默认模型" onClick={() => onPageChange("models")} />
               <IndexRow label="Skills" onClick={() => onPageChange("skills")} />
               <IndexRow label="插件" onClick={() => onPageChange("plugins")} />
+              <IndexRow label="Agents" onClick={() => onPageChange("agents")} />
             </>
           )}
           <IndexRow label="偏好" hint="主题 / 语言" onClick={() => onPageChange("preferences")} />
@@ -385,6 +389,18 @@ export function SettingsPanel({
             embedded
             cwd={settingsCwd}
             sessionId={sessionId}
+            onReloaded={onPluginsReloaded}
+          />
+        </div>
+      )}
+      {page === "agents" && settingsCwd && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <AgentsConfig
+            embedded
+            key={settingsCwd}
+            cwd={settingsCwd}
+            sessionId={sessionId}
+            onClose={onCloseOverlay}
             onReloaded={onPluginsReloaded}
           />
         </div>

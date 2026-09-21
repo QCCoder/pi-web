@@ -5,14 +5,17 @@ import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { validateAgentImages } from "../image-attachments";
 import { invalidateModelsCache } from "../models-cache";
-import { cacheSessionPath, invalidateSessionListCache } from "../session-reader";
+import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "../session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "../project-trust";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "../pi-types";
-import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "../types";
+import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem, SessionEntry } from "../types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "../custom-ui-terminal";
 import { buildWorkspaceExtensions } from "../workspaces/extensions";
-import { piSubagentExtension } from "./pi-subagent-host.ts";
+import { createSubagentExtension } from "../subagent-extension";
+import { createSubagentController } from "../subagent-runtime";
+import { listSubagentProfiles, readSubagentSessionResources, SUBAGENT_CONTROL_TOOL_NAMES } from "../subagents";
+import { isBuiltInSubagentsEnabled } from "../subagent-settings";
 import { raceAbort } from "../abort-race";
 import { buildStalledSnapshot, classifyStall, HEARTBEAT_TICK_MS, stallInterruptMessage, type StalledSessionInfo } from "./session-heartbeat";
 import { findWorkspaceForPath } from "../workspaces/service";
@@ -1287,6 +1290,14 @@ function startSessionHeartbeatMonitor(): void {
       // pending request is replayed to any (re)connecting viewer (see the
       // subscribe path), so it stays answerable however long the wait is.
       if (session.hasPendingUiRequests()) continue;
+      // Built-in subagent children follow upstream semantics: no silent-run
+      // kill. They are hidden from the sidebar (nobody would see the
+      // interruption), recovery belongs to the parent's delegation tools
+      // (abort/steer), and killing a quiet builder mid-run is exactly the
+      // community-package timeout philosophy this fork moved away from
+      // (docs/subagent.md). The 10-min idle teardown still applies once a
+      // child settles — that is ordinary registry cleanup, not a kill.
+      if (isSubagentChildSession({ id: session.sessionId || key })) continue;
       const idleMs = session.activityIdleMs();
       if (classifyStall(idleMs) !== "kill") continue;
       const sid = session.sessionId || key;
@@ -1447,14 +1458,17 @@ export async function startRpcSession(
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
     const workspace = await findWorkspaceForPath(cwd);
     const selectedWorkspaceSkills = new Set(workspace?.manifest.skills ?? []);
-    // `subagent` is a global capability: every session gets the community
-    // package's `delegate_task` tool regardless of workspace or capability
-    // toggles (lib/daemon/pi-subagent-host.ts — the former built-in
-    // lib/subagent was deleted). Roles come from the package's own discovery:
-    // built-in implementer/reviewer < project `<cwd>/.pi/agents/pi-subagent/`
-    // < user `~/.pi/agent/config/pi-subagent/`. Loop sessions run with
-    // cwd = workspace root, so a workspace's roles load with no extra wiring.
-    const extensionFactories = [await piSubagentExtension()];
+    // `subagent` is a global capability: every session gets the built-in
+    // delegation tools (Agent / get_subagent_result / steer_subagent)
+    // regardless of workspace or capability toggles. Profiles come from
+    // lib/subagents.ts discovery: built-in three < global ~/.pi/agent/agents
+    // < workspace <cwd>/.agents/agents < project <cwd>/.pi/agents. Loop
+    // sessions run with cwd = workspace root, so a workspace's profiles load
+    // with no extra wiring. Children strip these tools again after creation
+    // (see the subagent-child guard below) — no recursive orchestration.
+    const extensionFactories = [
+      createSubagentExtension(SUBAGENT_CONTROLLER.extensionRuntime, () => listSubagentProfiles(cwd), isBuiltInSubagentsEnabled),
+    ];
     const resourceLoaderOptions: Record<string, unknown> = workspace
       ? {
           extensionFactories: [...extensionFactories, ...buildWorkspaceExtensions(workspace.manifest, workspace.path)],
@@ -1496,6 +1510,24 @@ export async function startRpcSession(
     // extensions stay usable in Pi Web just like in the `pi` CLI.
     if (toolNames && toolNames.length > 0) {
       inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
+    }
+
+    // Built-in subagent children reopen through here (resume / notify). Their
+    // tool selection is fixed by the profile snapshot persisted in the session
+    // file (upstream: "Subagent tool selection is fixed by its profile"), and
+    // the delegation tools never activate inside a child — no recursive
+    // orchestration.
+    if (isSubagentChildSession({ id: inner.sessionId })) {
+      const resources = readSubagentSessionResources(inner.sessionManager.getEntries() as unknown as SessionEntry[]);
+      if (resources) {
+        inner.setActiveToolsByName(resources.tools.filter((tool) => !(SUBAGENT_CONTROL_TOOL_NAMES as readonly string[]).includes(tool)));
+        if (resources.exactSystemPrompt !== undefined && inner.agent.state) {
+          inner.agent.state.systemPrompt = resources.exactSystemPrompt;
+        }
+      } else {
+        const active = inner.getActiveToolNames().filter((tool) => !(SUBAGENT_CONTROL_TOOL_NAMES as readonly string[]).includes(tool));
+        inner.setActiveToolsByName(active);
+      }
     }
 
     const wrapper = new AgentSessionWrapper(inner, (completedSessionId) => {
@@ -1545,4 +1577,62 @@ export async function startRpcSession(
 
   locks.set(lockKey, result);
   return result;
+}
+
+// ----------------------------------------------------------------------------
+// Built-in subagent controller (upstream v0.9.1 architecture, adapted to the
+// daemon registry): children are in-process AgentSessions owned by the same
+// registry as interactive sessions and kit rounds — live SSE, steer and abort
+// all flow through the existing session surface. Children keep the
+// `pi-subagent-<uuid>` id prefix (lib/subagent-child.ts) so tagging, sidebar
+// hiding and the locate/open path work unchanged.
+// ----------------------------------------------------------------------------
+
+function registerSubagentChild(inner: AgentSessionLike): void {
+  // The exact prompt / chatOnly pinning lives in the session file
+  // (resourceSnapshot) and is re-applied on every reopen by the guard in
+  // startRpcSession, so no live-wrapper state is needed here (the runtime's
+  // registerSession options are intentionally ignored).
+  const wrapper = new AgentSessionWrapper(inner, (completedSessionId) => {
+    // Subagent children are internal work — completing them is not a
+    // "your session is done" moment for the human.
+    if (isSubagentChildSession({ id: completedSessionId })) return;
+    void notifySessionComplete(completedSessionId).catch((error) => {
+      console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
+    });
+  });
+  wrapper.start();
+  if (inner.sessionFile) cacheSessionPath(inner.sessionId, inner.sessionFile);
+  wrapper.onDestroy(() => getRegistry().delete(inner.sessionId));
+  getRegistry().set(inner.sessionId, wrapper);
+  wrapper.beginExtensionBinding();
+}
+
+async function reopenSubagentSession(sessionId: string, sessionFile: string): Promise<AgentSessionWrapper> {
+  const existing = getRegistry().get(sessionId);
+  if (existing?.isAlive()) return existing;
+  const cwd = SessionManager.open(sessionFile).getCwd();
+  const { session } = await startRpcSession(sessionId, sessionFile, cwd);
+  return session;
+}
+
+const SUBAGENT_CONTROLLER = createSubagentController({
+  getSession: (sessionId) => getRegistry().get(sessionId),
+  registerSession: (inner) => registerSubagentChild(inner),
+  reopenSession: reopenSubagentSession,
+  resolveSessionPath,
+  invalidateSessionList: invalidateSessionListCache,
+  isBuiltInSubagentsEnabled,
+});
+
+export function getSubagentRun(sessionId: string) {
+  return SUBAGENT_CONTROLLER.get(sessionId);
+}
+
+export function steerSubagent(sessionId: string, message: string) {
+  return SUBAGENT_CONTROLLER.steer(sessionId, message);
+}
+
+export function abortSubagent(sessionId: string) {
+  return SUBAGENT_CONTROLLER.abort(sessionId);
 }

@@ -289,6 +289,15 @@ export interface SessionTreeNode {
   compressedEntryIds?: string[];
 }
 
+export type SubagentSessionStatus =
+  | "starting"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "interrupted";
+
 export interface SessionInfo {
   path: string;
   id: string;

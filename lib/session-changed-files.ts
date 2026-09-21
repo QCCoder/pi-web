@@ -6,10 +6,11 @@ import type { AgentMessage } from "./types";
  * "Files changed in this session" — a pure derivation from the session message
  * stream (no git involvement, no backend). The data source is tool calls:
  * every `write` / `edit` (and edit-tool-name variants) plus Codex-style
- * `apply_patch` calls in THIS session's stream. Subagent children no longer contribute: the community
- * @henryqw/pi-subagent package runs children as separate pi processes whose
- * file operations never appear in the parent stream (only capped summaries
- * do) — their own session files list them instead. bash-touched files
+ * `apply_patch` calls in THIS session's stream. Subagent children never
+ * contribute by design: children are hidden worker sessions (their own
+ * session files list their changes), and the parent stream only ever sees
+ * capped run summaries — the builtin children run in-process now, but the
+ * parent-view semantics stay. bash-touched files
  * (`cat >`, `sed -i`, `git commit`, …) are deliberately NOT counted — the
  * detection would be regex guesswork, and commit doesn't change content.
  *
