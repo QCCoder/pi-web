@@ -66,6 +66,30 @@ function getRequestOrigin(request: Request): string | null {
 }
 
 /**
+ * A PWA "Export" opens `GET /api/sessions/<id>/export` as a top-level
+ * document navigation. Browsers send `Origin: null` for that, so the origin
+ * check above would 403 the very flow the button exists for. Only trust the
+ * Fetch Metadata shape a user-initiated document navigation produces — pages
+ * cannot forge these headers, and non-navigation requests keep the full check.
+ */
+function isUserInitiatedSessionExportNavigation(request: Request): boolean {
+  if (
+    request.method !== "GET"
+    || request.headers.get("sec-fetch-mode") !== "navigate"
+    || request.headers.get("sec-fetch-dest") !== "document"
+    || request.headers.get("sec-fetch-user") !== "?1"
+  ) {
+    return false;
+  }
+
+  try {
+    return /^\/api\/sessions\/[^/]+\/export$/.test(new URL(request.url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Only trust local names, IP literals, or the hostname explicitly selected by
  * the operator. IP literals preserve LAN access but cannot be DNS-rebound
  * because the browser keeps the literal address in the Host header.
@@ -139,6 +163,7 @@ export function isApiRequestAllowed(
   configuredHostnames = configuredHostnamesFromEnvironment(),
 ): boolean {
   if (!isApiRequestHostAllowed(request, configuredHostnames)) return false;
+  if (isUserInitiatedSessionExportNavigation(request)) return true;
   return !shouldCheckApiRequestOrigin(request) || isApiRequestOriginAllowed(request);
 }
 
