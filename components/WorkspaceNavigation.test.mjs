@@ -84,13 +84,15 @@ test("project sidebar: 新建任务 on top, tree body, 归档 footer per group, 
   assert.match(projectSidebarSource, /显示更多/);
   // 组尾暗淡「归档」。
   assert.match(projectSidebarSource, /onOpenArchive/);
-  // 底部四入口：设置/模型/插件/Skills —— 顺序固定。
+  // 底部五入口（2026-09 设置页两栏化后）：设置→工作区分区/模型/插件/Skills/
+  // Agents —— 全部路由到设置页预选分区，顺序固定。
   const bottomBlock = projectSidebarSource.slice(
     projectSidebarSource.indexOf("BOTTOM_ENTRIES"),
     projectSidebarSource.indexOf("function loadCollapsed"),
   );
-  const kinds = [...bottomBlock.matchAll(/kind: "(settings|models|skills|plugins)",/g)].map((m) => m[1]);
-  assert.deepEqual(kinds, ["settings", "models", "skills", "plugins"]);
+  const sections = [...bottomBlock.matchAll(/section: "(workspace|models|skills|plugins|agents)",/g)].map((m) => m[1]);
+  assert.deepEqual(sections, ["workspace", "models", "skills", "plugins", "agents"]);
+  assert.match(projectSidebarSource, /onOpenCenterPage\(\{ kind: "settings", section: entry.section \}\)/);
   // 折叠持久化 + 骨架门控（未加载不渲染假空态）。
   assert.match(projectSidebarSource, /pi-tree-collapsed/);
   assert.match(projectSidebarSource, /workspacesLoaded \|\| !sessionsLoaded/);
@@ -104,13 +106,16 @@ test("desktop shell: single tree sidebar, no icon rail; center pages precede ove
   assert.doesNotMatch(desktopShellSource, /renderMiddleColumn/);
   // 中央区整页分支优先于 总览/聊天：点任何会话 tab 即回。
   assert.match(desktopShellSource, /centerPage \? renderCenterPage\(\)/);
-  // 配置面全部走中央区整页（inline 模式，无 portal）。
+  // 配置面收敛（2026-09 设置页两栏化）：模型/Skills/插件/Agents 不再是独立
+  // 整页——DesktopShell 不再直接渲染四个 Config 组件，它们住进设置页分区
+  // （SettingsPanel desktop 模式）。
   assert.doesNotMatch(desktopShellSource, /configPortalNode/);
-  assert.match(desktopShellSource, /<ModelsConfig inline/);
-  assert.match(desktopShellSource, /<SkillsConfig[\s\S]*?inline/);
-  assert.match(desktopShellSource, /<PluginsConfig[\s\S]*?inline/);
+  assert.doesNotMatch(desktopShellSource, /<ModelsConfig/);
+  assert.doesNotMatch(desktopShellSource, /<SkillsConfig/);
+  assert.doesNotMatch(desktopShellSource, /<PluginsConfig/);
+  assert.doesNotMatch(desktopShellSource, /<AgentsConfig/);
   // 桌面 SessionTabBar 不传 onPickWorkspace（⊞ 退役）；设置经 SettingsPanel
-  // desktop 模式（子页面板内推进航）。
+  // desktop 模式（左索引列 + 右分区内容，无板内推跳）。
   assert.doesNotMatch(desktopShellSource, /onPickWorkspace/);
   assert.match(desktopShellSource, /<SettingsPanel[\s\S]*?desktop/);
   assert.match(desktopShellSource, /split=\{\{ inline: true \}\}/);
@@ -138,13 +143,17 @@ test("session tab bar: ⊞ workspace picker optional (desktop drops it, mobile k
   assert.match(mobileShellSource, /onPickWorkspace=\{handleOpenWorkspace\}/);
 });
 
-test("settings panel: desktop center-page mode keeps 工作区/偏好 rows only", () => {
-  // desktop 模式：模型/Skills/插件（侧栏底部四入口）与归档（项目树组尾）
-  // 不在设置索引重复；移动端保留全行索引 + 内嵌子页。
+test("settings panel: desktop two-column (left nav + right section), mobile keeps index + push subpages", () => {
+  // desktop 模式（2026-09 两栏化）：左索引列常驻（工作区/模型/Skills/插件/
+  // Agents/偏好），无索引页无板内推跳；模型等分区内容住进设置页。
   assert.match(settingsPanelSource, /desktop\?: boolean;/);
-  assert.match(settingsPanelSource, /\{!desktop && \(/);
-  assert.match(settingsPanelSource, /\{!desktop && onOpenArchive && \(/);
-  // 子页面板内推进航（‹ 设置 返回）。
+  assert.match(settingsPanelSource, /DESKTOP_NAV_SECTIONS/);
+  assert.match(settingsPanelSource, /id: "workspace", label: "工作区"/);
+  assert.match(settingsPanelSource, /id: "agents", label: "Agents"/);
+  assert.match(settingsPanelSource, /<ModelsConfig embedded/);
+  // 移动端保留全行索引 + 内嵌子页（‹ 设置 返回）。
+  assert.match(settingsPanelSource, /label="工作区"/);
+  assert.match(settingsPanelSource, /label="归档"/);
   assert.match(settingsPanelSource, /backLabel: "设置"/);
   assert.doesNotMatch(settingsPanelSource, /onOpenConfigView/);
 });
@@ -170,6 +179,32 @@ test("home landing uses a dedicated mobile layout (workspace sheet + grouped rec
   assert.match(homeLandingSource, /HomeSessionGroups/);
 });
 
+test("disabled workspaces stay recoverable from every shell (2026-09 修复)", () => {
+  // 已停用工作区从首页/选择器/树全部隐藏，但必须「找得回」：设置›工作区是
+  // 唯一重启用面，所以每个 shell 都要有直达路径。
+  // 移动端首页：⚙ 设置入口（底部 tab 栏只在工作区内渲染，首页没有它就断了）
+  // + tab 切 settings 时主区渲染设置面板（× 回首页）。
+  assert.match(homeLandingSource, /onOpenSettings: \(\) => void/);
+  assert.match(mobileShellSource, /onOpenSettings=\{\(\) => setTab\("settings"\)\}/);
+  assert.match(mobileShellSource, /tab === "settings" \? \(/);
+  // 移动端 ⊞ 面板：已停用行暗淡可见（不再被 isWorkspaceSelectable 过滤掉），
+  // 点击深链设置›工作区预选；全部停用时首页不掉进「创建第一个工作区」引导。
+  assert.match(homeLandingSource, /workspace\.disabled \? \([\s\S]*?onOpenWorkspaceSettings/);
+  assert.match(homeLandingSource, /hasWorkspaces = workspaces\.length > 0/);
+  assert.doesNotMatch(homeLandingSource, /filter\(isWorkspaceSelectable\)/);
+  // 桌面项目树：树底暗淡行包含已停用工作区，hover ⚙ 直达设置›工作区。
+  assert.match(projectSidebarSource, /!workspace\.available \|\| workspace\.disabled/);
+  assert.match(projectSidebarSource, /onOpenWorkspaceSettings/);
+  assert.match(desktopShellSource, /onOpenWorkspaceSettings=\{handleOpenWorkspaceSettings\}/);
+  // 深链预选机制：共享状态 + WorkspaceManager 消费（nonce 可重复触发）。
+  assert.match(shellStateSource, /requestWorkspaceSettings = useCallback/);
+  assert.match(workspaceManagerSource, /selectWorkspaceRequest\?: \{ id: string; nonce: number \} \| null/);
+  assert.match(
+    workspaceManagerSource,
+    /selectWorkspaceRequest[\s\S]*setSelectedWorkspaceId\(selectWorkspaceRequest\.id\)/,
+  );
+});
+
 test("workspace settings and work items render as center pages", () => {
   assert.match(desktopShellSource, /<WorkspaceManager[\s\S]*embedded/);
   assert.match(workspaceManagerSource, /workspace-manager-page/);
@@ -189,7 +224,9 @@ test("deleting the active workspace returns to the home context", () => {
 });
 
 test("home skills use an explicit global context instead of the user home directory", () => {
-  assert.match(desktopShellSource, /<SkillsConfig[\s\S]*?globalOnly=\{!activeWorkspace\}/);
+  // SkillsConfig 的宿主从 DesktopShell 独立整页迁到设置页分区（2026-09
+  // 两栏化），globalOnly 语义不变：无活动工作区 = 全局作用域。
+  assert.match(settingsPanelSource, /<SkillsConfig[\s\S]*?globalOnly=\{!workspace\}/);
   assert.match(skillsConfigSource, /scope=global/);
   assert.match(skillsConfigSource, /globalOnly\?: boolean/);
 });

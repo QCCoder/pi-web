@@ -38,6 +38,13 @@ interface RepositoryListResponse {
 }
 
 type ManagerSection = "workspaces" | "work-items";
+
+/** 列表行路径缩短（2026-09 反馈收敛）：保留末尾 3 段 + 省略号，完整路径在
+ *  title 提示与详情页可见。与 SettingsPanel.shortenPath 同规则。 */
+function shortenWorkspacePath(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  return segments.length > 3 ? `…/${segments.slice(-3).join("/")}` : path;
+}
 type WorkItemFilter = "all" | WorkItemType;
 
 interface Props {
@@ -67,6 +74,10 @@ interface Props {
   createWorkItemRequest?: { type: WorkItemType; id: number } | null;
   createWorkspaceOnOpen?: boolean;
   openRepositoryFormRequest?: number;
+  /** 深链预选（已停用工作区的重启用路径）：设置›工作区分区打开时选中指定
+   *  工作区（nonce 驱动，可重复触发）；宿主在设置面关闭时清空，避免重开时
+   *  闪回旧选择。数据就绪后命中才生效（id 不存在则忽略）。 */
+  selectWorkspaceRequest?: { id: string; nonce: number } | null;
   onClose: () => void;
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   onOpenWorkItemConversation: (workspace: WorkspaceSummary, item: WorkItemRecord) => void;
@@ -212,6 +223,7 @@ export function WorkspaceManager({
   createWorkItemRequest,
   createWorkspaceOnOpen = false,
   openRepositoryFormRequest,
+  selectWorkspaceRequest,
   onClose,
   onOpenWorkspace,
   onOpenWorkItemConversation,
@@ -474,6 +486,17 @@ export function WorkspaceManager({
     setSection("workspaces");
     setRepositoryFormOpen(true);
   }, [embedded, open, openRepositoryFormRequest]);
+
+  // 深链预选（已停用工作区的重启用路径）：请求到达且列表数据包含该 id 时
+  // 选中它并回到 workspaces 分区。数据通常晚于请求到达（面板刚挂载），所以
+  // workspaceData 也在依赖里——落地即触发。
+  useEffect(() => {
+    if ((!open && !embedded) || !selectWorkspaceRequest) return;
+    if (!workspaceData?.workspaces.some((workspace) => workspace.id === selectWorkspaceRequest.id)) return;
+    setSection("workspaces");
+    setSelectedWorkspaceId(selectWorkspaceRequest.id);
+    setSelectedWorkItem(null);
+  }, [embedded, open, selectWorkspaceRequest, workspaceData]);
 
   const visibleWorkItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -931,15 +954,10 @@ export function WorkspaceManager({
           .work-item-row .work-item-badge + .work-item-badge { display: none; }
           .work-item-fields { display: grid; grid-template-columns: 1fr 1fr; }
           .workspace-field-compact select { min-width: 0; }
-          .work-item-event { grid-template-columns: 92px 1fr; }
-          /* Detail header: robust to button count (返回/继续会话/编辑正文/归档…)
-             — key+title takes its own full-width line, buttons wrap below.
-             (The old :nth-of-type grid placements silently mis-laid-out every
-             button past the third.) */
-          .work-item-detail-header { display: flex; flex-wrap: wrap; gap: 8px; }
-          .work-item-detail-header > div { order: -1; flex: 1 1 100%; }
+          .work-item-event { grid-template-columns: 92px 1fr auto; }
+          /* Detail header is two explicit rows (actions / title) — compact only
+             shrinks the title; buttons already wrap inside their row. */
           .work-item-detail-header h2 { font-size: 15px; }
-          .work-item-detail-header > .workspace-action { flex: 0 0 auto; white-space: nowrap; }
   `;
 
   const managerStyles = `
@@ -1200,8 +1218,14 @@ export function WorkspaceManager({
           padding: 3px 7px;
           font-size: 10px;
         }
-        .work-item-detail-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; }
-        .work-item-detail-header h2 { margin: 2px 0 0; font-size: 20px; }
+        /* Detail header: two rows (2026-09 feedback) — row 1 = action buttons,
+           row 2 = key + title. Buttons wrap within their own row so any button
+           count stays readable. */
+        .work-item-detail-header { display: flex; flex-direction: column; align-items: stretch; gap: 8px; margin-bottom: 14px; }
+        .work-item-detail-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+        .work-item-detail-actions > .workspace-action { flex: 0 0 auto; white-space: nowrap; }
+        .work-item-detail-title { min-width: 0; }
+        .work-item-detail-header h2 { margin: 2px 0 0; font-size: 20px; overflow-wrap: anywhere; }
         .work-item-fields { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
         .work-item-content {
           border: 1px solid var(--border);
@@ -1245,7 +1269,7 @@ export function WorkspaceManager({
           color: var(--text-muted);
           font-size: 11px;
         }
-        .work-item-event { display: grid; grid-template-columns: 120px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+        .work-item-event { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 11px; align-items: start; }
         .work-item-event time { color: var(--text-dim); }
         /* Long unbreakable tokens (file paths, SPEC refs) must not blow out the
            1fr track — min-width:0 lets the track shrink, overflow-wrap breaks
@@ -1259,11 +1283,23 @@ export function WorkspaceManager({
            kept 18px padding — the whole pane overflowed the column). The
            manager chrome header is hidden entirely: the enclosing PanelHeader
            (工作项 panel / settings subpage) already titles the panel, and the
-           Workspaces tab was a dead-end in this context. */
+           Workspaces tab was a dead-end in this context.
+           RAIL EXCEPTION（2026-09 修复）: the rail (all-workspaces LIST) stays
+           hidden only for the work-items hosts（右坞/移动工作项 subpage — they
+           are scoped to ONE workspace, a list there is a dead end）. When the
+           section IS "workspaces"（设置›工作区 subpage — the ONLY surface where
+           hidden/disabled workspaces can be selected & re-enabled）the rail
+           must stay reachable at EVERY panel width: it used to rely solely on
+           the (max-width: 640px) media query below, so phone portrait got the
+           stacked list but any wider mobile viewport（横屏/平板/折叠屏 ≥768px
+           side-rail / 「电脑版网站」~980px）rendered ONLY the auto-selected
+           workspace's detail — the all-workspaces list "wouldn't open" and
+           disabled workspaces became unmanageable. Same stacked treatment the
+           phone media query applies, emitted here unconditionally. */
         .workspace-manager-page { container-type: inline-size; }
         .workspace-manager-header { display: none; }
-        .workspace-manager-body { grid-template-columns: minmax(0, 1fr); }
-        .workspace-rail { display: none; }
+        .workspace-manager-body { grid-template-columns: minmax(0, 1fr); ${section === "workspaces" ? "display: block; overflow: auto;" : ""} }
+        .workspace-rail { ${section === "workspaces" ? "display: block; height: auto; border-right: 0; border-bottom: 1px solid var(--border);" : "display: none;"} }
         .workspace-content { padding: 12px; }
         .work-item-toolbar { flex-wrap: wrap; }
         .work-item-filter { flex: 1 1 auto; min-width: 0; }
@@ -1296,16 +1332,14 @@ export function WorkspaceManager({
   const boundLoopName = selectedWorkItem?.item.loop ?? "";
   const workItemDetailPane = selectedWorkItem && selectedWorkspace ? (
     <div className="work-item-detail-card">
+                  {/* 两行结构（2026-09 反馈）：第一排 = 按钮区，第二排 = 编号 + 标题。 */}
                   <div className="work-item-detail-header">
+                    <div className="work-item-detail-actions">
                     <button className="workspace-action" onClick={() => setSelectedWorkItem(null)}>← 返回</button>
-                    <div>
-                      <div className="work-item-key">{selectedWorkItem.item.key}</div>
-                      <h2>{selectedWorkItem.item.title}</h2>
-                    </div>
                     {selectedWorkItem.item.status !== "done" && selectedWorkItem.item.status !== "cancelled" && selectedWorkItem.item.phase !== "complete" && selectedWorkItem.events.length > 0
                       && [...selectedWorkItem.events].reverse().find((event) => event.type === "loop.gate" || event.type.startsWith("loop."))?.type === "loop.gate" && (
                       <span
-                        style={{ padding: "2px 8px", borderRadius: 5, background: "rgba(245,158,11,0.15)", color: "#b45309", fontSize: 12, fontWeight: 700, alignSelf: "center" }}
+                        style={{ padding: "2px 8px", borderRadius: 5, background: "rgba(245,158,11,0.15)", color: "#b45309", fontSize: 12, fontWeight: 700 }}
                         title="执行会话已提问并等待答复——去关联会话里回答即可继续"
                       >
                         待裁决
@@ -1420,6 +1454,11 @@ export function WorkspaceManager({
                     >
                       {selectedWorkItem.item.archivedAt ? "取消归档" : "归档"}
                     </button>
+                    </div>
+                    <div className="work-item-detail-title">
+                      <div className="work-item-key">{selectedWorkItem.item.key}</div>
+                      <h2>{selectedWorkItem.item.title}</h2>
+                    </div>
                   </div>
                   {onOpenConversation && selectedWorkItem.item.conversations.length > 0 && (
                     <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
@@ -1514,25 +1553,17 @@ export function WorkspaceManager({
                       </div>
                     </div>
                   </div>
-                  {selectedWorkspace.repositories.length > 0 && (
+                  {/* 仓库范围只读展示（2026-09 反馈：详情页勾选无实际作用，撤掉）。
+                    字段仍由创建表单 / 外部源脚本 / LLM 工具写入，loop 选品的
+                    verifiable 判定读它；详情页只在非空时展示，不再提供勾选。 */}
+                  {selectedWorkItem.item.repositories.length > 0 && (
                     <div className="work-item-repositories" aria-label="Repository scope">
-                      {selectedWorkspace.repositories.map((repository) => {
-                        const checked = selectedWorkItem.item.repositories.includes(repository.id);
+                      {selectedWorkItem.item.repositories.map((repositoryId) => {
+                        const repository = selectedWorkspace.repositories.find((repo) => repo.id === repositoryId);
                         return (
-                          <label className="work-item-repository" key={repository.id}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              disabled={saving || repository.status === "removed"}
-                              onChange={(event) => {
-                                const next = event.target.checked
-                                  ? [...new Set([...selectedWorkItem.item.repositories, repository.id])]
-                                  : selectedWorkItem.item.repositories.filter((id) => id !== repository.id);
-                                void patchWorkItem({ repositories: next });
-                              }}
-                            />
-                            {repository.name}{repository.status === "removed" ? "（已停用）" : ""}
-                          </label>
+                          <span className="work-item-repository" key={repositoryId}>
+                            {repository ? repository.name : repositoryId}{repository?.status === "removed" ? "（已停用）" : ""}
+                          </span>
                         );
                       })}
                     </div>
@@ -1578,20 +1609,32 @@ export function WorkspaceManager({
                         移到回收站
                       </button>
                     </div>
-                    {selectedWorkItem.events.map((event) => (
-                      <div className="work-item-event" key={event.id}>
-                        <time>{formatDate(event.at)}</time>
-                        <div>
-                          <strong>{event.type}</strong>
-                          <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>{event.actor}</span>
-                          {typeof event.data?.summary === "string" && (
-                            <div style={{ color: "var(--text-muted)", marginTop: 3 }}>
-                              {event.data.summary}
-                            </div>
+                    {selectedWorkItem.events.map((event) => {
+                      const eventConversationId = event.conversationId;
+                      return (
+                        <div className="work-item-event" key={event.id}>
+                          <time>{formatDate(event.at)}</time>
+                          <div>
+                            <strong>{event.type}</strong>
+                            <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>{event.actor}</span>
+                            {typeof event.data?.summary === "string" && (
+                              <div style={{ color: "var(--text-muted)", marginTop: 3 }}>
+                                {event.data.summary}
+                              </div>
+                            )}
+                          </div>
+                          {onOpenConversation && eventConversationId && (
+                            <button
+                              className="workspace-action"
+                              onClick={() => onOpenConversation(eventConversationId)}
+                              title={`打开产生此里程碑的会话查看完整消息（${eventConversationId}）`}
+                            >
+                              查看会话
+                            </button>
                           )}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </section>
     </div>
   ) : null;
@@ -1805,9 +1848,11 @@ export function WorkspaceManager({
         ? { width: 300, flexShrink: 0, minHeight: 0 }
         : splitMode ? { width: "100%", flex: 1, minHeight: 0, borderRight: "none" } : undefined}
     >
+            {/* 新建按钮独占头部（2026-09 反馈收敛）：不再带 "Workspaces"
+                英文标题——设置页左索引列 / PanelHeader 已标明「工作区」，双层
+                标题观感混乱；按钮语义补全为「新建工作区」（避免误读为工作项）。 */}
             <div className="workspace-page-header">
-              <strong>Workspaces</strong>
-              <button className="workspace-action" onClick={() => setCreateWorkspaceOpen(true)}>新建</button>
+              <button className="workspace-action" onClick={() => setCreateWorkspaceOpen(true)}>＋ 新建工作区</button>
             </div>
             {loading && <div className="workspace-rail-meta">Loading…</div>}
             {workspaceData?.workspaces.map((workspace) => (
@@ -1858,13 +1903,14 @@ export function WorkspaceManager({
                     </span>
                   )}
                 </strong>
-                <span className="workspace-rail-meta">{workspace.path}</span>
-                <span className="workspace-rail-meta">
-                  {workspace.disabled
-                    ? "已停用（仅设置可见）"
-                    : workspace.available
-                      ? `${workspace.capabilities.length} capabilities · ${workspace.repositoryCount} repos`
-                      : "目录或配置不可用"}
+                {/* 两行制（2026-09 反馈收敛）：名称（含已停用徽章）+ 缩短路径；
+                    capabilities/repos 计数撤下列表（详情页全量可见），不可用
+                    状态占第二行。 */}
+                <span
+                  className="workspace-rail-meta"
+                  title={workspace.available ? workspace.path : undefined}
+                >
+                  {workspace.available ? shortenWorkspacePath(workspace.path) : "目录或配置不可用"}
                 </span>
               </button>
             ))}

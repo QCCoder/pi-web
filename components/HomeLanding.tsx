@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
+import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { HomeSessionGroups } from "./HomeSessionGroups";
 import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
@@ -18,6 +18,12 @@ interface Props {
   onNewSession: () => void;
   /** 运行中会话 id 集（移动端分组列表呼吸点） */
   runningSessionIds: Set<string>;
+  /** ⚙ 设置入口（2026-09 修复）：首页落地页没有底部 tab 栏（它只在工作区内
+   *  渲染），而设置›工作区是已停用工作区的唯一重启用面——没有这个入口，
+   *  把唯一工作区停用后手机端就再也找不到设置。 */
+  onOpenSettings: () => void;
+  /** ⊞ 面板里已停用工作区行点击 → 深链设置›工作区并预选（重启用路径）。 */
+  onOpenWorkspaceSettings: (workspace: WorkspaceSummary) => void;
 }
 
 /** 方向 A（会话优先，2026-09 重做 + 工作区维度收敛修订）：首页 = 全局启动器，
@@ -36,6 +42,8 @@ export function HomeLanding({
   onSelectSession,
   onNewSession,
   runningSessionIds,
+  onOpenSettings,
+  onOpenWorkspaceSettings,
 }: Props) {
   const isMobile = useIsMobile();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -57,11 +65,11 @@ export function HomeLanding({
     return () => controller.abort();
   }, [refreshKey]);
 
-  const availableWorkspaces = useMemo(
-    () => workspaces.filter(isWorkspaceSelectable),
-    [workspaces],
-  );
-  // 空工作区不成组（无会话的工作区只在 ⊞ 面板出现，最近区保持紧凑）。
+  // 空工作区不成组（无会话的工作区只在 ⊞ 面板出现，最近区保持紧凑）；分组
+  // 本身只看可选用工作区（isWorkspaceSelectable 在 groupSessionsByWorkspace
+  // 内部过滤，已停用不出最近区）。「是否有工作区」看全量——全部停用时不能
+  // 掉进「创建第一个工作区」引导（用户明明有，只是停用了；重启用路径在 ⊞
+  // 面板的暗淡行 + ⚙ 设置）。
   const sessionGroups = useMemo(
     () => groupSessionsByWorkspace(workspaces, sessions).filter((group) => group.sessions.length > 0),
     [workspaces, sessions],
@@ -74,7 +82,7 @@ export function HomeLanding({
   }
 
   const { greeting, dateLabel } = homeChrome();
-  const hasWorkspaces = availableWorkspaces.length > 0;
+  const hasWorkspaces = workspaces.length > 0;
 
   return (
     <main
@@ -94,6 +102,32 @@ export function HomeLanding({
             <BrandMark size={22} />
             <span style={{ fontSize: 13, fontWeight: 800, color: "var(--text)", flex: 1 }}>Pi</span>
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{dateLabel}</span>
+            {/* ⚙ 设置：首页唯一的全局配置入口（底部 tab 栏只在工作区内渲染）。
+                已停用工作区只能从设置›工作区重新启用——没有这里，停用后手机端
+                无法自救。 */}
+            <button
+              onClick={onOpenSettings}
+              aria-label="设置"
+              title="设置"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 32,
+                height: 32,
+                marginLeft: 4,
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                background: "var(--bg-panel)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
             <button
               onClick={() => setSheetOpen(true)}
               aria-label="工作区"
@@ -253,9 +287,10 @@ export function HomeLanding({
 
       {sheetOpen && (
         <WorkspaceSheet
-          workspaces={availableWorkspaces}
+          workspaces={workspaces}
           onClose={() => setSheetOpen(false)}
           onSelectWorkspace={onSelectWorkspace}
+          onOpenWorkspaceSettings={onOpenWorkspaceSettings}
           onCreateWorkspace={onCreateWorkspace}
           onImportDirectory={onImportDirectory}
         />
@@ -264,18 +299,22 @@ export function HomeLanding({
   );
 }
 
-/** Bottom sheet: the complete workspace list (select = enter) + 新建/导入
- *  footer — the management counterpart to the recent-groups' quick entry. */
+/** Bottom sheet: the complete workspace list (select = enter; 已停用行暗淡、
+ *  点击 → 深链设置›工作区重启用——它是各选择器都不显示停用工作区后的唯一
+ *  可见面) + 新建/导入 footer — the management counterpart to the recent-
+ *  groups' quick entry. */
 function WorkspaceSheet({
   workspaces,
   onClose,
   onSelectWorkspace,
+  onOpenWorkspaceSettings,
   onCreateWorkspace,
   onImportDirectory,
 }: {
   workspaces: WorkspaceSummary[];
   onClose: () => void;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
+  onOpenWorkspaceSettings: (workspace: WorkspaceSummary) => void;
   onCreateWorkspace: () => void;
   onImportDirectory: () => void;
 }) {
@@ -316,7 +355,54 @@ function WorkspaceSheet({
           工作区
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "0 6px" }}>
-          {workspaces.map((workspace) => (
+          {workspaces.map((workspace) => workspace.disabled ? (
+            /* 已停用：暗淡 + 徽章，点击去设置›工作区重启用（不能进入）。 */
+            <button
+              key={workspace.id}
+              onClick={act(() => onOpenWorkspaceSettings(workspace))}
+              title="已停用——点击前往设置重新启用"
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: 9,
+                padding: "11px 10px",
+                border: 0,
+                borderRadius: 10,
+                background: "transparent",
+                color: "var(--text-dim)",
+                fontSize: 13.5,
+                fontWeight: 600,
+                cursor: "pointer",
+                textAlign: "left",
+                opacity: 0.75,
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              </svg>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {workspace.name}
+              </span>
+              <span
+                style={{
+                  padding: "1px 6px",
+                  borderRadius: 6,
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: "var(--text-muted)",
+                  background: "var(--bg-hover)",
+                  flexShrink: 0,
+                }}
+              >
+                已停用
+              </span>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
+          ) : (
             <button
               key={workspace.id}
               onClick={act(() => onSelectWorkspace(workspace))}

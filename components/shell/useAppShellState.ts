@@ -4,6 +4,8 @@ import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useI18n } from "@/hooks/useI18n";
 import { type SettingsPage } from "../SettingsPanel";
+
+export type { SettingsPage };
 import { useSessionActivity } from "@/hooks/useSessionActivity";
 import { useGlobalAgentEvents } from "@/hooks/useGlobalAgentEvents";
 import { globalAgentEvents } from "@/lib/sse/global-agent-events";
@@ -47,23 +49,25 @@ import {
 
 type SessionCopyField = "file" | "id";
 
-/** 中央区整页（2026-09 树形侧栏改版，grill 共识）：底部四入口
- *  （设置/模型/插件/Skills）与项目树「归档」行打开的中央区页面——取代旧
- *  「中栏面板 + configView 三列 split」双轨。点任何会话 tab（activateTab）
- *  即关闭回到聊天；从不持久化。归档是工作区作用域，带 workspaceId。 */
+/** 中央区整页（2026-09 树形侧栏改版，grill 共识；同月设置页收敛为两栏）：
+ *  底部入口（设置/模型/插件/Skills/Agents）与项目树「归档」行打开的中央区
+ *  页面。点任何会话 tab（activateTab）即关闭回到聊天；从不持久化。归档是
+ *  工作区作用域，带 workspaceId。设置页自带左索引列，模型/Skills/插件/
+ *  Agents 不再是独立整页——底部入口 = 打开设置页并预选对应分区
+ *  （section），设置页内切分区不动 centerPage。 */
 export type CenterPage =
-  | { kind: "settings" }
-  | { kind: "models" }
-  | { kind: "skills" }
-  | { kind: "plugins" }
-  | { kind: "agents" }
+  | { kind: "settings"; section?: SettingsPage }
   | { kind: "archive"; workspaceId: string };
 
-/** 两次打开指向同一页（归档比 workspaceId）→ 底部入口再点一次 = 关闭（toggle）。 */
+/** 两次打开指向同一页（归档比 workspaceId，设置比 section）→ 底部入口再点
+ *  一次 = 关闭（toggle）；同页不同分区 = 切换不关。 */
 function sameCenterPage(current: CenterPage | null, next: CenterPage): boolean {
   if (current == null || current.kind !== next.kind) return false;
   if (current.kind === "archive" && next.kind === "archive") {
     return current.workspaceId === next.workspaceId;
+  }
+  if (current.kind === "settings" && next.kind === "settings") {
+    return (current.section ?? "workspace") === (next.section ?? "workspace");
   }
   return true;
 }
@@ -162,9 +166,10 @@ export function useAppShellState(seed?: {
   const [centerPage, setCenterPage] = useState<CenterPage | null>(null);
   const openCenterPage = useCallback((page: CenterPage) => {
     setCenterPage((current) => (sameCenterPage(current, page) ? null : page));
-    // 从底部入口进设置总是回到索引页；深链（总览「添加仓库」等）随后自行
-    // setSettingsPage 覆盖（同批状态更新，后写者胜）。
-    if (page.kind === "settings") setSettingsPage("index");
+    // 桌面设置页没有索引页（左索引列常驻）——打开时直接落到目标分区；
+    // 深链（总览「添加仓库」等）自带 section。移动端设置 tab 不走 centerPage，
+    // 仍从索引行进入。
+    if (page.kind === "settings") setSettingsPage(page.section ?? "workspace");
   }, []);
   // Loops 面板 → 文件区（桌面右栏「文件」tab / 移动端「文件」tab）的定位意图
   // （一次性信号，非持久视图状态——无需清空点位）：loop 名点击时写入
@@ -172,9 +177,6 @@ export function useAppShellState(seed?: {
   // FilesExplorerPanel（reveal 展开树定位；DesktopShell 激活右栏文件 tab、
   // MobileShell 切到「文件」tab）。
   const [loopFilesReveal, setLoopFilesReveal] = useState<{ path: string; nonce: number } | null>(null);
-  const handleOpenConfig = useCallback((view: "models" | "skills" | "plugins" | "agents") => {
-    setCenterPage({ kind: view });
-  }, []);
   const [refreshKey, setRefreshKey] = useState(0);
   const sessionActivity = useSessionActivity(
     selectedSession?.id ?? null,
@@ -239,6 +241,18 @@ export function useAppShellState(seed?: {
     id: number;
   } | null>(null);
   const [openRepositoryFormRequest, setOpenRepositoryFormRequest] = useState<number | undefined>();
+  // 设置›工作区 深链预选（已停用工作区的重启用路径，2026-09 修复「关闭的
+  // 工作区打不开/没有设置入口」）：首页 ⊞ 面板与项目树底部的暗淡行点击 →
+  // 请求设置›工作区分区选中某个工作区（nonce 保证重复点击重复触发）；
+  // 两 shell 把它透传给 workspaceSlot 里 WorkspaceManager 的
+  // selectWorkspaceRequest。请求是一次性意图——各 shell 在设置面关闭/离开时
+  // 调 clearWorkspaceSettingsRequest，避免下次打开设置闪回旧选择。
+  const [workspaceSettingsRequest, setWorkspaceSettingsRequest] = useState<{ id: string; nonce: number } | null>(null);
+  const requestWorkspaceSettings = useCallback((workspace: WorkspaceSummary) => {
+    setWorkspaceSettingsRequest((prev) => ({ id: workspace.id, nonce: (prev?.nonce ?? 0) + 1 }));
+    setSettingsPage("workspace");
+  }, []);
+  const clearWorkspaceSettingsRequest = useCallback(() => setWorkspaceSettingsRequest(null), []);
   const [globalSettingsCwd, setGlobalSettingsCwd] = useState<string | null>(null);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
@@ -1137,13 +1151,13 @@ export function useAppShellState(seed?: {
         .then(async (response) => {
           if (!response.ok) return;
           const detail = await response.json() as WorkItemDetail;
-          const conversations = [...new Set([...detail.item.conversations, session.id])];
+          // 只传 conversationId：合并由 service 层完成（预读全量列表再传回
+          // 会覆盖其它会话刚挂入的链接）。此调用仅用于读 revision 做乐观锁。
           return fetch(url, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               expectedRevision: detail.item.revision,
-              conversations,
               actor: "system",
               conversationId: session.id,
             }),
@@ -1694,6 +1708,9 @@ export function useAppShellState(seed?: {
     setCreateWorkItemRequest,
     openRepositoryFormRequest,
     setOpenRepositoryFormRequest,
+    workspaceSettingsRequest,
+    requestWorkspaceSettings,
+    clearWorkspaceSettingsRequest,
     globalSettingsCwd,
     setGlobalSettingsCwd,
     projectTrust,
@@ -1732,7 +1749,6 @@ export function useAppShellState(seed?: {
     setActiveTopPanel,
     topPanelPos,
     setTopPanelPos,
-    handleOpenConfig,
     handleWorkspaceSettingsSelection,
     focusChat,
     focusPanel,

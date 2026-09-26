@@ -37,6 +37,18 @@ const SUBPAGE_TITLES: Record<Exclude<SettingsPage, "index">, string> = {
   preferences: "偏好",
 };
 
+/** 桌面设置页的左索引列（2026-09 设置页收敛为两栏：与 模型/Skills/插件 等
+ *  配置页同一视觉语言——左列选分区、右侧直接渲染内容，不再有空索引页和
+ *  板内推跳）。模型/Skills/插件/Agents 不再是独立中央区整页，全部住进这里。 */
+const DESKTOP_NAV_SECTIONS: Array<{ id: Exclude<SettingsPage, "index">; label: string }> = [
+  { id: "workspace", label: "工作区" },
+  { id: "models", label: "模型" },
+  { id: "skills", label: "Skills" },
+  { id: "plugins", label: "插件" },
+  { id: "agents", label: "Agents" },
+  { id: "preferences", label: "偏好" },
+];
+
 function shortenPath(path: string): string {
   const segments = path.split("/").filter(Boolean);
   return segments.length > 3 ? `…/${segments.slice(-3).join("/")}` : path;
@@ -55,10 +67,10 @@ interface Props {
   /** Switch to the archive panel (index row — the mobile path to the archive;
    *  desktop has the project-tree 归档 row instead). */
   onOpenArchive?: () => void;
-  /** Desktop center-page mode（2026-09 树形侧栏改版）：设置作为中央区整页
-   *  渲染——索引只列 工作区/偏好（模型/Skills/插件 在侧栏底部四入口，归档
-   *  在项目树），子页面板内推进航（‹ 设置 返回）。缺省（移动端抽屉）保持
-   *  原样：全行索引 + 内嵌子页。 */
+  /** Desktop center-page mode（2026-09 设置页收敛为两栏）：单页两栏——左侧
+   *  常驻分区索引列（工作区/模型/Skills/插件/Agents/偏好），右侧直接渲染当前
+   *  分区内容（模型等不再独立整页，底部入口 = 打开设置页预选分区）；无索引页、
+   *  无板内推跳。缺省（移动端）保持原样：全行索引 + 内嵌子页 + ‹设置 返回。 */
   desktop?: boolean;
   /** 工作区子页 header 的 meta（选中工作区名，WorkspaceManager 上报）。 */
   workspaceMeta?: string | null;
@@ -309,18 +321,139 @@ export function SettingsPanel({
   sessionId,
   onCloseOverlay,
 }: Props) {
-  const title = page === "index" ? "设置" : SUBPAGE_TITLES[page];
-  // 子页面板内推进航（‹ 设置 返回）——桌面中央区页与移动端抽屉同构；索引
-  // 只在 index 页渲染（子页换入换出）。
-  const back = page !== "index"
+  // 桌面：左索引列常驻，没有索引页——"index" 归一为 "workspace"；移动端保留
+  // 索引页 + 板内推子页（‹设置 返回）。
+  const activePage: SettingsPage = desktop && page === "index" ? "workspace" : page;
+  const title = !desktop && activePage !== "index" ? SUBPAGE_TITLES[activePage] : "设置";
+  const back = !desktop && activePage !== "index"
     ? { onBack: () => onPageChange("index"), backLabel: "设置" }
     : {};
-  const showIndex = page === "index";
-  const meta = page === "workspace" ? workspaceMeta ?? undefined
-    : page === "models" ? "~/.pi/agent/models.json"
-    : page === "skills" || page === "plugins" ? shortenPath(settingsCwd)
+  const meta = activePage === "workspace" ? workspaceMeta ?? undefined
+    : activePage === "models" ? "~/.pi/agent/models.json"
+    : activePage === "skills" || activePage === "plugins" || activePage === "agents" ? shortenPath(settingsCwd)
     : undefined;
 
+  // 分区内容（桌面 = 右侧内容列；移动端 = 推入的子页）。
+  const sectionBody = (
+    <>
+      {activePage === "workspace" && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {workspaceSlot}
+        </div>
+      )}
+      {activePage === "models" && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <ModelsConfig embedded onSaved={onModelsSaved} />
+        </div>
+      )}
+      {activePage === "skills" && settingsCwd && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <SkillsConfig
+            embedded
+            cwd={settingsCwd}
+            globalOnly={!workspace}
+            workspace={workspace}
+            onWorkspaceSkillsChange={onWorkspaceSkillsChange}
+          />
+        </div>
+      )}
+      {activePage === "plugins" && settingsCwd && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <PluginsConfig
+            embedded
+            cwd={settingsCwd}
+            sessionId={sessionId}
+            onReloaded={onPluginsReloaded}
+          />
+        </div>
+      )}
+      {activePage === "agents" && settingsCwd && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <AgentsConfig
+            embedded
+            key={settingsCwd}
+            cwd={settingsCwd}
+            sessionId={sessionId}
+            onClose={onCloseOverlay}
+            onReloaded={onPluginsReloaded}
+          />
+        </div>
+      )}
+      {activePage === "preferences" && (
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+          <PreferencesPage />
+        </div>
+      )}
+    </>
+  );
+
+  // 桌面：单页两栏——左侧分区索引（含全部配置分区），右侧当前分区内容。
+  // 「工作区」分区的 workspaceSlot 本身是 列表+详情 并排，整页里外合计三栏，
+  // 每栏窄而专注；不再渲染几乎空白的索引页，也没有板内推跳。
+  if (desktop) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+        <PanelHeader
+          title={title}
+          meta={meta}
+          onClose={onCloseOverlay}
+        />
+        <div style={{ flex: 1, minHeight: 0, display: "flex", borderTop: "1px solid var(--border)" }}>
+          <nav
+            aria-label="设置分区"
+            style={{
+              width: 200,
+              flexShrink: 0,
+              minHeight: 0,
+              overflowY: "auto",
+              borderRight: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+              padding: "8px 6px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
+            }}
+          >
+            {DESKTOP_NAV_SECTIONS.map((section) => {
+              const selected = activePage === section.id;
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => onPageChange(section.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 10px",
+                    border: 0,
+                    borderRadius: 7,
+                    background: selected ? "var(--bg-selected)" : "transparent",
+                    color: selected ? "var(--text)" : "var(--text-muted)",
+                    fontWeight: selected ? 600 : 500,
+                    fontSize: 13,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => { if (!selected) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { if (!selected) e.currentTarget.style.background = "transparent"; }}
+                >
+                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {section.label}
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+            {sectionBody}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 移动端：全行索引 + 内嵌子页（推入式，‹设置 返回）。
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <PanelHeader
@@ -329,7 +462,7 @@ export function SettingsPanel({
         onClose={onCloseOverlay}
         {...back}
       />
-      {showIndex && (
+      {activePage === "index" && (
         <div style={{
           flex: 1,
           minHeight: 0,
@@ -343,73 +476,17 @@ export function SettingsPanel({
             hint={workspace?.name ?? "管理全部工作区"}
             onClick={() => onPageChange("workspace")}
           />
-          {/* 模型/Skills/插件：桌面端在侧栏底部四入口（中央区整页），设置里不再
-              重复；手机端这三行是唯一入口，进入内嵌子页。归档同理：桌面在项目
-              树组尾，手机在设置索引行。 */}
-          {!desktop && (
-            <>
-              <IndexRow label="模型" hint="API Key / 默认模型" onClick={() => onPageChange("models")} />
-              <IndexRow label="Skills" onClick={() => onPageChange("skills")} />
-              <IndexRow label="插件" onClick={() => onPageChange("plugins")} />
-              <IndexRow label="Agents" onClick={() => onPageChange("agents")} />
-            </>
-          )}
+          <IndexRow label="模型" hint="API Key / 默认模型" onClick={() => onPageChange("models")} />
+          <IndexRow label="Skills" onClick={() => onPageChange("skills")} />
+          <IndexRow label="插件" onClick={() => onPageChange("plugins")} />
+          <IndexRow label="Agents" onClick={() => onPageChange("agents")} />
           <IndexRow label="偏好" hint="主题 / 语言" onClick={() => onPageChange("preferences")} />
-          {!desktop && onOpenArchive && (
+          {onOpenArchive && (
             <IndexRow label="归档" hint="回收站" onClick={onOpenArchive} />
           )}
         </div>
       )}
-      {/* 子页面（板内推进航）：mobile 传 panel-mode WorkspaceManager，desktop
-          传 inline-split（列表+详情并排）——两者都在本面板内渲染。 */}
-      {page === "workspace" && (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          {workspaceSlot}
-        </div>
-      )}
-      {page === "models" && (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <ModelsConfig embedded onSaved={onModelsSaved} />
-        </div>
-      )}
-      {page === "skills" && settingsCwd && (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <SkillsConfig
-            embedded
-            cwd={settingsCwd}
-            globalOnly={!workspace}
-            workspace={workspace}
-            onWorkspaceSkillsChange={onWorkspaceSkillsChange}
-          />
-        </div>
-      )}
-      {page === "plugins" && settingsCwd && (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <PluginsConfig
-            embedded
-            cwd={settingsCwd}
-            sessionId={sessionId}
-            onReloaded={onPluginsReloaded}
-          />
-        </div>
-      )}
-      {page === "agents" && settingsCwd && (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <AgentsConfig
-            embedded
-            key={settingsCwd}
-            cwd={settingsCwd}
-            sessionId={sessionId}
-            onClose={onCloseOverlay}
-            onReloaded={onPluginsReloaded}
-          />
-        </div>
-      )}
-      {page === "preferences" && (
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <PreferencesPage />
-        </div>
-      )}
+      {sectionBody}
     </div>
   );
 }

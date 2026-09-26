@@ -7,7 +7,7 @@ import { groupSessionsByWorkspace } from "@/lib/home-quick-switch";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import { computeMenuLayout, readViewportWindow, type MenuLayout } from "@/lib/dropdown-layout";
 import { useI18n } from "@/hooks/useI18n";
-import type { CenterPage } from "./shell/useAppShellState";
+import type { CenterPage, SettingsPage } from "./shell/useAppShellState";
 import { SessionRow } from "./SessionRow";
 import { SessionSearch } from "./SessionSearch";
 
@@ -21,7 +21,7 @@ import { SessionSearch } from "./SessionSearch";
  *   📂 pi     🏠 🗑      ← 节点（缩进一级）：整行 = 展开/折叠；hover 右侧
  *                           出现 工作区首页/归档 两个快捷按钮
  *      · 会话行…（默认 5 条，更多收进「显示更多」）
- *   …不可用工作区（暗淡）
+ *   …暗淡行（已停用工作区 hover ⚙ 去设置重启用 / 不可用工作区）
  *   ─────────────────
  *   设置 模型 插件 Skills  ← 底部四入口（全局配置心智）→ 中央区整页
  *
@@ -43,6 +43,9 @@ interface Props {
   selectedSessionId: string | null;
   /** 当前打开的中央区整页（底部入口高亮）。 */
   centerPage: CenterPage | null;
+  /** 设置页当前分区（live settingsPage，仅在设置页打开时非 null）——底部入口
+   *  的高亮跟随设置页内左索引列的实时切换，而非打开时的入口。 */
+  settingsSection: Exclude<SettingsPage, "index"> | null;
   /** 方案二骨架门控：未加载时渲染骨架，不渲染假空态。 */
   workspacesLoaded: boolean;
   sessionsLoaded: boolean;
@@ -51,6 +54,9 @@ interface Props {
   onOpenWorkspace: (workspace: WorkspaceSummary) => void;
   /** 节点行 hover 的「归档」按钮 → 中央区归档页（工作区作用域就地）。 */
   onOpenArchive: (workspace: WorkspaceSummary) => void;
+  /** 树底暗淡行（已停用工作区）的 ⚙ → 设置›工作区预选（重启用路径，
+   *  2026-09 修复：停用的工作区从树/选择器全部消失后，设置是唯一入口）。 */
+  onOpenWorkspaceSettings?: (workspace: WorkspaceSummary) => void;
   onSelectSession: (session: SessionInfo) => void;
   /** 搜索结果命中行：带 entryId/blockIndex 的深跳转（打开会话并定位到具体消息）。 */
   onSelectSearchHit: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
@@ -65,15 +71,17 @@ interface Props {
   workspaceActivity: Record<string, "running" | "completed" | undefined>;
 }
 
-/** 底部四入口图标（原 ActivityBar 图标常量迁移；sidebar 底部一条 strip）。 */
+/** 底部五入口（原 ActivityBar 图标常量迁移；sidebar 底部一条 strip）。2026-09
+ *  设置页两栏化后，五个入口统一路由到设置页并预选对应分区（设置 → 工作区
+ *  分区，即设置页默认落地）；同分区再点 = 关闭，异分区 = 原地切换。 */
 const BOTTOM_ENTRIES: {
-  kind: "settings" | "models" | "skills" | "plugins" | "agents";
+  section: Exclude<SettingsPage, "index">;
   label: string;
   title: string;
   icon: React.ReactNode;
 }[] = [
   {
-    kind: "settings",
+    section: "workspace",
     label: "设置",
     title: "设置",
     icon: (
@@ -84,7 +92,7 @@ const BOTTOM_ENTRIES: {
     ),
   },
   {
-    kind: "models",
+    section: "models",
     label: "模型",
     title: "模型（models.json）",
     icon: (
@@ -103,7 +111,7 @@ const BOTTOM_ENTRIES: {
     ),
   },
   {
-    kind: "skills",
+    section: "skills",
     label: "Skills",
     title: "Skills",
     icon: (
@@ -113,7 +121,7 @@ const BOTTOM_ENTRIES: {
     ),
   },
   {
-    kind: "plugins",
+    section: "plugins",
     label: "插件",
     title: "插件",
     icon: (
@@ -123,7 +131,7 @@ const BOTTOM_ENTRIES: {
     ),
   },
   {
-    kind: "agents",
+    section: "agents",
     label: "Agents",
     title: "Agents（子代理）",
     icon: (
@@ -155,6 +163,7 @@ export function ProjectSidebar({
   completedSessionIds,
   selectedSessionId,
   centerPage,
+  settingsSection,
   workspacesLoaded,
   sessionsLoaded,
   onNewSession,
@@ -168,6 +177,7 @@ export function ProjectSidebar({
   onCreateWorkspace,
   onImportDirectory,
   onOpenCenterPage,
+  onOpenWorkspaceSettings,
   workspaceActivity,
 }: Props) {
   const { t } = useI18n();
@@ -211,7 +221,12 @@ export function ProjectSidebar({
   }, [plusOpen]);
 
   const groups = groupSessionsByWorkspace(workspaces, allSessions);
-  const unavailableWorkspaces = workspaces.filter((workspace) => !workspace.available);
+  // 树底暗淡行：不在树形分组里的工作区 = 用户停用的 + 目录/配置不可用的。
+  // 停用的工作区在首页/选择器全部隐藏，但「能找回」是硬要求——暗淡行 +
+  // hover ⚙ 直达设置›工作区（预选该工作区，重新启用一键可达，2026-09 修复）。
+  const hiddenWorkspaces = workspaces.filter(
+    (workspace) => !workspace.available || workspace.disabled,
+  );
 
   const renderBody = () => {
     // 骨架门控：未加载时绝不渲染「尚无工作区」假空态。
@@ -227,7 +242,7 @@ export function ProjectSidebar({
         </div>
       );
     }
-    if (groups.length === 0 && unavailableWorkspaces.length === 0) {
+    if (groups.length === 0 && hiddenWorkspaces.length === 0) {
       return (
         <div style={{ padding: 12, color: "var(--text-dim)", fontSize: 12 }}>
           尚无工作区——点右上 ＋ 新建或导入。
@@ -326,7 +341,7 @@ export function ProjectSidebar({
             </section>
           );
         })}
-        {unavailableWorkspaces.map((workspace) => (
+        {hiddenWorkspaces.map((workspace) => (
           <div
             key={workspace.id}
             style={{
@@ -340,9 +355,42 @@ export function ProjectSidebar({
               opacity: 0.6,
             }}
           >
-            <strong style={{ fontSize: "var(--pi-sidebar-fs)", color: "var(--text-muted)" }}>{workspace.name}</strong>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <strong style={{ fontSize: "var(--pi-sidebar-fs)", color: "var(--text-muted)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {workspace.name}
+              </strong>
+              {workspace.disabled && workspace.available && onOpenWorkspaceSettings && (
+                <button
+                  type="button"
+                  onClick={() => onOpenWorkspaceSettings(workspace)}
+                  title="已停用——前往设置重新启用"
+                  aria-label={`设置 ${workspace.name}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 22,
+                    height: 22,
+                    padding: 0,
+                    border: 0,
+                    borderRadius: 6,
+                    background: "transparent",
+                    color: "var(--text-dim)",
+                    cursor: "pointer",
+                    flexShrink: 0,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </button>
+              )}
+            </div>
             <span style={{ fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
-              目录或配置不可用
+              {workspace.disabled && workspace.available ? "已停用" : "目录或配置不可用"}
             </span>
           </div>
         ))}
@@ -492,8 +540,9 @@ export function ProjectSidebar({
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto" }}>{renderBody()}</div>
       </SessionSearch>
 
-      {/* 底部四入口：设置 / 模型 / 插件 / Skills（全局配置心智，打开 = 中央区
-          整页）。圆角按钮 + 内缩，hover/选中有圆角底。 */}
+      {/* 底部五入口：设置 / 模型 / 插件 / Skills / Agents（全局配置心智，
+          2026-09 设置页两栏化后统一 = 打开设置页并预选分区）。圆角按钮 +
+          内缩，hover/选中有圆角底。 */}
       <div
         role="tablist"
         aria-label="全局配置"
@@ -507,16 +556,16 @@ export function ProjectSidebar({
         }}
       >
         {BOTTOM_ENTRIES.map((entry) => {
-          const active = centerPage?.kind === entry.kind;
+          const active = centerPage?.kind === "settings" && settingsSection === entry.section;
           return (
             <button
-              key={entry.kind}
+              key={entry.section}
               type="button"
               role="tab"
               aria-selected={active}
               title={entry.title}
               aria-label={entry.label}
-              onClick={() => onOpenCenterPage({ kind: entry.kind })}
+              onClick={() => onOpenCenterPage({ kind: "settings", section: entry.section })}
               style={{
                 flex: 1,
                 display: "flex",

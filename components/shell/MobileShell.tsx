@@ -138,6 +138,9 @@ export function MobileShell() {
     explorerRefreshKey,
     createWorkItemRequest,
     openRepositoryFormRequest,
+    workspaceSettingsRequest,
+    requestWorkspaceSettings,
+    clearWorkspaceSettingsRequest,
     sessionActivity,
     modelsRefreshKey,
     sessionKey,
@@ -229,10 +232,14 @@ export function MobileShell() {
   // panels own their internal subpage navigation (their embedded variants
   // already render index → subpage with in-panel back buttons).
   const [archiveOpen, setArchiveOpen] = useState(false);
-  // Leaving the settings tab drops transient secondary state.
+  // Leaving the settings tab drops transient secondary state（含深链预选请求，
+  // 避免下次打开设置闪回旧选择）。
   useEffect(() => {
-    if (tab !== "settings") setArchiveOpen(false);
-  }, [tab]);
+    if (tab !== "settings") {
+      setArchiveOpen(false);
+      clearWorkspaceSettingsRequest();
+    }
+  }, [tab, clearWorkspaceSettingsRequest]);
 
   // 工作区 tab 的子页栈（2026-09 菜单化：落地 = WorkspaceHomeMenu，栈只存
   // 子页）：会话/工作项/知识库/Loops 管理，‹返回回菜单；离开工作区 tab 或
@@ -420,6 +427,7 @@ export function MobileShell() {
                 initialSection="workspaces"
                 activeWorkspacePath={activeWorkspace?.path ?? null}
                 openRepositoryFormRequest={openRepositoryFormRequest}
+                selectWorkspaceRequest={workspaceSettingsRequest}
                 onClose={() => {}}
                 onOpenWorkspace={handleOpenWorkspace}
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
@@ -439,6 +447,7 @@ export function MobileShell() {
             onModelsSaved={() => s.setModelsRefreshKey((key) => key + 1)}
             onPluginsReloaded={() => s.setSessionKey((key) => key + 1)}
             sessionId={selectedSession?.id ?? null}
+            onCloseOverlay={!activeWorkspace ? () => setTab("chat") : undefined}
           />
         );
       default:
@@ -521,7 +530,14 @@ export function MobileShell() {
           bubbles survive tab switches (Q14). */}
       <div style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
         {!activeWorkspace ? (
-          s.homeSession ? (
+          /* 首页也能进设置（2026-09 修复）：底部 tab 栏只在工作区内渲染，但
+           * 设置›工作区是已停用工作区的唯一重启用面——首页 ⚙/⊞ 暗淡行把
+           * tab 切到 settings 时，主区渲染设置面板（× 返回首页）。 */
+          tab === "settings" ? (
+            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
+              {renderTabContent()}
+            </div>
+          ) : s.homeSession ? (
             <ChatWindow
               reloadSignal={s.sessionKey}
               session={s.homeSession}
@@ -552,6 +568,11 @@ export function MobileShell() {
               onSelectSession={s.handleOpenSessionFromHome}
               onNewSession={s.handleHomeNewSession}
               runningSessionIds={s.sessionActivity.runningIds}
+              onOpenSettings={() => setTab("settings")}
+              onOpenWorkspaceSettings={(workspace) => {
+                requestWorkspaceSettings(workspace);
+                setTab("settings");
+              }}
             />
           )
         ) : (

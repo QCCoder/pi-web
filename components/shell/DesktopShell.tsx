@@ -12,15 +12,11 @@ import { WorkspaceOverview } from "../WorkspaceOverview";
 import { ProjectSidebar } from "../ProjectSidebar";
 import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
-import { ModelsConfig } from "../ModelsConfig";
-import { SkillsConfig } from "../SkillsConfig";
-import { AgentsConfig } from "../AgentsConfig";
-import { PluginsConfig } from "../PluginsConfig";
 import { LoopsDockPanel } from "../LoopsDockPanel";
 import { HomeNewSession } from "../HomeNewSession";
 import { WorkspaceSelector } from "../WorkspaceSelector";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
-import { isWorkspaceSelectable } from "@/lib/workspaces/types";
+import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 import { LOOPS_TAB_ID, KNOWLEDGE_TAB_ID, WORK_ITEMS_TAB_ID, isModuleTabId } from "@/lib/tab-types";
 import { SessionTabBar } from "../SessionTabBar";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
@@ -100,6 +96,9 @@ export function DesktopShell() {
     explorerRefreshKey,
     createWorkItemRequest,
     openRepositoryFormRequest,
+    workspaceSettingsRequest,
+    requestWorkspaceSettings,
+    clearWorkspaceSettingsRequest,
     sessionActivity,
     modelsRefreshKey,
     sessionKey,
@@ -275,6 +274,17 @@ export function DesktopShell() {
   // 子页的 inline-split WorkspaceManager 经 workspaceSlot 注入）。
   const closeCenterPage = () => setCenterPage(null);
 
+  // 树底暗淡行（已停用/不可用工作区）的「去设置」：深链预选 + 打开设置整页
+  // 的›工作区分区。设置页已开时不再走 openCenterPage（它是 toggle 语义，会把
+  // 页面关掉），只切分区；离开设置整页时清掉预选请求，避免重开时闪回旧选择。
+  useEffect(() => {
+    if (centerPage?.kind !== "settings") clearWorkspaceSettingsRequest();
+  }, [centerPage, clearWorkspaceSettingsRequest]);
+  const handleOpenWorkspaceSettings = useCallback((workspace: WorkspaceSummary) => {
+    requestWorkspaceSettings(workspace);
+    if (centerPage?.kind !== "settings") openCenterPage({ kind: "settings", section: "workspace" });
+  }, [centerPage, openCenterPage, requestWorkspaceSettings]);
+
   const renderCenterPage = () => {
     const page = centerPage;
     if (!page) return null;
@@ -300,6 +310,7 @@ export function DesktopShell() {
                 onSelectedWorkspaceChange={handleWorkspaceSettingsSelection}
                 activeWorkspacePath={activeWorkspace?.path ?? null}
                 openRepositoryFormRequest={openRepositoryFormRequest}
+                selectWorkspaceRequest={workspaceSettingsRequest}
                 onClose={() => {}}
                 onOpenWorkspace={handleOpenWorkspace}
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
@@ -324,53 +335,8 @@ export function DesktopShell() {
       );
     }
 
-    const titles = { models: "模型", skills: "Skills", plugins: "插件", agents: "Agents" } as const;
-    if (page.kind === "models" || page.kind === "skills" || page.kind === "plugins" || page.kind === "agents") {
-      const title = titles[page.kind];
-      const meta = page.kind === "models"
-        ? "~/.pi/agent/models.json"
-        : settingsCwd ?? undefined;
-      return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-          <PanelHeader title={title} meta={meta} onClose={closeCenterPage} />
-          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-            {page.kind === "models" ? (
-              <ModelsConfig inline onSaved={() => setModelsRefreshKey((key) => key + 1)} onClose={closeCenterPage} />
-            ) : page.kind === "skills" ? (
-              <SkillsConfig
-                inline
-                cwd={settingsCwd ?? ""}
-                globalOnly={!activeWorkspace}
-                workspace={activeWorkspace}
-                onWorkspaceSkillsChange={(updated) => {
-                  setWorkspaces((current) =>
-                    current.map((w) => (w.id === updated.id ? updated : w)),
-                  );
-                }}
-                onClose={closeCenterPage}
-              />
-            ) : page.kind === "plugins" ? (
-              <PluginsConfig
-                inline
-                cwd={settingsCwd ?? ""}
-                sessionId={selectedSession?.id ?? null}
-                onReloaded={() => setSessionKey((key) => key + 1)}
-                onClose={closeCenterPage}
-              />
-            ) : (
-              <AgentsConfig
-                embedded
-                key={settingsCwd ?? ""}
-                cwd={settingsCwd ?? ""}
-                sessionId={selectedSession?.id ?? null}
-                onReloaded={() => setSessionKey((key) => key + 1)}
-                onClose={closeCenterPage}
-              />
-            )}
-          </div>
-        </div>
-      );
-    }
+    // 模型/Skills/插件/Agents 已收敛进设置页分区（2026-09 两栏化）——不再是
+    // 独立中央区整页；底部入口 = openCenterPage({kind:"settings", section})。
 
     // archive — 工作区作用域（树内组尾入口）。
     const archiveWorkspace = workspaces.find((w) => w.id === page.workspaceId) ?? null;
@@ -419,6 +385,7 @@ export function DesktopShell() {
         completedSessionIds={sessionActivity.completedIds}
         selectedSessionId={selectedSession?.id ?? homeSession?.id ?? null}
         centerPage={centerPage}
+        settingsSection={centerPage?.kind === "settings" && settingsPage !== "index" ? settingsPage : null}
         workspacesLoaded={workspacesLoaded}
         sessionsLoaded={sessionActivity.loaded}
         onNewSession={() => {
@@ -427,6 +394,7 @@ export function DesktopShell() {
         }}
         onOpenWorkspace={handleOpenWorkspace}
         onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
+        onOpenWorkspaceSettings={handleOpenWorkspaceSettings}
         onSelectSession={handleSelectSession}
         onSelectSearchHit={handleSelectSearchHit}
         sessionListVersion={sessionActivity.listVersion}
@@ -471,8 +439,8 @@ export function DesktopShell() {
         onNewSession={handleTabBarNewSession}
       />
 
-      {/* Main content: 中央区整页（CenterPage：设置/模型/插件/Skills/归档——
-          点任何会话 tab 即关闭）优先于 总览/聊天/首页。 */}
+      {/* Main content: 中央区整页（CenterPage：设置（含全部配置分区）/归档
+          ——点任何会话 tab 即关闭）优先于 总览/聊天/首页。 */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {centerPage ? renderCenterPage() : activeTab?.kind === "workspace-home" ? (
           <WorkspaceOverview
@@ -480,8 +448,7 @@ export function DesktopShell() {
             onNewSession={handleWorkspaceNewSession}
             onOpenSettings={() => {
               setOpenRepositoryFormRequest(undefined);
-              setCenterPage({ kind: "settings" });
-              setSettingsPage("workspace");
+              openCenterPage({ kind: "settings", section: "workspace" });
             }}
             onOpenWorkItems={() => updateActiveTab({ activeFileTabId: WORK_ITEMS_TAB_ID, rightPanelOpen: true })}
             onCreateWorkItem={handleCreateWorkItem}
@@ -495,8 +462,7 @@ export function DesktopShell() {
               });
             }}
             onAddRepository={() => {
-              setCenterPage({ kind: "settings" });
-              setSettingsPage("workspace");
+              openCenterPage({ kind: "settings", section: "workspace" });
               setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
             }}
             onSessionDeleted={handleSessionRemoved}

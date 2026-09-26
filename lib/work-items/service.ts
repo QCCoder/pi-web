@@ -520,6 +520,12 @@ export async function updateWorkItem(
     }
     if (input.tags !== undefined) next.tags = requireStringArray(input.tags, "tags");
     if (input.conversations !== undefined) next.conversations = requireStringArray(input.conversations, "conversations");
+    // 会话自链接（服务层不变式）：任何带 conversationId 的更新都把该会话记入
+    // conversations。此前只有 LLM 扩展显式合并——HTTP PATCH / D9 等调用方各写
+    // 一遍，漏了就断链（工作项详情看不到产生变更的会话）。
+    if (input.conversationId && !next.conversations.includes(input.conversationId)) {
+      next.conversations = [...next.conversations, input.conversationId];
+    }
     if (input.relatedItems !== undefined) next.relatedItems = requireStringArray(input.relatedItems, "relatedItems");
     if (input.designs !== undefined) next.designs = requireStringArray(input.designs, "designs");
     if (input.plans !== undefined) next.plans = requireStringArray(input.plans, "plans");
@@ -611,6 +617,18 @@ export async function recordWorkItemMilestone(
       throw new WorkItemConflictError(
         `Expected revision ${input.expectedRevision}, current revision is ${current.item.revision}`,
       );
+    }
+    // 会话自链接：里程碑盖了 conversationId 就把该会话挂入 conversations
+    // （只写元数据，不 bump revision——里程碑本身也不 bump）。此前合并只发生
+    // 在 workspace_update_work_item，而 conversations 事后回填（D9）仅 daemon
+    // 心跳轮才有——loop 轮/交互会话只盖里程碑时（loop.parked / loop.gate /
+    // analysis.completed…）会话与工作项断链，详情页「关联会话」为空，回复
+    // 结果无处可寻。此合并对所有传输路径生效（LLM 工具 / HTTP events API）。
+    if (input.conversationId && !current.item.conversations.includes(input.conversationId)) {
+      const linked = structuredClone(current.item);
+      linked.conversations = [...linked.conversations, input.conversationId];
+      linked.updatedAt = new Date().toISOString();
+      await writeAtomic(join(current.path, "item.yaml"), serializeWorkItem(linked));
     }
     await appendEvent(
       current.path,

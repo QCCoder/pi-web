@@ -161,8 +161,11 @@ export async function settleRoundBookkeeping(
       for (const entry of impact.itemsToLink) {
         if (entry.conversations.includes(sessionId)) continue;
         try {
+          // 只传 conversationId：updateWorkItem 服务层自动合并（本钩子大多已
+          // 被里程碑落盘时的服务层合并抢先 no-op）。旧写法传预读的全量列表，
+          // 与锁内写入之间存在覆盖其它会话新链接的竞窗。
           await updater(manifest.id, entry.key, {
-            conversations: [...entry.conversations, sessionId],
+            conversationId: sessionId,
             expectedRevision: entry.revision,
           });
         } catch (error) {

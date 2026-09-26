@@ -145,8 +145,9 @@ export function createWorkspaceWorkItemExtension(
           })),
         }),
         execute: async (_callId, params, _signal, _update, ctx) => {
+          // 会话链接由 service 层按 conversationId 自动合并（防并发覆盖：旧写法
+          // 预读全量 conversations 再显式传回，会把其他会话刚挂入的链接冲掉）。
           const conversationId = ctx.sessionManager.getSessionId();
-          const current = await readWorkItem(workspacePath, params.key);
           return result(await updateWorkItem(workspaceId, params.key, {
             expectedRevision: params.expected_revision,
             ...(params.title !== undefined ? { title: params.title } : {}),
@@ -157,7 +158,6 @@ export function createWorkspaceWorkItemExtension(
             ...(params.tags !== undefined ? { tags: params.tags } : {}),
             ...(params.archived !== undefined ? { archived: params.archived } : {}),
             ...(params.loop !== undefined ? { loop: params.loop } : {}),
-            conversations: [...new Set([...current.item.conversations, conversationId])],
             actor: "agent",
             conversationId,
           }));
