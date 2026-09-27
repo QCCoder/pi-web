@@ -5,6 +5,7 @@ import { parse } from "yaml";
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { isExistingPathWithinRoots } from "./path-security";
 import { listAllSessions } from "./session-reader";
+import { chatUploadsRoot } from "./uploads-root";
 export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
 
 // Short-TTL cache for the allowed-roots set. Without this, every file list/read
@@ -48,6 +49,10 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   }
 
   for (const root of getAdditionalAllowedRoots()) roots.add(root);
+
+  // 聊天文件附件的家（lib/uploads-root.ts）——附件在消息里以绝对路径引用，
+  // 点击打开/预览走 /api/files，所以这个根必须常驻白名单。
+  roots.add(normalizeSlashes(chatUploadsRoot()));
 
   // Workspace-owned directories (repositories/* and knowledge/*, work-items, loops)
   // are owned by the workspace, so they are inherently readable via /api/files.

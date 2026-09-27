@@ -24,14 +24,17 @@ interface Props {
   onOpenSettings: () => void;
   /** ⊞ 面板里已停用工作区行点击 → 深链设置›工作区并预选（重启用路径）。 */
   onOpenWorkspaceSettings: (workspace: WorkspaceSummary) => void;
+  /** 注入的会话列表（shell 已有：SSR 预取 + 5s 版本轮询保持新鲜）。传入则组件
+   *  不再自取 /api/sessions——每次挂载冷拉全量列表曾是「打开 ＋ 最近加载慢」
+   *  的根因（session 索引 memo 仅 3s TTL，过期即重扫磁盘）。 */
+  sessions?: SessionInfo[];
 }
 
-/** 方向 A（会话优先，2026-09 重做 + 工作区维度收敛修订）：首页 = 全局启动器，
- *  不设「当前工作区」chip。主动作 = 发起新会话（大输入卡 → HomeNewSession，
- *  工作区在选择器里挑）；工作区入口有二、职责不重叠——最近分组的组头
- *  （HomeSessionGroups，继续干活时的顺路入口；空工作区不成组）与右上角 ⊞
- *  工作区面板（完整列表 + 新建/导入，管理入口）。仅服务移动端首页；桌面首页
- *  是 HomeNewSession composer 页（本组件返回 null）。分组排序纯逻辑见
+/** 方向 A（会话优先，2026-09 重做 + 工作区维度收敛修订；同月首页退役后本组件
+ *  从落地页变为「新建会话起始页」：宿主 = 移动端家/占位 tab + 桌面 ＋ 占位
+ *  tab（点击 ＋ 先见本页，点大输入卡才展开 composer——onNewSession 由宿主
+ *  接线）。两 shell 同构：问候语 + 大输入卡 + 最近分组 + ⊞ 面板/⚙；桌面为
+ *  居中窄栏（同 .page 的 720px 心智），面板改居中浮卡。分组排序纯逻辑见
  *  lib/home-quick-switch.ts 的 groupSessionsByWorkspace（活跃度降序）。 */
 export function HomeLanding({
   workspaces,
@@ -44,18 +47,20 @@ export function HomeLanding({
   runningSessionIds,
   onOpenSettings,
   onOpenWorkspaceSettings,
+  sessions: injectedSessions,
 }: Props) {
   const isMobile = useIsMobile();
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [selfSessions, setSelfSessions] = useState<SessionInfo[]>([]);
   const [sheetOpen, setSheetOpen] = useState(false);
 
   useEffect(() => {
+    if (injectedSessions) return; // 注入模式：shell 列表常驻内存，不自取。
     const controller = new AbortController();
     void fetch("/api/sessions", { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) return;
         const data = await response.json() as { sessions?: SessionInfo[] };
-        setSessions(data.sessions ?? []);
+        setSelfSessions(data.sessions ?? []);
       })
       .catch((error) => {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -63,7 +68,9 @@ export function HomeLanding({
         }
       });
     return () => controller.abort();
-  }, [refreshKey]);
+  }, [refreshKey, injectedSessions]);
+
+  const sessions = injectedSessions ?? selfSessions;
 
   // 空工作区不成组（无会话的工作区只在 ⊞ 面板出现，最近区保持紧凑）；分组
   // 本身只看可选用工作区（isWorkspaceSelectable 在 groupSessionsByWorkspace
@@ -75,12 +82,7 @@ export function HomeLanding({
     [workspaces, sessions],
   );
 
-  if (!isMobile) {
-    // ---- Desktop: retired —— 桌面首页默认就是新建会话 composer 页（HomeNewSession，
-    // DesktopShell 直挂）；本组件只服务移动端首页。防误用兜底：
-    return null;
-  }
-
+  // 桌面与移动端同构渲染（居中窄栏见根样式；桌面宿主 = ＋ 占位 tab，「都要变」）。
   const { greeting, dateLabel } = homeChrome();
   const hasWorkspaces = workspaces.length > 0;
 
@@ -93,6 +95,10 @@ export function HomeLanding({
         display: "flex",
         flexDirection: "column",
         padding: "14px 14px 0",
+        // 桌面：tab 内嵌首页为居中窄栏（同 .page 的 720px 心智）；移动端全宽。
+        width: "100%",
+        maxWidth: 720,
+        margin: "0 auto",
       }}
     >
       {hasWorkspaces ? (
@@ -287,6 +293,7 @@ export function HomeLanding({
 
       {sheetOpen && (
         <WorkspaceSheet
+          isMobile={isMobile}
           workspaces={workspaces}
           onClose={() => setSheetOpen(false)}
           onSelectWorkspace={onSelectWorkspace}
@@ -304,6 +311,7 @@ export function HomeLanding({
  *  可见面) + 新建/导入 footer — the management counterpart to the recent-
  *  groups' quick entry. */
 function WorkspaceSheet({
+  isMobile,
   workspaces,
   onClose,
   onSelectWorkspace,
@@ -311,6 +319,7 @@ function WorkspaceSheet({
   onCreateWorkspace,
   onImportDirectory,
 }: {
+  isMobile: boolean;
   workspaces: WorkspaceSummary[];
   onClose: () => void;
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
@@ -334,9 +343,9 @@ function WorkspaceSheet({
         aria-label="工作区"
         style={{
           position: "fixed",
-          left: 10,
-          right: 10,
-          bottom: 10,
+          ...(isMobile
+            ? { left: 10, right: 10, bottom: 10 }
+            : { left: "50%", transform: "translateX(-50%)", bottom: 24, width: 440 }),
           zIndex: 31,
           display: "flex",
           flexDirection: "column",

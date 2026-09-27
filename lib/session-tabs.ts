@@ -108,6 +108,23 @@ export function resolveNewSessionTarget(activeTab: SessionTabState | null): "mor
 }
 
 /**
+ * 占位 tab 去重（2026-09 用户反馈）：同工作区已有「未发起」的占位 tab
+ * （composer 草稿为空——无文字、无图片、无文件）→ 复用它而不是再开一个。
+ * 草稿非空的占位不算未发起（复用会冲掉用户已输入的内容，调用方应照旧
+ * 开新 tab）。isDraftEmpty 由调用方注入（draft-store 属浏览器层，纯层不
+ * 碰 localStorage）；命中取 tab 条序里最前面的一个。
+ */
+export function findReusableNewSessionTab(
+  tabs: SessionTabState[],
+  workspaceId: string,
+  isDraftEmpty: (tabId: string) => boolean,
+): SessionTabState | null {
+  return tabs.find((tab) => tab.kind === "new-session"
+    && tab.workspace.id === workspaceId
+    && isDraftEmpty(tab.id)) ?? null;
+}
+
+/**
  * X1 邻居规则：关闭 closedId 后激活谁。先左邻、再右邻；一个不剩 → null
  * （回到应用首页）。closedId 不在列表里（已被并发移除）→ null。
  */

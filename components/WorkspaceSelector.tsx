@@ -7,8 +7,9 @@ import type { WorkspaceSummary } from "@/lib/workspaces/types";
  * 「工作区: name ▾」选择器 — 宿主在 composer 控制行（上传按钮左侧，
  * ChatInput leadingControl 槽），下拉向上展开（bottom 锚定）。
  *
- * 共享宿主（2026-09 树形侧栏改版）：首页 HomeNewSession + 桌面新会话占位
- * tab（DesktopShell）——「新建任务」在任何上下文都能就地改选目标工作区。
+ * 共享宿主（2026-09 树形侧栏改版）：首页 HomeNewSession + 新会话占位 tab
+ * composer（DesktopShell 与 MobileShell 的 inputLeadingControl）——「新建任务」
+ * 在任何上下文都能就地改选目标工作区。
  */
 export function WorkspaceSelector({
   workspaces,

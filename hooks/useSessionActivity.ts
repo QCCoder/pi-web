@@ -41,13 +41,23 @@ export function useSessionActivity(
   const [sessions, setSessions] = useState<SessionInfo[]>(() => seed?.sessions ?? []);
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set(seed?.runningIds ?? []));
   const [loaded, setLoaded] = useState(() => seed != null);
-  const [completedIds, setCompletedIds] = useState<Set<string>>(() => loadIds(COMPLETED_KEY));
+  // SSR 先空（服务端无 localStorage），挂载后读取持久化值——避免服务端/客户端
+  // 首帧不一致的 hydration mismatch（同 ProjectSidebar 折叠态的模式）。此前在
+  // useState 初始化器里直接 loadIds：服务端空集 vs 客户端持久化集合，侧栏工作区
+  // 的「已完成」点两帧渲染不同，整树被客户端重建（devtools "1 Issue" 的根因）。
+  const [completedIds, setCompletedIds] = useState<Set<string>>(() => new Set());
+  const [completedHydrated, setCompletedHydrated] = useState(false);
   /** 会话列表版本（服务端磁盘目录缓存代数）：/api/sessions 响应携带，作为
    *  搜索的跨窗口 refreshKey 暴露给视图层。 */
   const [listVersion, setListVersion] = useState<number | null>(null);
   const listVersionRef = useRef<number | null>(null);
   const previousRunningRef = useRef<Set<string>>(loadIds(LAST_RUNNING_KEY));
   const receivedSnapshotRef = useRef(false);
+
+  useEffect(() => {
+    setCompletedIds(loadIds(COMPLETED_KEY));
+    setCompletedHydrated(true);
+  }, []);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -147,9 +157,11 @@ export function useSessionActivity(
     return () => document.removeEventListener("visibilitychange", markVisibleSelectionRead);
   }, [selectedSessionId]);
 
+  // 水合恢复完成前不回写：否则挂载首拍会把空集存进去，抹掉持久化的未读记录。
   useEffect(() => {
+    if (!completedHydrated) return;
     saveIds(COMPLETED_KEY, completedIds);
-  }, [completedIds]);
+  }, [completedIds, completedHydrated]);
 
   useEffect(() => {
     const sync = (event: StorageEvent) => {

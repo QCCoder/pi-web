@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { computeMenuLayout, readViewportWindow } from "@/lib/dropdown-layout";
 import { contextCloseTargetIds, type SessionTabState } from "@/lib/session-tabs";
-import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 
 /**
  * 会话 tab 条（docs/session-tabs-design.md Phase 1）：顶栏 tab = 会话/占位/
@@ -12,7 +11,10 @@ import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/t
  * 桌面/移动两 shell 共用（无 isMobile 分支——移动端就是一排可横滚的紧凑 chips）。
  *
  * 右端按钮区（P1）：＋ = 在当前 tab 的工作区开新会话 tab（无活动 tab 时隐藏——
- * 首页有自己的 composer）；⊞ = 工作区选择器下拉 → 开/激活该工作区的家 tab。
+ * 首页有自己的 composer）。⊞ 工作区选择器已删除（2026-09 移动端反馈：
+ * tab 条只留 chips + ＋；工作区切换走 设置›工作区，桌面走项目树）；「首页」
+ * chip 桌面保留、移动端经 showHomeTab=false 退役（移动端的家 tab 即首页，
+ * MobileShell 空态自动落回家 tab）。
  *
  * 右键菜单（桌面主路径；移动端无 isMobile 分支——Android 长按若触发
  * contextmenu 事件同样受益）：关闭 / 关闭其他 / 关闭左侧 / 关闭右侧。
@@ -24,12 +26,14 @@ import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/t
 interface Props {
   tabs: SessionTabState[];
   activeTabId: string | null;
-  workspaces: WorkspaceSummary[];
   /** 全局 running 集会话级徽章，无需每会话 SSE（M1）。 */
   runningIds: ReadonlySet<string>;
   completedIds: ReadonlySet<string>;
   /** 家 tab 上的工作区级聚合活动（沿用旧 tab 条的 ActivityIndicator）。 */
   workspaceActivity: Record<string, "running" | "completed" | undefined>;
+  /** 「首页」chip 是否渲染：桌面保留（首页 composer 页的锚点）；移动端
+   *  退役（2026-09：家 tab 即首页，空态由 MobileShell 自动落回家 tab）。 */
+  showHomeTab?: boolean;
   onSelectHome: () => void;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
@@ -37,25 +41,6 @@ interface Props {
   onCloseTabs: (ids: string[]) => void;
   onReorder: (ids: string[]) => void;
   onNewSession: () => void;
-  /** ⊞ 工作区选择器（开/激活家 tab）。可选——桌面端侧栏项目树已接管工作区
-   *  导航（2026-09 改版：⊞ 退役）；移动端保留（无侧栏，⊕ 是直达工作区的
-   *  快捷入口）。 */
-  onPickWorkspace?: (workspace: WorkspaceSummary) => void;
-}
-
-/** 工作区色点（id 哈希 → 固定调色板）：2026-09 起仅用于 ⊞ 工作区选择器下拉列表辨位，
- *  tab chips 上的色点已按用户要求移除（同色小点常驻每个 tab 被视为噪音）。 */
-const WORKSPACE_COLORS = [
-  "#e05d5d", "#e08b3a", "#c9a227", "#5aa469",
-  "#4d9de0", "#7b6ce0", "#b56bb5", "#5aa0a8",
-];
-
-function workspaceColor(workspaceId: string): string {
-  let hash = 0;
-  for (let index = 0; index < workspaceId.length; index += 1) {
-    hash = (hash * 31 + workspaceId.charCodeAt(index)) | 0;
-  }
-  return WORKSPACE_COLORS[Math.abs(hash) % WORKSPACE_COLORS.length];
 }
 
 function tabLabel(tab: SessionTabState): string {
@@ -76,38 +61,22 @@ function tabTitle(tab: SessionTabState): string {
 export function SessionTabBar({
   tabs,
   activeTabId,
-  workspaces,
   runningIds,
   completedIds,
   workspaceActivity,
+  showHomeTab = true,
   onSelectHome,
   onSelectTab,
   onCloseTab,
   onCloseTabs,
   onReorder,
   onNewSession,
-  onPickWorkspace,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
-  const plusRef = useRef<HTMLButtonElement>(null);
-  const pickerRef = useRef<HTMLButtonElement>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerRect, setPickerRect] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ tabId: string; anchor: DOMRect } | null>(null);
   const [ctxRect, setCtxRect] = useState<{ top: number; right: number; maxHeight: number } | null>(null);
-  const availableWorkspaces = workspaces.filter(isWorkspaceSelectable);
-
-  useEffect(() => {
-    if (!pickerOpen) return;
-    const rect = pickerRef.current?.getBoundingClientRect();
-    if (rect) {
-      setPickerRect(
-        computeMenuLayout({ anchor: rect, menuMinWidth: 220, maxMenuHeight: 320 }, readViewportWindow()),
-      );
-    }
-  }, [pickerOpen]);
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -168,20 +137,23 @@ export function SessionTabBar({
         flexShrink: 0,
         overflowX: "auto",
         overflowY: "hidden",
+        scrollPaddingRight: 36,
         background: "var(--bg-panel)",
         borderBottom: "1px solid var(--border)",
       }}
     >
-      <div
-        ref={activeTabId === null ? activeRef : undefined}
-        role="tab"
-        aria-selected={activeTabId === null}
-        onClick={onSelectHome}
-        style={tabStyle(activeTabId === null, true)}
-      >
-        <HomeIcon />
-        <span>首页</span>
-      </div>
+      {showHomeTab && (
+        <div
+          ref={activeTabId === null ? activeRef : undefined}
+          role="tab"
+          aria-selected={activeTabId === null}
+          onClick={onSelectHome}
+          style={tabStyle(activeTabId === null, true)}
+        >
+          <HomeIcon />
+          <span>首页</span>
+        </div>
+      )}
       {tabs.map((tab) => {
         const active = tab.id === activeTabId;
         const running = tab.kind === "session" && tab.session
@@ -264,104 +236,24 @@ export function SessionTabBar({
         );
       })}
       {/* ＋ 在当前 tab 的工作区开新会话 tab（P1：无活动 tab = 首页上下文时隐藏，
-          首页有自己的 composer）。 */}
+          首页有自己的 composer）。sticky right：tab 多到溢出时吸附在条的最右
+          （不透明背景，chips 从底下滚过），不溢出时紧跟最后一个 tab。 */}
       {activeTabId !== null && (
         <button
-          ref={plusRef}
           type="button"
           title="新会话"
           aria-label="新会话"
           onClick={onNewSession}
-          style={buttonStyle(false)}
+          style={{
+            ...buttonStyle(false),
+            position: "sticky",
+            right: 0,
+            zIndex: 1,
+            background: "var(--bg-panel)",
+          }}
         >
           ＋
         </button>
-      )}
-      {onPickWorkspace && (
-        <button
-          ref={pickerRef}
-          type="button"
-          title="打开工作区"
-          aria-label="打开工作区"
-          aria-haspopup="menu"
-          aria-expanded={pickerOpen}
-          onClick={() => setPickerOpen((open) => !open)}
-          style={buttonStyle(pickerOpen)}
-        >
-          <WorkspaceIcon />
-        </button>
-      )}
-      {pickerOpen && pickerRect && createPortal(
-        <>
-          <div
-            aria-hidden="true"
-            onClick={() => setPickerOpen(false)}
-            style={{ position: "fixed", inset: 0, zIndex: 2000 }}
-          />
-          <div
-            role="menu"
-            aria-label="打开工作区"
-            style={{
-              position: "fixed",
-              top: pickerRect.top,
-              right: pickerRect.right,
-              zIndex: 2001,
-              minWidth: 220,
-              maxWidth: 300,
-              maxHeight: pickerRect.maxHeight,
-              overflowY: "auto",
-              padding: 4,
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              background: "var(--bg)",
-              boxShadow: "0 10px 30px rgba(0,0,0,0.22)",
-            }}
-          >
-            {availableWorkspaces.length === 0 && (
-              <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-dim)" }}>没有可用工作区</div>
-            )}
-            {availableWorkspaces.map((workspace) => {
-              const homeOpen = tabs.some((t) => t.kind === "workspace-home" && t.workspace.id === workspace.id);
-              const anyOpen = tabs.some((t) => t.workspace.id === workspace.id);
-              return (
-                <button
-                  key={workspace.id}
-                  type="button"
-                  role="menuitem"
-                  title={`${workspace.name}\n${workspace.path}`}
-                  onClick={() => { setPickerOpen(false); onPickWorkspace?.(workspace); }}
-                  style={{
-                    width: "100%",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 7,
-                    minHeight: 34,
-                    padding: "6px 8px",
-                    border: 0,
-                    borderRadius: 6,
-                    background: "transparent",
-                    color: "var(--text-muted)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 12,
-                    fontWeight: 450,
-                  }}
-                >
-                  <span
-                    aria-hidden
-                    style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: workspaceColor(workspace.id) }}
-                  />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-                    {workspace.name}
-                  </span>
-                  <ActivityIndicator status={workspaceActivity[workspace.id]} />
-                  {anyOpen && <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>{homeOpen ? "家已开" : "已开"}</span>}
-                </button>
-              );
-            })}
-          </div>
-        </>,
-        document.body,
       )}
       {ctxMenu && ctxRect && createPortal(
         <>
@@ -541,14 +433,6 @@ function HomeIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
       <path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5" />
-    </svg>
-  );
-}
-
-function WorkspaceIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
-      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
     </svg>
   );
 }

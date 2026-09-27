@@ -10,6 +10,8 @@ import { useKitLoops } from "@/hooks/useKitLoops";
 
 interface Props {
   workspace: WorkspaceSummary;
+  /** 全量工作区列表：WorkspaceSessionList 用它做与侧栏一致的会话归属判定。 */
+  workspaces: WorkspaceSummary[];
   onNewSession: () => void;
   onOpenSettings: () => void;
   onOpenWorkItems: () => void;
@@ -24,8 +26,8 @@ interface Props {
   /** loop 变更刷新信号（创建/删除/frontmatter 保存后由 shell bump）。 */
   loopsRefreshKey?: number;
   /** 右坞 Loops tab 入口：Loops 区块渲染为摘要行（决策 #10）——点击开右坞
-   *  Loops tab，状态/操作/配置只住 tab。2026-09 菜单化后必传（移动端工作区
-   *  tab 已改用 WorkspaceHomeMenu，不再渲染本组件）。 */
+   *  Loops tab，状态/操作/配置只住 tab。移动端不渲染本组件（抽屉目的地页
+   *  取代，更早的 WorkspaceHomeMenu 已退役）。 */
   onOpenLoopsTab: () => void;
 }
 
@@ -78,6 +80,7 @@ const emptyHintStyle: React.CSSProperties = {
 
 export function WorkspaceOverview({
   workspace,
+  workspaces,
   onNewSession,
   onOpenSettings,
   onOpenWorkItems,
@@ -391,7 +394,7 @@ export function WorkspaceOverview({
                 {(() => {
                   const running = loops.filter((loop) => loop.running).length;
                   const paused = loops.filter((loop) => loop.paused).length;
-                  if (loops.length === 0) return "文件即声明：.pi/loops/&lt;name&gt;/LOOP.md";
+                  if (loops.length === 0) return "文件即声明：.pi/loops/<name>/LOOP.md";
                   const parts: string[] = [];
                   if (running > 0) parts.push(`${running} 个运行中`);
                   if (paused > 0) parts.push(`${paused} 个已暂停`);
@@ -408,6 +411,7 @@ export function WorkspaceOverview({
             子页同体）；全局跨工作区列表住首页/桌面中栏（HomeSessionGroups）。 */}
         <WorkspaceSessionList
           workspace={workspace}
+          workspaces={workspaces}
           onSelectSession={onSelectSession}
           onSessionDeleted={onSessionDeleted}
         />

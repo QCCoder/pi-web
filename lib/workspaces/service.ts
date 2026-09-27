@@ -1276,13 +1276,25 @@ export async function removeWorkspace(
   idOrSlug: string,
   root?: string,
 ): Promise<{ removed: true }> {
+  // 墓碑：删除默认工作区（目录名即约定 workspace-default）时在工作区根写
+  // 标记，ensureDefaultWorkspace 之后不再复活它（删除是注销制、目录保留在
+  // 磁盘，没有墓碑下一次启动就会把目录重新注册回来）。
+  let removedDefault = false;
   await updateWorkspaceIndex((index) => {
     const entryIndex = index.workspaces.findIndex((entry) =>
       entry.id === idOrSlug || basename(entry.path) === `workspace-${idOrSlug}`
     );
     if (entryIndex < 0) throw new WorkspaceNotFoundError(`Workspace not found: ${idOrSlug}`);
+    removedDefault = basename(index.workspaces[entryIndex].path) === `workspace-${DEFAULT_WORKSPACE_SLUG}`;
     index.workspaces.splice(entryIndex, 1);
   }, root);
+  if (removedDefault) {
+    try {
+      await writeFile(defaultWorkspaceTombstonePath(root), new Date().toISOString(), "utf8");
+    } catch {
+      // best-effort：写不进墓碑只会导致复活，不影响删除本身。
+    }
+  }
   return { removed: true };
 }
 
@@ -1389,5 +1401,71 @@ export async function findWorkspaceForPath(
       if (parent === candidate) return null;
       candidate = parent;
     }
+  }
+}
+
+// ---- 默认工作区（初始化时自动补建，2026-09） ---------------------------------
+//
+// 供随手问答/搜索的轻量「默认」工作区：能力集只有强制的 sessions+explorer，
+// 不 git init、不建工作项/仓库目录。初始化（web 进程启动，instrumentation.ts）
+// 时 ensure 一次，幂等：
+//   - slug `default` 已登记（含外部路径导入的同 slug 工作区）→ 不动；
+//   - 墓碑（<工作区根>/.pi-default-deleted，removeWorkspace 删默认时写）→ 永不复活；
+//   - 目录在磁盘但未注册（removeWorkspace 是注销制，目录保留）→ 重新注册自愈，
+//     不撞 createWorkspace 的 slug 冲突。
+// ensure 永不抛——初始化路径上的任何失败都降级为日志。
+
+export const DEFAULT_WORKSPACE_SLUG = "default";
+export const DEFAULT_WORKSPACE_NAME = "默认";
+const DEFAULT_WORKSPACE_TOMBSTONE = ".pi-default-deleted";
+
+function defaultWorkspaceTombstonePath(root?: string): string {
+  return join(root ?? getWorkspaceRoot(), DEFAULT_WORKSPACE_TOMBSTONE);
+}
+
+/** 纯判定（供测试）：是否需要补建默认工作区。 */
+export function shouldEnsureDefaultWorkspace(
+  existingSlugs: string[],
+  tombstoneExists: boolean,
+): boolean {
+  return !tombstoneExists && !existingSlugs.includes(DEFAULT_WORKSPACE_SLUG);
+}
+
+export async function ensureDefaultWorkspace(root?: string): Promise<WorkspaceSummary | null> {
+  const workspaceRoot = root ?? getWorkspaceRoot();
+  try {
+    const existing = await discoverWorkspaces(root);
+    let tombstoneExists = false;
+    try {
+      await access(defaultWorkspaceTombstonePath(root));
+      tombstoneExists = true;
+    } catch {
+      tombstoneExists = false;
+    }
+    if (!shouldEnsureDefaultWorkspace(existing.map((workspace) => workspace.slug), tombstoneExists)) {
+      return null;
+    }
+    const workspacePath = join(workspaceRoot, `workspace-${DEFAULT_WORKSPACE_SLUG}`);
+    try {
+      // 目录已在磁盘但未注册：重新注册（自愈），不重复创建。
+      await access(workspacePath);
+      return await importWorkspace(workspacePath, root);
+    } catch {
+      // 目录不存在 —— 落到 createWorkspace。
+    }
+    return await createWorkspace(
+      {
+        name: DEFAULT_WORKSPACE_NAME,
+        slug: DEFAULT_WORKSPACE_SLUG,
+        capabilities: [],
+      },
+      root,
+    );
+  } catch (error) {
+    console.error(
+      "[workspaces] ensure default workspace failed:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
   }
 }

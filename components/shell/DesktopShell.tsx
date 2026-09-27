@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar, FILES_TAB_ID } from "../TabBar";
@@ -13,6 +13,7 @@ import { ProjectSidebar } from "../ProjectSidebar";
 import { PanelHeader } from "../PanelHeader";
 import { SettingsPanel } from "../SettingsPanel";
 import { LoopsDockPanel } from "../LoopsDockPanel";
+import { HomeLanding } from "../HomeLanding";
 import { HomeNewSession } from "../HomeNewSession";
 import { WorkspaceSelector } from "../WorkspaceSelector";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
@@ -30,13 +31,13 @@ import { createNewSessionTab } from "@/lib/session-tabs";
 import { ChatToolbar } from "./ChatToolbar";
 
 /**
- * The desktop shell（2026-09 树形侧栏改版，grill 共识）：左侧单一项目树侧栏
- * （ProjectSidebar：新建任务 / 项目→会话 / 组尾归档 / 底部设置·模型·插件·
- * Skills 四入口）+ 中央区（ChatToolbar + SessionTabBar + 总览|聊天|配置整页）
- * + 右坞（文件/Loops/知识库/工作项 + 文件 tab，不变）。图标栏与「中栏面板」
- * 已退役——原 configView 三列 split（列表中栏 + 详情 portal 右栏）由中央区
- * 整页（CenterPage）取代。所有状态来自共享 shell context；本组件只拥有
- * 中央区页面的渲染分派。
+ * The desktop shell（2026-09 ZCode 风格导航改版）：左侧单一项目树侧栏
+ * （ProjectSidebar：顶部 新建任务⌘N/搜索⌘K/插件&技能 导航行 + 项目→会话树 +
+ * 组尾归档 + 底部 设置·模型·Agents 三入口）+ 中央区（ChatToolbar +
+ * SessionTabBar + 总览|聊天|配置整页）+ 右坞（文件/Loops/知识库/工作项 + 文件
+ * tab，不变）。图标栏与「中栏面板」已退役——原 configView 三列 split（列表中栏
+ * + 详情 portal 右栏）由中央区整页（CenterPage）取代。所有状态来自共享 shell
+ * context；本组件只拥有中央区页面的渲染分派。
  */
 export function DesktopShell() {
   const s = useShell();
@@ -73,6 +74,7 @@ export function DesktopShell() {
     resetRightPanelWidth,
     workspaces,
     setWorkspaces,
+    navReady,
     workspaceSettingsName,
     workspaceActivity,
     setModelsRefreshKey,
@@ -93,6 +95,7 @@ export function DesktopShell() {
     openSessionStatsPanel,
     handleFileLineMention,
     setOpenRepositoryFormRequest,
+    handleReorderWorkspaces,
     explorerRefreshKey,
     createWorkItemRequest,
     openRepositoryFormRequest,
@@ -138,6 +141,7 @@ export function DesktopShell() {
     chatInputRef,
     updateActiveTab,
     setRefreshKey,
+    refreshKey,
     setImportPickerOpen,
   } = s;
 
@@ -174,6 +178,50 @@ export function DesktopShell() {
   const panelActiveFileTab = homeAtDesktop
     ? (homeActiveFileTabId ? homeFileTabs.find((t) => t.id === homeActiveFileTabId) : undefined)
     : activeFileTab;
+
+  // ---- 首页退役（2026-09 用户反馈，桌面同步移动端）--------------------------
+  // 空态（冷启动无恢复 tab / 关光 tab / 旧 tab=home 深链 / 侧栏「新建任务」在
+  // 无工作区时回首页）自动落回当前（MRU/最近会话所属）工作区的家 tab——桌面
+  // 家 tab = 总览，即事实首页。URL 用 replace 写入，不给历史埋 tab=home 陷阱。
+  // 没有任何可用工作区时不动：HomeNewSession 首页页接手（创建/选工作区引导）。
+  useEffect(() => {
+    if (!navReady || activeTabId !== null) return;
+    if (s.homeSession || s.homeNewSession.open) return;
+    const targetId = defaultHomeNewSessionWorkspaceId(workspaces, s.sessionActivity.sessions, s.mruIds);
+    const target = targetId ? workspaces.find((w) => w.id === targetId) : undefined;
+    if (!target || !isWorkspaceSelectable(target)) return;
+    handleOpenWorkspace(target, { replace: true });
+  }, [navReady, activeTabId, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, handleOpenWorkspace]);
+
+  /** 关掉最后一个 tab ≠ 落首页空态：先关（草稿确认取消时 closeTab 返回 false，
+   *  不动），紧接着开/激活该工作区的家 tab 接住——同一事件内批处理，不闪首页页。
+   *  关的就是家 tab 时 = 重新激活（家 tab 即首页，不可关）。 */
+  const desktopCloseTab = useCallback((id: string) => {
+    const closing = tabs.find((t) => t.id === id) ?? null;
+    const closed = closeTab(id);
+    if (closed && closing && tabs.length === 1) {
+      handleOpenWorkspace(closing.workspace, { replace: true });
+    }
+  }, [tabs, closeTab, handleOpenWorkspace]);
+
+  // ＋（新占位 tab）默认渲染首页内容（HomeLanding，2026-09 用户反馈「都要变」）；
+  // 点大输入卡才在本 tab 内展开真正的 composer。显式「新建会话」（侧栏新建任务/
+  // 总览按钮）绕过首页直落 composer：调用前置 explicitComposeRef，activeTab
+  // 变成新占位后由 effect 补写 composerTabId。
+  const [composerTabId, setComposerTabId] = useState<string | null>(null);
+  const explicitComposeRef = useRef(false);
+  const newSessionDirect = useCallback(() => {
+    if (!activeWorkspace) return;
+    explicitComposeRef.current = true;
+    handleWorkspaceNewSession();
+  }, [activeWorkspace, handleWorkspaceNewSession]);
+  useEffect(() => {
+    if (!explicitComposeRef.current) return;
+    if (activeTab?.kind === "new-session") {
+      explicitComposeRef.current = false;
+      setComposerTabId(activeTabId);
+    }
+  }, [activeTab, activeTabId]);
   // Right dock（design S1）：activeFileTabId 的值域 = 文件/会话 tab id + 钦死模块
   // tab id（文件/Loops）。模块 id 永不在 fileTabs 里——文件 tab 不活时它指向当前
   // 模块；非模块非文件 id（陈旧值）安全回落到文件树。模块内容跟工作区（决策 #6）：
@@ -362,7 +410,7 @@ export function DesktopShell() {
 
   return (
     <>
-<div style={{ display: "flex", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)", boxSizing: "border-box", paddingTop: "env(safe-area-inset-top)", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)" }}>
+<div style={{ display: "flex", height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)", boxSizing: "border-box", paddingTop: "env(safe-area-inset-top)", paddingLeft: "env(safe-area-inset-left)", paddingRight: "env(safe-area-inset-right)", "--pi-sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
     {/* 左侧：项目树侧栏（2026-09 改版：单一侧栏 = 新建任务 + 项目→会话 +
         组尾归档 + 底部设置/模型/插件/Skills）。宽度沿用可拖拽/折叠机制
         （sidebar-container 类 + 拖拽把手）；折叠后左上角固定按钮展开。 */}
@@ -375,7 +423,6 @@ export function DesktopShell() {
         flexDirection: "column",
         flexShrink: 0,
         zIndex: 200,
-        "--pi-sidebar-width": `${sidebarWidth}px`,
       } as React.CSSProperties}
     >
       <ProjectSidebar
@@ -389,12 +436,13 @@ export function DesktopShell() {
         workspacesLoaded={workspacesLoaded}
         sessionsLoaded={sessionActivity.loaded}
         onNewSession={() => {
-          if (activeWorkspace) handleWorkspaceNewSession();
+          if (activeWorkspace) newSessionDirect();
           else handleReturnHome();
         }}
         onOpenWorkspace={handleOpenWorkspace}
         onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
         onOpenWorkspaceSettings={handleOpenWorkspaceSettings}
+        onReorderWorkspaces={handleReorderWorkspaces}
         onSelectSession={handleSelectSession}
         onSelectSearchHit={handleSelectSearchHit}
         sessionListVersion={sessionActivity.listVersion}
@@ -425,15 +473,15 @@ export function DesktopShell() {
       <SessionTabBar
         tabs={tabs}
         activeTabId={activeTabId}
-        workspaces={workspaces}
         runningIds={sessionActivity.runningIds}
         completedIds={sessionActivity.completedIds}
         workspaceActivity={workspaceActivity}
         onSelectHome={handleReturnHome}
+        showHomeTab={false}
         onSelectTab={(id: string) => {
           if (id !== activeTabId) handleSelectTab(id);
         }}
-        onCloseTab={closeTab}
+        onCloseTab={desktopCloseTab}
         onCloseTabs={closeTabs}
         onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is SessionTabState => Boolean(t)))}
         onNewSession={handleTabBarNewSession}
@@ -445,9 +493,13 @@ export function DesktopShell() {
         {centerPage ? renderCenterPage() : activeTab?.kind === "workspace-home" ? (
           <WorkspaceOverview
             workspace={activeTab.workspace}
-            onNewSession={handleWorkspaceNewSession}
+            workspaces={workspaces}
+            onNewSession={newSessionDirect}
             onOpenSettings={() => {
               setOpenRepositoryFormRequest(undefined);
+              // 带工作区上下文（2026-09 反馈）：深链预选 + 详情优先——只看
+              // 当前工作区的设置，不再把全部工作区列表摆在面前。
+              requestWorkspaceSettings(activeTab.workspace);
               openCenterPage({ kind: "settings", section: "workspace" });
             }}
             onOpenWorkItems={() => updateActiveTab({ activeFileTabId: WORK_ITEMS_TAB_ID, rightPanelOpen: true })}
@@ -470,6 +522,23 @@ export function DesktopShell() {
             loopsRefreshKey={loopsRefreshKey}
           />
         ) : showChat ? (
+          !selectedSession && activeTab?.kind === "new-session" && composerTabId !== activeTabId ? (
+            /* ＋ 新占位 tab：首页内容（2026-09「都要变」，与移动端同款）——
+             * 问候语/最近分组/工作区面板；点大输入卡展开 composer。 */
+            <HomeLanding
+          sessions={sessionActivity.sessions}
+              workspaces={workspaces}
+              refreshKey={refreshKey}
+              onSelectWorkspace={handleOpenWorkspace}
+              onCreateWorkspace={handleCreateWorkspace}
+              onImportDirectory={() => setImportPickerOpen(true)}
+              onSelectSession={handleSelectSession}
+              onNewSession={() => setComposerTabId(activeTabId)}
+              runningSessionIds={sessionActivity.runningIds}
+              onOpenSettings={() => openCenterPage({ kind: "settings" })}
+              onOpenWorkspaceSettings={handleOpenWorkspaceSettings}
+            />
+          ) : (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
               <ChatWindow
@@ -514,8 +583,16 @@ export function DesktopShell() {
               />
             </div>
           </div>
+          )
         ) : !activeWorkspace ? (
-          homeSession ? (
+          workspaces.some(isWorkspaceSelectable) ? (
+            /* 首页退役：这个空态只可能是「自动落回家 tab 还没轮到」（同一帧内
+             * 的 effect 会接住）——渲染极简占位，不闪首页页；真正零可用工作区
+             * （全部停用/未建）才落 HomeNewSession 首页页（创建/选工作区引导）。 */
+            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
+              …
+            </div>
+          ) : homeSession ? (
             <ChatWindow
               session={homeSession}
               newSessionCwd={null}

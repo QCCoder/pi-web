@@ -6,17 +6,18 @@ export function useDragDrop(onDrop: (files: File[]) => void) {
   const [isDragOver, setIsDragOver] = useState(false);
   const counterRef = useRef(0);
 
+  // 任意文件（不限图片）：图片内联、其余上传落盘（ChatInput.addFiles 分派）。
+  const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.items).some((item) => item.kind === "file");
+
   const handleDragEnter = useCallback((e: React.DragEvent) => {
-    const hasImages = Array.from(e.dataTransfer.items).some((item) => item.type.startsWith("image/"));
-    if (!hasImages) return;
+    if (!hasFiles(e)) return;
     e.preventDefault();
     counterRef.current += 1;
     setIsDragOver(true);
   }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    const hasImages = Array.from(e.dataTransfer.items).some((item) => item.type.startsWith("image/"));
-    if (!hasImages) return;
+    if (!hasFiles(e)) return;
     e.preventDefault();
   }, []);
 

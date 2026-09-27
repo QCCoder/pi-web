@@ -24,10 +24,12 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
   captureScrollDistance,
   getNextVisibleCount,
+  getStagedTargetCount,
   getVisibleRenderWindow,
+  INITIAL_VISIBLE_COUNT,
   restoreScrollTop,
   shouldShowScrollToLatest,
-  VISIBLE_PAGE_SIZE,
+  STAGED_VISIBLE_STEP,
 } from "@/lib/chat-lazy-load";
 import {
   findChatScrollAnchor,
@@ -270,7 +272,8 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
   // --- Lazy-load historical messages ---
   // Only render the last N messages initially. When the user scrolls to the
   // top, load another page while keeping the scroll position stable.
-  const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
+  // 首渲染分帧：初始只挂 INITIAL_VISIBLE_COUNT 条，随后 rAF 链补齐（见下）。
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
 
   // --- Per-session reading position (upstream 430fe4d) ---
   // 会话稳定不重挂，所以“切走”没有 unmount：渲染期检测 session 切换，若有上次
@@ -377,8 +380,28 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
   // Reset lazy-load window when switching sessions so the previous (possibly much
   // larger) accumulated visibleCount doesn't render hundreds of messages at once.
   useEffect(() => {
-    setVisibleCount(VISIBLE_PAGE_SIZE);
+    setVisibleCount(INITIAL_VISIBLE_COUNT);
   }, [session?.id, reloadSignal]);
+
+  // --- 首渲染分帧（staged first render）---
+  // 初始窗口见 INITIAL_VISIBLE_COUNT（chat-lazy-load）：首屏内容渲染完成后，
+  // 用 rAF 链每帧补 STAGED_VISIBLE_STEP 条直到稳态窗口。每步长前保存距底
+  // 距离，交给下方既有的 restore effect 保位（内容往上方补，视口不跳）。
+  // 与哨兵 observer 兼容：用户快速上滚（或短内容哨兵可见）时整页增长抢跑，
+  // 本链因已达目标自然停；会话切换/卸载由 cleanup 取消 pending rAF。
+  useEffect(() => {
+    if (loading) return;
+    const target = getStagedTargetCount(messages.length);
+    if (visibleCount >= target) return;
+    const raf = requestAnimationFrame(() => {
+      const container = scrollContainerRef.current;
+      if (container) {
+        prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+      }
+      setVisibleCount((current) => Math.min(getNextVisibleCount(current, STAGED_VISIBLE_STEP), target));
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [loading, messages.length, visibleCount, scrollContainerRef]);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
   // When it becomes visible: grow the local render window first; when the
@@ -425,7 +448,7 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
       }
       if (head !== prev.head) {
         // different head entirely — new context window (branch switch / reload)
-        setVisibleCount(VISIBLE_PAGE_SIZE);
+        setVisibleCount(INITIAL_VISIBLE_COUNT);
         prevWindowHeadRef.current = { head, length: entryIds.length };
         return;
       }
@@ -536,7 +559,7 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
 
   const onDrop = useCallback((files: File[]) => {
     if (sessionBusy) return;
-    chatInputRef?.current?.addImages(files);
+    chatInputRef?.current?.addFiles(files);
   }, [sessionBusy, chatInputRef]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
@@ -618,6 +641,14 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
     [messages, streamingToolResults],
   );
 
+  // Live (running + queued) delegations — the button's "processing now"
+  // count. Queued children wait in the maxConcurrent FIFO but are as
+  // un-landed as running ones, so they count.
+  const runningSubagentCount = useMemo(
+    () => sessionSubagents.filter((s) => s.status === "running" || s.status === "pending").length,
+    [sessionSubagents],
+  );
+
   // Drawer open state for the changed-files quick access — lifted here because
   // the entry button lives in ChatInput while the drawer overlay renders at
   // ChatWindow level. Not persisted; switching sessions closes it (agreed).
@@ -675,7 +706,7 @@ export function ChatWindow({ session, newSessionCwd, searchTarget, onSearchTarge
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
       changedFiles={!embedded && onOpenFile ? { count: changedFiles.length, open: changedFilesOpen, onToggle: toggleChangedFiles } : undefined}
-      subagents={!embedded && onOpenSession ? { count: sessionSubagents.length, open: subagentsOpen, onToggle: toggleSubagents } : undefined}
+      subagents={!embedded && onOpenSession ? { count: sessionSubagents.length, running: runningSubagentCount, open: subagentsOpen, onToggle: toggleSubagents } : undefined}
       draftKey={composerDraftKey}
       cwd={session?.cwd ?? newSessionCwd}
     />

@@ -266,11 +266,29 @@ html.pi-keyboard-open.pi-kb-squeeze body {
 html.pi-keyboard-open.pi-kb-squeeze body {
   transform: translateY(var(--app-lift, 0px));
 }
-/* 键盘开启时底部 tab 栏直接隐藏（微信式）：不给它“顶上去”浮在键盘上方 ——
-   tab 栏固定在屏幕底部的语义由键盘盖住它来表达，输入框直接贴键盘顶，
-   也省出 52px 给消息区；键盘收起自动回来。 */
-html.pi-keyboard-open .mobile-bottom-tabbar {
-  display: none !important;
+/* 键盘开启时底部无导航条（2026-09 树抽屉重构：底部 tab 栏已删，导航在抽屉
+   /常驻树，工具栏在顶部键盘盖不住）——无额外处理。 */
+
+/* 移动端导航抽屉（docs/mobile-drawer-design.md §6）：scrim 淡入 + 面板滑入。 */
+@keyframes pi-nav-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes pi-nav-drawer-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+.mobile-nav-scrim {
+  animation: pi-nav-scrim-in 0.18s ease-out;
+}
+.mobile-nav-drawer {
+  animation: pi-nav-drawer-in 0.2s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mobile-nav-scrim,
+  .mobile-nav-drawer {
+    animation: none;
+  }
 }
 
 /* iOS Safari 聚焦 font-size<16px 的输入框时会自动放大页面（viewport scale 变化
@@ -1093,6 +1111,18 @@ span.linenumber {
   50% { opacity: 0.5; }
 }
 
+/* 工作区拖拽排序的插入指示线（项目树节点上/下边缘 + 列表尾；2026-09）：
+   从左生长 + 淡入，比静态色块更能读出“会插在这里”。 */
+@keyframes workspace-drop-line-in {
+  from { opacity: 0; transform: scaleX(0.35); }
+  to { opacity: 1; transform: scaleX(1); }
+}
+
+.workspace-drop-line {
+  animation: workspace-drop-line-in 0.14s ease-out;
+  transform-origin: left center;
+}
+
 @keyframes notice-shelf-in {
   from {
     opacity: 0;
@@ -1232,7 +1262,11 @@ span.linenumber {
     min-width: 300px;
     /* keep the center chat area usable (≥620px) even if the stored px width
        was set on a larger window (min-width still wins below 920px windows) */
-    max-width: calc(100vw - 620px);
+    /* 上限必须扣掉侧栏实际宽度（--pi-sidebar-width 由 DesktopShell 设在三栏
+       包裹层上）——旧写法 calc(100vw - 620px) 漏了侧栏，1280 宽窗口下面板
+       默认 42%（538px）把中间区压到 ~440px，设置弹层/Skills 详情被截断。
+       632 = 620 中间区下限 + 12 拖拽手柄。 */
+    max-width: calc(100vw - var(--pi-sidebar-width, 300px) - 632px);
   }
   .right-panel-container.right-panel-closed {
     width: 0;

@@ -263,6 +263,16 @@ export function WorkspaceManager({
   const [nameDraft, setNameDraft] = useState("");
   // 列表拖拽排序（HTML5 DnD，同 SessionTabBar 模式：拖到目标上 = 插到它前面）。
   const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(null);
+  // 详情优先模式（见 selectWorkspaceRequest effect 注释）：true = rail 收起、
+  // 详情独占，「‹ 全部工作区」返回。
+  const [detailFocus, setDetailFocus] = useState(false);
+  // 拖拽插入指示线（2026-09，同项目树）：行上半 = 插到它前面、下半 = 插到它
+  // 后面；tail = 列表尾。动画类 workspace-drop-line 在 globals.css。
+  const [railDropHint, setRailDropHint] = useState<{ targetId: string | null; position: "before" | "after" } | null>(null);
+  const railDropPositionOf = (event: React.DragEvent): "before" | "after" => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientY > rect.top + rect.height / 2 ? "after" : "before";
+  };
   const [createWorkItemOpen, setCreateWorkItemOpen] = useState(false);
   const [workItemType, setWorkItemType] = useState<WorkItemType>("bug");
   const [workItemTitle, setWorkItemTitle] = useState("");
@@ -490,12 +500,17 @@ export function WorkspaceManager({
   // 深链预选（已停用工作区的重启用路径）：请求到达且列表数据包含该 id 时
   // 选中它并回到 workspaces 分区。数据通常晚于请求到达（面板刚挂载），所以
   // workspaceData 也在依赖里——落地即触发。
+  // 详情优先（detailFocus，2026-09 反馈）：带工作区上下文点「设置」（树 ⚙ /
+  // 总览「工作区设置」/ 工作区菜单行）时用户只关心 THAT workspace——rail
+  // （全部工作区列表）收起，详情独占 +「‹ 全部工作区」返回；不带上下文的
+  // 设置页入口（底部设置）仍落到全局列表。
   useEffect(() => {
     if ((!open && !embedded) || !selectWorkspaceRequest) return;
     if (!workspaceData?.workspaces.some((workspace) => workspace.id === selectWorkspaceRequest.id)) return;
     setSection("workspaces");
     setSelectedWorkspaceId(selectWorkspaceRequest.id);
     setSelectedWorkItem(null);
+    setDetailFocus(true);
   }, [embedded, open, selectWorkspaceRequest, workspaceData]);
 
   const visibleWorkItems = useMemo(() => {
@@ -1037,6 +1052,8 @@ export function WorkspaceManager({
           padding: 10px;
         }
         .workspace-rail-item {
+          position: relative;
+          transition: opacity 0.15s ease;
           width: 100%;
           display: flex;
           flex-direction: column;
@@ -1844,9 +1861,14 @@ export function WorkspaceManager({
   const railPane = (
     <aside
       className="workspace-rail"
-      style={inlineSplit
-        ? { width: 300, flexShrink: 0, minHeight: 0 }
-        : splitMode ? { width: "100%", flex: 1, minHeight: 0, borderRight: "none" } : undefined}
+      style={{
+        // 详情优先：rail（全部工作区列表）收起——带工作区上下文的入口只见
+        // 目标工作区，‹ 全部工作区再展开。
+        ...(detailFocus ? { display: "none" } : null),
+        ...(inlineSplit
+          ? { width: 300, flexShrink: 0, minHeight: 0 }
+          : splitMode ? { width: "100%", flex: 1, minHeight: 0, borderRight: "none" } : null),
+      }}
     >
             {/* 新建按钮独占头部（2026-09 反馈收敛）：不再带 "Workspaces"
                 英文标题——设置页左索引列 / PanelHeader 已标明「工作区」，双层
@@ -1866,15 +1888,22 @@ export function WorkspaceManager({
                   setDraggedWorkspaceId(workspace.id);
                   event.dataTransfer.effectAllowed = "move";
                 }}
-                onDragEnd={() => setDraggedWorkspaceId(null)}
-                onDragOver={(event) => event.preventDefault()}
+                onDragEnd={() => { setDraggedWorkspaceId(null); setRailDropHint(null); }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setRailDropHint({ targetId: workspace.id, position: railDropPositionOf(event) });
+                }}
                 onDrop={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
+                  const position = railDropPositionOf(event);
+                  setRailDropHint(null);
                   if (!draggedWorkspaceId || draggedWorkspaceId === workspace.id) return;
                   const ids = workspaceData?.workspaces.map((item) => item.id) ?? [];
                   const next = ids.filter((id) => id !== draggedWorkspaceId);
-                  next.splice(next.indexOf(workspace.id), 0, draggedWorkspaceId);
+                  const at = next.indexOf(workspace.id);
+                  if (at >= 0) next.splice(position === "after" ? at + 1 : at, 0, draggedWorkspaceId);
                   setDraggedWorkspaceId(null);
                   void saveWorkspaceOrder(next);
                 }}
@@ -1882,8 +1911,24 @@ export function WorkspaceManager({
                   setSelectedWorkspaceId(workspace.id);
                   setSelectedWorkItem(null);
                 }}
-                style={draggedWorkspaceId === workspace.id ? { opacity: 0.55 } : undefined}
+                style={draggedWorkspaceId === workspace.id ? { opacity: 0.5 } : undefined}
               >
+                {railDropHint?.targetId === workspace.id && (
+                  <span
+                    aria-hidden
+                    className="workspace-drop-line"
+                    style={{
+                      position: "absolute",
+                      left: 0,
+                      right: 0,
+                      height: 2,
+                      borderRadius: 2,
+                      background: "var(--accent)",
+                      boxShadow: "0 0 4px color-mix(in srgb, var(--accent) 45%, transparent)",
+                      ...(railDropHint.position === "before" ? { top: -2 } : { bottom: -2 }),
+                    }}
+                  />
+                )}
                 <strong>
                   {workspace.name}
                   {workspace.disabled && (
@@ -1917,11 +1962,15 @@ export function WorkspaceManager({
             {!loading && workspaceData?.workspaces.length === 0 && (
               <div className="workspace-rail-meta">尚未创建 Workspace。</div>
             )}
-            {/* 空白区 drop = 移到末尾（同 SessionTabBar 容器兜底）。 */}
+            {/* 空白区 drop = 移到末尾（同 SessionTabBar 容器兜底）；尾部指示线。 */}
             <div
-              style={{ minHeight: 24 }}
-              onDragOver={(event) => event.preventDefault()}
+              style={{ minHeight: 24, position: "relative" }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setRailDropHint({ targetId: null, position: "after" });
+              }}
               onDrop={() => {
+                setRailDropHint(null);
                 if (!draggedWorkspaceId) return;
                 const ids = workspaceData?.workspaces.map((item) => item.id) ?? [];
                 const next = ids.filter((id) => id !== draggedWorkspaceId);
@@ -1929,7 +1978,11 @@ export function WorkspaceManager({
                 setDraggedWorkspaceId(null);
                 void saveWorkspaceOrder(next);
               }}
-            />
+            >
+              {draggedWorkspaceId && railDropHint?.targetId === null && (
+                <div aria-hidden className="workspace-drop-line" style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 2, borderRadius: 2, background: "var(--accent)" }} />
+              )}
+            </div>
     </aside>
   );
 
@@ -1939,6 +1992,14 @@ export function WorkspaceManager({
       style={splitMode ? { flex: 1, minHeight: 0 } : undefined}
     >
             {error && <div className="workspace-error">{error}</div>}
+
+            {detailFocus && section === "workspaces" && (
+              <div style={{ display: "flex", marginBottom: 8 }}>
+                <button className="workspace-action" onClick={() => setDetailFocus(false)}>
+                  ‹ 全部工作区
+                </button>
+              </div>
+            )}
 
             {section === "workspaces" && (
               <>
@@ -2373,7 +2434,10 @@ export function WorkspaceManager({
           )}
         </header>
 
-        <div className="workspace-manager-body">
+        <div
+          className="workspace-manager-body"
+          style={detailFocus ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}
+        >
           {railPane}
           {contentPane}
         </div>

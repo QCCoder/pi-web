@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { formatRelativeTime } from "@/lib/format-time";
+import { RelativeTime } from "./RelativeTime";
 
 /**
  * 会话行（全局左栏 2026-09 抽出共享）：运行/完成徽章 + Cmd/中键新 tab
@@ -105,9 +105,10 @@ export function SessionRow({
     >
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{label}</span>
       {showTime && !hovered && (
-        <span style={{ flexShrink: 0, fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}>
-          {formatRelativeTime(session.modified)}
-        </span>
+        <RelativeTime
+          dateStr={session.modified}
+          style={{ flexShrink: 0, fontSize: "var(--pi-sidebar-fs-meta)", color: "var(--text-dim)" }}
+        />
       )}
       {activity === "running" && !hovered && (
         <span

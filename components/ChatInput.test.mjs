@@ -156,6 +156,8 @@ test("locks built-in command submission until it settles", async () => {
   }).outputText).runInNewContext({
     attachedImages: [],
     attachedImagesRef: { current: [] },
+    attachedFiles: [],
+    attachedFilesRef: { current: [] },
     builtinCommandPendingRef: { current: false },
     clearInput() {},
     onBuiltinCommand: async () => new Promise((resolve) => { callback.resolve = resolve; }),
@@ -304,6 +306,28 @@ test("rekey keeps a synchronously restored draft when React state is still empty
   });
 
   clearDraft(sessionKey);
+});
+
+test("file attachments merge by path on restore and rekey, empty files stay keyless", async () => {
+  const { mergeRestoredSubmissionDraft } = await import("../lib/draft-store.ts");
+  const fileA = { path: "/u/uploads/a.pdf", name: "a.pdf", size: 1 };
+  const fileB = { path: "/u/uploads/b.zip", name: "b.zip", size: 2 };
+
+  // 发送失败回填：真实流程里 composer 已被 clearInput 清空（currentFiles=[]），
+  // 引用已在恢复文本里，不会二次成 chip
+  const restored = mergeRestoredSubmissionDraft("text [附件 a.pdf](/u/uploads/a.pdf)", [], "", []);
+  assert.deepEqual(restored, { value: "text [附件 a.pdf](/u/uploads/a.pdf)", images: [] });
+
+  // 当前 composer 已有的文件保留（未发送草稿恢复场景）
+  const kept = mergeRestoredSubmissionDraft("text", [], "", [], undefined, [fileA]);
+  assert.deepEqual(kept.files, [fileA]);
+
+  // rekey 合并：两侧文件按 path 去重、共孭
+  const merged = mergeRestoredSubmissionDraft("next", [], "previous", [], [fileA, fileB], [fileA]);
+  assert.deepEqual(merged.files, [fileA, fileB]);
+
+  // 无文件 → 不带 files 键（存储形态稳定）
+  assert.deepEqual(mergeRestoredSubmissionDraft("t", [], "", []), { value: "t", images: [] });
 });
 
 test("keeps the model selector visible when a model error leaves no options", () => {

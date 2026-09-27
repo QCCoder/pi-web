@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { BranchNavigator } from "../BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -12,16 +12,21 @@ type SessionCopyField = "file" | "id";
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 
+export type ToolbarNavToggle = "sidebar" | "drawer" | "hidden";
+
 /**
  * The 36px tool strip — theme / language / (chat-scoped) history, auto-name,
  * branch navigator, system prompt, token usage — plus the shared dropdown
  * panels (branches / system / session info / language menu) anchored to it.
  *
  * Rendered by BOTH shells: desktop puts it at the top of its center column,
- * mobile at the top of the screen. The ☰ sidebar toggle is desktop-only (the
- * mobile drawer is gone; navigation lives in the bottom tab bar).
+ * mobile at the top of the screen. The ☰ button behavior comes from the
+ * `navToggle` prop: "sidebar" (default — desktop tree collapse), "drawer"
+ * (mobile nav drawer + background-activity status dot) or "hidden" (mobile
+ * wide layout: the tree is permanent, there is nothing to toggle). Mobile
+ * also shows the current session/workspace title.
  */
-export function ChatToolbar() {
+export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavToggle } = {}) {
   const s = useShell();
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, t: translate, supportedLocales } = useI18n();
@@ -30,6 +35,10 @@ export function ChatToolbar() {
   const {
     sidebarOpen,
     setSidebarOpen,
+    mobileNavOpen,
+    setMobileNavOpen,
+    activeWorkspace,
+    sessionActivity,
     activeTopPanel,
     setActiveTopPanel,
     toggleTopPanel,
@@ -57,20 +66,52 @@ export function ChatToolbar() {
   } = s;
 
   // The desktop middle-column toggle (VS Code collapse). Owned here so the ☰
-  // button sits next to its effect; inert on mobile (button not rendered).
+  // button sits next to its effect. On mobile the same button toggles the nav
+  // drawer instead.
   const handleSidebarToggle = useCallback(() => {
     setSidebarOpen((open) => !open);
   }, [setSidebarOpen]);
 
+  // ---- 移动端 ☰ 状态圆点（docs/mobile-drawer-design.md §5）-----------------
+  // 后台会话运行中 → accent 点；有已完成未查看 → 次级点（抽屉打开即视为
+  // 已查看，同步清零）。chips 行删除后这是后台活动的唯一头部信号。
+  const [seenCompleted, setSeenCompleted] = useState<Set<string>>(() => new Set());
+  const drawerMode = navToggle === "drawer";
+  useEffect(() => {
+    if (!drawerMode || !mobileNavOpen) return;
+    setSeenCompleted(new Set(sessionActivity.completedIds));
+  }, [drawerMode, mobileNavOpen, sessionActivity.completedIds]);
+  const runningCount = sessionActivity.runningIds.size;
+  const hasUnseenCompleted = drawerMode
+    && [...sessionActivity.completedIds].some((id) => !seenCompleted.has(id));
+  // 查看已完成会话 = 该会话视为已读（圆点细粒度，M2）：只清单个，不动整体
+  // 「抽屉打开全清」的语义。
+  useEffect(() => {
+    const id = selectedSession?.id;
+    if (!id || !drawerMode) return;
+    setSeenCompleted((prev) => {
+      if (prev.has(id) || !sessionActivity.completedIds.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, [drawerMode, selectedSession?.id, sessionActivity.completedIds]);
+
   return (
 <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
-  {!isMobile && (
-<button
-    onClick={handleSidebarToggle}
-     title={sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show")}
-     aria-label={sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show")}
+  {navToggle !== "hidden" && (
+  <button
+    onClick={navToggle === "drawer" ? () => setMobileNavOpen((open) => !open) : handleSidebarToggle}
+     title={navToggle === "drawer"
+       ? (mobileNavOpen ? translate("sidebar.hide") : translate("sidebar.show"))
+       : (sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show"))}
+     aria-label={navToggle === "drawer"
+       ? (mobileNavOpen ? translate("sidebar.hide") : translate("sidebar.show"))
+       : (sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show"))}
+     aria-expanded={navToggle === "drawer" ? mobileNavOpen : sidebarOpen}
     style={{
       display: "flex", alignItems: "center", justifyContent: "center",
+      position: "relative",
       width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
       background: "none", border: "none", borderRight: "1px solid var(--border)",
       color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
@@ -78,7 +119,7 @@ export function ChatToolbar() {
     onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
     onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
   >
-    {sidebarOpen ? (
+    {(navToggle === "drawer" ? mobileNavOpen : sidebarOpen) ? (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
       </svg>
@@ -87,8 +128,18 @@ export function ChatToolbar() {
         <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
       </svg>
     )}
+    {navToggle === "drawer" && (runningCount > 0 || hasUnseenCompleted) && (
+      <span
+        aria-hidden
+        style={{
+          position: "absolute", top: 4, right: 4, width: 7, height: 7, borderRadius: "50%",
+          background: runningCount > 0 ? "var(--accent)" : "var(--text-dim)",
+          boxShadow: runningCount > 0 ? "0 0 6px var(--accent)" : "none",
+        }}
+      />
+    )}
   </button>
-)}
+  )}
   <button
     onClick={(e) => {
       const rect = e.currentTarget.getBoundingClientRect();
@@ -370,6 +421,23 @@ export function ChatToolbar() {
         </svg>
          {!isMobile && <span>{translate("system.label")}</span>}
       </button>
+    </div>
+  )}
+  {/* 当前会话标题（移动端 only，docs/mobile-drawer-design.md §5）：chips 行
+      删除后的「我在哪」方位感。会话名优先（自动命名后的 name），回落首条
+      消息，无会话时显示当前工作区名。放在 chat 控件组之后的弹性空隙里，
+      右对齐、省略号截断。 */}
+  {isMobile && (
+    <div
+      title={selectedSession ? (selectedSession.name || selectedSession.firstMessage) : (activeWorkspace?.name ?? "")}
+      style={{
+        flex: 1, minWidth: 0, textAlign: "right",
+        padding: "0 10px", overflow: "hidden",
+        fontSize: 12, color: "var(--text-muted)",
+        whiteSpace: "nowrap", textOverflow: "ellipsis", userSelect: "none",
+      }}
+    >
+      {selectedSession ? (selectedSession.name || selectedSession.firstMessage) : (activeWorkspace?.name ?? "")}
     </div>
   )}
   {/* Session stats — right-aligned in top bar */}

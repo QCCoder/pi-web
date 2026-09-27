@@ -28,11 +28,18 @@ export interface WorkspaceSessionGroup {
 /** Group sessions by owning workspace for the home quick-switch list.
  *  Selectable workspaces only (available and not user-disabled; each keeps a
  *  group, header-only when empty); subagent children and sessions outside
- *  every workspace are dropped. Groups with sessions sort by latestModified
- *  desc; empty groups sink to the bottom (name asc). */
+ *  every workspace are dropped.
+ *  Group ordering (`options.orderBy`):
+ *  - "activity" (default): groups with sessions sort by latestModified desc,
+ *    empty groups sink to the bottom (name asc) — the mobile home 「最近」 list.
+ *  - "workspaces": preserve the input array's order verbatim — the desktop
+ *    project tree, where the array IS the user's manual sort order（拖拽排序，
+ *    2026-09：树不按活跃度自动重排）。Sessions inside a group still sort
+ *    newest-first either way. */
 export function groupSessionsByWorkspace(
   workspaces: WorkspaceSummary[],
   sessions: SessionInfo[],
+  options?: { orderBy?: "activity" | "workspaces" },
 ): WorkspaceSessionGroup[] {
   const byId = new Map<string, WorkspaceSessionGroup>(
     workspaces
@@ -51,12 +58,14 @@ export function groupSessionsByWorkspace(
     group.sessions.sort((a, b) => b.modified.localeCompare(a.modified));
     group.latestModified = group.sessions[0]?.modified ?? "";
   }
-  groups.sort((a, b) => {
-    if (a.latestModified && b.latestModified) return b.latestModified.localeCompare(a.latestModified);
-    if (a.latestModified) return -1;
-    if (b.latestModified) return 1;
-    return a.workspace.name.localeCompare(b.workspace.name);
-  });
+  if (options?.orderBy !== "workspaces") {
+    groups.sort((a, b) => {
+      if (a.latestModified && b.latestModified) return b.latestModified.localeCompare(a.latestModified);
+      if (a.latestModified) return -1;
+      if (b.latestModified) return 1;
+      return a.workspace.name.localeCompare(b.workspace.name);
+    });
+  }
   return groups;
 }
 

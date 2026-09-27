@@ -22,4 +22,16 @@ export async function register(): Promise<void> {
         );
       });
   }
+
+  // 初始化时补建默认「默认」工作区（随手问答/搜索的轻量落点；幂等 + 墓碑，
+  // 用户删过就不再复活——见 lib/workspaces/service.ts 的 ensureDefaultWorkspace）。
+  // fire-and-forget，永不阻塞启动。
+  void import("@/lib/workspaces/service")
+    .then((mod) => mod.ensureDefaultWorkspace())
+    .catch((err) => {
+      console.error(
+        "[workspaces] ensure default workspace failed:",
+        err instanceof Error ? err.message : err,
+      );
+    });
 }

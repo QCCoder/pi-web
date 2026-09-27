@@ -8,7 +8,7 @@ import type { useAppShellState } from "./useAppShellState";
  * provides the result here; `DesktopShell` / `MobileShell` consume it through
  * `useShell()`. The state layer is shell-agnostic (no isMobile branches) —
  * cross-shell navigation intents travel as focus signals
- * (`chatFocusKey` / `panelFocus`) that only the mobile shell reacts to.
+ * (`chatFocusKey`) that only the mobile shell reacts to.
  */
 export type AppShellState = ReturnType<typeof useAppShellState>;
 

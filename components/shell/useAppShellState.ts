@@ -39,6 +39,7 @@ import {
   newSessionTabId,
   resolveOpenSessionTarget,
   resolveNewSessionTarget,
+  findReusableNewSessionTab,
   nextActiveTabId,
   nextActiveAfterBatchClose,
   tabQuery,
@@ -108,7 +109,7 @@ const SESSION_TABS_STORAGE_KEY = "pi-session-tabs";
  *
  * Contains no `isMobile` branching — shell-specific reactions (e.g. switching
  * to the mobile 会话 tab when a session opens) happen through the focus
- * signals (`chatFocusKey`, `panelFocus`) that the mobile shell subscribes to
+ * signal (`chatFocusKey`) that the mobile shell subscribes to
  * and the desktop shell ignores.
  */
 export function useAppShellState(seed?: {
@@ -267,10 +268,10 @@ export function useAppShellState(seed?: {
   // shell-agnostic.
   const [chatFocusKey, setChatFocusKey] = useState(0);
   const focusChat = useCallback(() => setChatFocusKey((key) => key + 1), []);
-  const [panelFocus, setPanelFocus] = useState<{ view: string; key: number } | null>(null);
-  const focusPanel = useCallback((view: string) => {
-    setPanelFocus((prev) => ({ view, key: (prev?.key ?? 0) + 1 }));
-  }, []);
+  // 移动端树抽屉开合（docs/mobile-drawer-design.md §6）。放共享状态层（无
+  // isMobile 分支）：ChatToolbar 的 ☰ 在手机切换它，MobileShell 消费渲染
+  // 抽屉；桌面此状态闲置。
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   // ---- Desktop sidebar resize -------------------------------------------------
   // Default width until localStorage hydrates (SSR-safe: no localStorage in the
@@ -570,7 +571,30 @@ export function useAppShellState(seed?: {
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   ), []);
 
-  const openNewSessionTab = useCallback((workspace: WorkspaceSummary): string => {
+  /** 占位去重（2026-09 用户反馈）的草稿空判定：无文字、无图片、无文件
+   *  附件才算「未发起」。与 draft-store 的 isEmptyDraft 语义一致。 */
+  const isNewSessionDraftEmpty = useCallback((tabId: string) => {
+    const draft = getDraft(tabId);
+    return !draft || (!draft.value && draft.images.length === 0 && (draft.files?.length ?? 0) === 0);
+  }, []);
+
+  const openNewSessionTab = useCallback((workspace: WorkspaceSummary, options?: { replace?: boolean }): string => {
+    // 占位去重：同工作区已有空草稿占位 → 激活复用，不再新建。所有入口
+    // （树「新建任务」/ tab 条 ＋ / ⊞ / 工作项预填）一致受益；预填只会落
+    // 进空草稿 tab（findReusableNewSessionTab 拒绝非空草稿），不会冲字。
+    // options.replace：自动导航（移动端空态自动落 composer）用 replace 写
+    // URL，不给浏览器历史埋可 popstate 回跳的陷阱。
+    const reusable = findReusableNewSessionTab(tabsRef.current, workspace.id, isNewSessionDraftEmpty);
+    if (reusable) {
+      activateTab(reusable.id);
+      setSessionKey((k) => k + 1);
+      setBranchTree([]);
+      setBranchActiveLeafId(null);
+      setSystemPrompt(null);
+      focusChat();
+      navigateUrl(tabQuery(reusable), options?.replace === true);
+      return reusable.id;
+    }
     const id = freshNewSessionTabId();
     setTabs((prev) => [...prev, createNewSessionTab(workspace, id)]);
     activateTab(id);
@@ -579,26 +603,53 @@ export function useAppShellState(seed?: {
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
     focusChat();
-    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`);
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`, options?.replace === true);
     return id;
-  }, [activateTab, navigateUrl, focusChat, freshNewSessionTabId]);
+  }, [activateTab, navigateUrl, focusChat, freshNewSessionTabId, isNewSessionDraftEmpty]);
+
+  /** 移动端抽屉上下文锚定（docs/mobile-drawer-design.md §4.2「上下文跟着
+   *  屏幕走」）：把抽屉里以工作区 W 为目标的动作（模块行/归档）放进 W 的
+   *  上下文——幂等地建/激活 W 锚定的占位 tab（去重复用空草稿占位）。与
+   *  openNewSessionTab 的差别：纯状态，不 focusChat、不 bump sessionKey——
+   *  调用方接着打开目的地全屏页，聊天不可见，chatFocusKey 不应触发移动端
+   *  「关闭目的地页」的 effect。会话行点击走 handleSelectSession（自带
+   *  focusChat，语义正确：打开会话 = 离开目的地页）。 */
+  const ensureWorkspaceContext = useCallback((workspace: WorkspaceSummary): void => {
+    // 已在 W 上下文（当前 tab 就属于 W）→ 什么都不做，不多开占位。
+    if (activeTab?.workspace.id === workspace.id) return;
+    const reusable = findReusableNewSessionTab(tabsRef.current, workspace.id, isNewSessionDraftEmpty);
+    if (reusable) {
+      if (activeTabId !== reusable.id) {
+        activateTab(reusable.id);
+        navigateUrl(tabQuery(reusable));
+      }
+      return;
+    }
+    const id = freshNewSessionTabId();
+    setTabs((prev) => [...prev, createNewSessionTab(workspace, id)]);
+    activateTab(id);
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=chat`);
+  }, [activeTab, activeTabId, activateTab, navigateUrl, freshNewSessionTabId, isNewSessionDraftEmpty]);
 
   /** X1 关 tab：草稿确认（会话 tab 用 session.id 键，占位 tab 用 tab.id 键）
    *  → 邻居规则回落（先左后右；一个不剩 → 首页）。会话删除/归档的自动关
-   *  闭路径传 skipDraftConfirm（草稿已无意义）。 */
-  const closeTab = useCallback((id: string, options?: { skipDraftConfirm?: boolean }) => {
+   *  闭路径传 skipDraftConfirm（草稿已无意义）。返回是否真的关了（草稿确认
+   *  取消 = false）——移动端用它决定要不要接「关最后一个 tab → 落家 tab」的
+   *  回退，取消时不动。 */
+  const closeTab = useCallback((id: string, options?: { skipDraftConfirm?: boolean }): boolean => {
     const tab = tabs.find((t) => t.id === id) ?? null;
-    if (tab && !options?.skipDraftConfirm) {
+    if (!tab) return false;
+    if (!options?.skipDraftConfirm) {
       const draftKey = tab.kind === "session" && tab.session ? tab.session.id : tab.id;
       const draft = getDraft(draftKey);
       if (draft && (draft.value || draft.images.length > 0)) {
-        if (!window.confirm("这个 tab 有未发送的聊天草稿。要关闭并丢弃草稿吗？")) return;
+        if (!window.confirm("这个 tab 有未发送的聊天草稿。要关闭并丢弃草稿吗？")) return false;
         clearDraft(draftKey);
       }
     }
     const remaining = tabs.filter((t) => t.id !== id);
     setTabs(remaining);
-    if (activeTabId !== id) return;
+    if (activeTabId !== id) return true;
     const nextId = nextActiveTabId(tabs, id);
     if (nextId) {
       activateTab(nextId);
@@ -608,6 +659,7 @@ export function useAppShellState(seed?: {
       activateTab(null);
       navigateUrl("tab=home");
     }
+    return true;
   }, [tabs, activeTabId, activateTab, navigateUrl]);
 
   /** 批量关 tab（右键菜单的 关闭其他/关闭左侧/关闭右侧）：草稿确认只弹
@@ -681,6 +733,27 @@ export function useAppShellState(seed?: {
       setWorkspacesLoaded(true);
     }
   }, []);
+
+  /** 项目树工作区拖拽排序（2026-09）：PATCH 全量期望序（索引 sortOrder 重编
+   *  1..N）→ 重拉列表。全量由调用方拼好（树只传重排后的分组序 + 隐藏项垫底）——
+   *  updateWorkspaceOrder 对未提及条目会删 sortOrder（回落 MRU），不能传部分列表。 */
+  const handleReorderWorkspaces = useCallback(async (ids: string[]) => {
+    try {
+      const response = await fetch("/api/workspaces", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order: ids }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { error?: string };
+        console.error("Failed to reorder workspaces:", data.error ?? `HTTP ${response.status}`);
+        return;
+      }
+      await loadWorkspaces();
+    } catch (error) {
+      console.error("Failed to reorder workspaces:", error);
+    }
+  }, [loadWorkspaces]);
 
   // Translate the current URL into tab state. Used by the initial mount (once
   // workspaces are loaded) and by popstate (back/forward). This is the *only*
@@ -927,12 +1000,13 @@ export function useAppShellState(seed?: {
       .catch(() => {});
   }, [openSessionTab]);
 
-  const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary) => {
-    // P1：开工作区 = 开/激活它的家 tab（总览落地；会话 tab 模型下「进入工作区」
-    // 与「看它的总览」是同一件事）。
+  /** P1：开工作区 = 开/激活它的家 tab（总览落地；会话 tab 模型下「进入工作区」
+   *  与「看它的总览」是同一件事）。options.replace：自动导航（如移动端空态
+   *  落回家 tab）用 replace 写 URL，不给浏览器历史埋 tab=home 陷阱。 */
+  const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary, options?: { replace?: boolean }) => {
     const id = ensureHomeTab(workspace);
     activateTab(id);
-    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=overview`);
+    navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=overview`, options?.replace === true);
   }, [ensureHomeTab, activateTab, navigateUrl]);
 
   /** Overview（家 tab）的回头路：工作台 PanelHeader「总览」按钮 → 开/激活当前
@@ -953,6 +1027,11 @@ export function useAppShellState(seed?: {
    *  （U1 豁免：同工作区可并存多个 composer，不吃掉正在看的会话）。 */
   const handleWorkspaceNewSession = useCallback(() => {
     if (!activeWorkspace) return;
+    // 家 tab 变身前先看去重：已有空草稿占位 → 直接激活它（不变身、不多开）。
+    if (findReusableNewSessionTab(tabsRef.current, activeWorkspace.id, isNewSessionDraftEmpty)) {
+      openNewSessionTab(activeWorkspace);
+      return;
+    }
     if (activeTab && resolveNewSessionTarget(activeTab) === "morph") {
       const id = freshNewSessionTabId();
       setTabs((prev) => prev.map((t) => (t.id === activeTab.id
@@ -973,7 +1052,7 @@ export function useAppShellState(seed?: {
       return;
     }
     openNewSessionTab(activeWorkspace);
-  }, [activeWorkspace, activeTab, activateTab, navigateUrl, focusChat, freshNewSessionTabId, openNewSessionTab]);
+  }, [activeWorkspace, activeTab, activateTab, navigateUrl, focusChat, freshNewSessionTabId, openNewSessionTab, isNewSessionDraftEmpty]);
 
   /** tab 条「＋」：显式的加 tab 按钮——永远开新占位 tab，不做家 tab 原地变身。 */
   const handleTabBarNewSession = useCallback(() => {
@@ -1725,8 +1804,6 @@ export function useAppShellState(seed?: {
     setSidebarOpen,
     chatFocusKey,
     setChatFocusKey,
-    panelFocus,
-    setPanelFocus,
     sidebarWidth,
     setSidebarWidth,
     sidebarResizing,
@@ -1751,7 +1828,9 @@ export function useAppShellState(seed?: {
     setTopPanelPos,
     handleWorkspaceSettingsSelection,
     focusChat,
-    focusPanel,
+    mobileNavOpen,
+    setMobileNavOpen,
+    ensureWorkspaceContext,
     sidebarWidthRef,
     sidebarContainerRef,
     startSidebarResize,
@@ -1792,6 +1871,7 @@ export function useAppShellState(seed?: {
     navigateUrl,
 
     loadWorkspaces,
+    handleReorderWorkspaces,
     applyUrlToTabs,
     initialNavDoneRef,
     handleSelectSession,

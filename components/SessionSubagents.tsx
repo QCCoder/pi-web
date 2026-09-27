@@ -104,10 +104,17 @@ function SubagentRow({ sub, onOpenSession }: { sub: SubagentEntry; onOpenSession
 }
 
 /** Compact toolbar entry — rendered by ChatInput at the end of its controls
- *  row (right of the changed-files button). Icon + live count. */
-export function SessionSubagentsButton({ count, open, onToggle }: { count: number; open: boolean; onToggle: () => void }) {
+ *  row (right of the changed-files button). Icon + count.
+ *
+ *  Dual state: `running` counts live delegations (running + queued). While
+ *  > 0 the button turns accent with a breathing dot and the number switches
+ *  to the live count — the fixed "something is processing" signal; when idle
+ *  it keeps the dim all-time count as the durable history entry. */
+export function SessionSubagentsButton({ count, running = 0, open, onToggle }: { count: number; running?: number; open: boolean; onToggle: () => void }) {
   const { t } = useI18n();
-  const label = t("chat.subagents", { count });
+  const busy = running > 0;
+  const label = busy ? t("chat.subagentsRunning", { count: running }) : t("chat.subagents", { count });
+  const baseColor = busy || open ? "var(--accent)" : "var(--text-muted)";
   return (
     <button
       onClick={onToggle}
@@ -121,7 +128,7 @@ export function SessionSubagentsButton({ count, open, onToggle }: { count: numbe
         background: open ? "var(--bg-hover)" : "none",
         border: "none",
         borderRadius: 9,
-        color: open ? "var(--accent)" : "var(--text-muted)",
+        color: baseColor,
         cursor: "pointer",
         fontSize: 12,
         fontVariantNumeric: "tabular-nums",
@@ -134,17 +141,25 @@ export function SessionSubagentsButton({ count, open, onToggle }: { count: numbe
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.background = open ? "var(--bg-hover)" : "none";
-        e.currentTarget.style.color = open ? "var(--accent)" : "var(--text-muted)";
+        e.currentTarget.style.color = busy || open ? "var(--accent)" : "var(--text-muted)";
       }}
     >
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-        <rect x="3" y="11" width="18" height="10" rx="2" />
-        <circle cx="12" cy="5" r="2" />
-        <path d="M12 7v4" />
-        <line x1="8" y1="16" x2="8" y2="16.01" />
-        <line x1="16" y1="16" x2="16" y2="16.01" />
-      </svg>
-      <span style={{ whiteSpace: "nowrap" }}>{count}</span>
+      {busy ? (
+        <span
+          aria-hidden
+          className="animate-[pulse_1.5s_infinite]"
+          style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }}
+        />
+      ) : (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+          <rect x="3" y="11" width="18" height="10" rx="2" />
+          <circle cx="12" cy="5" r="2" />
+          <path d="M12 7v4" />
+          <line x1="8" y1="16" x2="8" y2="16.01" />
+          <line x1="16" y1="16" x2="16" y2="16.01" />
+        </svg>
+      )}
+      <span style={{ whiteSpace: "nowrap" }}>{busy ? running : count}</span>
     </button>
   );
 }

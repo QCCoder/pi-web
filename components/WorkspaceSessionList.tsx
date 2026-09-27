@@ -3,11 +3,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
+import { workspaceForSession } from "@/lib/home-quick-switch";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
 /**
  * 本工作区会话列表（2026-09 工作区 tab 菜单化）：拉 /api/sessions 后按工作区
- * 前缀过滤（cwd/projectRoot 命中、排除 subagent 子会话），按修改时间降序；
+ * 归属过滤（与侧栏 groupSessionsByWorkspace 同语义：cwd 最长前缀归属本工作区；
+ * 无归属但 projectRoot 指向本工作区的会话也保留——它们不属于任何其他工作区，
+ * 只在这里可见。排除 subagent 子会话），按修改时间降序；
  * 默认前 {@link SESSION_PREVIEW_COUNT} 条 + 「显示全部」展开；行内删除
  * （RecentSessionRow 语义自总览平移）。宿主：移动端工作区 tab 的「会话」子页
  * （全屏，showHeader=false——PanelHeader 已有标题）+ WorkspaceOverview 的
@@ -39,6 +42,9 @@ export function getSessionListIndices(count: number, scrollTop: number, viewport
 
 interface Props {
   workspace: WorkspaceSummary;
+  /** 全量可选工作区列表：用于与侧栏一致的最长前缀归属判定（防止嵌套工作区
+   *  的会话被本工作区重复计入——侧栏徽标数与总览「会话 N」不一致的根因）。 */
+  workspaces: WorkspaceSummary[];
   onSelectSession: (session: SessionInfo) => void;
   onSessionDeleted?: (id: string) => void;
   /** 是否渲染「会话 (N)」小节头（总览区块 true / 移动端全屏子页 false，PanelHeader 已有标题）。 */
@@ -47,6 +53,7 @@ interface Props {
 
 export function WorkspaceSessionList({
   workspace,
+  workspaces,
   onSelectSession,
   onSessionDeleted,
   showHeader = true,
@@ -100,21 +107,19 @@ export function WorkspaceSessionList({
     return () => controller.abort();
   }, [workspace.id]);
 
-  const wsPath = workspace.path.replace(/\/+$/, "");
   const workspaceSessions = useMemo(() => {
     const path = workspace.path;
-    const prefix = `${wsPath}/`;
     return sessions
-      .filter((session) =>
-        !session.subagentChild
-        && (
-          session.cwd === path
-          || session.cwd.startsWith(prefix)
-          || session.projectRoot === path
-        ),
-      )
+      .filter((session) => {
+        if (session.subagentChild) return false;
+        const owner = workspaceForSession(session, workspaces);
+        // 与侧栏同归属；无主会话退回 projectRoot 命中（否则这类会话在任何
+        // 工作区都看不到）。
+        if (owner) return owner.id === workspace.id;
+        return session.projectRoot === path;
+      })
       .sort((a, b) => b.modified.localeCompare(a.modified));
-  }, [sessions, wsPath, workspace.path]);
+  }, [sessions, workspaces, workspace.id, workspace.path]);
 
   return (
     <section style={{ marginTop: 26 }}>
