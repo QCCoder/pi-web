@@ -77,7 +77,6 @@ export function MobileShell() {
     modelsRefreshKey,
     sessionKey,
     effectiveNewSessionCwd,
-    showChat,
     activeFileTab,
     chatFocusKey,
     settingsPage,
@@ -165,7 +164,7 @@ export function MobileShell() {
         history.back();
       }
     };
-  }, [drawerOpen]);
+  }, [drawerOpen, setMobileNavOpen]);
 
   // ---- 边缘右滑开抽屉（M2 增强，窄屏 only）--------------------------------
   // document 级 passive touch 跟踪：起点距左缘 <28px、横向位移 >56px 且明显
