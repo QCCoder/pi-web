@@ -47,7 +47,6 @@ export function serveSessionSse(request: IncomingMessage, response: ServerRespon
   });
   let unsubscribe: () => void = () => {};
   let offDestroy: () => void = () => {};
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
   const cleanup = () => {
     clearInterval(heartbeat);
     unsubscribe();
@@ -59,7 +58,7 @@ export function serveSessionSse(request: IncomingMessage, response: ServerRespon
   const writer = createSseWriter(response, cleanup);
   writer.writeEvent({ type: "connected", sessionId: session.sessionId });
   unsubscribe = session.onEvent((event) => writer.writeEvent(event));
-  heartbeat = setInterval(() => writer.writeRaw(": \n\n"), 30_000);
+  const heartbeat = setInterval(() => writer.writeRaw(": \n\n"), 30_000);
   offDestroy = session.onDestroy(cleanup);
   request.on("close", cleanup);
   request.on("error", cleanup);
@@ -78,7 +77,6 @@ function serveRunningSse(request: IncomingMessage, response: ServerResponse): vo
     Connection: "keep-alive",
   });
   let unsubscribe: () => void = () => {};
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
   const cleanup = () => {
     clearInterval(heartbeat);
     unsubscribe();
@@ -89,7 +87,7 @@ function serveRunningSse(request: IncomingMessage, response: ServerResponse): vo
     try { writer.writeEvent({ type: "running", runningSessionIds: ids }); } catch { /* closed */ }
   });
   writer.writeEvent({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
-  heartbeat = setInterval(() => writer.writeRaw(": \n\n"), 30_000);
+  const heartbeat = setInterval(() => writer.writeRaw(": \n\n"), 30_000);
   request.on("close", cleanup);
   request.on("error", cleanup);
 }
