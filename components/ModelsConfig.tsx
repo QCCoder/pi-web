@@ -1820,6 +1820,9 @@ export function ModelsConfig({ onClose, embedded, onSaved, inline }: {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Set when models.json could not be read. Saving stays disabled: the draft
+  // would not contain the file's providers, and a save replaces the whole file.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
@@ -1842,14 +1845,18 @@ export function ModelsConfig({ onClose, embedded, onSaved, inline }: {
 
   useEffect(() => {
     fetch("/api/models-config")
-      .then((r) => r.json())
+      .then(async (r) => {
+        const d = await r.json() as ModelsJson & { error?: string };
+        if (!r.ok || d.error) throw new Error(d.error ?? `HTTP ${r.status}`);
+        return d;
+      })
       .then((d: ModelsJson) => {
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
         const keys = Object.keys(normalized.providers ?? {});
         if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
-      .catch(() => setConfig({ providers: {} }))
+      .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
     loadOAuthProviders();
     loadApiKeyProviders();
@@ -1943,6 +1950,7 @@ export function ModelsConfig({ onClose, embedded, onSaved, inline }: {
   }, []);
 
   const handleSave = useCallback(async () => {
+    if (loadError) return;
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);
@@ -1960,7 +1968,7 @@ export function ModelsConfig({ onClose, embedded, onSaved, inline }: {
     } finally {
       setSaving(false);
     }
-  }, [config, onSaved]);
+  }, [config, onSaved, loadError]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
@@ -2158,18 +2166,20 @@ export function ModelsConfig({ onClose, embedded, onSaved, inline }: {
   // pane in every mode.
   const footerPane = (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
-          {saveError && <span style={{ fontSize: 12, color: "#f87171", flex: 1 }}>{saveError}</span>}
+          {(loadError || saveError) && <span style={{ fontSize: 12, color: "#f87171", flex: 1 }}>
+            {loadError ? t("models.configUnreadable", { error: loadError }) : saveError}
+          </span>}
           <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
              {t("i18n.cancel")}
           </button>
-          <button onClick={handleSave} disabled={saving || savedOk} style={{
+          <button onClick={handleSave} disabled={saving || savedOk || loadError !== null} style={{
             position: "relative",
             padding: "6px 16px",
             minWidth: 92,
             background: savedOk ? "#16a34a" : saving ? "var(--bg-panel)" : "var(--accent)",
             border: "none", borderRadius: 6,
             color: savedOk ? "#fff" : saving ? "var(--text-muted)" : "#fff",
-            cursor: (saving || savedOk) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
+            cursor: (saving || savedOk || loadError !== null) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
             display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
             transition: "background-color 0.2s ease, color 0.2s ease",
             animation: savedOk ? "saved-pop 0.45s ease" : undefined,

@@ -259,6 +259,17 @@ interface CodeBlockProps {
   plain?: boolean;
 }
 
+// Prism's light theme uses backgroundColor, while its dark theme uses the
+// background shorthand. Keep the pre background solely in customStyle so a
+// theme switch cannot remove/update one and reset the other in React's diff.
+const codeBlockDarkTheme = {
+  ...vscDarkPlus,
+  'pre[class*="language-"]': {
+    ...vscDarkPlus['pre[class*="language-"]'],
+  },
+};
+delete codeBlockDarkTheme['pre[class*="language-"]'].background;
+
 /**
  * Syntax-highlighted code block with copy button.
  * Used as the "source" view for mermaid blocks and for all non-mermaid code fences.
@@ -277,13 +288,13 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, pla
   };
 
   const body = plain ? (
-    <pre style={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))", overflow: "auto" }}>
+    <pre style={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))", overflow: "auto" }}>
       <code style={{ fontFamily: "var(--font-mono)", whiteSpace: "pre" }}>{code}</code>
     </pre>
   ) : (
     <SyntaxHighlighter
       language={lang || "text"}
-      style={isDark ? vscDarkPlus : vs}
+      style={isDark ? codeBlockDarkTheme : vs}
       showLineNumbers
       lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
       customStyle={{
@@ -292,13 +303,12 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, pla
         fontSize: 12.5,
         lineHeight: 1.62,
         borderRadius: 0,
-        background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
+        backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
       }}
       codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
     >
       {code}
-    </SyntaxHighlighter>
-  );
+    </SyntaxHighlighter>  );
 
   return (
     <div className="markdown-code-block">
