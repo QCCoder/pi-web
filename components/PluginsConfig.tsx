@@ -627,6 +627,155 @@ function PackageDetail({
   );
 }
 
+/** 市场卡片（ZCode 插件市场同款）：图标章 + 名称 + 资源摘要 + 启用开关 +
+ *  详情/检查更新/移除 操作行。详情按钮打开弹窗（PackageDetail 全量视图）。 */
+function PluginMarketCard({
+  pkg,
+  busyKey,
+  updateStatus,
+  checkingUpdate,
+  updateError,
+  onAction,
+  onCheckUpdate,
+  onOpenDetail,
+}: {
+  pkg: PluginPackageInfo;
+  busyKey: string | null;
+  updateStatus?: PluginUpdateResult;
+  checkingUpdate: boolean;
+  updateError: string | null;
+  onAction: (action: PluginAction, pkg: PluginPackageInfo) => void;
+  onCheckUpdate: () => void;
+  onOpenDetail: () => void;
+}) {
+  const { t } = useI18n();
+  const key = packageKey(pkg);
+  const busy = busyKey?.endsWith(key) ?? false;
+  const updateAvailable = updateStatus?.state === "update-available";
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        border: "1px solid var(--border)",
+        borderRadius: 10,
+        background: "var(--bg)",
+        padding: "13px 14px",
+        transition: "background 0.15s, border-color 0.15s",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg)"; }}
+    >
+      <div style={{ display: "flex", gap: 11, alignItems: "flex-start" }}>
+        <span
+          aria-hidden
+          style={{
+            display: "grid",
+            placeItems: "center",
+            width: 36,
+            height: 36,
+            borderRadius: 9,
+            background: "color-mix(in srgb, var(--accent) 13%, transparent)",
+            color: "var(--accent)",
+            flexShrink: 0,
+          }}
+        >
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-1.705.707 2.402 2.402 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.402 2.402 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.23 8.77c.24-.24.581-.353.917-.303.515.077.877.528 1.073 1.01a2.5 2.5 0 1 0 3.259-3.259c-.482-.196-.933-.558-1.01-1.073-.05-.336.062-.676.303-.917l1.525-1.525A2.402 2.402 0 0 1 12 1.998c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z" />
+          </svg>
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            <span
+              title={pkg.source}
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: "var(--text)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {pkg.source}
+            </span>
+            <ScopeTag scope={pkg.scope} />
+          </div>
+          <div
+            style={{
+              fontSize: 11.5,
+              color: "var(--text-muted)",
+              marginTop: 3,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {resourceSummary(pkg, t)}
+          </div>
+          <div
+            style={{
+              fontSize: 10.5,
+              color: "var(--text-dim)",
+              marginTop: 2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {versionSummary(pkg, t)} · {pkg.status}
+          </div>
+        </div>
+        <Toggle
+          enabled={!pkg.disabled}
+          loading={busy}
+          onToggle={() => onAction(pkg.disabled ? "enable" : "disable", pkg)}
+          label={pkg.disabled ? t("i18n.enablePackage") : t("i18n.disablePackage")}
+        />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button type="button" onClick={onOpenDetail} style={buttonStyle(false)}>
+          详情
+        </button>
+        {pkg.canCheckForUpdates && (
+          <button
+            type="button"
+            onClick={onCheckUpdate}
+            disabled={busy || checkingUpdate}
+            style={{
+              ...buttonStyle(busy || checkingUpdate),
+              ...(updateAvailable
+                ? { background: "var(--accent)", color: "white", border: "1px solid var(--accent)" }
+                : {}),
+            }}
+          >
+            {checkingUpdate ? t("i18n.checking") : updateAvailable ? t("i18n.update") : t("i18n.check")}
+          </button>
+        )}
+        {updateAvailable && (
+          <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>
+            ↑ {t("i18n.updateAvailable")}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={() => onAction("remove", pkg)}
+          disabled={busy}
+          style={buttonStyle(busy, true)}
+        >
+          {busyKey === `remove:${key}` ? t("i18n.removing") : t("i18n.remove")}
+        </button>
+      </div>
+      {updateError && (
+        <div style={{ fontSize: 11, color: "#ef4444" }}>{updateError}</div>
+      )}
+    </div>
+  );
+}
+
 export function PluginsConfig({
   cwd,
   sessionId,
@@ -634,6 +783,7 @@ export function PluginsConfig({
   onReloaded,
   embedded,
   inline = false,
+  market = false,
 }: {
   cwd: string;
   sessionId: string | null;
@@ -645,6 +795,11 @@ export function PluginsConfig({
    *  （左固定宽列表列 + 右 banner/详情/页脚）——取代旧三列 portal split。
    *  Modal/embedded 模式不变。 */
   inline?: boolean;
+  /** 市场式布局（2026-09 ZCode 插件市场同款，插件&技能整页专用）：搜索 +
+   *  「已安装」卡片网格 + 添加区 + 详情弹窗，替代 列表+详情 分栏。所有数据
+   *  与操作（install/remove/update/enable/disable/检查更新）与分栏模式共用
+   *  同一套状态；移动端设置子页仍用 embedded 分栏。 */
+  market?: boolean;
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -663,6 +818,9 @@ export function PluginsConfig({
   const [checkingAll, setCheckingAll] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
+  // 市场布局专用：卡片搜索词 + 详情弹窗（packageKey）。
+  const [marketQuery, setMarketQuery] = useState("");
+  const [marketDetailKey, setMarketDetailKey] = useState<string | null>(null);
 
   const packages = useMemo(() => data?.packages ?? [], [data?.packages]);
   const selectedPackage = packages.find((pkg) => packageKey(pkg) === selected) ?? null;
@@ -865,6 +1023,15 @@ export function PluginsConfig({
   ).length;
   const hasCheckablePackages = packages.some((pkg) => pkg.canCheckForUpdates);
   const footerBusy = loading || busyKey !== null || checkingUpdates.size > 0 || updatingAll;
+
+  // 市场布局派生：按搜索词过滤卡片 + 详情弹窗对应的包（remove 后包消失 → 弹窗自动关闭）。
+  const marketQueryTrim = marketQuery.trim().toLowerCase();
+  const marketPackages = marketQueryTrim
+    ? packages.filter((pkg) => pkg.source.toLowerCase().includes(marketQueryTrim))
+    : packages;
+  const marketDetailPackage = marketDetailKey
+    ? packages.find((pkg) => packageKey(pkg) === marketDetailKey) ?? null
+    : null;
 
   const pageMode = inline;
 
@@ -1181,6 +1348,217 @@ export function PluginsConfig({
           </button>
     </div>
   );
+
+  if (market) {
+    // 市场式布局（ZCode 插件市场同款）：工具行（搜索 + 检查更新/刷新/添加）
+    // + 「已安装」卡片网格 + 添加区；详情走弹窗（PackageDetail 全量复用）。
+    return (
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+        {/* 工具行 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "14px 22px 0", flexShrink: 0 }}>
+          <div style={{ position: "relative", flex: 1, minWidth: 150, maxWidth: 440 }}>
+            <svg
+              aria-hidden
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="var(--text-dim)"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              style={{ position: "absolute", top: 11, left: 10 }}
+            >
+              <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+            </svg>
+            <input
+              value={marketQuery}
+              onChange={(e) => setMarketQuery(e.target.value)}
+              placeholder="搜索插件"
+              aria-label="搜索插件"
+              style={{
+                width: "100%",
+                height: 36,
+                padding: "0 11px 0 31px",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                background: "var(--bg-panel)",
+                color: "var(--text)",
+                fontSize: 12.5,
+                outline: "none",
+              }}
+            />
+          </div>
+          {hasCheckablePackages && (
+            <button
+              onClick={() => void (availableUpdateCount > 0 ? updateAllPluginsAction() : checkForUpdates())}
+              disabled={footerBusy}
+              title={availableUpdateCount > 0 ? t("i18n.updateAllPluginsHint") : undefined}
+              style={buttonStyle(footerBusy)}
+            >
+              {updatingAll
+                ? t("i18n.updating")
+                : checkingAll
+                  ? t("i18n.checking")
+                  : availableUpdateCount > 0
+                    ? `${t("i18n.updateAllPlugins")} (${availableUpdateCount})`
+                    : t("i18n.checkUpdates")}
+            </button>
+          )}
+          <button onClick={() => void loadPlugins()} disabled={footerBusy} style={buttonStyle(footerBusy)}>
+            {t("i18n.refresh")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAddMode((current) => !current)}
+            style={{
+              ...buttonStyle(false),
+              // 不与 buttonStyle 的 border 简写混用 borderColor（React 警告
+              // 简写/非简写混排在重渲染时丢样式）——覆盖完整 border。
+              ...(addMode
+                ? {}
+                : { background: "var(--accent)", color: "white", border: "1px solid var(--accent)", fontWeight: 600 }),
+            }}
+          >
+            {addMode ? t("i18n.close") : `＋ ${t("i18n.addPlugin")}`}
+          </button>
+        </div>
+
+        {contextBanners}
+
+        {/* 添加插件（addMode 展开，复用 AddPluginPanel） */}
+        {addMode && (
+          <div style={{ margin: "14px 22px 0", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", flexShrink: 0, background: "var(--bg)" }}>
+            <AddPluginPanel
+              cwd={cwd}
+              source={installSource}
+              scope={installScope}
+              projectResourcesLoaded={projectResourcesLoaded}
+              busy={addBusy}
+              actionError={actionError}
+              onSourceChange={setInstallSource}
+              onScopeChange={setInstallScope}
+              onInstall={installPlugin}
+            />
+          </div>
+        )}
+
+        {/* 已安装 */}
+        <div style={{ padding: "16px 22px 26px" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>已安装</span>
+            <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{marketPackages.length}</span>
+            {availableUpdateCount > 0 && (
+              <span style={{ fontSize: 11.5, color: "var(--accent)", fontWeight: 600 }}>
+                {availableUpdateCount} {t("i18n.updateAvailable")}
+              </span>
+            )}
+          </div>
+          {loading ? (
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading...</div>
+          ) : error ? (
+            <div style={{ fontSize: 12, color: "#ef4444" }}>{error}</div>
+          ) : marketPackages.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.8 }}>
+              {packages.length === 0
+                ? "尚未安装任何插件——点右上「＋ 添加插件」从 npm / git 安装。"
+                : "没有匹配的插件。"}
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: 12 }}>
+              {marketPackages.map((pkg) => (
+                <PluginMarketCard
+                  key={packageKey(pkg)}
+                  pkg={pkg}
+                  busyKey={busyKey}
+                  updateStatus={updateStatuses[packageKey(pkg)]}
+                  checkingUpdate={checkingUpdates.has(packageKey(pkg))}
+                  updateError={updateError}
+                  onAction={runAction}
+                  onCheckUpdate={() => void checkForUpdates(pkg)}
+                  onOpenDetail={() => setMarketDetailKey(packageKey(pkg))}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 详情弹窗（PackageDetail 全量复用） */}
+        {marketDetailPackage && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="插件详情"
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 1000,
+              background: "rgba(0,0,0,0.35)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setMarketDetailKey(null);
+            }}
+          >
+            <div
+              style={{
+                position: "relative",
+                width: "min(860px, calc(100vw - 16px))",
+                maxHeight: "82vh",
+                overflowY: "auto",
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                padding: "16px 20px 20px",
+                boxShadow: "0 16px 48px rgba(0,0,0,0.22)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setMarketDetailKey(null)}
+                title="关闭"
+                aria-label="关闭"
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  right: 14,
+                  display: "grid",
+                  placeItems: "center",
+                  width: 28,
+                  height: 28,
+                  border: "1px solid var(--border)",
+                  borderRadius: 7,
+                  background: "var(--bg)",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: 12,
+                }}
+              >
+                ✕
+              </button>
+              <PackageDetail
+                key={packageKey(marketDetailPackage)}
+                pkg={marketDetailPackage}
+                cwd={cwd}
+                busyKey={busyKey}
+                actionError={actionError}
+                actionMessage={actionMessage}
+                sessionId={sessionId}
+                updateStatus={updateStatuses[packageKey(marketDetailPackage)]}
+                checkingUpdate={checkingUpdates.has(packageKey(marketDetailPackage))}
+                updateError={updateError}
+                onAction={runAction}
+                onCheckUpdate={() => void checkForUpdates(marketDetailPackage)}
+                onReloadSession={reloadSession}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (pageMode) {
     // Inline（中央区整页）mode：list + detail side by side in ONE page. One

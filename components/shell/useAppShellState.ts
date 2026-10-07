@@ -28,7 +28,7 @@ import type { ChatInputHandle } from "../ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
-import { type Tab, FILES_TAB_ID, WORK_ITEMS_TAB_ID } from "@/lib/tab-types";
+import { type Tab, FILES_TAB_ID, WORK_ITEMS_TAB_ID, type ModuleTabId } from "@/lib/tab-types";
 import {
   type SessionTabState,
   createSessionTab,
@@ -50,25 +50,25 @@ import {
 
 type SessionCopyField = "file" | "id";
 
-/** 中央区整页（2026-09 树形侧栏改版，grill 共识；同月设置页收敛为两栏）：
- *  底部入口（设置/模型/插件/Skills/Agents）与项目树「归档」行打开的中央区
- *  页面。点任何会话 tab（activateTab）即关闭回到聊天；从不持久化。归档是
- *  工作区作用域，带 workspaceId。设置页自带左索引列，模型/Skills/插件/
- *  Agents 不再是独立整页——底部入口 = 打开设置页并预选对应分区
- *  （section），设置页内切分区不动 centerPage。 */
+/** 中央区整页（2026-09 树形侧栏改版，grill 共识；同月配置页拆分）：导航入口
+ *  （设置/模型/插件&技能/Agents）各自打开**独立整页**（此前四入口共用一个
+ *  两栏设置页只换预选分区，页头永远是「设置」——用户反馈「跳转的页面都一
+ *  模一样」）。页面本体渲染在 `ConfigCenterPage`（页内多分区页的分区切换走
+ *  settingsPage，不动 centerPage）。点任何会话 tab（activateTab）即关闭回
+ *  到聊天；从不持久化。归档是工作区作用域，带 workspaceId。 */
 export type CenterPage =
-  | { kind: "settings"; section?: SettingsPage }
+  | { kind: "settings" }
+  | { kind: "models" }
+  | { kind: "agents" }
+  | { kind: "plugins" }
   | { kind: "archive"; workspaceId: string };
 
-/** 两次打开指向同一页（归档比 workspaceId，设置比 section）→ 底部入口再点
- *  一次 = 关闭（toggle）；同页不同分区 = 切换不关。 */
+/** 两次打开指向同一页（归档比 workspaceId）→ 导航入口再点一次 = 关闭
+ *  （toggle）。 */
 function sameCenterPage(current: CenterPage | null, next: CenterPage): boolean {
   if (current == null || current.kind !== next.kind) return false;
   if (current.kind === "archive" && next.kind === "archive") {
     return current.workspaceId === next.workspaceId;
-  }
-  if (current.kind === "settings" && next.kind === "settings") {
-    return (current.section ?? "workspace") === (next.section ?? "workspace");
   }
   return true;
 }
@@ -167,10 +167,12 @@ export function useAppShellState(seed?: {
   const [centerPage, setCenterPage] = useState<CenterPage | null>(null);
   const openCenterPage = useCallback((page: CenterPage) => {
     setCenterPage((current) => (sameCenterPage(current, page) ? null : page));
-    // 桌面设置页没有索引页（左索引列常驻）——打开时直接落到目标分区；
-    // 深链（总览「添加仓库」等）自带 section。移动端设置 tab 不走 centerPage，
-    // 仍从索引行进入。
-    if (page.kind === "settings") setSettingsPage(page.section ?? "workspace");
+    // 配置整页拆分后（2026-09），settingsPage 兼作多分区页的「页内分区」记忆：
+    // 设置页落地工作区分区（默认），插件&技能页落地插件分区；模型/Agents 单
+    // 分区页无索引列，不消费分区值。移动端设置目的地页沿用同一状态的完整
+    // SettingsPage 值域（索引页=「index」）。
+    if (page.kind === "settings") setSettingsPage("workspace");
+    else if (page.kind === "plugins") setSettingsPage("plugins");
   }, []);
   // Loops 面板 → 文件区（桌面右栏「文件」tab / 移动端「文件」tab）的定位意图
   // （一次性信号，非持久视图状态——无需清空点位）：loop 名点击时写入
@@ -440,12 +442,28 @@ export function useAppShellState(seed?: {
     setContextUsage(usage);
   }, []);
 
-  // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | null>(null);
+  // Single active panel — only one dropdown open at a time. "more" 是移动端
+  // 顶栏 ⋯ 菜单（theme/language/历史/命名/分支/系统提示词 收纳，见
+  // ChatToolbar）；桌面端不会产生该值。
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | "more" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language") => {
+  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language" | "more") => {
     setActiveTopPanel((cur) => cur === panel ? null : panel);
+  }, []);
+
+  // ---- 右坞模块 tab 开合（2026-09 改版：模块不再是常驻固定 tab）------------
+  // dockModuleTabs = dock 标签条里「已打开」的模块 tab（插入序）。默认含
+  // 「文件」——保持 dock 打开时回落文件树的原有默认。集合是 shell 级 UI 状态
+  // （跨工作区 tab 一致）；每个 tab 自己的 activeFileTabId 仍决定当前激活项。
+  // DesktopShell 负责 toggle/关闭回落/坞排空收起；这里只提供集合原语，
+  // 供状态层自身的深链（如 handleCreateWorkItem）也能确保模块已打开。
+  const [dockModuleTabs, setDockModuleTabs] = useState<ModuleTabId[]>([FILES_TAB_ID]);
+  const ensureDockModule = useCallback((id: ModuleTabId) => {
+    setDockModuleTabs((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
+  const removeDockModule = useCallback((id: ModuleTabId) => {
+    setDockModuleTabs((prev) => prev.filter((m) => m !== id));
   }, []);
 
   const openSessionStatsPanel = useCallback(() => {
@@ -1167,12 +1185,13 @@ export function useAppShellState(seed?: {
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
     // 右坞 S3：新建工作项 = 开右坞工作项 tab + 创建请求送进挂在坞里的
     // WorkspaceManager（panel 模式推进航）。移动端不经此路径（MobileShell 的
-    // overview 栈自管）。
+    // overview 栈自管）。模块 tab 改版后先确保工作项 tab 在坞里已打开。
     setCreateWorkItemRequest({ type, id: Date.now() });
     if (activeWorkspace?.capabilities.includes("work-items")) {
+      ensureDockModule(WORK_ITEMS_TAB_ID);
       updateActiveTab({ activeFileTabId: WORK_ITEMS_TAB_ID, rightPanelOpen: true });
     }
-  }, [activeWorkspace, updateActiveTab]);
+  }, [activeWorkspace, updateActiveTab, ensureDockModule]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -1857,6 +1876,9 @@ export function useAppShellState(seed?: {
     handleContextUsageChange,
     toggleTopPanel,
     openSessionStatsPanel,
+    dockModuleTabs,
+    ensureDockModule,
+    removeDockModule,
     handleFileLineMention,
     updateTab,
     updateActiveTab,

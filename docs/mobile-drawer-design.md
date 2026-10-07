@@ -1,6 +1,7 @@
 # 移动端导航重构：树抽屉（mobile drawer nav）
 
 状态：M1 + M2 已实现（2026-09）。M2 = Android 返回键关抽屉、左缘右滑开抽屉、圆点查看即清除细粒度。
+**2026-09-27 顶栏重排（§5 已被取代）+ 侧栏瘦身（§3 被取代，侧栏只剩会话），见文末两条补充记录**。
 设计经用户逐条确认（grill 会话），决策记录见文末。
 
 ---
@@ -167,3 +168,65 @@
 | Q7 上下文 | 跟着屏幕走（点 W 下的东西 ⇒ W 成为当前；ensureWorkspaceContext 实现） |
 | Q8 抽屉参数 | 300px/85vw；☰ 开；点目标/遮罩关；共用 pi-tree-collapsed；返回键拦截延后 |
 | Q9 宽视口 | ≥768px 树常驻贴左；MobileSideRail 删除；不引入 DesktopShell |
+
+---
+
+## 补充记录：侧栏瘦身（2026-09-27，grill 会话三，用户确认——最新）
+
+### 决策（§3 被取代）
+
+侧边栏**只剩会话**：工作区树（节点/hover 快捷键/拖拽）与模块行（§3）退役；「项目」区头 +
+＋菜单、树底暗淡行一并迁出。侧栏新结构 = `headerSlot（移动端抽屉头切换块）+ 新建任务/搜索/
+插件&技能 三行 + 当前工作区会话清单（显示更多 + 组尾归档行）+ 底部 设置/模型/Agents`。
+
+- **WorkspaceSwitcherPanel（新组件，两端共用）**：工作区列表（点击切换；当前项高亮；运行/
+  完成徽章；拖拽排序沿用全量 PATCH）+ ＋新建工作区/导入目录（承接「项目＋」）+ 停用/不可用
+  暗淡行（⚙ 重启用路径不断）+ 当前工作区模块入口（总览/文件/工作项/知识库/Loops，capability
+  门控与 active 高亮由宿主计算）。桌面 = 32px 工作区工具行「工作区名 ▾」下方弹出（点外部
+  关闭，右侧只留 总览+文件 平铺捷径）；移动端 = 抽屉/常驻树头部 headerSlot 内联展开。
+- **切工作区两端对齐 = 落总览**：桌面开家 tab（现状）；手机新增 `mobilePage:"overview"`
+  目的地（WorkspaceOverview 全屏 + ‹返回=聊天；ensureWorkspaceContext(W) 先行）。手机此前
+  无总览面——这是两端最大的交互差异，本次补齐。
+- 手机模块入口 = 面板内点击 → ensureWorkspaceContext + mobilePage（§4.2 语义不变），active
+  高亮跟 mobilePage；桌面 = dock 开合语义，active 跟 panelEffTabId。
+- 模块入口结果形态差异保留（桌面右坞并排 / 手机全屏页）——形态所限，入口与语义已对齐。
+- **同日晚追加：会话清单「# 分组」开关**（用户看 ZCode 截图后要求）：开 = 按项目分组（静态组头[文件夹+项目名+计数，不可点/不可折叠——工作区切换只走顶部面板] + 每组 5 条 + 组内显示更多）；关 = 全部会话最近活跃平铺（前 20 + 一次性显示更多）。持久化 `pi-sidebar-grouped`，缺省开；两端同构（同一组件自动继承）。上一轮「只显示当前工作区」的设定随之翻转——分组/平铺都列全部项目的会话。
+- **同日晚再追加：「项目」分区行 + 手机模块条**。分区行 = `📁 项目 [#分组] …… ＋`（标题 13px 与导航行一致；＋ = 新建工作区/导入目录 body-portal 菜单，两端一致）。手机端工作区切换器撤下（分组清单已列全部项目、点会话即切上下文）——headerSlot 换成紧凑**模块条**（总览/文件/工作项/知识库/Loops 竖排图标 chip，作用于当前工作区，active 跟 mobilePage，capability 门控）；`WorkspaceSwitcherPanel` 与「切工作区=落总览」保留桌面（手机 overview 入口 = 模块条「总览」）。
+- **同日收尾：项目行收起/展开 chevron**——一键收起整个项目列表（含归档行），极简侧栏态；持久化 `pi-projects-collapsed`，缺省展开。
+- **组头折叠回归**：分组组头整行可点（头像+项目名+chevron+计数），收起/展开该项目会话；持久化沿用树时代 `pi-tree-collapsed`（老用户偏好自动延续）。彩色首字头像（名字 FNV-1a 哈希 → 12 色相板稳定配色）替代原灰文件夹图标。
+
+### 实现
+
+- `components/WorkspaceSwitcherPanel.tsx`（新）；`ProjectSidebar.tsx` 重写为会话侧栏（props
+  增 `activeWorkspace`/`headerSlot`，删 onOpenWorkspace/onOpenWorkspaceSettings/
+  onReorderWorkspaces/workspaceActivity/showModuleRows/onOpenModule/onNewSessionInWorkspace）；
+  `DesktopShell.tsx`（32px 行改造）；`MobileShell.tsx`（MobilePage 增 "overview"、overview
+  目的地渲染、切换块与面板接线）。`WorkspaceNavigation.test.mjs` 结构断言同步（905/905 过）；
+  Playwright 19 项断言 + 截图（gui-test-screenshots/r4_*）验收。
+
+## 补充记录：顶栏重排（2026-09-27，grill 会话二，用户确认）
+
+### 背景与决策
+
+M1 后顶栏实际状态 = ☰ + 主题 + 语言 + 4 个会话控件（图标）+ 右对齐标题 + 统计，最坏 8~9 个
+控件挤 375px（标题仅剩 ~110px），且 36px 高低于 44px 触控标准。grill 二轮定案（方案 C）：
+
+| Q | 决策 |
+|---|---|
+| Q2 顶栏职责 | **定位优先**：`☰ | 会话标题（居中）| 统计 | ⋯`；高度 36 → **44px**（仅移动端） |
+| Q5 溢出菜单 | **设 ⋯**（方案 C）。理由：降级后 B 方案（抽屉+composer 分宿）与 ⋯ 的到达深度同为 2 击，C 单一收纳位心智更简单，分支/历史属「阅读场景」工具（顶栏比输入框旁更近），且实现面最小（复用 ChatToolbar 下拉面板框架） |
+| Q3/Q7（取代） | 6 个降级控件（主题/语言/完整历史/自动命名/分支/系统提示词）**全部进 ⋯ 菜单**，分两组（全局 ｜ 会话，分隔线）；会话组沿用 `showChat` 门控；抽屉底部不加主题/语言快捷行（Q7 作废）；composer「更多控件」弹出条不动 |
+| Q6 标题 | **点击标题打开会话信息面板**（复用 `toggleTopPanel("session")`，锚定顶栏下方全宽）；统计按钮保留（承担上下文用量颜色指示） |
+| 其余 | PC 端 ChatToolbar 零改动（36px、主题/语言原位）；抽屉/子页面/手势/返回键全部不动 |
+
+### 实现
+
+- `ChatToolbar.tsx`：44px（`isMobile ? 44 : 36`）；主题/语言按钮与历史/命名/系统按钮 `!isMobile` 化；
+  标题居中 + `role="button"` + 点击 `toggleTopPanel("session")`；新增 ⋯ 按钮（`activeTopPanel: "more"`，
+  useAppShellState 类型扩展）与 `MoreMenuRow` 菜单体；统计按钮移动端 `paddingRight` 不再为桌面固定
+  dock 开关预留 48px。
+- `BranchNavigator.tsx`：新增 `hideTrigger`（inline 模式只挂面板不渲染触发钮）——移动端分支面板
+  仍锚定 `containerRef`（顶栏），入口在 ⋯ 菜单。
+- i18n：新增 `i18n.more`（中/英）。
+- 验收：44px/居中/标题点面板/dock 交互共 8 项 playwright 断言全过 + 双端截图
+  （gui-test-screenshots/r1~r3_*）。

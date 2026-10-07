@@ -283,6 +283,7 @@ export const enLocale: LocalePlugin = {
     "chat.compacted": "Compacted",
     "chat.tokensSaved": "{saved} saved",
     "i18n.close": "Close",
+    "i18n.more": "More",
     "i18n.copy": "Copy",
     "i18n.copied": "Copied",
     "i18n.cancel": "Cancel",

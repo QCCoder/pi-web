@@ -283,6 +283,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.compacted": "已压缩",
     "chat.tokensSaved": "节省 {saved}",
     "i18n.close": "关闭",
+    "i18n.more": "更多",
     "i18n.copy": "复制",
     "i18n.copied": "已复制",
     "i18n.cancel": "取消",

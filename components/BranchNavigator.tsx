@@ -20,6 +20,10 @@ interface Props {
   hasSession?: boolean;
   /** When inline, render icon-only (no text label) to save horizontal space */
   compact?: boolean;
+  /** When inline, mount only the dropdown panel and skip the trigger button —
+   *  the mobile top bar toggles it from its ⋯ overflow menu instead
+   *  (panel positioning still uses containerRef). */
+  hideTrigger?: boolean;
 }
 
 // Find the visible entry IDs on the path from root to activeLeafId.
@@ -217,7 +221,7 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
   );
 }
 
-export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession, compact }: Props) {
+export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession, compact, hideTrigger }: Props) {
   const { t } = useI18n();
   const [openInternal, setOpenInternal] = useState(false);
   const open = openProp !== undefined ? openProp : openInternal;
@@ -277,6 +281,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   if (inline) {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "stretch" }}>
+        {!hideTrigger && (
         <button
           ref={btnRef}
           onClick={() => onToggle ? onToggle() : setOpenInternal((v) => !v)}
@@ -305,6 +310,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           {branchIcon}
            {!compact && <span>{t("i18n.branches")}</span>}
         </button>
+        )}
         {open && dropdownPos && (
           <div style={{
             position: "fixed",

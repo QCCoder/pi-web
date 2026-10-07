@@ -10,12 +10,17 @@ import { type Tab, FILES_TAB_ID } from "@/lib/tab-types";
 export type { Tab };
 export { FILES_TAB_ID };
 
-/** A pinned, non-closable module tab of the right dock (文件/Loops/… — right-dock
- *  design §2). Rendered before every file/session tab, in order. */
+/** An entry of the right dock's module strip (文件/Loops/… — right-dock
+ *  design §2). Since the 2026-09 rework these are OPENED on demand (from the
+ *  workspace bar / overview hub) instead of permanently pinned — closable
+ *  entries render the same hover-✕ as file/session tabs. Rendered before
+ *  every file/session tab, in order. */
 export interface LeadingTabEntry {
   id: string;
   label: string;
   icon?: ReactNode;
+  /** Render a close ✕ (and middle-click close) for this module tab. */
+  closable?: boolean;
 }
 
 interface Props {
@@ -53,6 +58,12 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTabs
           onMouseDown={(e) => {
             if (e.button === 1) e.preventDefault();
           }}
+          onAuxClick={tab.closable ? (e) => {
+            if (e.button !== 1) return;
+            e.preventDefault();
+            e.stopPropagation();
+            onCloseTab(tab.id);
+          } : undefined}
           title={tab.label}
           style={{
             display: "flex",
@@ -60,7 +71,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTabs
             gap: 6,
             height: 36,
             paddingLeft: 12,
-            paddingRight: 12,
+            paddingRight: tab.closable ? 6 : 12,
             borderRight: "1px solid var(--border)",
             borderTop: tab.id === activeTabId ? "2px solid var(--accent)" : "2px solid transparent",
             background: tab.id === activeTabId ? "var(--bg)" : "var(--bg-panel)",
@@ -83,6 +94,32 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, leadingTabs
           <span className="dock-module-tab-label" style={{ fontWeight: tab.id === activeTabId ? 500 : 400 }}>
             {tab.label}
           </span>
+          {tab.closable && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
+              onMouseEnter={() => setHoveredClose(tab.id)}
+              onMouseLeave={() => setHoveredClose(null)}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 24, height: 24,
+                background: hoveredClose === tab.id ? "var(--bg-hover)" : "transparent",
+                border: "none",
+                borderRadius: 4,
+                color: hoveredClose === tab.id ? "var(--text)" : "var(--text-dim)",
+                cursor: "pointer",
+                padding: 0,
+                flexShrink: 0,
+                transition: "background 0.1s, color 0.1s",
+              }}
+              title={t("i18n.close")}
+              aria-label={`${t("i18n.close")} ${tab.label}`}
+            >
+              <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <line x1="2" y1="2" x2="8" y2="8" />
+                <line x1="8" y1="2" x2="2" y2="8" />
+              </svg>
+            </button>
+          )}
         </div>
       ))}
       {tabs.map((tab) => {

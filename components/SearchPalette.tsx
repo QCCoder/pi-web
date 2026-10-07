@@ -163,7 +163,7 @@ export function SearchPalette({
           <path d="M17 3h4v4" /><path d="M13 7l8-4" />
         </svg>
       ),
-      run: () => onOpenCenterPage({ kind: "settings", section: "plugins" }),
+      run: () => onOpenCenterPage({ kind: "plugins" }),
     },
   ], [onNewSession, onCreateWorkspace, onImportDirectory, onOpenCenterPage]);
 

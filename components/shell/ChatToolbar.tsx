@@ -14,17 +14,57 @@ const TOP_BAR_ICON_BUTTON_SIZE = 36;
 
 export type ToolbarNavToggle = "sidebar" | "drawer" | "hidden";
 
+/** A row of the mobile ⋯ overflow menu（全局组 + 会话组）。44px 触控行高。 */
+function MoreMenuRow({ icon, label, onClick, disabled = false, testColor }: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  disabled?: boolean;
+  testColor?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        display: "flex", alignItems: "center", gap: 10,
+        width: "100%", minHeight: 40, padding: "0 10px",
+        border: "none", borderRadius: 6,
+        background: "transparent",
+        color: disabled ? "var(--text-dim)" : testColor ?? "var(--text)",
+        cursor: disabled ? "not-allowed" : "pointer",
+        fontSize: 13, textAlign: "left", whiteSpace: "nowrap",
+        opacity: disabled ? 0.55 : 1,
+        transition: "background 0.1s",
+      }}
+      onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = "var(--bg-hover)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+    >
+      <span style={{ display: "flex", alignItems: "center", flexShrink: 0, opacity: 0.85 }}>{icon}</span>
+      <span style={{ flex: 1 }}>{label}</span>
+    </button>
+  );
+}
+
 /**
- * The 36px tool strip — theme / language / (chat-scoped) history, auto-name,
+ * The tool strip — theme / language / (chat-scoped) history, auto-name,
  * branch navigator, system prompt, token usage — plus the shared dropdown
- * panels (branches / system / session info / language menu) anchored to it.
+ * panels (branches / system / session info / language menu / mobile ⋯ menu)
+ * anchored to it.
  *
- * Rendered by BOTH shells: desktop puts it at the top of its center column,
- * mobile at the top of the screen. The ☰ button behavior comes from the
- * `navToggle` prop: "sidebar" (default — desktop tree collapse), "drawer"
- * (mobile nav drawer + background-activity status dot) or "hidden" (mobile
- * wide layout: the tree is permanent, there is nothing to toggle). Mobile
- * also shows the current session/workspace title.
+ * Rendered by BOTH shells: desktop puts it at the top of its center column
+ * (36px), mobile at the top of the screen (44px touch height). The ☰ button
+ * behavior comes from the `navToggle` prop: "sidebar" (default — desktop tree
+ * collapse), "drawer" (mobile nav drawer + background-activity status dot) or
+ * "hidden" (mobile wide layout: the tree is permanent, there is nothing to
+ * toggle).
+ *
+ * Mobile (2026-09 重排，docs/mobile-drawer-design.md §5)：定位优先 ——
+ * `☰ | 会话标题（居中，点击 → 会话信息面板）| 统计 | ⋯`。主题/语言/完整
+ * 历史/自动命名/分支/系统提示词全部收进 ⋯ 菜单（全局组 + 会话组分隔），
+ * 分支面板由隐藏触发钮的 BranchNavigator 承载。
  */
 export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavToggle } = {}) {
   const s = useShell();
@@ -98,7 +138,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
   }, [drawerMode, selectedSession?.id, sessionActivity.completedIds]);
 
   return (
-<div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
+<div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: isMobile ? 44 : 36, background: "var(--bg-panel)" }}>
   {navToggle !== "hidden" && (
   <button
     onClick={navToggle === "drawer" ? () => setMobileNavOpen((open) => !open) : handleSidebarToggle}
@@ -112,7 +152,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
     style={{
       display: "flex", alignItems: "center", justifyContent: "center",
       position: "relative",
-      width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+      width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
       background: "none", border: "none", borderRight: "1px solid var(--border)",
       color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
     }}
@@ -140,6 +180,9 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
     )}
   </button>
   )}
+  {/* 主题/语言：全局低频设置。桌面端保持原位常驻；移动端收进 ⋯ 菜单（2026-09
+      重排）——顶栏让位给「我在哪」定位与状态。 */}
+  {!isMobile && (
   <button
     onClick={(e) => {
       const rect = e.currentTarget.getBoundingClientRect();
@@ -150,7 +193,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
     aria-pressed={isDark}
     style={{
       display: "flex", alignItems: "center", justifyContent: "center",
-      width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+      width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
       background: "none", border: "none", borderRight: "1px solid var(--border)",
       color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
     }}
@@ -171,6 +214,8 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
       </svg>
     )}
    </button>
+  )}
+  {!isMobile && (
    <button
      ref={languageBtnRef}
      type="button"
@@ -182,7 +227,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
      aria-pressed={activeTopPanel === "language"}
      style={{
        display: "flex", alignItems: "center", justifyContent: "center",
-       width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+       width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
        background: activeTopPanel === "language" ? "var(--bg-selected)" : "none",
        border: "none", borderRight: "1px solid var(--border)",
        color: activeTopPanel === "language" ? "var(--text)" : "var(--text-muted)",
@@ -212,6 +257,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
        <path d="M14 18h6" />
      </svg>
    </button>
+  )}
   {showChat && projectTrust?.requiresTrust && !projectTrust.trusted && (
     <button
       type="button"
@@ -257,6 +303,10 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
   )}
   {showChat && (
     <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
+      {/* 会话级工具（完整历史/自动命名/系统提示词）：桌面端原位常驻；移动端
+          收进 ⋯ 菜单（2026-09 重排）。分支面板两端都要 —— 移动端用
+          hideTrigger 只挂面板，入口在 ⋯ 菜单里。 */}
+      {!isMobile && (
       <button
         onClick={handleViewFullHistory}
         disabled={!selectedSession}
@@ -310,6 +360,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
         </svg>
          {!isMobile && <span>{translate("history.label")}</span>}
       </button>
+      )}
       {(() => {
         // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
         const hasMessages = Boolean(
@@ -334,6 +385,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
                ? autoNameStatus.message
                : translate("title.generateSession");
         return (
+          !isMobile && (
           <button
             type="button"
             onClick={() => void handleAutoName()}
@@ -378,8 +430,9 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
                 <path d="M6 4V2M5 3H3M19 19v3M17.5 20.5h3" />
               </svg>
             )}
-            {!isMobile && <span>{label}</span>}
+             <span>{label}</span>
           </button>
+          )
         );
       })()}
       <BranchNavigator
@@ -388,11 +441,13 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
         onLeafChange={handleBranchLeafChange}
         inline
         compact={isMobile}
+        hideTrigger={isMobile}
         containerRef={topBarRef}
         open={activeTopPanel === "branches"}
         onToggle={() => toggleTopPanel("branches")}
         hasSession
       />
+      {!isMobile && (
       <button
         ref={systemBtnRef}
         onClick={() => toggleTopPanel("system")}
@@ -419,27 +474,43 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
           <line x1="8" y1="13" x2="16" y2="13" />
           <line x1="8" y1="17" x2="13" y2="17" />
         </svg>
-         {!isMobile && <span>{translate("system.label")}</span>}
+         <span>{translate("system.label")}</span>
       </button>
+      )}
     </div>
   )}
   {/* 当前会话标题（移动端 only，docs/mobile-drawer-design.md §5）：chips 行
       删除后的「我在哪」方位感。会话名优先（自动命名后的 name），回落首条
-      消息，无会话时显示当前工作区名。放在 chat 控件组之后的弹性空隙里，
-      右对齐、省略号截断。 */}
-  {isMobile && (
-    <div
-      title={selectedSession ? (selectedSession.name || selectedSession.firstMessage) : (activeWorkspace?.name ?? "")}
-      style={{
-        flex: 1, minWidth: 0, textAlign: "right",
-        padding: "0 10px", overflow: "hidden",
-        fontSize: 12, color: "var(--text-muted)",
-        whiteSpace: "nowrap", textOverflow: "ellipsis", userSelect: "none",
-      }}
-    >
-      {selectedSession ? (selectedSession.name || selectedSession.firstMessage) : (activeWorkspace?.name ?? "")}
-    </div>
-  )}
+      消息，无会话时显示当前工作区名。2026-09 重排：居中、主文字色、可点击
+      ——点击打开会话信息面板（与统计按钮同一 topPanel）。 */}
+  {isMobile && (() => {
+    const titleText = selectedSession ? (selectedSession.name || selectedSession.firstMessage) : (activeWorkspace?.name ?? "");
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => toggleTopPanel("session")}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleTopPanel("session");
+          }
+        }}
+        aria-label={`${translate("session.title")}: ${titleText}`}
+        aria-expanded={activeTopPanel === "session"}
+        title={titleText}
+        style={{
+          flex: 1, minWidth: 0, height: "100%",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: "0 8px", overflow: "hidden",
+          fontSize: 13, fontWeight: 500, color: "var(--text)",
+          cursor: "pointer", userSelect: "none", outline: "none",
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleText}</span>
+      </div>
+    );
+  })()}
   {/* Session stats — right-aligned in top bar */}
   {showChat && (sessionStats || contextUsage) && (() => {
      const tokens = sessionStats?.tokens;
@@ -478,7 +549,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
           marginLeft: "auto",
           display: "flex", alignItems: "center", gap: 10,
           paddingLeft: 12,
-          paddingRight: rightPanelOpen ? 12 : 48,
+          paddingRight: isMobile ? 4 : (rightPanelOpen ? 12 : 48),
           height: "100%",
           background: activeTopPanel === "session" ? "var(--bg-selected)" : "none",
           border: "none",
@@ -536,6 +607,34 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
       </button>
     );
   })()}
+  {/* ⋯ 溢出菜单（移动端 only，2026-09 重排）：全局组（主题/语言）+ 会话组
+      （完整历史/生成标题/分支/系统提示词）——6 个从顶栏降级的控件统一收纳，
+      顶栏本体只留 定位（标题）+ 状态（统计）。 */}
+  {isMobile && (
+    <button
+      type="button"
+      onClick={() => toggleTopPanel("more")}
+      title={translate("i18n.more")}
+      aria-label={translate("i18n.more")}
+      aria-haspopup="menu"
+      aria-expanded={activeTopPanel === "more"}
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
+        background: activeTopPanel === "more" ? "var(--bg-selected)" : "none",
+        border: "none",
+        borderTop: activeTopPanel === "more" ? "2px solid var(--accent)" : "2px solid transparent",
+        color: activeTopPanel === "more" ? "var(--text)" : "var(--text-muted)",
+        cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "more" ? "var(--text)" : "var(--text-muted)"; }}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+        <circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" />
+      </svg>
+    </button>
+  )}
   {/* Top panel dropdown — shared, only one active at a time */}
   {activeTopPanel && topPanelPos && (
     <div style={{
@@ -590,6 +689,134 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
           ))}
         </div>
       )}
+      {activeTopPanel === "more" && (() => {
+        // 移动端 ⋯ 菜单体。行点击语义：主题/历史/命名 = 执行并收起；语言 =
+        // 原位换成语言列表（复用 "language" 面板）；分支/系统 = 换成对应面板
+        // （single-active 语义自动关闭菜单）。自动命名的禁用判定与桌面按钮
+        // 同源（消息数含压缩前口径）。
+        const hasMessages = Boolean(
+          selectedSession
+          && ((sessionStats?.userMessages ?? 0) > 0 || selectedSession.messageCount > 0),
+        );
+        const autoNameDisabled = !selectedSession || !hasMessages || autoNameStatus.kind === "naming";
+        const autoNameLabel = autoNameStatus.kind === "naming"
+          ? translate("title.generating")
+          : autoNameStatus.kind === "success"
+            ? translate("title.updated")
+            : autoNameStatus.kind === "error"
+              ? translate("title.failed")
+              : translate("title.generate");
+        const separator = <div style={{ height: 1, background: "var(--border)", margin: "4px 6px" }} />;
+        return (
+          <div
+            role="menu"
+            aria-label={translate("i18n.more")}
+            style={{
+              background: "var(--bg-panel)",
+              borderLeft: "1px solid var(--border)",
+              borderRight: "1px solid var(--border)",
+              borderBottom: "1px solid var(--border)",
+              boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
+              overflow: "hidden",
+              padding: 6,
+            }}
+          >
+            <MoreMenuRow
+              icon={isDark ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="5" />
+                  <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
+                  <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                  <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
+                  <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+              )}
+              label={isDark ? translate("theme.light") : translate("theme.dark")}
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+                setActiveTopPanel(null);
+              }}
+            />
+            <MoreMenuRow
+              icon={(
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="m5 8 6 6" /><path d="m4 14 6-6 2-3" /><path d="M2 5h12" /><path d="M7 2h1" />
+                  <path d="m22 22-5-10-5 10" /><path d="M14 18h6" />
+                </svg>
+              )}
+              label={translate("common.language")}
+              onClick={() => setActiveTopPanel("language")}
+            />
+            {showChat && separator}
+            {showChat && (
+              <>
+                <MoreMenuRow
+                  icon={(
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" />
+                    </svg>
+                  )}
+                  label={translate("history.label")}
+                  disabled={!selectedSession}
+                  onClick={() => {
+                    handleViewFullHistory();
+                    setActiveTopPanel(null);
+                  }}
+                />
+                <MoreMenuRow
+                  icon={autoNameStatus.kind === "naming" ? (
+                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+                      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  ) : autoNameStatus.kind === "success" ? (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="m15 4 5 5L7 22l-5-5Z" /><path d="m14 5 5 5" />
+                      <path d="M6 4V2M5 3H3M19 19v3M17.5 20.5h3" />
+                    </svg>
+                  )}
+                  label={autoNameLabel}
+                  disabled={autoNameDisabled}
+                  onClick={() => {
+                    void handleAutoName();
+                    setActiveTopPanel(null);
+                  }}
+                />
+                <MoreMenuRow
+                  icon={(
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" />
+                      <circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" />
+                    </svg>
+                  )}
+                  label={translate("i18n.branches")}
+                  onClick={() => toggleTopPanel("branches")}
+                />
+                <MoreMenuRow
+                  icon={(
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={systemPrompt ? "var(--accent)" : "currentColor"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="13" y2="17" />
+                    </svg>
+                  )}
+                  label={translate("system.label")}
+                  onClick={() => toggleTopPanel("system")}
+                />
+              </>
+            )}
+          </div>
+        );
+      })()}
       {activeTopPanel === "system" && (
         <div style={{
           background: "var(--bg-panel)",

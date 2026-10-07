@@ -343,6 +343,160 @@ function SkillDetail({
   );
 }
 
+/** 市场卡片（ZCode 插件市场同款）：图标章 + 名称 + 描述 + 启用开关 +
+ *  详情/检查更新 操作行。详情按钮打开弹窗（SkillDetail 全量视图）。 */
+function SkillMarketCard({
+  skill,
+  enabled,
+  toggling,
+  saveError,
+  updateStatus,
+  checkingUpdate,
+  updating,
+  onToggle,
+  onCheckUpdate,
+  onUpdate,
+  onOpenDetail,
+}: {
+  skill: Skill;
+  enabled: boolean;
+  toggling: boolean;
+  saveError: string | null;
+  updateStatus?: SkillUpdateResult;
+  checkingUpdate: boolean;
+  updating: boolean;
+  onToggle: () => void;
+  onCheckUpdate: () => void;
+  onUpdate: () => void;
+  onOpenDetail: () => void;
+}) {
+  const { t } = useI18n();
+  const updateAvailable = updateStatus?.state === "update-available";
+  const canCheck = Boolean(skill.install?.canCheckForUpdates);
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        border: "1px solid var(--border)",
+        borderRadius: 10,
+        background: "var(--bg)",
+        padding: "13px 14px",
+        transition: "background 0.15s, border-color 0.15s",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg)"; }}
+    >
+      <div style={{ display: "flex", gap: 11, alignItems: "flex-start" }}>
+        <span
+          aria-hidden
+          style={{
+            display: "grid",
+            placeItems: "center",
+            width: 36,
+            height: 36,
+            borderRadius: 9,
+            background: "color-mix(in srgb, var(--accent) 13%, transparent)",
+            color: "var(--accent)",
+            flexShrink: 0,
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+          </svg>
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: enabled ? "var(--text)" : "var(--text-dim)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {skill.name}
+            </span>
+            <span
+              style={{
+                fontSize: 10,
+                padding: "1px 5px",
+                borderRadius: 3,
+                flexShrink: 0,
+                background: sourceLabel(skill) === "project" ? "rgba(99,102,241,0.12)" : "rgba(120,120,120,0.12)",
+                color: sourceLabel(skill) === "project" ? "rgba(99,102,241,0.8)" : "var(--text-dim)",
+              }}
+            >
+              {sourceLabel(skill)}
+            </span>
+          </div>
+          <div
+            title={skill.description}
+            style={{
+              fontSize: 11.5,
+              color: "var(--text-muted)",
+              marginTop: 3,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              lineHeight: 1.45,
+            }}
+          >
+            {skill.description || shortenPath(skill.filePath)}
+          </div>
+        </div>
+        <Toggle enabled={enabled} loading={toggling} onToggle={onToggle} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button type="button" onClick={onOpenDetail} style={{ padding: "5px 11px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11.5 }}>
+          详情
+        </button>
+        {canCheck && (
+          <button
+            type="button"
+            onClick={updating ? onUpdate : onCheckUpdate}
+            disabled={checkingUpdate || updating}
+            style={{
+              padding: "5px 11px",
+              borderRadius: 6,
+              background: updateAvailable ? "var(--accent)" : "none",
+              border: updateAvailable ? "1px solid var(--accent)" : "1px solid var(--border)",
+              color: updateAvailable ? "#fff" : "var(--text-muted)",
+              cursor: checkingUpdate || updating ? "not-allowed" : "pointer",
+              opacity: checkingUpdate || updating ? 0.5 : 1,
+              fontSize: 11.5,
+            }}
+          >
+            {checkingUpdate
+              ? t("i18n.checking")
+              : updating
+                ? t("i18n.updating")
+                : updateAvailable
+                  ? t("i18n.update")
+                  : t("i18n.check")}
+          </button>
+        )}
+        {updateAvailable && (
+          <span style={{ fontSize: 11, color: "#d97706", fontWeight: 600 }}>
+            ↑ {t("i18n.updateAvailable")}
+          </span>
+        )}
+        {saveError && (
+          <span style={{ fontSize: 11, color: "#f87171", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {saveError}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AddSkillPanel({
   cwd,
   globalOnly,
@@ -696,6 +850,7 @@ export function SkillsConfig({
   onClose,
   embedded = false,
   inline = false,
+  market = false,
 }: {
   cwd: string;
   globalOnly?: boolean;
@@ -712,6 +867,11 @@ export function SkillsConfig({
    *  （左固定宽列表列 + 右 banner/详情/页脚）——取代旧三列 portal split。
    *  Modal/embedded 模式不变。 */
   inline?: boolean;
+  /** 市场式布局（2026-09 ZCode 插件市场同款，插件&技能整页专用）：搜索 +
+   *  「已安装」卡片网格 + skills.sh 安装区，替代 列表+详情 分栏；详情经
+   *  「详情」按钮开弹窗。所有数据与操作与分栏模式共用同一套状态；移动端
+   *  设置子页仍用 embedded 分栏。 */
+  market?: boolean;
 }) {
   const isMobile = useIsMobile();
   const workspaceMode = workspace !== null;
@@ -739,6 +899,9 @@ export function SkillsConfig({
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectResourcesLoaded, setProjectResourcesLoaded] = useState(true);
+  // 市场布局专用：卡片搜索词 + 详情弹窗（skill.filePath）。
+  const [marketQuery, setMarketQuery] = useState("");
+  const [marketDetailKey, setMarketDetailKey] = useState<string | null>(null);
   // Workspace skills whitelist (workspace.yaml `skills`). Owned locally so the
   // toggle can update optimistically; re-seeded from the workspace prop.
   const [workspaceSkills, setWorkspaceSkills] = useState<Set<string>>(
@@ -953,6 +1116,21 @@ export function SkillsConfig({
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
   const pageMode = inline;
+
+  // 市场布局派生：按搜索词过滤卡片（名称/描述）+ 详情弹窗对应技能
+  // （PATCH 删除/卸载后技能消失 → 弹窗自动关闭）。
+  const marketQueryTrim = marketQuery.trim().toLowerCase();
+  const marketSkills = marketQueryTrim
+    ? skills.filter((skill) =>
+        skill.name.toLowerCase().includes(marketQueryTrim) ||
+        (skill.description ?? "").toLowerCase().includes(marketQueryTrim))
+    : skills;
+  const marketDetailSkill = marketDetailKey
+    ? skills.find((skill) => skill.filePath === marketDetailKey) ?? null
+    : null;
+  const marketUpdateAvailableCount = Object.values(updateStatuses).filter(
+    (status) => status.state === "update-available",
+  ).length;
 
   // Context banners (workspace whitelist hint + project-trust notice) — they
   // explain the detail pane's toggle semantics, so in page mode they travel
@@ -1397,6 +1575,247 @@ export function SkillsConfig({
           </button>
     </div>
   );
+
+  if (market) {
+    // 市场式布局（ZCode 插件市场同款）：工具行（搜索 + 检查更新/添加）+
+    // 「已安装」卡片网格 + skills.sh 安装区（AddSkillPanel 自带远程市场搜索）；
+    // 详情走弹窗（SkillDetail 全量复用）。
+    return (
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+        {/* 工具行 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "14px 22px 0", flexShrink: 0 }}>
+          <div style={{ position: "relative", flex: 1, minWidth: 150, maxWidth: 440 }}>
+            <svg
+              aria-hidden
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="var(--text-dim)"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              style={{ position: "absolute", top: 11, left: 10 }}
+            >
+              <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+            </svg>
+            <input
+              value={marketQuery}
+              onChange={(e) => setMarketQuery(e.target.value)}
+              placeholder="搜索技能"
+              aria-label="搜索技能"
+              style={{
+                width: "100%",
+                height: 36,
+                padding: "0 11px 0 31px",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                background: "var(--bg-panel)",
+                color: "var(--text)",
+                fontSize: 12.5,
+                outline: "none",
+              }}
+            />
+          </div>
+          {skills.some((skill) => Boolean(skill.install)) && (
+            <button
+              onClick={() => void checkForUpdates()}
+              disabled={checkingAll || updatingSkill !== null}
+              style={{
+                height: 36,
+                padding: "0 13px",
+                background: "none",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                color: marketUpdateAvailableCount > 0 ? "var(--accent)" : "var(--text-muted)",
+                cursor: checkingAll || updatingSkill !== null ? "not-allowed" : "pointer",
+                opacity: checkingAll || updatingSkill !== null ? 0.5 : 1,
+                fontSize: 12,
+                flexShrink: 0,
+              }}
+            >
+              {checkingAll
+                ? t("i18n.checking")
+                : marketUpdateAvailableCount > 0
+                  ? `${t("i18n.checkUpdates")} (${marketUpdateAvailableCount})`
+                  : t("i18n.checkUpdates")}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setAddMode((current) => !current)}
+            style={{
+              height: 36,
+              padding: "0 13px",
+              borderRadius: 8,
+              background: addMode ? "var(--bg)" : "var(--accent)",
+              color: addMode ? "var(--text-muted)" : "white",
+              border: addMode ? "1px solid var(--border)" : "1px solid var(--accent)",
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: addMode ? 400 : 600,
+              flexShrink: 0,
+            }}
+          >
+            {addMode ? t("i18n.close") : `＋ ${t("i18n.addSkill")}`}
+          </button>
+        </div>
+
+        {contextBanners}
+
+        {/* 添加技能（addMode 展开，复用 AddSkillPanel：skills.sh 远程市场搜索 + 安装） */}
+        {addMode && (
+          <div style={{ margin: "14px 22px 0", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", flexShrink: 0, background: "var(--bg)" }}>
+            <AddSkillPanel
+              cwd={cwd}
+              globalOnly={globalOnly}
+              projectResourcesLoaded={projectResourcesLoaded}
+              installedPackages={{
+                global: new Set(
+                  skills
+                    .filter((skill) => skill.install?.scope === "global")
+                    .map((skill) => skill.install!.package),
+                ),
+                project: new Set(
+                  skills
+                    .filter((skill) => skill.install?.scope === "project")
+                    .map((skill) => skill.install!.package),
+                ),
+              }}
+              onInstalled={() => {
+                void loadSkills();
+              }}
+            />
+          </div>
+        )}
+
+        {/* 已安装 */}
+        <div style={{ padding: "16px 22px 26px" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>已安装</span>
+            <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{marketSkills.length}</span>
+            {marketUpdateAvailableCount > 0 && (
+              <span style={{ fontSize: 11.5, color: "#d97706", fontWeight: 600 }}>
+                {marketUpdateAvailableCount} {t("i18n.updateAvailable")}
+              </span>
+            )}
+          </div>
+          {loading ? (
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("i18n.loading")}</div>
+          ) : error ? (
+            <div style={{ fontSize: 12, color: "#f87171" }}>{error}</div>
+          ) : marketSkills.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.8 }}>
+              {skills.length === 0
+                ? "尚未安装任何技能——点右上「＋ 添加技能」从 skills.sh 搜索安装。"
+                : "没有匹配的技能。"}
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: 12 }}>
+              {marketSkills.map((skill) => (
+                <SkillMarketCard
+                  key={skill.filePath}
+                  skill={skill}
+                  enabled={isEnabled(skill)}
+                  toggling={workspaceMode ? toggling.size > 0 : toggling.has(skill.filePath)}
+                  saveError={saveError}
+                  updateStatus={updateKey(skill) ? updateStatuses[updateKey(skill)!] : undefined}
+                  checkingUpdate={updateKey(skill) ? checkingUpdates.has(updateKey(skill)!) : false}
+                  updating={updatingSkill === updateKey(skill)}
+                  onToggle={() => void toggle(skill)}
+                  onCheckUpdate={() => void checkForUpdates(skill)}
+                  onUpdate={() => void updateInstalledSkill(skill)}
+                  onOpenDetail={() => setMarketDetailKey(skill.filePath)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 详情弹窗（SkillDetail 全量复用） */}
+        {marketDetailSkill && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="技能详情"
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 1000,
+              background: "rgba(0,0,0,0.35)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setMarketDetailKey(null);
+            }}
+          >
+            <div
+              style={{
+                position: "relative",
+                width: "min(720px, calc(100vw - 16px))",
+                maxHeight: "82vh",
+                overflowY: "auto",
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                padding: "20px",
+                boxShadow: "0 16px 48px rgba(0,0,0,0.22)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setMarketDetailKey(null)}
+                title="关闭"
+                aria-label="关闭"
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  right: 14,
+                  display: "grid",
+                  placeItems: "center",
+                  width: 28,
+                  height: 28,
+                  border: "1px solid var(--border)",
+                  borderRadius: 7,
+                  background: "var(--bg)",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: 12,
+                }}
+              >
+                ✕
+              </button>
+              <SkillDetail
+                key={marketDetailSkill.filePath}
+                skill={marketDetailSkill}
+                cwd={cwd}
+                enabled={isEnabled(marketDetailSkill)}
+                onToggle={toggle}
+                toggling={workspaceMode ? toggling.size > 0 : toggling.has(marketDetailSkill.filePath)}
+                saveError={saveError}
+                updateStatus={
+                  updateKey(marketDetailSkill)
+                    ? updateStatuses[updateKey(marketDetailSkill)!]
+                    : undefined
+                }
+                checkingUpdate={
+                  updateKey(marketDetailSkill)
+                    ? checkingUpdates.has(updateKey(marketDetailSkill)!)
+                    : false
+                }
+                updating={updatingSkill === updateKey(marketDetailSkill)}
+                updateError={updateError}
+                onCheckUpdate={() => void checkForUpdates(marketDetailSkill)}
+                onUpdate={() => void updateInstalledSkill(marketDetailSkill)}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (pageMode) {
     // Inline（中央区整页）mode：list + detail side by side in ONE page. One

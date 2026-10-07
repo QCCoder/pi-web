@@ -1,6 +1,17 @@
 # 右栏扩展坞设计（桌面）
 
 > 状态：S1 + S2 + S3 全部已实施（2026-09-15；grill 共识十一项决策见 §0）。
+> **2026-09-27 二次改版（已实施）**：模块 tab 不再常驻固定（§0 决策 #3/#7 的「钉死」语义
+> 反转）——改为「按需打开的可关闭 tab」，常驻入口移到 SessionTabBar 下方的**工作区工具行**
+> （工作区名 + 🏠总览 + 模块 toggle）。动机：模块导航混在右坞 tab 条里语义混杂（dock 关着时
+> 入口不可见），且四个钉死 tab 常驻占用坞条；工作区工具行顺带补上桌面端「我在哪个工作区」
+> 的定位。实施：useAppShellState（`dockModuleTabs` 集合 + `ensureDockModule`/`removeDockModule`
+> 原语；`activeTopPanel` 不变）、DesktopShell（工作区工具行 + `DOCK_MODULE_META` +
+> `toggleDockModule`/`closeDockModule`/`openDockModuleTab` + `panelEffTabId` 回落改为尊重
+> 集合 + `handleDockTabClose` 拦截模块 id + 坞排空收起 + 总览 hub 回调改走 `openDockModuleTab`）、
+> TabBar（`LeadingTabEntry.closable` → 模块 tab 渲染 hover-✕ 与中键关闭）、
+> useAppShellState.handleCreateWorkItem（先 ensure 工作项 tab）。
+> 语义详见文末「§12 二次改版」。
 > 实施记录（S1）：lib/tab-types.ts（LOOPS_TAB_ID/MODULE_TAB_IDS/isModuleTabId + 测试）、
 > TabBar.tsx（leadingTab→leadingTabs 钦死模块组 + .dock-module-tab 类）、globals.css
 > （right-panel-container container-type:inline-size + @container≤420px 图标化）、
@@ -107,3 +118,44 @@
 - `configPortalNode` 消费者减少（工作项详情/Loop 配置退出）；机制本身不动。
 - 移动端 `WorkspaceManager` panel 模式成为桌坞工作项 tab 的宿主形态（同一组件两个 shell 消费，可接受且是既有模式）。
 - AGENTS.md 导航章节在实施时随各切片同步更新。
+
+## 12. 二次改版（2026-09-27）：模块 tab 常驻 → 按需打开
+
+### 12.1 决策记录（grill 共识，用户确认）
+
+| Q | 决策 |
+|---|---|
+| Q1 对象 | PC 端右坞四个固定模块 tab（移动端抽屉模块行 + 全屏子页已是目标形态，零改动） |
+| Q4 模块终局 | 入口上移 + **保留右坞并排能力**（否掉子页面化——「边聊边看」是编码代理刚需） |
+| Q8 入口位置 | **新增 32px 工作区工具行**（SessionTabBar 下方）：左 = 工作区名 + 🏠总览，右 = 模块 toggle（capability 门控）。否掉塞进 SessionTabBar（语义混杂 + 无会话空态尴尬 + 作用域歧义）与 ChatToolbar（太挤 + 右上角被固定 dock 开关占据） |
+| Q9 dock 行为 | 入口点击 = dock 关着则自动打开 + 模块面板作为**带 ✕ 的可关闭 tab** 打开；再点同一入口 = 关闭该 tab；激活模块关闭后激活项回落（剩余模块 → 最后文件 tab → 空）；**坞内 tab（模块/文件/终端）全排空 → dock 整体收起** |
+| 补充默认 | 无选中工作区（首页）工具行整行隐藏；URL/deep-link 本轮不做；capability 门控沿用 |
+
+### 12.2 状态模型变化
+
+- `dockModuleTabs: ModuleTabId[]`（useAppShellState，默认 `[FILES_TAB_ID]`）：**已打开**的模块 tab 集合，shell 级 UI 状态（跨会话 tab 一致）；「当前激活哪个模块」仍跟会话 tab（`activeFileTabId`，决策 #6 不变）；模块**内容**仍跟工作区（display:none 存活，不变）。
+- `panelEffTabId` 回落语义变化：`activeFileTabId ?? (FILES 在集合中 ? FILES : null)` ——用户关掉「文件」tab 后不再默认亮文件树；`showFilesTree` 相应加 `panelEffTabId !== null` 守卫。
+- `handleCloseFileTab` 关最后一个文件 tab 时钉回 FILES 常量的旧行为，在「文件」tab 未打开时由 DesktopShell 覆盖为按剩余模块回落 + 排空收坞（避免无 tab 条却亮文件树）。
+
+### 12.3 布局终态
+
+```
+┌────┬──────────────┬──────────────────────────────────┬────────────────────────────────┐
+│    │              │ [会话A|会话B|…] ← 会话tab条        │ [文件×|Loops×|README×|…]        │
+│ 树 │  (工作台)     ├──────────────────────────────────┤  已打开的模块 tab（可关）+ 文件/  │
+│    │              │ ws名 🏠总览        文件 Loops …←工具行│  终端 tab；空坞不出现（自动收起） │
+│    │              │                                  │                                │
+│    │              │   中心区：聊天 / 总览 / 配置整页     │                                │
+└────┴──────────────┴──────────────────────────────────┴────────────────────────────────┘
+```
+
+窄坞图标化（`.dock-module-tab` 的 @container 规则）不变；工作区工具行在中央区整页（配置/归档）打开时随 SessionTabBar 一起隐藏。
+
+### 12.4 三次修订（2026-09-27 晚，侧栏瘦身联动）：入口收敛为切换面板
+
+侧栏瘦身改版（docs/mobile-drawer-design.md 补充记录）后，工作区工具行再次演化：
+行首改为「**工作区名 ▾**」切换器——点击弹出 `WorkspaceSwitcherPanel`（两端共用：工作区列表
+[点击切换=开总览家 tab；运行/完成徽章；拖拽排序] + ＋新建工作区/导入目录 + 停用/不可用暗淡行
+[⚙ 重启用] + 当前工作区模块入口[总览/文件/工作项/知识库/Loops，dock 开合语义]）；行右侧平铺
+toggle 撤掉工作项/知识库/Loops，只留 **🏠总览 + 文件** 两个高频捷径。桌面左侧 ProjectSidebar
+同步瘦身为「当前工作区会话清单」（树退役）——工作区维度的导航全部收敛到顶部一行。
