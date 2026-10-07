@@ -10,6 +10,18 @@ try {
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
+  experimental: {
+    // proxy.ts matches /api/:path*, and Next buffers the request body whenever
+    // a proxy is present, capped at 10 MB by default (upstream 31f0505). The
+    // upload routes accept up to 100 MB per request, so raise the buffer above
+    // that or large uploads are truncated and fail with "Failed to parse body
+    // as FormData."
+    proxyClientMaxBodySize: "128mb",
+  },
+  // next/image is only used for the static logo, so the /_next/image optimizer
+  // (and its sharp/libheif attack surface, see GHSA-2xp9-vwfh-vxw4) is not
+  // needed (upstream e5a2434).
+  images: { unoptimized: true },
   // Disable the Next.js dev tools indicator (the black "N" badge in the
   // corner during dev) — it overlapped the mobile bottom tab bar.
   devIndicators: false,
