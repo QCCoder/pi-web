@@ -32,7 +32,7 @@ function LoginForm() {
         setError(await failureMessage(response));
         return;
       }
-      window.location.replace(safeDestination(window.location.search));
+      window.location.replace(safeDestination(window.location.search, window.location.origin));
     } catch {
       setError(t("auth.loginFailed"));
     } finally {
