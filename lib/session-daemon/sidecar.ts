@@ -44,15 +44,22 @@ function daemonBaseUrl(): string {
  *  PI_DAEMON_URL — that is the web-side client address), so a URL-only
  *  configuration must be translated; otherwise the sidecar would spawn a
  *  daemon on the default port and then poll the URL's port forever. Explicit
- *  PI_DAEMON_HOST/PI_DAEMON_PORT always win. */
+ *  PI_DAEMON_HOST/PI_DAEMON_PORT always win.
+ *
+ *  PI_WEB_PASSWORD is stripped (upstream 6ad18cd 的 daemon 侧对应):the daemon
+ *  never reads it — it guards the web login — while the daemon's in-process
+ *  agent sessions inherit its env, so keeping it here would leak the password
+ *  into bash-tool output and session transcripts. */
 export function sidecarSpawnEnv(
   daemonUrl: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const url = new URL(daemonUrl);
   const hostname = url.hostname.replace(/^\[(.+)\]$/, "$1");
+  const rest: NodeJS.ProcessEnv = { ...baseEnv };
+  delete rest.PI_WEB_PASSWORD;
   return {
-    ...baseEnv,
+    ...rest,
     PI_DAEMON_HOST: baseEnv.PI_DAEMON_HOST ?? hostname,
     PI_DAEMON_PORT: baseEnv.PI_DAEMON_PORT ?? url.port,
   };
