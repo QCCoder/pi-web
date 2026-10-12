@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
-import { TabBar, FILES_TAB_ID } from "../TabBar";
+import { TabBar } from "../TabBar";
 import { FilesExplorerPanel } from "../FilesExplorerPanel";
 import { TerminalPanel } from "../TerminalPanel";
 import { ArchiveModal } from "../ArchiveModal";
@@ -19,7 +19,7 @@ import { HomeNewSession } from "../HomeNewSession";
 import { WorkspaceSelector } from "../WorkspaceSelector";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
 import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
-import { LOOPS_TAB_ID, KNOWLEDGE_TAB_ID, WORK_ITEMS_TAB_ID, isModuleTabId, type ModuleTabId } from "@/lib/tab-types";
+import { LOOPS_TAB_ID, KNOWLEDGE_TAB_ID, WORK_ITEMS_TAB_ID, TERMINALS_TAB_ID, FILES_TAB_ID, isModuleTabId, type ModuleTabId } from "@/lib/tab-types";
 import { SessionTabBar } from "../SessionTabBar";
 import { KnowledgeBrowser } from "../KnowledgeBrowser";
 import { useI18n } from "@/hooks/useI18n";
@@ -67,16 +67,25 @@ const DOCK_MODULE_META: Record<ModuleTabId, { label: string; icon: React.ReactNo
       </svg>
     ),
   },
+  [TERMINALS_TAB_ID]: {
+    label: "终端",
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    ),
+  },
 };
 
 /**
  * The desktop shell（2026-09 ZCode 风格导航改版）：左侧单一项目树侧栏
  * （ProjectSidebar：顶部 新建任务⌘N/搜索⌘K/插件&技能 导航行 + 项目→会话树 +
  * 组尾归档 + 底部 设置·模型·Agents 三入口）+ 中央区（ChatToolbar +
- * SessionTabBar + 工作区工具行 + 总览|聊天|配置整页）+ 右坞（按需打开的
- * 模块 tab：文件/Loops/知识库/工作项 + 文件/终端 tab）。2026-09 二次改版：
- * 右坞四个模块 tab 不再常驻固定——工作区工具行（工作区名 + 🏠总览 + 模块
- * toggle）成为模块常驻入口，坞内只留已打开的可关闭 tab，坞排空自动收起。
+ * SessionTabBar + 工作区工具行 + 总览|聊天|配置整页）+ 右坞（2026-10 rail
+ * 改版：44px 常驻图标列 文件/Loops/工作项/知识库/终端 + 展开面板；点未激活
+ * 图标 = 切模块并展开，点已激活图标 = 收起到只剩 rail；激活模块 + 展开态
+ * per-workspace 持久化。文件 tab 住「文件」模块面板内横条，终端 tab 住
+ * 「终端」模块面板内横条；配置整页/无工作区上下文时整个右坞隐藏。
  * 图标栏与「中栏面板」已退役——原 configView 三列 split（列表中栏
  * + 详情 portal 右栏）由中央区整页（CenterPage）取代。2026-09 配置页拆分：
  * 设置/模型/插件&技能/Agents 是四个独立整页（ConfigCenterPage，各有页头与
@@ -96,7 +105,6 @@ export function DesktopShell() {
     selectedSession,
     fileTabs,
     activeFileTabId,
-    rightPanelOpen,
     activeCwd,
     centerPage,
     setCenterPage,
@@ -129,17 +137,15 @@ export function DesktopShell() {
     workspacesLoaded,
     homeFileTabs,
     homeActiveFileTabId,
-    homeRightPanelOpen,
-    setHomeRightPanelOpen,
     setHomeActiveFileTabId,
     handleCloseHomeFileTab,
     handleHomeNewSessionSelect,
     handleHomeSessionCreated,
     handleCreateWorkItem,
     openSessionStatsPanel,
-    dockModuleTabs,
-    ensureDockModule,
-    removeDockModule,
+    dockRailFor,
+    openDockModule,
+    setDockExpanded,
     handleShowOverview,
     handleFileLineMention,
     setOpenRepositoryFormRequest,
@@ -223,7 +229,6 @@ export function DesktopShell() {
     : workspaces.find((w) => w.id === homeComposerWorkspaceId && w.available);
   // 右栏在首页用独立状态（无 tab 可挂）；面板/文件 tab 依上下文取源。
   const panelWorkspace = activeWorkspace ?? homeContextWorkspace ?? null;
-  const panelOpen = homeAtDesktop ? homeRightPanelOpen : rightPanelOpen;
   const panelFileTabs = homeAtDesktop ? homeFileTabs : fileTabs;
   const panelActiveFileTabId = homeAtDesktop ? homeActiveFileTabId : activeFileTabId;
   const panelActiveFileTab = homeAtDesktop
@@ -273,64 +278,102 @@ export function DesktopShell() {
       setComposerTabId(activeTabId);
     }
   }, [activeTab, activeTabId]);
-  // Right dock（2026-09 改版）：activeFileTabId 的值域 = 文件/会话 tab id +
-  // 模块 tab id。模块 tab 不再常驻（leadingTabs 固定四个 → 已废弃），改为
-  // 「按需打开的可关闭 tab」：集合在 shell 状态层（dockModuleTabs，默认含
-  // 「文件」），入口 = 工作区工具行 + 总览 hub；激活项仍在各会话 tab 自己的
-  // activeFileTabId 里。模块内容跟工作区（决策 #6）：模块体常驻挂载
-  // （display:none 隐藏），LoopsDockPanel 以 key=workspace.id 重置——同工作区
-  // 切会话 tab 状态存活，换工作区才重建。
-  const panelEffTabId = panelActiveFileTabId ?? (dockModuleTabs.includes(FILES_TAB_ID) ? FILES_TAB_ID : null);
+  // Right dock（2026-10 rail 改版，反转 2026-09-27「模块 tab 按需打开」）：
+  // 右坞 = 44px 常驻图标列（文件/Loops/工作项/知识库/终端）+ 展开面板。激活
+  // 模块 + 展开态在 shell 状态层（dockRailMap，per-workspace 持久化，切工作
+  // 区回来恢复原样）；activeFileTabId 回归纯文件语义——FILES_TAB_ID 是「文件
+  // 树」伪 tab，只住在「文件」模块面板内的横条（旧会话状态里残留的其它模块
+  // id 一律按 null 处理）。模块内容跟工作区（决策 #6 沿用）：模块体常驻挂载
+  // （display:none 隐藏），LoopsDockPanel 等以 key=workspace.id 重置——同工作
+  // 区切会话 tab 状态存活，换工作区才重建。
+  const panelWsId = panelWorkspace?.id ?? null;
+  const railState = dockRailFor(panelWsId);
+  const railModule = panelWsId ? railState.module : FILES_TAB_ID;
+  const panelOpen = Boolean(panelWsId) && railState.expanded && !centerPage;
+  const effFileTabId = isModuleTabId(panelActiveFileTabId) && panelActiveFileTabId !== FILES_TAB_ID ? null : panelActiveFileTabId;
   // ---- Workspace terminals（上游 #695 移植）--------------------------------
   // 终端 tab 由 DesktopShell 自有（不进 useAppShellState）：跨会话 tab/工程
   // 切换常驻挂载（上游语义：terminal panels stay mounted behind inactive
   // tabs, hidden panels, and session or project switches），仅 hidden 隐藏。
-  // tab 条挂在工作坞 TabBar 尾部；激活复用 activeFileTabId 通道（终端 id 不
-  // 在 fileTabs/moduleTabs 里 → 文件树/查看器分支自动让位，见 activeTerminalTab）。
+  // 2026-10 rail 改版：终端是 rail 第五项（独立模块），激活选中
+  // （activeTerminalId）不再借道 activeFileTabId（那是「文件」模块内部的通道）。
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
+  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
-  const activeTerminalTab = terminalTabs.find((tab) => tab.id === panelActiveFileTabId) ?? null;
-  const dockActiveModule = !panelActiveFileTab && isModuleTabId(panelEffTabId) ? panelEffTabId : null;
-  const showFilesTree = Boolean(panelWorkspace) && panelEffTabId !== null && !panelActiveFileTab && !activeTerminalTab
-    && (panelEffTabId === FILES_TAB_ID || !isModuleTabId(panelEffTabId));
+  const activeTerminalTab = terminalTabs.find((tab) => tab.id === activeTerminalId) ?? terminalTabs[terminalTabs.length - 1] ?? null;
+  const showFilesTree = Boolean(panelWorkspace) && railModule === FILES_TAB_ID && !panelActiveFileTab;
 
-  // ---- 右坞模块 tab 的开合（2026-09 改版，docs/right-dock-design.md §2）------
-  // toggle 语义（工作区工具行入口）：未开 → 打开并激活 + dock 自动打开；已开
-  // 未激活 → 仅激活；已开且激活（且 dock 开着）→ 关闭。关闭激活模块时激活项
-  // 回落：剩余模块 → 最后一个文件 tab → 空。dock 内 tab（模块/文件/终端）
-  // 全部排空 → dock 整体收起。
-  const setDockActiveId = (id: string | null, open?: boolean) => {
-    if (homeAtDesktop) {
-      setHomeActiveFileTabId(id);
-      if (open !== undefined) setHomeRightPanelOpen(open);
-    } else if (open !== undefined) {
-      updateActiveTab({ activeFileTabId: id, rightPanelOpen: open });
-    } else {
-      updateActiveTab({ activeFileTabId: id });
-    }
-  };
-  const collapseDockIfEmpty = (modulesLeft: number, fileTabsLeft: number, termsLeft: number) => {
-    if (modulesLeft > 0 || fileTabsLeft > 0 || termsLeft > 0) return;
-    if (homeAtDesktop) setHomeRightPanelOpen(false);
-    else updateActiveTab({ rightPanelOpen: false });
-  };
-  const closeDockModule = (id: ModuleTabId) => {
-    const next = dockModuleTabs.filter((m) => m !== id);
-    removeDockModule(id);
-    if (panelActiveFileTabId === id) {
-      const fallback = next[next.length - 1] ?? panelFileTabs[panelFileTabs.length - 1]?.id ?? null;
-      setDockActiveId(fallback);
-    }
-    collapseDockIfEmpty(next.length, panelFileTabs.length, terminalTabs.length);
-  };
-  const openDockModuleTab = (id: ModuleTabId) => {
-    ensureDockModule(id);
-    setDockActiveId(id, true);
-  };
-  const toggleDockModule = (id: ModuleTabId) => {
-    if (dockModuleTabs.includes(id) && panelEffTabId === id && panelOpen) closeDockModule(id);
-    else openDockModuleTab(id);
-  };
+  // rail 点击语义（共识 Q2）：点未激活图标 = 切模块并展开；点已激活且展开 =
+  // 收起到只剩图标列（rail 永不消失——限有工作区上下文的形态，共识 Q6）。
+  const openRailModule = useCallback((id: ModuleTabId) => {
+    openDockModule(panelWsId, id);
+  }, [openDockModule, panelWsId]);
+  const handleRailClick = useCallback((id: ModuleTabId) => {
+    if (!panelWsId) return;
+    if (railModule === id && panelOpen) setDockExpanded(panelWsId, false);
+    else openDockModule(panelWsId, id);
+  }, [panelWsId, railModule, panelOpen, setDockExpanded, openDockModule]);
+
+  // rail 条目（共识 Q5 门控：knowledge/work-items capability 没开则图标不
+  // 渲染；Loops/终端常驻；文件只需工作区上下文）。
+  const railEntries: { id: ModuleTabId; label: string; icon: React.ReactNode }[] = [
+    {
+      id: FILES_TAB_ID,
+      label: "文件",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+      ),
+    },
+    {
+      id: LOOPS_TAB_ID,
+      label: "Loops",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M17 2l4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+          <path d="M7 22l-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" />
+        </svg>
+      ),
+    },
+    ...(panelWorkspace?.capabilities.includes("work-items") ? ([{
+      id: WORK_ITEMS_TAB_ID,
+      label: "工作项",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="9 11 12 14 22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+      ),
+    }] as { id: ModuleTabId; label: string; icon: React.ReactNode }[]) : []),
+    ...(panelWorkspace?.capabilities.includes("knowledge") ? ([{
+      id: KNOWLEDGE_TAB_ID,
+      label: "知识库",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+        </svg>
+      ),
+    }] as { id: ModuleTabId; label: string; icon: React.ReactNode }[]) : []),
+    {
+      id: TERMINALS_TAB_ID,
+      label: "终端",
+      icon: (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+        </svg>
+      ),
+    },
+  ];
+
+  // Loops 面板的 reveal 信号 → 激活「文件」模块（FilesExplorerPanel 消费信号
+  // 把分段切回「文件」；模块不可见时 reveal 无处落地）。
+  const lastRevealNonceRef = useRef(0);
+  useEffect(() => {
+    if (!loopFilesReveal || loopFilesReveal.nonce === lastRevealNonceRef.current) return;
+    lastRevealNonceRef.current = loopFilesReveal.nonce;
+    openRailModule(FILES_TAB_ID);
+  }, [loopFilesReveal, openRailModule]);
 
   // 刷新恢复：sessionStorage 里的终端身份（id+cwd）在挂载时还原；restored tab
   // 的面板会先 GET 校验服务端实例，过期/服务重启后绝不静默起新 shell（上游语义）。
@@ -338,42 +381,31 @@ export function DesktopShell() {
     try {
       const saved = restoreTerminalTabs(window.sessionStorage.getItem(TERMINAL_TABS_KEY));
       setTerminalTabs(saved.tabs);
-      if (saved.tabs.length > 0 && saved.activeId) {
-        const { activeId, open } = saved;
-        if (homeAtDesktop) {
-          setHomeActiveFileTabId(activeId);
-          setHomeRightPanelOpen(open);
-        } else {
-          updateActiveTab({ activeFileTabId: activeId, rightPanelOpen: open });
-        }
-      }
+      if (saved.tabs.length > 0 && saved.activeId) setActiveTerminalId(saved.activeId);
     } catch { /* storage is optional */ }
     setTerminalsRestored(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- restore-once on mount
   }, []);
 
-  // 恢复完成后持续持久化（id+cwd+激活 tab+面板开合；closing 状态不入档）。
+  // 恢复完成后持续持久化（id+cwd+激活 tab；closing 状态不入档。open 字段仅
+  // 保留格式兼容——模块/展开态由 per-workspace 的 dock-rail 持久化负责）。
   useEffect(() => {
     if (!terminalsRestored) return;
     try {
       window.sessionStorage.setItem(TERMINAL_TABS_KEY, JSON.stringify({
         tabs: terminalTabs.map(({ id, cwd }) => ({ id, cwd })),
         activeId: activeTerminalTab?.id ?? null,
-        open: panelOpen,
+        open: railModule === TERMINALS_TAB_ID && panelOpen,
       }));
     } catch { /* storage is optional */ }
-  }, [terminalTabs, activeTerminalTab, panelOpen, terminalsRestored]);
+  }, [terminalTabs, activeTerminalTab, railModule, panelOpen, terminalsRestored]);
 
   const handleOpenTerminal = (cwd: string) => {
     const existing = terminalTabs.find((tab) => tab.cwd === cwd);
     const tab = existing ?? newTerminalTab(cwd);
     if (!existing) setTerminalTabs((tabs) => [...tabs, tab]);
-    if (homeAtDesktop) {
-      setHomeActiveFileTabId(tab.id);
-      setHomeRightPanelOpen(true);
-    } else {
-      updateActiveTab({ activeFileTabId: tab.id, rightPanelOpen: true });
-    }
+    setActiveTerminalId(tab.id);
+    openRailModule(TERMINALS_TAB_ID);
   };
 
   // 显式终止/重启：标记 closing → TerminalPanel 等创建与在途输入落地后 DELETE →
@@ -382,10 +414,7 @@ export function DesktopShell() {
   const handleTerminalClosed = (tab: TerminalTab) => {
     const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
     setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
-    if (panelActiveFileTabId !== tab.id) return;
-    const nextActiveId = replacement?.id ?? null;
-    if (homeAtDesktop) setHomeActiveFileTabId(nextActiveId);
-    else updateActiveTab({ activeFileTabId: nextActiveId });
+    if (activeTerminalId === tab.id) setActiveTerminalId(replacement?.id ?? null);
   };
 
   const handleTerminalRestart = (id: string) => {
@@ -396,32 +425,6 @@ export function DesktopShell() {
     setTerminalTabs((tabs) => tabs.map((item) => item.id === id ? { ...item, closing: undefined } : item));
   };
 
-  // tab 的关闭先于文件 tab 拦截：模块 tab（可关闭化后带 ✕）→ 终端 → 文件。
-  const handleDockTabClose = (id: string) => {
-    if (isModuleTabId(id)) {
-      closeDockModule(id);
-      return;
-    }
-    if (terminalTabs.some((tab) => tab.id === id)) {
-      setTerminalTabs((tabs) => tabs.map((tab) => tab.id === id && !tab.closing ? { ...tab, closing: "close" as const } : tab));
-      return;
-    }
-    const fileTabsLeft = panelFileTabs.length - 1;
-    (homeAtDesktop ? handleCloseHomeFileTab : handleCloseFileTab)(id);
-    if (homeAtDesktop) {
-      collapseDockIfEmpty(dockModuleTabs.length, fileTabsLeft, terminalTabs.length);
-      return;
-    }
-    // 桌面：handleCloseFileTab 关掉最后一个文件 tab 时会把激活项钉回 FILES
-    // 常量；若「文件」模块 tab 已被用户关闭，这里覆盖为按剩余模块回落
-    // （无剩余 → 排空收坞），避免出现「没有 tab 条却亮着文件树」。
-    if (fileTabsLeft === 0 && !dockModuleTabs.includes(FILES_TAB_ID)) {
-      const fallback = dockModuleTabs[dockModuleTabs.length - 1] ?? null;
-      updateActiveTab({ activeFileTabId: fallback, ...(fallback === null && terminalTabs.length === 0 ? { rightPanelOpen: false } : {}) });
-      return;
-    }
-    collapseDockIfEmpty(dockModuleTabs.length, fileTabsLeft, terminalTabs.length);
-  };
 
   // ---- 中央区整页（CenterPage）------------------------------------------------
   // 导航入口（插件&技能 / 设置 / 模型 / Agents）各自打开独立配置整页
@@ -604,11 +607,10 @@ export function DesktopShell() {
         />
       )}
 
-      {/* 工作区工具行（2026-09-27 二次改版）：左 = 「工作区名 ▾」切换器——
-          点击展开 WorkspaceSwitcherPanel（工作区列表[拖拽排序/运行徽章/新建/
-          导入] + 当前工作区模块入口 总览/文件/工作项/知识库/Loops）；右 =
-          🏠总览 + 文件 两个高频捷径（平铺），工作项/知识库/Loops 收进面板。
-          无活动工作区（首页）或中央区整页打开时整行隐藏。 */}
+      {/* 工作区工具行（2026-10 rail 改版后精简，共识 Q7）：左 = 「工作区名 ▾」
+          切换器——点击展开 WorkspaceSwitcherPanel（纯工作区管理：列表[拖拽
+          排序/运行徽章/新建/导入/停用行]；模块入口已随右坞 rail 常驻而移除）；
+          右 = 🏠总览 高频捷径。无活动工作区（首页）或中央区整页打开时整行隐藏。 */}
       {!centerPage && activeWorkspace && (
         <div
           style={{
@@ -683,37 +685,11 @@ export function DesktopShell() {
             </svg>
             总览
           </button>
-          {(() => {
-            const active = panelOpen && panelEffTabId === FILES_TAB_ID;
-            const { label, icon } = DOCK_MODULE_META[FILES_TAB_ID];
-            return (
-              <button
-                type="button"
-                onClick={() => toggleDockModule(FILES_TAB_ID)}
-                aria-pressed={active}
-                title={label}
-                style={{
-                  display: "flex", alignItems: "center", gap: 5,
-                  height: 24, padding: "0 8px",
-                  background: active ? "var(--bg-selected)" : "none",
-                  border: "none", borderRadius: 4,
-                  color: active ? "var(--text)" : "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0, fontSize: 12, whiteSpace: "nowrap",
-                  userSelect: "none",
-                  transition: "color 0.1s, background 0.1s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = active ? "var(--text)" : "var(--text-muted)"; }}
-              >
-                <span style={{ display: "flex", alignItems: "center", opacity: active ? 1 : 0.7 }}>{icon}</span>
-                {label}
-              </button>
-            );
-          })()}
           <div style={{ flex: 1 }} />
 
           {/* 工作区切换面板（WorkspaceSwitcherPanel，两端共用）：行下方弹出，
-              点外部关闭；模块入口 = dock 开合语义（总览/文件 与行上捷径一致）。 */}
+              点外部关闭；桌面不再传模块入口（rail 常驻后切换器回归纯工作区
+              管理，共识 Q7；移动端仍自传目的地页入口）。 */}
           {switcherOpen && (
             <>
               <div aria-hidden="true" onClick={() => setSwitcherOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 1200 }} />
@@ -733,31 +709,6 @@ export function DesktopShell() {
                   workspaces={workspaces}
                   currentWorkspaceId={activeWorkspace.id}
                   workspaceActivity={workspaceActivity}
-                  moduleEntries={[
-                    {
-                      id: "overview",
-                      label: "总览",
-                      icon: (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                          <path d="M3 9.5 12 3l9 6.5" /><path d="M5 8.5V21h14V8.5" />
-                        </svg>
-                      ),
-                      active: activeTab?.kind === "workspace-home",
-                      onClick: () => { setSwitcherOpen(false); handleShowOverview(); },
-                    },
-                    ...([
-                      FILES_TAB_ID,
-                      ...(activeWorkspace.capabilities.includes("work-items") ? [WORK_ITEMS_TAB_ID] : []),
-                      ...(activeWorkspace.capabilities.includes("knowledge") ? [KNOWLEDGE_TAB_ID] : []),
-                      LOOPS_TAB_ID,
-                    ] as ModuleTabId[]).map((id) => ({
-                      id,
-                      label: DOCK_MODULE_META[id].label,
-                      icon: DOCK_MODULE_META[id].icon,
-                      active: panelOpen && panelEffTabId === id,
-                      onClick: () => { setSwitcherOpen(false); openDockModuleTab(id); },
-                    })),
-                  ]}
                   onSelectWorkspace={(workspace) => {
                     setSwitcherOpen(false);
                     handleOpenWorkspace(workspace);
@@ -788,21 +739,20 @@ export function DesktopShell() {
               requestWorkspaceSettings(activeTab.workspace);
               openCenterPage({ kind: "settings" });
             }}
-            onOpenWorkItems={() => openDockModuleTab(WORK_ITEMS_TAB_ID)}
+            onOpenWorkItems={() => openRailModule(WORK_ITEMS_TAB_ID)}
             onCreateWorkItem={handleCreateWorkItem}
             onSelectSession={handleSelectSession}
             onSwitchSidebarView={(view) => {
-              // 仓库行 → 右坞「文件」tab；知识库行 → 右坞「知识库」tab
-              // （S2 收编：hub knowledge 子视图已退役）。改版后先确保模块
-              // tab 在坞里已打开。
-              openDockModuleTab(view === "knowledge" ? KNOWLEDGE_TAB_ID : FILES_TAB_ID);
+              // 仓库行 → 右坞「文件」模块；知识库行 → 右坞「知识库」模块
+              // （S2 收编：hub knowledge 子视图已退役）。
+              openRailModule(view === "knowledge" ? KNOWLEDGE_TAB_ID : FILES_TAB_ID);
             }}
             onAddRepository={() => {
               openCenterPage({ kind: "settings" });
               setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
             }}
             onSessionDeleted={handleSessionRemoved}
-            onOpenLoopsTab={() => openDockModuleTab(LOOPS_TAB_ID)}
+            onOpenLoopsTab={() => openRailModule(LOOPS_TAB_ID)}
             loopsRefreshKey={loopsRefreshKey}
           />
         ) : showChat ? (
@@ -930,73 +880,107 @@ export function DesktopShell() {
       </div>
     </div>
 
-    {/* Right panel resize handle (drag to widen/narrow; double-click resets
-        to the 42% default) — same pattern as the sidebar handle, placed
-        between the center column and the right file panel. Rendered only
-        while the panel is open (at home the panel is closed). */}
-    {panelOpen && (
-      <div
-        className={`right-panel-resize-handle${rightPanelResizing ? " right-panel-resize-active" : ""}`}
-        role="separator"
-        aria-orientation="vertical"
-        title={translate("files.panelResize")}
-        onMouseDown={startRightPanelResize}
-        onDoubleClick={resetRightPanelWidth}
-      />
-    )}
-
-    {/* Right panel: file viewer — always mounted, width animated via CSS,
-        drag-resizable via the handle above (px width persisted in
-        localStorage; null → CSS 42% default) */}
-    <div
-      ref={rightPanelContainerRef}
-      className={`right-panel-container${panelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizing ? " right-panel-resizing" : ""}`}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        background: "var(--bg)",
-        ...(rightPanelWidth != null ? { "--pi-right-panel-width": `${rightPanelWidth}px` } : {}),
-      } as React.CSSProperties}
-    >
-      {/* Right dock tab bar（2026-09 改版）——模块 tab 不再常驻固定，改为
-          「已打开的模块集合」（dockModuleTabs，入口在工作区工具行/总览 hub）
-          渲染成带 ✕ 的可关闭 tab（窄面板时仍按 .dock-module-tab 的
-          @container 规则图标化）+ 文件/终端 tab。激活模块关闭后的回落与
-          坞排空收起见 handleDockTabClose/closeDockModule。 */}
-      <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}
-      >
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          <TabBar
-            tabs={[
-              ...panelFileTabs,
-              ...terminalTabs.map((tab) => ({
-                id: tab.id,
-                kind: "terminal" as const,
-                label: getFileName(tab.cwd) || tab.cwd,
-                cwd: tab.cwd,
-                closing: Boolean(tab.closing),
-              })),
-            ]}
-            activeTabId={panelActiveFileTabId ?? (dockModuleTabs.includes(FILES_TAB_ID) ? FILES_TAB_ID : "")}
-            leadingTabs={panelWorkspace ? dockModuleTabs
-              .filter((id) => (id !== KNOWLEDGE_TAB_ID || panelWorkspace.capabilities.includes("knowledge"))
-                && (id !== WORK_ITEMS_TAB_ID || panelWorkspace.capabilities.includes("work-items")))
-              .map((id) => ({ id, label: DOCK_MODULE_META[id].label, icon: DOCK_MODULE_META[id].icon, closable: true }))
-            : undefined}
-            onSelectTab={(id: string) => (homeAtDesktop ? setHomeActiveFileTabId(id) : updateActiveTab({ activeFileTabId: id }))}
-            onCloseTab={handleDockTabClose}
+    {/* Right dock（2026-10 rail 改版，IDEA 形态）：图标列贴窗口最右缘，
+        面板从其左侧展开。容器 row-reverse + DOM [rail][panel]——rail 永远
+        钉在右缘，收起态（44px）被 overflow 裁掉的是面板左缘而非 rail。
+        点未激活图标 = 切模块并展开；点已激活图标 = 收起到只剩 rail。展开态宽度沿用
+        拖拽把手 + px 持久化 + 42% 默认；收起态不渲染把手（共识 Q8a）。配置
+        整页打开或无工作区上下文时整个右坞隐藏（共识 Q6）。 */}
+    {!centerPage && panelWorkspace && (
+      <>
+        {panelOpen && (
+          <div
+            className={`right-panel-resize-handle${rightPanelResizing ? " right-panel-resize-active" : ""}`}
+            role="separator"
+            aria-orientation="vertical"
+            title={translate("files.panelResize")}
+            onMouseDown={startRightPanelResize}
+            onDoubleClick={resetRightPanelWidth}
           />
-        </div>
+        )}
+        <div
+          ref={rightPanelContainerRef}
+          className={`right-panel-container${panelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizing ? " right-panel-resizing" : ""}`}
+          style={{
+            display: "flex",
+            flexDirection: "row-reverse",
+            background: "var(--bg)",
+            ...(rightPanelWidth != null ? { "--pi-right-panel-width": `${rightPanelWidth}px` } : {}),
+          } as React.CSSProperties}
+        >
+          <nav className="dock-rail" aria-label="工作台模块">
+            {railEntries.map((entry) => {
+              const active = railModule === entry.id;
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className={`dock-rail-icon${active ? " dock-rail-icon-active" : ""}`}
+                  onClick={() => handleRailClick(entry.id)}
+                  title={entry.label}
+                  aria-label={entry.label}
+                  aria-pressed={active}
+                >
+                  {entry.icon}
+                  <span className="dock-rail-icon-label">{entry.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+          <div className="dock-panel">
+            {/* 模块内横条（2026-10 rail 改版）：「文件」模块 = [文件(树) |
+                打开的文件 tab]（F1 沿用：文件 tab 状态挂在会话 tab 上，关最后
+                一个回落文件树）；「终端」模块 = [终端1 | 终端2…] + ＋新建。
+                其它三个模块无横条（面板体自带导航）。共识 Q3/Q4。 */}
+            {railModule === FILES_TAB_ID && (
+              <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
+                <div style={{ flex: 1, overflow: "hidden" }}>
+                  <TabBar
+                    tabs={panelFileTabs}
+                    activeTabId={effFileTabId ?? FILES_TAB_ID}
+                    leadingTabs={[{ id: FILES_TAB_ID, label: DOCK_MODULE_META[FILES_TAB_ID].label, icon: DOCK_MODULE_META[FILES_TAB_ID].icon }]}
+                    onSelectTab={(id: string) => (homeAtDesktop ? setHomeActiveFileTabId(id) : updateActiveTab({ activeFileTabId: id }))}
+                    onCloseTab={(id: string) => (homeAtDesktop ? handleCloseHomeFileTab : handleCloseFileTab)(id)}
+                  />
+                </div>
+              </div>
+            )}
+            {railModule === TERMINALS_TAB_ID && (
+              <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
+                <div style={{ flex: 1, overflow: "hidden" }}>
+                  <TabBar
+                    tabs={terminalTabs.map((tab) => ({
+                      id: tab.id,
+                      kind: "terminal" as const,
+                      label: getFileName(tab.cwd) || tab.cwd,
+                      cwd: tab.cwd,
+                      closing: Boolean(tab.closing),
+                    }))}
+                    activeTabId={activeTerminalTab?.id ?? ""}
+                    onSelectTab={(id: string) => setActiveTerminalId(id)}
+                    onCloseTab={(id: string) => {
+                      setTerminalTabs((tabs) => tabs.map((tab) => tab.id === id && !tab.closing ? { ...tab, closing: "close" as const } : tab));
+                    }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  title="新建终端（工作区根）"
+                  aria-label="新建终端"
+                  onClick={() => handleOpenTerminal(panelWorkspace!.path)}
+                  style={{ width: 28, height: 28, margin: "0 4px", display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                </button>
+              </div>
+            )}
 
-      </div>
-
-      {/* Dock bodies: module tabs stay MOUNTED (hidden via display:none while
-          another tab is active) so their state survives tab switches of the
-          SAME workspace (decision #6) — LoopsDockPanel resets only when the
-          workspace changes (key). File/session tabs render only while active;
-          the empty hint remains only as the home fallback (no workspace → no
-          tree to show). */}
-      <div style={{ flex: 1, overflow: "hidden" }}>
+            {/* Dock bodies: rail modules stay MOUNTED (hidden via display:none
+                while another module is active) so their state survives module/
+                session-tab switches of the SAME workspace (decision #6) —
+                LoopsDockPanel etc. reset only when the workspace changes (key).
+                File/session tabs render only while active. */}
+            <div style={{ flex: 1, overflow: "hidden" }}>
         {panelWorkspace ? (
           <div
             style={{
@@ -1017,7 +1001,7 @@ export function DesktopShell() {
         {panelWorkspace ? (
           <div
             style={{
-              display: dockActiveModule === LOOPS_TAB_ID ? "flex" : "none",
+              display: railModule === LOOPS_TAB_ID ? "flex" : "none",
               flexDirection: "column",
               height: "100%",
             }}
@@ -1034,7 +1018,7 @@ export function DesktopShell() {
         {panelWorkspace ? (
           <div
             style={{
-              display: dockActiveModule === KNOWLEDGE_TAB_ID ? "flex" : "none",
+              display: railModule === KNOWLEDGE_TAB_ID ? "flex" : "none",
               flexDirection: "column",
               height: "100%",
             }}
@@ -1050,7 +1034,7 @@ export function DesktopShell() {
         {panelWorkspace?.capabilities.includes("work-items") ? (
           <div
             style={{
-              display: dockActiveModule === WORK_ITEMS_TAB_ID ? "flex" : "none",
+              display: railModule === WORK_ITEMS_TAB_ID ? "flex" : "none",
               flexDirection: "column",
               height: "100%",
             }}
@@ -1079,17 +1063,17 @@ export function DesktopShell() {
             hidden, the server-side pty lives until explicitly closed, the
             120s lease expires, or the server shuts down（上游 #695 语义）. */}
         {terminalTabs.map((tab) => (
-          <div key={tab.id} hidden={tab.id !== panelActiveFileTabId} style={{ width: "100%", height: "100%" }}>
+          <div key={tab.id} hidden={!(railModule === TERMINALS_TAB_ID && tab.id === activeTerminalTab?.id)} style={{ width: "100%", height: "100%" }}>
             <TerminalPanel
               tab={tab}
-              active={panelOpen && tab.id === panelActiveFileTabId}
+              active={panelOpen && railModule === TERMINALS_TAB_ID && tab.id === activeTerminalTab?.id}
               onRestart={() => handleTerminalRestart(tab.id)}
               onClosed={() => handleTerminalClosed(tab)}
               onCloseError={() => handleTerminalCloseError(tab.id)}
             />
           </div>
         ))}
-        {panelActiveFileTab?.kind === "file" ? (
+        {railModule === FILES_TAB_ID && panelActiveFileTab?.kind === "file" ? (
           <FileViewer
             filePath={panelActiveFileTab.filePath}
             cwd={(homeAtDesktop ? panelWorkspace?.path : activeCwd) ?? undefined}
@@ -1103,7 +1087,7 @@ export function DesktopShell() {
               { sourceSessionId: panelActiveFileTab.sourceSessionId },
             )}
           />
-        ) : panelActiveFileTab?.kind === "session" ? (
+        ) : railModule === FILES_TAB_ID && panelActiveFileTab?.kind === "session" ? (
           <ChatWindow
             key={panelActiveFileTab.sessionId}
             session={panelActiveFileTab.sessionInfo}
@@ -1112,34 +1096,24 @@ export function DesktopShell() {
             onOpenFile={handleOpenLinkedFile}
             onOpenSession={handleOpenSessionViewer}
           />
-        ) : !panelWorkspace ? (
-          <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
-             {translate("files.noneOpen")}
+        ) : railModule === TERMINALS_TAB_ID && !activeTerminalTab ? (
+          <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--text-dim)", fontSize: 12 }}>
+            <span>暂无终端</span>
+            <button
+              type="button"
+              onClick={() => handleOpenTerminal(panelWorkspace!.path)}
+              style={{ height: 28, padding: "0 12px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
+            >
+              为 {panelWorkspace!.name} 新建终端
+            </button>
           </div>
         ) : null}
-      </div>
-    </div>
+            </div>
+          </div>
+        </div>
+        </>
+      )}
   </div>
-  {/* File panel toggle — workspace tab 或首页（上下文工作区存在即可切）。 */}
-  {panelWorkspace && <button
-    onClick={() => (homeAtDesktop ? setHomeRightPanelOpen(!homeRightPanelOpen) : updateActiveTab((tab) => ({ rightPanelOpen: !tab.rightPanelOpen })))}
-     title={panelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-     aria-label={panelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-    style={{
-      position: "fixed", top: 0, right: 0, zIndex: 300,
-      display: "flex", alignItems: "center", justifyContent: "center",
-      width: 36, height: 36, padding: 0,
-      background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-      color: panelOpen ? "var(--text)" : "var(--text-muted)",
-      cursor: "pointer", transition: "color 0.12s",
-    }}
-    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-    onMouseLeave={(e) => { e.currentTarget.style.color = panelOpen ? "var(--text)" : "var(--text-muted)"; }}
-  >
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-    </svg>
-  </button>}
     </>
   );
 }

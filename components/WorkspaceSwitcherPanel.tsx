@@ -38,8 +38,9 @@ interface Props {
   workspaces: WorkspaceSummary[];
   currentWorkspaceId: string | null;
   workspaceActivity: Record<string, "running" | "completed" | undefined>;
-  /** 当前工作区的模块入口（总览/文件/工作项/知识库/Loops）；空数组 = 不渲染模块区。 */
-  moduleEntries: SwitcherModuleEntry[];
+  /** 当前工作区的模块入口（移动端 = mobilePage 目的地；桌面 rail 改版后
+   *  不再传入——模块入口常驻右坞图标列，切换器回归纯工作区管理）。缺省/空 = 不渲染模块区。 */
+  moduleEntries?: SwitcherModuleEntry[];
   onSelectWorkspace: (workspace: WorkspaceSummary) => void;
   onCreateWorkspace: () => void;
   onImportDirectory: () => void;
@@ -52,7 +53,7 @@ export function WorkspaceSwitcherPanel({
   workspaces,
   currentWorkspaceId,
   workspaceActivity,
-  moduleEntries,
+  moduleEntries = [],
   onSelectWorkspace,
   onCreateWorkspace,
   onImportDirectory,

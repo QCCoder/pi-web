@@ -1263,9 +1263,13 @@ span.token.table {
     /* the panel measures itself for the dock module-tab collapse below */
     container-type: inline-size;
   }
+  /* 2026-10 rail 改版：右坞 = 44px 常驻图标列 + 展开面板。宽度语义 = 整个
+     右坞（rail + 面板）：展开态沿用 --pi-right-panel-width（px，拖拽把手
+     写入）/ 42% 默认，min 344 = 44 rail + 300 面板；收起态固定 44px——
+     只剩 rail，图标列永不消失（收起 = 点已激活图标 toggle）。 */
   .right-panel-container.right-panel-open {
     width: var(--pi-right-panel-width, 42%);
-    min-width: 300px;
+    min-width: 344px;
     /* keep the center chat area usable (≥620px) even if the stored px width
        was set on a larger window (min-width still wins below 920px windows) */
     /* 上限必须扣掉侧栏实际宽度（--pi-sidebar-width 由 DesktopShell 设在三栏
@@ -1275,17 +1279,18 @@ span.token.table {
     max-width: calc(100vw - var(--pi-sidebar-width, 300px) - 632px);
   }
   .right-panel-container.right-panel-closed {
-    width: 0;
-    min-width: 0;
-    border-left: none !important;
+    width: 44px;
+    min-width: 44px;
   }
   /* while actively dragging, jump instantly instead of animating each move */
   .right-panel-container.right-panel-resizing {
     transition: none !important;
   }
-  /* keep inner content at fixed width so it doesn't reflow during animation */
-  .right-panel-container > * {
-    width: var(--pi-right-panel-width, 42vw);
+  /* keep inner content at fixed width so it doesn't reflow during animation
+     （rail 固定 44px；面板 = 总宽 - 44，与展开态宽度一致——收起动画期间
+     面板内容不重排，仅被容器 overflow hidden 裁掉） */
+  .right-panel-container > .dock-panel {
+    width: calc(var(--pi-right-panel-width, 42vw) - 44px);
     min-width: 300px;
   }
   /* Right dock module tabs are PINNED primary nav — they never scroll away
@@ -1301,6 +1306,58 @@ span.token.table {
       padding-right: 10px;
     }
   }
+}
+
+/* Right dock rail (2026-10 改版, IDEA 形态): 44px vertical icon column —
+   文件/Loops/工作项/知识库/终端，贴窗口最右缘常驻（capability 门控由
+   DesktopShell 控制条目渲染）。容器 flex-direction: row-reverse + DOM
+   [rail][panel]：rail 钉右缘；收起态（容器 44px）被 overflow 裁掉的是
+   面板左缘——rail 永远可见。点已激活图标 = 收起/展开 toggle。 */
+.dock-rail {
+  width: 44px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  padding-top: 6px;
+}
+.dock-rail-icon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 48px;
+  background: transparent;
+  border: none;
+  border-right: 2px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  user-select: none;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.dock-rail-icon:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.dock-rail-icon.dock-rail-icon-active {
+  background: var(--bg);
+  color: var(--text);
+  border-right-color: var(--accent);
+}
+.dock-rail-icon-label {
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dock-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* Desktop right panel resize handle (rendered only when open). Same pattern

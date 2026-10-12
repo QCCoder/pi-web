@@ -28,7 +28,7 @@ import type { ChatInputHandle } from "../ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
-import { type Tab, FILES_TAB_ID, WORK_ITEMS_TAB_ID, type ModuleTabId } from "@/lib/tab-types";
+import { type Tab, FILES_TAB_ID, WORK_ITEMS_TAB_ID, isModuleTabId, type ModuleTabId } from "@/lib/tab-types";
 import {
   type SessionTabState,
   createSessionTab,
@@ -93,9 +93,13 @@ const SIDEBAR_WIDTH_KEY = "pi-sidebar-width";
 // Right (file) panel resize — same shape as the sidebar, but the DEFAULT is
 // the CSS 42% fallback (rightPanelWidth === null → no --pi-right-panel-width
 // override); dragging stores a px width. The max keeps the center chat area
-// usable (≥620px for toolbar + tabs + composer).
-const RIGHT_PANEL_MIN_WIDTH = 300;
+// usable (≥620px for toolbar + tabs + composer). 2026-10 rail 改版：宽度语义
+// = 整个右坞（44px 图标列 + 展开面板），min 相应为 344（44 + 面板 300）。
+const RIGHT_PANEL_MIN_WIDTH = 344;
 const RIGHT_PANEL_WIDTH_KEY = "pi-right-panel-width";
+
+// 右坞 rail（2026-10 改版）：激活模块 + 展开态按工作区持久化。
+const DOCK_RAIL_KEY = "pi-dock-rail";
 
 // R2：会话 tab 条持久化（身份 + 顺序 + active；fileTabs/右栏开合不持久化，
 // 重载后为默认态）。失效 id（会话已删/归档、工作区不可用）在恢复时静默跳过。
@@ -452,18 +456,53 @@ export function useAppShellState(seed?: {
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, []);
 
-  // ---- 右坞模块 tab 开合（2026-09 改版：模块不再是常驻固定 tab）------------
-  // dockModuleTabs = dock 标签条里「已打开」的模块 tab（插入序）。默认含
-  // 「文件」——保持 dock 打开时回落文件树的原有默认。集合是 shell 级 UI 状态
-  // （跨工作区 tab 一致）；每个 tab 自己的 activeFileTabId 仍决定当前激活项。
-  // DesktopShell 负责 toggle/关闭回落/坞排空收起；这里只提供集合原语，
-  // 供状态层自身的深链（如 handleCreateWorkItem）也能确保模块已打开。
-  const [dockModuleTabs, setDockModuleTabs] = useState<ModuleTabId[]>([FILES_TAB_ID]);
-  const ensureDockModule = useCallback((id: ModuleTabId) => {
-    setDockModuleTabs((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  // ---- 右坞 rail（2026-10 改版：反转 2026-09-27「模块 tab 按需打开」）----
+  // 右坞 = 44px 常驻图标列（文件/Loops/工作项/知识库/终端）+ 展开面板；
+  // 点未激活图标 = 切模块并展开，点已激活图标 = 收起到只剩 rail。激活模块
+  // + 展开态是 per-workspace 的 shell 级 UI 状态（dockRailMap，localStorage
+  // `pi-dock-rail` 持久化；切工作区回来恢复原样）；每个会话 tab 自己的
+  // activeFileTabId 只管「文件」模块内部选中哪个文件 tab（FILES_TAB_ID = 树）。
+  // 这里只提供原语；rail 点击语义（toggle 收起）由 DesktopShell 组装。
+  const [dockRailMap, setDockRailMap] = useState<Record<string, { module: ModuleTabId; expanded: boolean }>>({});
+  // 恢复持久化的 rail 偏好（挂载后读，避免 SSR/水合不一致；损坏条目丢弃）
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DOCK_RAIL_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object") return;
+      const next: Record<string, { module: ModuleTabId; expanded: boolean }> = {};
+      for (const [wsId, value] of Object.entries(parsed)) {
+        if (typeof wsId !== "string" || !wsId || !value || typeof value !== "object") continue;
+        const entry = value as { module?: unknown; expanded?: unknown };
+        if (typeof entry.module !== "string" || !isModuleTabId(entry.module) || typeof entry.expanded !== "boolean") continue;
+        next[wsId] = { module: entry.module, expanded: entry.expanded };
+      }
+      if (Object.keys(next).length > 0) setDockRailMap(next);
+    } catch { /* localStorage unavailable — keep defaults */ }
   }, []);
-  const removeDockModule = useCallback((id: ModuleTabId) => {
-    setDockModuleTabs((prev) => prev.filter((m) => m !== id));
+  useEffect(() => {
+    try { localStorage.setItem(DOCK_RAIL_KEY, JSON.stringify(dockRailMap)); } catch { /* ignore */ }
+  }, [dockRailMap]);
+  const dockRailFor = useCallback((wsId: string | null | undefined): { module: ModuleTabId; expanded: boolean } =>
+    (wsId && dockRailMap[wsId]) || { module: FILES_TAB_ID, expanded: true }, [dockRailMap]);
+  /** 激活某模块并展开（rail 图标点击的「非 toggle」分支、所有深链入口）。 */
+  const openDockModule = useCallback((wsId: string | null | undefined, id: ModuleTabId) => {
+    if (!wsId) return;
+    setDockRailMap((prev) => {
+      const cur = prev[wsId] ?? { module: FILES_TAB_ID, expanded: true };
+      if (cur.module === id && cur.expanded) return prev;
+      return { ...prev, [wsId]: { module: id, expanded: true } };
+    });
+  }, []);
+  /** 仅切换展开/收起（rail 图标点击的 toggle 分支：收起到只剩图标列）。 */
+  const setDockExpanded = useCallback((wsId: string | null | undefined, expanded: boolean) => {
+    if (!wsId) return;
+    setDockRailMap((prev) => {
+      const cur = prev[wsId] ?? { module: FILES_TAB_ID, expanded: true };
+      if (cur.expanded === expanded) return prev;
+      return { ...prev, [wsId]: { ...cur, expanded } };
+    });
   }, []);
 
   const openSessionStatsPanel = useCallback(() => {
@@ -1183,15 +1222,14 @@ export function useAppShellState(seed?: {
   }, [focusChat]);
 
   const handleCreateWorkItem = useCallback((type: "requirement" | "bug") => {
-    // 右坞 S3：新建工作项 = 开右坞工作项 tab + 创建请求送进挂在坞里的
-    // WorkspaceManager（panel 模式推进航）。移动端不经此路径（MobileShell 的
-    // overview 栈自管）。模块 tab 改版后先确保工作项 tab 在坞里已打开。
+    // 右坞 S3：新建工作项 = 激活右坞工作项模块（rail 常驻，2026-10 改版后
+    // 不再有「确保 tab 已打开」）+ 创建请求送进挂在坞里的 WorkspaceManager
+    // （panel 模式推进航）。移动端不经此路径（MobileShell 的 overview 栈自管）。
     setCreateWorkItemRequest({ type, id: Date.now() });
     if (activeWorkspace?.capabilities.includes("work-items")) {
-      ensureDockModule(WORK_ITEMS_TAB_ID);
-      updateActiveTab({ activeFileTabId: WORK_ITEMS_TAB_ID, rightPanelOpen: true });
+      openDockModule(activeWorkspace.id, WORK_ITEMS_TAB_ID);
     }
-  }, [activeWorkspace, updateActiveTab, ensureDockModule]);
+  }, [activeWorkspace, openDockModule]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -1551,6 +1589,14 @@ export function useAppShellState(seed?: {
   ) => {
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
+    // 任何路径打开文件（2026-10 rail 共识 Q3）：自动切到「文件」模块并展开。
+    const dockWsId = activeTabId
+      ? (activeWorkspace?.id ?? null)
+      : (homeSession
+        ? (workspaceForSession(homeSession, workspaces)?.id ?? null)
+        : (homeNewSession.workspaceId
+          ?? defaultHomeNewSessionWorkspaceId(workspaces, sessionActivity.sessions, mruIds)));
+    openDockModule(dockWsId, FILES_TAB_ID);
     // 首页（无活动 tab）：文件 tab 落在首页自己的右栏并展开面板。
     if (!activeTabId) {
       const fileTabId = `file:${filePath}`;
@@ -1616,7 +1662,7 @@ export function useAppShellState(seed?: {
       }
       return { fileTabs, activeFileTabId: fileTabId, rightPanelOpen: true };
     });
-  }, [activeTabId, updateTab]);
+  }, [activeTabId, activeWorkspace, homeSession, homeNewSession, workspaces, sessionActivity.sessions, mruIds, openDockModule, updateTab]);
 
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
@@ -1876,9 +1922,9 @@ export function useAppShellState(seed?: {
     handleContextUsageChange,
     toggleTopPanel,
     openSessionStatsPanel,
-    dockModuleTabs,
-    ensureDockModule,
-    removeDockModule,
+    dockRailFor,
+    openDockModule,
+    setDockExpanded,
     handleFileLineMention,
     updateTab,
     updateActiveTab,

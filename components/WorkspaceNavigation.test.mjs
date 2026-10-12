@@ -25,6 +25,12 @@ import test from "node:test";
  * 两端共用的 WorkspaceSwitcherPanel（桌面 = 32px 工作区工具行「工作区名 ▾」
  * 弹出；移动端 = 抽屉头部内联展开）。切工作区两端对齐 = 落该工作区总览
  * （桌面开家 tab；手机新增 mobilePage:"overview" 目的地）。
+ *
+ * 2026-10 右坞 rail 改版（grill 会话，反转 2026-09-27「模块 tab 按需打开」）：
+ * 桌面右坞 = 44px 常驻图标列（文件/Loops/工作项/知识库/终端）+ 展开面板——
+ * 点未激活图标切模块并展开、点已激活图标收起到只剩 rail；激活模块 + 展开态
+ * per-workspace 持久化（pi-dock-rail）。工具行删「文件」捷径、切换面板不再
+ * 传模块入口（回归纯工作区管理）；activeFileTabId 回归纯文件语义。
  */
 const projectSidebarSource = await readFile(
   new URL("./ProjectSidebar.tsx", import.meta.url),
@@ -289,7 +295,10 @@ test("sidebar slim-down: switcher panel on both shells; switch = land on overvie
   // 面板（dock 开合语义）。侧栏只吃 activeWorkspace（当前工作区会话）。
   assert.match(desktopShellSource, /switcherOpen/);
   assert.match(desktopShellSource, /<WorkspaceSwitcherPanel/);
-  assert.match(desktopShellSource, /toggleDockModule\(FILES_TAB_ID\)/);
+  // 2026-10 rail 改版：工具行的「文件」捷径与切换面板模块入口移除——模块
+  // 入口常驻右坞图标列（rail），切换器回归纯工作区管理。
+  assert.doesNotMatch(desktopShellSource, /moduleEntries=/);
+  assert.match(desktopShellSource, /className=\{`dock-rail-icon/);
   assert.match(desktopShellSource, /activeWorkspace=\{activeWorkspace\}/);
   assert.doesNotMatch(desktopShellSource, /onOpenWorkspace=\{handleOpenWorkspace\}\s*\n\s*onOpenArchive/);
   // 移动端：抽屉/常驻树头部 headerSlot 注入切换块；面板模块入口 = 目的地页
@@ -308,6 +317,32 @@ test("sidebar slim-down: switcher panel on both shells; switch = land on overvie
   assert.match(mobileShellSource, /case "overview":/);
   assert.match(mobileShellSource, /<WorkspaceOverview/);
   assert.match(mobileShellSource, /title="总览" meta=\{activeWorkspace\.name\}/);
+});
+
+test("right dock rail: persistent icon column + expandable panel (2026-10 rail 改版)", () => {
+  // 反转 2026-09-27「模块 tab 按需打开」：rail 常驻（文件/Loops/工作项/知识库/
+  // 终端），点未激活图标 = 切模块并展开；点已激活图标 = 收起到只剩 rail。
+  // 门控：knowledge/work-items capability 没开则图标不渲染；Loops/终端常驻。
+  assert.match(desktopShellSource, /railEntries/);
+  assert.match(desktopShellSource, /id: TERMINALS_TAB_ID,/);
+  assert.match(desktopShellSource, /capabilities\.includes\("work-items"\) \? \(\[\{/);
+  assert.match(desktopShellSource, /capabilities\.includes\("knowledge"\) \? \(\[\{/);
+  assert.match(desktopShellSource, /handleRailClick/);
+  // 状态层：激活模块 + 展开态 per-workspace 持久化（pi-dock-rail）。
+  assert.match(shellStateSource, /pi-dock-rail/);
+  assert.match(shellStateSource, /dockRailFor/);
+  assert.match(shellStateSource, /openDockModule = useCallback/);
+  // 任何路径打开文件 → 自动切「文件」模块并展开（共识 Q3）。
+  assert.match(shellStateSource, /openDockModule\(dockWsId, FILES_TAB_ID\)/);
+  // activeFileTabId 回归纯文件语义；终端激活不再借道该通道（共识 Q4）。
+  assert.match(desktopShellSource, /const \[activeTerminalId, setActiveTerminalId\] = useState/);
+  assert.doesNotMatch(desktopShellSource, /activeTerminalTab = terminalTabs\.find\(\(tab\) => tab\.id === panelActiveFileTabId\)/);
+  // 配置整页打开或无工作区上下文时整个右坞隐藏（共识 Q6）。
+  assert.match(desktopShellSource, /\{!centerPage && panelWorkspace && \(/);
+  // CSS：收起态 = 44px rail；展开态 min 344（44 rail + 300 面板）。
+  assert.match(globalsCssSource, /\.right-panel-container\.right-panel-closed \{\s*\n\s*width: 44px;/);
+  assert.match(globalsCssSource, /min-width: 344px;/);
+  assert.match(globalsCssSource, /\.dock-rail-icon \{/);
 });
 
 test("config center pages: four standalone pages with scoped rails (2026-09 配置页拆分)", () => {
