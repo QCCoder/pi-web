@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+import { createJiti } from "jiti";
 
 const source = await readFile(new URL("./useWorkItems.ts", import.meta.url), "utf8");
+
+const jiti = createJiti(import.meta.url, { interopDefault: true, tsconfigPaths: true, moduleCache: false });
+const { coalesceNotifiedSnapshot } = await jiti.import("./useWorkItems.ts");
 
 test("hook source contract: one refcounted poller per workspace with visibility/focus revalidation", () => {
   // ONE module-level poller registry, refcounted — multiple hosts of the same
@@ -45,5 +49,35 @@ test("hook source contract: one refcounted poller per workspace with visibility/
     source,
     /const current = getSnapshot\(workspaceId\);\s*\n\s*setSnapshotState\(current\);\s*\n\s*setLoading\(current === null\);\s*\n\s*setError\(null\);/,
     "the id-change catch-up branch must reset loading and error from the new workspace's store state",
+  );
+});
+
+test("coalesceNotifiedSnapshot: null notifications keep the last snapshot (invalidate flicker fix)", () => {
+  const stale = { items: [], archivedItems: [], trashedItems: [], invalid: [], fetchedAt: 1 };
+  const fresh = { items: [], archivedItems: [], trashedItems: [], invalid: [], fetchedAt: 2 };
+  // invalidate() 先 clearSnapshot → 订阅者同步收到 null：忽略之，保留旧快照，
+  // 强制重取落地（setSnapshot 通知）才替换——每次 create/archive/restore 不再
+  // 闪一轮「暂无工作项」/「选择工作项」空态。
+  assert.equal(coalesceNotifiedSnapshot(stale, null), stale, "null notification is ignored — keep the last snapshot");
+  assert.equal(coalesceNotifiedSnapshot(stale, fresh), fresh, "a real snapshot replaces the previous one");
+  // 首载语义不受影响：无旧快照 + null 通知仍是 null（loading 由 mount effect 呈现）。
+  assert.equal(coalesceNotifiedSnapshot(null, null), null, "no prior snapshot + null notification stays null");
+  assert.equal(coalesceNotifiedSnapshot(null, fresh), fresh, "no prior snapshot adopts the first real snapshot");
+});
+
+test("hook source contract: subscription ignores null notifications; refetch gating still reads the store", () => {
+  // 订阅回调必须经 coalesceNotifiedSnapshot（函数式 setState）——不能把 null
+  // 直接传播进 hook state。
+  assert.match(
+    source,
+    /subscribeWorkItems\(workspaceId,\s*\(next\) => setSnapshotState\(\(prev\) => coalesceNotifiedSnapshot\(prev, next\)\),?\s*\)/,
+    "the store subscription must coalesce null notifications through coalesceNotifiedSnapshot",
+  );
+  // 强制重取的闸门必须继续读 STORE（getSnapshot），不是 hook state——invalidate
+  // 清了 store，mount/gate 仍会强制重取，不存在「hook state 看似新鲜而跳过重取」的路径。
+  assert.match(
+    source,
+    /if \(shouldRefetch\(getSnapshot\(workspaceId\), Date\.now\(\), pollMs\)\)/,
+    "the mount gate keeps reading the store snapshot, not hook state",
   );
 });

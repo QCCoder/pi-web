@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatWindow } from "../ChatWindow";
 import { FileViewer } from "../FileViewer";
 import { TabBar } from "../TabBar";
@@ -18,7 +18,7 @@ import { WorkItemsPage } from "../work-items/WorkItemsPage";
 import { WorkspaceOverview } from "../WorkspaceOverview";
 import { type SwitcherModuleEntry } from "../WorkspaceSwitcherPanel";
 import { WorkspaceSelector } from "../WorkspaceSelector";
-import { createNewSessionTab } from "@/lib/session-tabs";
+import { createNewSessionTab, tabQuery } from "@/lib/session-tabs";
 import type { CenterPage } from "./useAppShellState";
 import { defaultHomeNewSessionWorkspaceId } from "@/lib/home-quick-switch";
 import { isWorkspaceSelectable } from "@/lib/workspaces/types";
@@ -122,12 +122,46 @@ export function MobileShell() {
     setRefreshKey,
     setImportPickerOpen,
     setOpenRepositoryFormRequest,
+    centerPage,
+    setCenterPage,
+    navigateUrl,
+    openWorkItemsPage,
+    workItemsItemKeyRef,
   } = s;
 
   // ---- 目的地页（扁平导航：null = 聊天；‹返回 永远 = 回聊天）--------------
   const [mobilePage, setMobilePage] = useState<MobilePage | null>(null);
   // LoopsDockPanel 的变更信号：创建/删除/保存后 bump → 重新拉取。
   const [loopsRefreshKey, setLoopsRefreshKey] = useState(0);
+
+  // ---- work-items 深链 → 目的地页映射（fix wave）---------------------------
+  // applyUrlToTabs 对 ?page=work-items 写 centerPage {kind:"work-items"}（两壳
+  // 共用），但移动端没有中央区整页——不映射的话手机深链落在聊天、URL 与界面
+  // 不一致，且滞留的 centerPage 压住空态自动落 composer。presence→destination：
+  // centerPage 是 work-items ⇒ mobilePage 落 work-items 目的地页并记 deeplink
+  // 来源；离开该 kind（activateTab / popstate / 页内 ‹返回）⇒ 只收回**自己设的**
+  // 目的地页（用户此后若已导航去别处/自行重进工作项页，则不动）。
+  const workItemsDeeplinkActive = centerPage?.kind === "work-items";
+  const workItemsDeeplinkAutoRef = useRef(false);
+  useEffect(() => {
+    if (workItemsDeeplinkActive) {
+      workItemsDeeplinkAutoRef.current = true;
+      setMobilePage((page) => (page === "work-items" ? page : "work-items"));
+      return;
+    }
+    if (workItemsDeeplinkAutoRef.current) {
+      workItemsDeeplinkAutoRef.current = false;
+      setMobilePage((page) => (page === "work-items" ? null : page));
+    }
+  }, [workItemsDeeplinkActive]);
+  /** 关深链工作项页：清 centerPage + URL 回写活动 tab 投影（与桌面
+   *  closeCenterPage 同构——URL 说 page=work-items，关页必须让 URL 与状态
+   *  一致，否则刷新复活已关闭的页面）。mobilePage 的收回由上面的映射 effect
+   *  接手（deeplink-auto 标记）。 */
+  const closeWorkItemsDeeplink = useCallback(() => {
+    setCenterPage(null);
+    navigateUrl(activeTab ? tabQuery(activeTab) : "tab=home");
+  }, [setCenterPage, navigateUrl, activeTab]);
 
   // ---- 会话全文搜索深跳转（与 DesktopShell 同机制，壳自有）----------------
   // 搜索结果行选择会话时先记下 entryId/blockIndex，再走常规
@@ -250,6 +284,10 @@ export function MobileShell() {
   const handleNavModule = useCallback((workspace: WorkspaceSummary, module: "files" | "work-items" | "knowledge" | "loops") => {
     closeDrawer();
     ensureWorkspaceContext(workspace);
+    // 用户自驱进入工作项目的地页 = 深链自动态让位：ensureWorkspaceContext 的
+    // activateTab 会清 centerPage，若不摘 deeplink-auto 标记，深链映射 effect
+    // 的 absence 分支会把用户刚点开的工作项页误收回聊天。
+    if (module === "work-items") workItemsDeeplinkAutoRef.current = false;
     setMobilePage(module);
   }, [closeDrawer, ensureWorkspaceContext]);
   const handleNavArchive = useCallback((workspace: WorkspaceSummary) => {
@@ -496,6 +534,35 @@ export function MobileShell() {
           </div>
         );
       case "work-items":
+        if (centerPage?.kind === "work-items") {
+          // 深链/中央页形态（fix wave）：页面身份绑定 centerPage.workspaceId
+          // （spec §6.1，深链可指向非当前 tab 的工作区，不用 activeWorkspace 代
+          // 替）；item 深链经 initialItemKey 透传（消费后清 ref）。‹返回/✕ =
+          // 关深链页（清 centerPage + URL 回写——URL 说 page=work-items，关页
+          // 必须让 URL 与状态一致，否则刷新复活）；「查看会话」走既有 locate
+          // 管道（openSessionTab 的 activateTab 清 centerPage → 映射 effect 收
+          // 回目的地页，失败则页面留在原地，与桌面一致）；页头工作区切换（平板
+          // 形态）复用 openWorkItemsPage（replace 写 URL，不埋历史陷阱）。
+          return (
+            <WorkItemsPage
+              key={centerPage.workspaceId}
+              workspaceId={centerPage.workspaceId}
+              initialItemKey={workItemsItemKeyRef.current}
+              onOpenConversation={handleOpenConversation}
+              onOpenLoopsRecovery={() => {
+                closeWorkItemsDeeplink();
+                setMobilePage("loops");
+              }}
+              onConsumedInitialItem={() => { workItemsItemKeyRef.current = null; }}
+              onBack={closeWorkItemsDeeplink}
+              onClose={closeWorkItemsDeeplink}
+              backLabel="聊天"
+              onOpenWorkItemsPage={openWorkItemsPage}
+              onReplaceUrl={(query) => navigateUrl(query, true)}
+              workspaces={workspaces}
+            />
+          );
+        }
         // 工作项目的地页宿中央同款 WorkItemsPage（M2 T10，spec §6.1/§6.3）：
         // 同一共享数据缓存与同一套 列表/筛选/详情/创建/回收站；窄屏形态由
         // 页面自适配（看板回落为阶段筛选列表、详情全屏覆盖）。‹返回 = 回聊天
@@ -648,8 +715,14 @@ export function MobileShell() {
           {!activeWorkspace ? (
             /* 零可用工作区分支（冷启动 / 全部停用）：设置目的地仍要可达
                （设置›工作区是重启用唯一入口——HomeLanding ⚙ 落这里）；其余
-               交给 HomeLanding 引导 / 历史首页会话路径。 */
-            mobilePage === "settings" ? (
+               交给 HomeLanding 引导 / 历史首页会话路径。work-items 深链例外：
+               冷启动深链可能没有任何恢复 tab（activeTabId=null，空态自动落
+               composer 又被 centerPage 抑制）——目的地页必须照常渲染。 */
+            mobilePage === "work-items" && centerPage?.kind === "work-items" ? (
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", background: "var(--bg)" }}>
+                {renderPageContent()}
+              </div>
+            ) : mobilePage === "settings" ? (
               <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column" }}>
                 {renderSettings()}
               </div>

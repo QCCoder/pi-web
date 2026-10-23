@@ -36,6 +36,19 @@ type WorkItemsPayload = {
 
 type FetchResult = { snapshot: WorkItemsSnapshot } | { error: string };
 
+/** Subscription coalescing（fix wave：per-mutation 闪烁）：`invalidate()` 先
+ *  `clearSnapshot` → 订阅者在强制重取落地前同步收到一次 `null` 通知。hook 对
+ *  null 通知**忽略**（保留上一份快照），新数据落地（setSnapshot 通知）才替换
+ * ——否则每次 create/archive/restore 都有一整个 fetch 往返的「暂无工作项」/
+ * 「选择工作项」空态闪烁。首载语义不受影响：初始 snapshot 本就是 null，loading
+ * 由 mount effect 呈现（null + null → null）。 */
+export function coalesceNotifiedSnapshot(
+  current: WorkItemsSnapshot | null,
+  next: WorkItemsSnapshot | null,
+): WorkItemsSnapshot | null {
+  return next ?? current;
+}
+
 async function fetchWorkItemsSnapshot(workspaceId: string): Promise<FetchResult> {
   try {
     const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/work-items`);
@@ -200,7 +213,10 @@ export function useWorkItems(
     setSnapshotState(current);
     setLoading(current === null);
     setError(null);
-    return subscribeWorkItems(workspaceId, (next) => setSnapshotState(next));
+    // null 通知（invalidate 的 clearSnapshot 窗口）被 coalesce 掉：保留旧快照
+    // 直到强制重取落地，杜绝每 mutation 一轮空态闪烁。函数式 setState——结果
+    // 引用不变时 React 直接跳过重渲染。
+    return subscribeWorkItems(workspaceId, (next) => setSnapshotState((prev) => coalesceNotifiedSnapshot(prev, next)));
   }, [workspaceId]);
 
   // Mount / workspace switch: join the workspace's poller (refcounted) and
