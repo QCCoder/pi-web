@@ -3,6 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { type LoopStatus } from "@/components/LoopRow";
 
+/** GET /api/workspaces/:id/loops 追加的执行中断行（spec §5.4）：
+ *  needsAttention 的在飞轮记录 → LoopRow 徽章 + 「重新检查并恢复」。 */
+export interface LoopInterruption {
+  loopName: string;
+  runId: string;
+  stoppedAt: string;
+}
+
 /** Shared kit-loop status plumbing for the two right-dock-era consumers:
  *  the desktop right dock's Loops tab (LoopsDockPanel) and WorkspaceOverview
  *  (mobile full block + desktop summary row). One fetch (GET
@@ -11,14 +19,16 @@ import { type LoopStatus } from "@/components/LoopRow";
  *  re-fetch everywhere. */
 export function useKitLoops(workspaceId: string, refreshKey?: number) {
   const [loops, setLoops] = useState<LoopStatus[]>([]);
+  const [interruptions, setInterruptions] = useState<LoopInterruption[]>([]);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/loops`);
       if (!response.ok) return;
-      const data = (await response.json()) as { loops?: LoopStatus[] };
+      const data = (await response.json()) as { loops?: LoopStatus[]; interruptions?: LoopInterruption[] };
       setLoops(data.loops ?? []);
+      setInterruptions(data.interruptions ?? []);
     } catch {
       // offline / daemon down — keep the last snapshot
     }
@@ -49,5 +59,5 @@ export function useKitLoops(workspaceId: string, refreshKey?: number) {
     [refresh, workspaceId],
   );
 
-  return { loops, busy, refresh, runAction };
+  return { loops, interruptions, busy, refresh, runAction };
 }

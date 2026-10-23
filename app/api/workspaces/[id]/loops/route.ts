@@ -7,6 +7,7 @@ import {
 } from "@/lib/workspaces/service";
 import { collectStatus } from "../../../../../packages/pi-loop/status.ts";
 import { createLoop, LoopManageError, type CreateLoopInput } from "@/lib/loops/manage";
+import { listPendingExecutionRecords } from "@/lib/loops/executions";
 
 function errorResponse(error: unknown): NextResponse {
   if (error instanceof LoopManageError) {
@@ -44,7 +45,15 @@ export async function GET(
     // 管理面数据（web spec §5.1）：includePaused 发现 + 每 loop 的运行状态
     // （.round.lock 活性 + .lastrun + nextDue，与 pi-loop status CLI 同一口径）。
     // 消费方自行过滤 paused（D11 门控语义：暂停即不存在）。
-    return NextResponse.json({ loops: collectStatus(path) });
+    // 执行中断记录（spec §5.4）：needsAttention 的在飞轮记录 → UI 徽章 +
+    // 「重新检查并恢复」；记录解除（recover）后自然消失。
+    const pending = await listPendingExecutionRecords(path);
+    const interruptions = pending.map((record) => ({
+      loopName: record.loopName,
+      runId: record.runId,
+      stoppedAt: record.stoppedAt,
+    }));
+    return NextResponse.json({ loops: collectStatus(path), interruptions });
   } catch (error) {
     return errorResponse(error);
   }

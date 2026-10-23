@@ -29,6 +29,13 @@ export interface LoopRowProps {
   onRowClick?: () => void;
   /** 可选：「运行」按钮回调（手动起一轮；总览不传，不渲染该按钮）。 */
   onRun?: () => void;
+  /** 可选：执行中断（spec §5.4）——宿主关停时在飞轮的 needsAttention 记录；
+ *  存在时渲染「执行中断，待恢复」徽章 + 「重新检查并恢复」按钮（onRecover
+ *  缺省则只有徽章，不渲染按钮）。 */
+  interrupted?: { runId: string; stoppedAt: string };
+  onRecover?: () => void;
+  /** 「重新检查并恢复」进行中（禁用按钮 + 禁用视觉，与 busy 同款）。 */
+  recovering?: boolean;
   /** 「配置」按钮是否渲染（行点击已开配置的宿主隐藏按钮；默认 true 供总览）。 */
   showConfigureButton?: boolean;
 }
@@ -42,6 +49,9 @@ export function LoopRow({
   onNameClick,
   onRowClick,
   onRun,
+  interrupted,
+  onRecover,
+  recovering,
   showConfigureButton = true,
 }: LoopRowProps) {
   const [hovered, setHovered] = useState(false);
@@ -93,10 +103,30 @@ export function LoopRow({
         {summarizeCron(loop.cron) ?? loop.cron}
       </span>
       <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 4, background: "var(--bg-hover)" }}>{loop.level}</span>
+      {interrupted && (
+        <span
+          title={`轮 ${interrupted.runId} 于宿主关停时中断（${interrupted.stoppedAt}），心跳已阻塞直至恢复`}
+          style={{ fontSize: 11, padding: "1px 6px", borderRadius: 4, background: "#d977061f", color: "#b45309" }}
+        >
+          执行中断，待恢复
+        </span>
+      )}
       <span style={{ fontSize: 12, color: loop.running ? "#15803d" : loop.paused ? "var(--text-dim)" : "var(--text-muted)" }}>
         {loop.running ? "● 运行中" : loop.paused ? "已暂停" : formatNextDueLabel(loop)}
       </span>
       <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+        {interrupted && onRecover && (
+          <button
+            disabled={busy || recovering}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRecover();
+            }}
+            style={{ ...rowLinkButton, ...(busy || recovering ? disabledButtonStyle : undefined) }}
+          >
+            {recovering ? "恢复中…" : "重新检查并恢复"}
+          </button>
+        )}
         {onRun && (
           <button
             disabled={busy || loop.running}
