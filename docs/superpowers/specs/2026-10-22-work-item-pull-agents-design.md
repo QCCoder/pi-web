@@ -12,6 +12,15 @@
 
 [可缩放 SVG 源图](assets/work-item-delivery-architecture.svg)
 
+实现归属：
+
+- **pi-web**：本仓前端、API、交付领域服务、daemon、loop 宿主，以及会话/子 agent 的执行管理；拟新增的 TaskPool、ClaimService、WorkerWaker、RoleSessionLauncher 都在此范围。
+- **pi harness**：通过 pi SDK 复用 AgentSession、模型与工具循环、资源/扩展加载、SessionManager 和基础工具；本设计不要求改写这些依赖包。
+- **pi-extension**：pi 提供的扩展接入机制。本仓已有的工作项、知识库和 subagent 工具扩展，由 pi-web 实现并挂载到 SDK。扩展入口调用领域服务，领取和阶段规则不只写在提示词中。
+- **工作区资源**：角色 Profiles、Skills、AGENTS.md、LOOP.md、STATE.md 和交付配置。四个角色是资源配置与会话职责，不是四个 Extension。
+
+子 agent 的工具扩展在 `lib/subagent-extension.ts`，执行管理在 `lib/subagent-runtime.ts`；这些是 pi-web 本仓实现，底层子会话使用 pi SDK。它们不应整体归入 pi harness。
+
 ## 1. 用户意图与成功标准
 
 用户希望把目前“外部需求导入后由 loop 扫描执行”的能力，发展成可持续推进的需求管理与自动化开发流程。
