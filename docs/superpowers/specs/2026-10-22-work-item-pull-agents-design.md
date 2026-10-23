@@ -6,6 +6,12 @@
 
 范围：Pi Web 内单条需求的阶段交接、角色自主领取、验收、返工和恢复
 
+架构图更新：2026-10-23。灰色为已有能力，橙色为增强，绿色为新增；图示为待实施的设计目标态。
+
+![Pi Web 需求自动交付分层架构](assets/work-item-delivery-architecture.png)
+
+[可缩放 SVG 源图](assets/work-item-delivery-architecture.svg)
+
 ## 1. 用户意图与成功标准
 
 用户希望把目前“外部需求导入后由 loop 扫描执行”的能力，发展成可持续推进的需求管理与自动化开发流程。
