@@ -14,9 +14,9 @@ work-items, loop, subagent, git/changes) layered on top.
 
 ```bash
 npm run dev    # Next.js dev server on http://127.0.0.1:30141
-npm run daemon # OPTIONAL — the pi-daemon, a separate process on :30142
-               # (spawned automatically as a sidecar by `npm run dev` — see lib/session-daemon/sidecar.ts;
-               #  run it manually/systemd when you want it managed explicitly.
+               # 单进程（2026-10 M1）：Next.js Node.js server 就是会话宿主——所有会话/
+               # subagent/loop 轮都在这一个进程里（见 Key Design Decisions 的 Session Host 节），
+               # 没有独立 daemon 进程了
 ```
 
 Typecheck: `node_modules/.bin/tsc --noEmit`
@@ -27,7 +27,8 @@ Tests: `npm test` (node:test over `lib/**/*.test.mjs`)
 into `<repo>/.pi/{agent,workspaces,workspace-index.yaml}` and writes `.env.local` pointing the three env vars
 (`PI_CODING_AGENT_DIR` / `PI_WORKSPACES_DIR` / `PI_WORKSPACE_INDEX_FILE`) there — workspaces, skills and sessions become
 visible in the project tree. `.pi/agent` + `.pi/workspaces` are gitignored (auth tokens live there) and excluded from
-tsc/eslint/git-discovery; `bin/pi-daemon.js` self-loads `.env.local` (see "Local pi data home" under Key Design Decisions).
+tsc/eslint/git-discovery; `.env.local` is loaded by Next.js itself (single process — see "Local pi data home" under
+Key Design Decisions).
 
 **Never run `next build` during dev** — it pollutes `.next/` and breaks `npm run dev`.
 
@@ -36,31 +37,31 @@ tsc/eslint/git-discovery; `bin/pi-daemon.js` self-loads `.env.local` (see "Local
 ## Architecture
 
 ```
-Browser                Next.js Server                Session Daemon (bin/pi-daemon.js, :30142)
-  │                        │                                │ — THE single session owner
-  │  ┌──────── Workspace layer ────────┐                    │   (lib/daemon/rpc-manager.ts
-  │  │ manifest .pi/workspace.yaml      │                    │    registry: interactive +
-  │  │ capabilities → extensions        │                    │    subagent children + kit rounds)
-  │  │ repositories / work-items /      │                    │
-  │  │ loops (kit files)                │                    │
-  │  └──────────────┬───────────────────┘                    │
-  │                 │                                          │
-  ├─ GET /api/sessions ──────▶ reads ~/.pi/agent/sessions/    │
-  ├─ GET /api/sessions/[id] ─▶ reads .jsonl directly          │
-  │                 │  (+ daemon /v1/sessions/live for fresh) │
-  │                 │                                          │
-  ├─ send message ──▶ POST /api/agent/[id] ── proxy ─────────▶ POST /v1/sessions/:id/commands
-  │                   (lib/agent-proxy.ts)                    │   startRpcSession()/wrapper.send()
-  │                 │                                          │
-  ├─ SSE connect ───▶ GET /api/agent/[id]/events ── proxy ───▶ GET  /v1/sessions/:id/events
-  │◀── data: {...} ──│◀───────────── piped ◀──────────────────│ session.subscribe()
-  │                 │                                          │
-  ├─ running ids ───▶ GET /api/agent/running/events ─ proxy ─▶ GET  /v1/sessions/running/events
+Browser                       Next.js Server (single process, :30141)
+  │                                 │ — THE single session owner
+  │  ┌──────── Workspace layer ────┐  (lib/session-host/registry.ts,
+  │  │ manifest .pi/workspace.yaml │   globalThis registry: interactive +
+  │  │ capabilities → extensions   │   subagent children + kit rounds)
+  │  │ repositories / work-items / │
+  │  │ loops (kit files)           │
+  │  └──────────────┬──────────────┘
+  │                 │
+  ├─ GET /api/sessions ──────▶ reads ~/.pi/agent/sessions/ (persistent index)
+  ├─ GET /api/sessions/[id] ─▶ reads .jsonl directly
+  │                 │  (+ in-process facade liveSessions() for fresh ones)
+  │                 │
+  ├─ send message ──▶ POST /api/agent/[id] ── facade.sendCommand() ──▶ wrapper.send()
+  │                   (lib/session-host/facade.ts — direct call, no proxy)
+  │                 │
+  ├─ SSE connect ───▶ GET /api/agent/[id]/events ── Web-stream SSE served in-process
+  │◀── data: {...} ──│◀────────── session.subscribe() (lib/session-host/sse.ts)
+  │                 │
+  ├─ running ids ───▶ GET /api/agent/running/events ── facade.runningStatus() in-process
 ```
 
-- **Session browsing** (read-only): list views are served from the **persistent session index** (`lib/session-index.ts`, mtime+size incremental over `~/.pi/agent/sessions` incl. `.archived/`, cache file `~/.pi/agent/sessions/.index.json`, rebuildable, tmp+rename atomic write, failed saves retried in background via a dirty flag; schemaVersion 2 — v1 clipped `/skill:` expansions mid-wrapper, so firstMessage is now skill-reduced BEFORE the 400-char truncation, and the bump discards the stale cache for a one-time rebuild). **The in-process memo is TTL-bound (`PI_SESSION_INDEX_MEMO_TTL_MS`, default 3s)** — once it served a forever-snapshot, files written by OTHER processes (the daemon spawning subagent children / loop rounds) stayed invisible to locate/detail/list until a web restart, which resurfaced as "opening a subagent (child) does nothing / opens blank"; now every TTL expiry re-runs the cheap incremental walk (stat-heavy, not read-heavy) through the single in-flight promise. `listAllSessions()` in `lib/session-reader.ts` maps index entries to `SessionInfo` (firstMessage truncated to 160 chars for display — the raw text once inflated the payload to 1MB+); `GET /api/sessions?archived` and `listArchivedSessions()` derive from the same index; `GET /api/sessions/[id]/locate` resolves by id through `findSessionIndexEntry` (display title via the shared `firstMessageTitle`) and — on the daemon-probe hit — also seeds `cacheSessionPath` from the probe's `sessionFile`, so a just-spawned child whose .jsonl isn't flushed yet still opens (detail answers the empty-but-valid placeholder, live SSE renders on top). Opening a session detail still reads the whole .jsonl via SDK `SessionManager`, but the response is a **tail window** (`?tail=100`): `buildSessionContext(..., { tailMessages })` maps only the last N entries and sets `hasEarlier`; older pages arrive via `GET /api/sessions/[id]/earlier?before=<entryId>&limit=&leafId=` (`buildEarlierContext` — needs an explicit leaf, defaults to the session's current leaf). The client (`useAgentSession.loadEarlier` + ChatWindow prepend detection) grows the window as the user scrolls up; `VISIBLE_PAGE_SIZE` render-windowing in `lib/chat-lazy-load.ts` sits on top of the loaded window — **first render is staged** (2026-09): `INITIAL_VISIBLE_COUNT = 10`, then a rAF chain in ChatWindow grows `visibleCount` by `STAGED_VISIBLE_STEP = 10` per frame up to `getStagedTargetCount`（= min(50, messages.length)；步长前保存距底距离，复用既有 restore effect 保位）。 Motivation: dev 冷 JIT 下首开大会话，消息到达与 loading=false 同 tick 批处理成一次同步挂载满窗 50 条（react-markdown 全家桶 + Prism），主线程被占满、「正在加载会话…」挂数秒（服务端/网络无率，实测亚秒）。 哨兵 observer 的滚动增长语义不变；短内容时哨兵可见直接整页跳满，天然兼容。
-- **Sending a message**: the web routes are **pure proxies** (`lib/agent-proxy.ts` → `daemonClient`) over the session daemon, where `startRpcSession()` in `lib/daemon/rpc-manager.ts` creates the AgentSession. At creation it resolves the enclosing **Workspace** (if any) and attaches that workspace's extensions + skills + AGENTS.md.
-- **Workspace management**: `app/api/workspaces/**` reads/writes `~/.pi/workspaces/**` and `~/.pi/workspace.yaml` (the global index). Capability edits, repository add/remove, work-item CRUD) all flow through this surface. Kit loops are plain files under the workspace root — the loop management surface is `app/api/workspaces/[id]/loops/**` (status/pause/resume/frontmatter edit/manual round/stop) + the WorkspaceOverview Loops block; heartbeats stay daemon-only.
+- **Session browsing** (read-only): list views are served from the **persistent session index** (`lib/session-index.ts`, mtime+size incremental over `~/.pi/agent/sessions` incl. `.archived/`, cache file `~/.pi/agent/sessions/.index.json`, rebuildable, tmp+rename atomic write, failed saves retried in background via a dirty flag; schemaVersion 2 — v1 clipped `/skill:` expansions mid-wrapper, so firstMessage is now skill-reduced BEFORE the 400-char truncation, and the bump discards the stale cache for a one-time rebuild). **The in-process memo is TTL-bound (`PI_SESSION_INDEX_MEMO_TTL_MS`, default 3s)** — once it served a forever-snapshot, session files written outside the walk (the host spawning subagent children / loop rounds — pre-M1 these came from a separate daemon process; today same-process writes are caught the same way) stayed invisible to locate/detail/list until a web restart, which resurfaced as "opening a subagent (child) does nothing / opens blank"; now every TTL expiry re-runs the cheap incremental walk (stat-heavy, not read-heavy) through the single in-flight promise. `listAllSessions()` in `lib/session-reader.ts` maps index entries to `SessionInfo` (firstMessage truncated to 160 chars for display — the raw text once inflated the payload to 1MB+); `GET /api/sessions?archived` and `listArchivedSessions()` derive from the same index; `GET /api/sessions/[id]/locate` resolves by id through `findSessionIndexEntry` (display title via the shared `firstMessageTitle`) and — on the live-registry probe hit (`facade.probeSession`) — also seeds `cacheSessionPath` from the probe's `sessionFile`, so a just-spawned child whose .jsonl isn't flushed yet still opens (detail answers the empty-but-valid placeholder, live SSE renders on top). Opening a session detail still reads the whole .jsonl via SDK `SessionManager`, but the response is a **tail window** (`?tail=100`): `buildSessionContext(..., { tailMessages })` maps only the last N entries and sets `hasEarlier`; older pages arrive via `GET /api/sessions/[id]/earlier?before=<entryId>&limit=&leafId=` (`buildEarlierContext` — needs an explicit leaf, defaults to the session's current leaf). The client (`useAgentSession.loadEarlier` + ChatWindow prepend detection) grows the window as the user scrolls up; `VISIBLE_PAGE_SIZE` render-windowing in `lib/chat-lazy-load.ts` sits on top of the loaded window — **first render is staged** (2026-09): `INITIAL_VISIBLE_COUNT = 10`, then a rAF chain in ChatWindow grows `visibleCount` by `STAGED_VISIBLE_STEP = 10` per frame up to `getStagedTargetCount`（= min(50, messages.length)；步长前保存距底距离，复用既有 restore effect 保位）。 Motivation: dev 冷 JIT 下首开大会话，消息到达与 loading=false 同 tick 批处理成一次同步挂载满窗 50 条（react-markdown 全家桶 + Prism），主线程被占满、「正在加载会话…」挂数秒（服务端/网络无率，实测亚秒）。 哨兵 observer 的滚动增长语义不变；短内容时哨兵可见直接整页跳满，天然兼容。
+- **Sending a message**: the web routes call the **in-process session host facade** (`lib/session-host/facade.ts`, direct function call — no proxy, no second process), under which `startRpcSession()` in `lib/session-host/registry.ts` creates the AgentSession. At creation it resolves the enclosing **Workspace** (if any) and attaches that workspace's extensions + skills + AGENTS.md.
+- **Workspace management**: `app/api/workspaces/**` reads/writes `~/.pi/workspaces/**` and `~/.pi/workspace.yaml` (the global index). Capability edits, repository add/remove, work-item CRUD) all flow through this surface. Kit loops are plain files under the workspace root — the loop management surface is `app/api/workspaces/[id]/loops/**` (status/pause/resume/frontmatter edit/manual round/stop/recover) + the WorkspaceOverview Loops block; heartbeats run inside the Next.js host (LoopKitSpawner, see Session Host).
 
 ---
 
@@ -137,7 +138,7 @@ sessions, explorer, work-items, repositories, knowledge, workflows
 - `manifest.capabilities` is required and always present (see "Workspace index v2" above). Read it directly; there is no derivation helper.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
 - **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below).
-- **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by `manifest.capabilities`. `lib/daemon/rpc-manager.ts` always attaches the built-in subagent extension globally (`createSubagentExtension` — see Subagent below), then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
+- **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by `manifest.capabilities`. `lib/session-host/registry.ts` (`startRpcSession`) always attaches the built-in subagent extension globally (`createSubagentExtension` — see Subagent below), then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
 ### AGENTS.md auto-management (managed segments)
 
 Each workspace may carry an `AGENTS.md` at its root. **`renderWorkspaceAgents(manifest, capabilities)`** is the
@@ -208,7 +209,7 @@ The panel bodies（树形侧栏改版后）：左栏只剩 `ProjectSidebar` 一�
 
 Mobile is a **separate shell with drawer navigation**（2026-09 树抽屉重构，docs/mobile-drawer-design.md；详见上方「移动端抽屉」节）: `MobileShell` renders **44px tool strip（2026-09-27 顶栏重排，docs/mobile-drawer-design.md 补充记录）** (`ChatToolbar`，`navToggle="drawer"`：☰ 开抽屉 + 后台状态圆点 + **居中会话标题（点击 → 会话信息面板）** + 统计 + **⋯ 溢出菜单**收纳 主题/语言/完整历史/生成标题/分支/系统提示词 六个降级控件——全局组+会话组分隔；分支面板由 `hideTrigger` 的 BranchNavigator 承载) → 全屏主区（聊天永远挂载持久，SSE 跨页不断；非聊天目的地 = `mobilePage` 全屏页，‹返回永远 = 回聊天）→ 抽屉（`mobileNavOpen`，scrim + 滑入，内容 = `ProjectSidebar`（头部模块条[总览/文件/工作项/知识库/Loops] + 「项目」分区行 + 分组/平铺会话清单，2026-09-27）；点目标/遮罩即关；**Android 返回键经 pushState 陷阱态只关抽屉不退页，左缘右滑（横移 >56px 且明显横向）也可开**）。**底部 tab 栏、头部 chips 行、`MobileSideRail`、`WorkspaceHomeMenu`、`pi-mobile-tab:<wsId>` 持久化均已删除**。空态（冷启动/关光 tab）自动给默认工作区开占位 composer 作上下文锚（`openNewSessionTab(target, { replace: true })`）；**≥768px（平板竖屏/手机横屏/折叠屏展开）同一侧栏常驻贴左（`showPermanentTree`，推挤内容，☰ 隐藏）**，跨断点切换不丢 mobilePage 与会话状态。零可用工作区时 HomeLanding 接手（创建/重启用引导 + ⚙ 设置逃生口，抽屉重构后它只剩这一个宿主角色）。新建会话直落 composer（占位 tab，控制行带 WorkspaceSelector）；HomeLanding 两段式（大输入卡先出）仅桌面保留。**设计决策反转记录：旧「Don't reintroduce a drawer」（commit 0d96111）针对的是「抽屉装模块面板、没有统一工作区/会话树」的时代；2026-09 树抽屉重构反转它——树已是正确且唯一的导航内容，痛点是移动端缺树（切工作区深/chips 放不下/导航碎）而非抽屉形态本身。新增模块的落点演变：抽屉树模块行（`showModuleRows`，已退役）→ 切换面板（已撤）→ **抽屉头部模块条**（2026-09-27 晚，`headerSlot`，作用于当前工作区），不是新 tab 也不是新 overlay。**
 
-**Shell split (mobile tab refactor):** `AppShell` is a thin dispatcher — `useAppShellState()` (`components/shell/useAppShellState.ts`) owns ALL shared state (workspace tabs, sessions, SSE wiring, panel selection, persistence) and provides it via `components/shell/context.tsx` (`useShell()`); the state layer has **no `isMobile` branches** — cross-shell navigation intents travel as focus signals (`chatFocusKey` bumped by every chat-opening handler, `panelFocus` for the work-items create flow) that only MobileShell reacts to. **The shell choice must be correct in the FIRST HTML response**: `app/page.tsx` (async server component) sniffs the User-Agent into `initialIsMobile` and passes it to `AppShell`, which seeds `useViewportIsMobile(initial)` — the value drives BOTH the SSR render and the hydration render (no mismatch), then a mount effect corrects a wrong UA guess via `decideIsMobile` (`lib/shell-is-mobile.ts`, pure + tested): ① viewport ≤640px → mobile; ② **UA-mobile seed never downgrades** — a phone stays mobile even at a wide CSS viewport (landscape, foldables, remembered zoom-out); ③ touch-only device (`pointer: coarse` and NO `any-pointer: fine`) → mobile, which catches「电脑版网站」mode (it rewrites the UA *and* widens the layout viewport to ~980px — both width and UA go blind, only the pointer media feature survives; this was the 2026-09 "PC 端首页、底部没有 tab" bug). `AppShell` provides the resolved flag via `IsMobileContext`; every `useIsMobile()` caller reads that context (zero per-caller subscriptions, one source of truth) and falls back to a standalone viewport hook only outside the shell tree. Without the server seed phones SSR the desktop shell and flip only after full hydration — seconds on a slow device. **The DATA must be in the first HTML response too (2026-09 方案二 SSR 预取)**: without it the server renders a data-less shell —「尚无工作区」+「加载中」— and the client then jumps TWICE (workspaces arrive → empty groups in letter order; /api/sessions arrives ~400ms cold → activity-ordered filled groups; the session index walk is ~8× slower than the workspaces fetch, holding the real content hostage). `app/page.tsx` now prefetches BOTH in-process — `discoverWorkspaces()` + `buildSessionsPayload()` (shared with `GET /api/sessions` in `lib/session-payload.ts`) — and seeds `useAppShellState({ initialWorkspaces, initialSessions, initialRunningIds })` → `workspacesLoaded`/`useSessionActivity(seed)` start true; the post-hydration refreshes are silent same-data updates. Two guards: the SSR daemon merge uses the DIRECT `daemonClient` (fail-fast — a render must never block on sidecar spawn ≤15s; the API route keeps `daemonProxy()`); and EITHER seed failing (null) falls back to client fetch with **skeleton gating** — `ProjectSidebar` (`workspacesLoaded`/`sessionsLoaded` props) renders skeleton rows instead of「尚无工作区」or empty groups, killing the lying empty states on the fallback path too. `DesktopShell.tsx` renders the desktop layout (tree sidebar + center + right dock, see Navigation); `MobileShell.tsx` renders the drawer navigation (see「移动端抽屉」). `ChatToolbar.tsx` is the shared tool strip (desktop 36px: theme/language/history/auto-name/branch/system/token stats inline; **mobile 44px, 2026-09-27: ☰ / 居中标题(点击→会话信息) / 统计 / ⋯ overflow menu hosting theme+language+history+auto-name+branch+system**) + dropdown panels (branches/system/session/language/**more**) + `navToggle`-driven ☰, rendered by both shells. Shell-agnostic overlays (home create-workspace wizard, DirectoryPicker, ProjectTrustDialog) render in AppShell for both.
+**Shell split (mobile tab refactor):** `AppShell` is a thin dispatcher — `useAppShellState()` (`components/shell/useAppShellState.ts`) owns ALL shared state (workspace tabs, sessions, SSE wiring, panel selection, persistence) and provides it via `components/shell/context.tsx` (`useShell()`); the state layer has **no `isMobile` branches** — cross-shell navigation intents travel as focus signals (`chatFocusKey` bumped by every chat-opening handler, `panelFocus` for the work-items create flow) that only MobileShell reacts to. **The shell choice must be correct in the FIRST HTML response**: `app/page.tsx` (async server component) sniffs the User-Agent into `initialIsMobile` and passes it to `AppShell`, which seeds `useViewportIsMobile(initial)` — the value drives BOTH the SSR render and the hydration render (no mismatch), then a mount effect corrects a wrong UA guess via `decideIsMobile` (`lib/shell-is-mobile.ts`, pure + tested): ① viewport ≤640px → mobile; ② **UA-mobile seed never downgrades** — a phone stays mobile even at a wide CSS viewport (landscape, foldables, remembered zoom-out); ③ touch-only device (`pointer: coarse` and NO `any-pointer: fine`) → mobile, which catches「电脑版网站」mode (it rewrites the UA *and* widens the layout viewport to ~980px — both width and UA go blind, only the pointer media feature survives; this was the 2026-09 "PC 端首页、底部没有 tab" bug). `AppShell` provides the resolved flag via `IsMobileContext`; every `useIsMobile()` caller reads that context (zero per-caller subscriptions, one source of truth) and falls back to a standalone viewport hook only outside the shell tree. Without the server seed phones SSR the desktop shell and flip only after full hydration — seconds on a slow device. **The DATA must be in the first HTML response too (2026-09 方案二 SSR 预取)**: without it the server renders a data-less shell —「尚无工作区」+「加载中」— and the client then jumps TWICE (workspaces arrive → empty groups in letter order; /api/sessions arrives ~400ms cold → activity-ordered filled groups; the session index walk is ~8× slower than the workspaces fetch, holding the real content hostage). `app/page.tsx` now prefetches BOTH in-process — `discoverWorkspaces()` + `buildSessionsPayload()` (shared with `GET /api/sessions` in `lib/session-payload.ts`) — and seeds `useAppShellState({ initialWorkspaces, initialSessions, initialRunningIds })` → `workspacesLoaded`/`useSessionActivity(seed)` start true; the post-hydration refreshes are silent same-data updates. Two guards: the SSR running-id merge is a plain in-process call (`buildSessionsPayload()` reads `facade.runningStatus()` — fail-fast, a render must never block); and EITHER seed failing (null) falls back to client fetch with **skeleton gating** — `ProjectSidebar` (`workspacesLoaded`/`sessionsLoaded` props) renders skeleton rows instead of「尚无工作区」or empty groups, killing the lying empty states on the fallback path too. `DesktopShell.tsx` renders the desktop layout (tree sidebar + center + right dock, see Navigation); `MobileShell.tsx` renders the drawer navigation (see「移动端抽屉」). `ChatToolbar.tsx` is the shared tool strip (desktop 36px: theme/language/history/auto-name/branch/system/token stats inline; **mobile 44px, 2026-09-27: ☰ / 居中标题(点击→会话信息) / 统计 / ⋯ overflow menu hosting theme+language+history+auto-name+branch+system**) + dropdown panels (branches/system/session/language/**more**) + `navToggle`-driven ☰, rendered by both shells. Shell-agnostic overlays (home create-workspace wizard, DirectoryPicker, ProjectTrustDialog) render in AppShell for both.
 
 **Mobile keyboard（键盘↔输入框空白修复，双策略分治）：** `useVisualViewportKeyboard`（`hooks/useVisualViewportKeyboard.ts`，AppShell 挂载一次，`pointer: coarse` 门控）是唯一的键盘适配层：可编辑元素聚焦且 visualViewport 比 **`documentElement.clientHeight` 基准**（绝不用 `window.innerHeight` —— iOS 键盘弹出时它也跟着缩；基准只在“前后都不在键盘态”时采样）小 ≥150px 时判为键盘开启，加 `.pi-keyboard-open`，然后按 **`resolveKeyboardStrategy`（`lib/keyboard-layout.ts`，纯函数+测试）分两条路**：
 
@@ -253,7 +254,7 @@ Key behavior:
 - **会话自链接（服务层不变式，2026-09）**：任何带 `conversationId` 的事件/更新都把该会话合并进 `item.conversations` ——
   `updateWorkItem` 在锁内合并（bump revision），`recordWorkItemMilestone` 只写元数据不 bump。此前合并只存在于
   `workspace_update_work_item`（扩展显式预读全量再传回，存在覆盖其它会话新链接的竞窗，已删），而 conversations
-  事后回填（D9）仅 daemon 心跳轮才有 —— loop 轮/交互会话只盖里程碑时（`loop.parked`/`loop.gate`/…）会话与工作项
+  事后回填（D9）仅宿主心跳轮才有 —— loop 轮/交互会话只盖里程碑时（`loop.parked`/`loop.gate`/…）会话与工作项
   断链，详情页「关联会话」为空、回复结果无处可寻（cxin REQ-0013/0014 实证）。调用方（LLM 扩展 / D9 回填 /
   HTTP API）一律只传 `conversationId`，不传全量列表。UI 侧：详情页「执行里程碑」每行带 `conversationId` 时渲染
   「查看会话」按钮（`onOpenConversation` → locate 打开，含已归档轮会话）；详情头部为两行结构——第一排按钮区、
@@ -267,25 +268,32 @@ Key behavior:
   archive **only if no other active work item references them**; restoring brings them back. Sessions are physically
   moved to a `.archived/` subdirectory (`lib/session-archive.ts`) so `SessionManager.listAll()` no longer sees them.
 
-### Loop（pi-loop kit；`lib/daemon/loop-spawner.ts` + `packages/pi-loop/` + `kit/`）
+### Loop（pi-loop kit；`lib/session-host/loop-spawner.ts` + `packages/pi-loop/` + `kit/`）
 
 **Loop = 文件协议 + 心跳。** v3 引擎（orchestrator session / seeder / RUNS.jsonl / gate 机器）已拆除
 （设计：`docs/pi-loop-kit-design.md`；宿主层修订——beat/补跑/锁/D13——见 `docs/pi-loop-host-design.md`）。现行形态：
 
 - **声明**：workspace 根 `.pi/loops/<name>/LOOP.md` 存在即 loop（frontmatter：cron/timezone/level/max_minutes/pattern）；
   `PAUSED` 标记文件停单 loop，根 `.pi/loop/pause-all` 全停。无 capability、无 manifest 字段。`GET /api/workspaces/[id]/loops`
-  返回全量状态（`collectStatus`，含 paused——管理面全量；纯 fs，导入 `packages/pi-loop/status.ts.ts`，无 daemon 依赖），消费方自行
+  返回全量状态（`collectStatus`，含 paused——管理面全量；纯 fs，导入 `packages/pi-loop/status.ts`，无宿主依赖），消费方自行
   过滤 paused（D11 门控语义：暂停即不存在）——工作项「开始对话/收养续跑」按钮的门控与 Overview Loops 区块都读它。
 - **pi-loop 包**（`packages/pi-loop/`，npm workspaces 成员，独立 package.json 备发布；pi-web 以相对路径导入，不经 node_modules 链接——H5 的 Next server bundle 符号链接摩擦）：loop 宿主的**纯逻辑层 + CLI**——
-  protocol/cron/due/round-lock/contract/reap/fire 全是纯函数，daemon spawner 与 beat CLI 共用同一实现（无双实现）。
-- **心跳宿主有二，可并存**：① 本地 pi-web daemon 的 `LoopKitSpawner`（DaemonJob `loop-kit-heartbeats`，30s tick，
-  **无条件注册，无旗子**）扫已注册 workspace；② **`pi-loop beat`** —— 一次性幂等进程（发现 → 补跑判定 → 锁 → 起轮 →
-  退出），无 pi-web 的 standalone 仓库挂进任意外部 cron 即获心跳（crontab `* * * * * pi-loop beat --root <path>`）。
-  fire 序列统一（`packages/pi-loop/fire.ts.ts`）：acquire `.round.lock` → 锁内复查 `.lastrun` 判定 → 写 `.lastrun` → 起轮 →
-  finally release —— **双宿主并存安全**（daemon 轮的锁写 `kind: "daemon"` + sessionId，beat 看到即跳过，反之亦然）。
+  protocol/cron/due/round-lock/contract/reap/fire 全是纯函数，宿主 spawner（Next.js 进程内）与 beat CLI 共用同一实现（无双实现）。
+- **心跳宿主有二，可并存（2026-10 M1 起宿主 = Next.js 进程本身）**：① Next.js 宿主内的 `LoopKitSpawner`
+  （HostJob `loop-kit-heartbeats`，30s tick，**无条件注册，无旗子**；由 `instrumentation.ts` →
+  `ensureHostBooted()`（`lib/session-host/background.ts`）装配）扫已注册 workspace；② **`pi-loop beat`** —— 一次性幂等进程
+  （发现 → 补跑判定 → 锁 → 起轮 → 退出），无 pi-web 的 standalone 仓库挂进任意外部 cron 即获心跳
+  （crontab `* * * * * pi-loop beat --root <path>`）。
+  fire 序列统一（`packages/pi-loop/fire.ts`）：acquire `.round.lock` → 锁内复查 `.lastrun` 判定 → 写 `.lastrun` → 起轮 →
+  finally release —— **双宿主并存安全**（宿主轮的锁写 `kind: "daemon"` + sessionId——字面值沿用历史命名，跨宿主互斥协议不变，
+  beat 看到即跳过，反之亦然）。
   到点 → `startRpcSession` 起一次性会话（cwd=workspace 根 → workspace 装配照常），命名 `<loop> · <slot>`，
   开场合同 = LOOP.md 正文 + spawner 注入的硬规则 + `/skill:<pattern>` 展开；
-  `max_minutes` 超时 → destroy + `packages/pi-loop/reap.ts.ts` cwd 收敛收割。
+  `max_minutes` 超时 → `destroy()` **定向杀**（SDK destroy→dispose→abortBash 按执行进程组 kill）；共享宿主
+  **禁止 cwd 收敛收割**（spawner 的 reaper 依赖默认 NO-OP，注入点留给测试/独立宿主；beat CLI 自带收割不受影响），
+  残余孤儿交由恢复期**只读探测**报告（`lib/loops/executions.ts` 的 `detectSurvivingRoundProcesses`）。
+  **恢复门禁（spec §5.4）**：上次关停留下的未确认中断记录在场 → 该 loop 不起新轮；管理面「重新检查并恢复」=
+  `POST …/loops/[name]/recover`（探测到存活残留进程 → 409；干净 → resolve 记录），loops GET 附带 `interruptions` 字段。
 - **补跑语义（anacron-lite）**：fire 判定 = `now >= nextDue(cron, tz, .lastrun)`——宿主睡眠/停机错过的槽位恢复后
   至多**补一轮**（旧分钟槽语义是静默丢失；A 轮在跑也不再丢 B 的槽，`.lastrun` per-loop）。`.lastrun` / `.round.lock`
   是宿主文件，agent 禁改禁删（与 `PAUSED` 同级，写进协议条款与开场合同）。
@@ -296,7 +304,7 @@ Key behavior:
 - **事后钩子（D9）**：轮结束（成功与失败路径都跑）扫工作项 events.jsonl 的 conversationId 回填 conversations；
   无待决 `loop.gate` 里程碑 → 自动归档轮会话（会话列表防污染；有待决 gate 的留在列表供人在 composer 答复）。
   （beat 轮无此钩子——standalone 根没有 work-items 域工具；轮会话自然沉淀为普通 pi 会话。）
-- **run-contract**：工作项「开始对话/收养续跑」= 客户端预填（D11，无 daemon seed 路由）——`handleRunContract` in
+- **run-contract**：工作项「开始对话/收养续跑」= 客户端预填（D11，无服务端 seed 路由）——`handleRunContract` in
   `useAppShellState` reads the workspace's kit loops (`GET /api/workspaces/[id]/loops`) and resolves the pattern via
   `resolveContractPattern`（`lib/loops/contract-prefill.ts`：绑定名命中 → 该 loop 的 pattern；paused = 不存在；未命中/未绑定
   且恰有 1 个 active loop → 该 loop；≥2 个 active loop → undefined 不猜——可能存在不消费工作项的 loop，盲取首个会误路由，
@@ -309,15 +317,17 @@ Key behavior:
   两个 LLM 工具透传）；**绑定 = 路由收窄**——loop 轮拾取候选 = 「绑给我的项 + 未绑定项」，未命中/已删 loop 的绑定按未绑定
   处理；SKILL.md 的选择段声明该过滤语义（候选 = 绑定项 ∪ 未绑定项）。管理面：
   ① 工作项「立即跑一轮」（B 按钮，`lib/loops/rounds.ts` `launchManualRound`）走 `POST …/loops/[name]/run`——web 进程
-  import pi-loop 纯逻辑组装开场合同，经**现有 daemon 会话面**起轮（`POST /v1/sessions` 两步建会话：sessionId 要进
-  开场合同第 3 条；无 daemon 新路由）；可选 `itemKey` → 合同追加「本轮优先处理 <KEY>」。手动轮**无 D9 自动归档**
+  import pi-loop 纯逻辑组装开场合同，经**进程内宿主 facade 两步建会话**（`createSession` 不带 command → sessionId 进
+  开场合同第 3 条 → `sendCommand` prompt；依赖全注入，无 HTTP 往返）；可选 `itemKey` → 合同追加「本轮优先处理 <KEY>」。
+  手动轮**无 D9 自动归档**
   （人在场），锁**保持持有**靠 stale 窗（maxMinutes+15min）兜底回收，至多丢一个后续心跳槽（anacron-lite 不放大）；
   轮收尾后锁在 stale 窗内仍是「假运行中」（按钮禁用 + 409 误报 + 心跳槽被吃）——run/stop 路由注入
-  `runningSessionIds` 做**幽灵锁活性接管**（`isPhantomRoundLock`：daemon 锁带 sessionId、锁龄过
-  `PHANTOM_LOCK_GRACE_MS` 2min 宽限、且不在 daemon running set → 证明轮已死，清锁重取/直接停；beat 锁与
+  `runningSessionIds` 做**幽灵锁活性接管**（`isPhantomRoundLock`：宿主锁带 sessionId、锁龄过
+  `PHANTOM_LOCK_GRACE_MS` 2min 宽限、且不在宿主 running set（`facade.runningStatus().ids`）→ 证明轮已死，清锁重取/直接停；beat 锁与
   启动窗口锁不判，探测失败保守不接管），假窗口从最长 maxMinutes+15min 收窄到分钟级；LoopRow 按钮
   disabled 有视觉（opacity+cursor），不再「能点但没反应」。
-  ② 停止 = `POST …/loops/[name]/stop`（`stopRound`）：daemon 持有 → `DELETE /v1/sessions/:id` + 包内 reap + 释放锁
+  ② 停止 = `POST …/loops/[name]/stop`（`stopRound`）：宿主持有 → facade `destroySession`（定向中止在飞 prompt；
+  共享宿主不做 cwd 收割——destroy 链路已按进程组定向杀）+ 释放锁
   （下轮可立即补跑）；beat 持有 → 409 提示走 `pi-loop stop`（web 不代杀本机 beat 进程）。③ frontmatter 编辑 =
   `PATCH …/loops/[name]`（「人的手」：仅 cron/timezone/level/max_minutes 四字段，frontmatter 重序列化、正文 byte 保留；
   cron 改后下一心跳自然生效，`.lastrun` 保留、next-due 按新 cron 重算）。④ Overview Loops 区块（常驻，无 loop 空态 +
@@ -341,7 +351,7 @@ Key behavior:
 双开 guard / `loop.active_session` 戳 / 僵尸收割在「每轮短进程」模型下天然消失。
 ### Subagent (built-in, upstream v0.9.1 port)
 
-**In-process child AgentSessions** owned by the same daemon registry as
+**In-process child AgentSessions** owned by the same in-process host registry as
 interactive sessions and kit rounds (live SSE / steer / abort through the
 existing session surface). Ported from upstream v0.9.1 + fixes `9d282da`/`20a2579`;
 the community `@henryqw/pi-subagent` package was removed (its `delegate_task`
@@ -351,7 +361,7 @@ result panel remains for history rendering). Canonical doc: `docs/subagent.md`.
   model/thinking/max_turns/inherit_context/isolation overrides),
   `get_subagent_result`, `steer_subagent`. Children strip them again
   (`SUBAGENT_CONTROL_TOOL_NAMES`) — no recursive orchestration.
-- **Always global**: `lib/daemon/rpc-manager.ts` attaches
+- **Always global**: `lib/session-host/registry.ts` attaches
   `createSubagentExtension` to **every** session (same posture the community
   package had); still NOT in `WORKSPACE_EXTENSION_FACTORIES` /
   `ALL_WORKSPACE_CAPABILITIES`.
@@ -407,7 +417,7 @@ result panel remains for history rendering). Canonical doc: `docs/subagent.md`.
 ### Dev Loop (pi-loop kit 实例；reference: cxin-workspace)
 
 **Loops are per-workspace file protocols — pi-web ships no loop engine.** The generic surface is the kit spawner
-(`lib/daemon/loop-spawner.ts`) + the `kit/` template library; every loop's behavior lives in its workspace
+(`lib/session-host/loop-spawner.ts`) + the `kit/` template library; every loop's behavior lives in its workspace
 (`.pi/loops/<name>/LOOP.md` declaration + `STATE.md` spine + root constitution files + `.pi/skills/<pattern>/SKILL.md`
 contract + `.pi/agents/*.md` roles). There is no loop authoring UI and no dev-loop code path in pi-web; cxin-workspace's
 v3 leftovers (`loop.yaml`/`RUNS.jsonl`/`LEARN.jsonl`, v1/v2 baks) stay in place unread — git history is the audit
@@ -432,7 +442,7 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (cxin-workspace), migr
   `.pi/loops/<name>/loop-ledger.json` breaker (same error digest ×3 or >3 attempts on one item → escalated). Constitution
   (`.pi/loop/constraints.md` path blacklist + discipline, `.pi/loop/budget.md` caps) is root-level shared by all loops of the
   workspace (D13) and agent-immutable.
-- **API**: the pi-web loop surface is `GET /api/workspaces/[id]/loops`（全量状态）+ per-loop `run|pause|resume|stop` / frontmatter `PATCH`（`lib/loops/`，见 Loop 章——全部经现有 daemon 会话面，daemon 无 loop 路由）。
+- **API**: the pi-web loop surface is `GET /api/workspaces/[id]/loops`（全量状态，附 `interruptions`）+ per-loop `run|pause|resume|stop|recover` / frontmatter `PATCH`（`lib/loops/`，见 Loop 章——全部经进程内宿主 facade，依赖注入，宿主无 loop 专属路由）。
   standalone 宿主用 `pi-loop` CLI（beat/run/stop/status/init）。
 
 ### Learn (archive inline; consolidation via the `learner` agent)
@@ -454,9 +464,9 @@ The **dev Loop** is the R&D loop pattern deployed in cxin (cxin-workspace), migr
   `LEARN.jsonl`, v1/v2 baks) stay in place unread. Sensitive module list + module→repo map:
   `cargo-knowledge/standards/dev-loop-modules.md`; consolidated process lessons in `cargo-knowledge/learnings/`
   (contentHash'd).
-- **Host wiring**: the daemon's job registry (`lib/daemon/jobs.ts`) registers `LoopKitSpawner` (`loop-kit-heartbeats`,
-  unconditional). None runs in the web server (`instrumentation.ts` only boot-ensures the sidecar
-  + 默认工作区补建，两者均 fire-and-forget，无定时器).
+- **Host wiring**: `instrumentation.ts` boots the in-process host — `ensureHostBooted()`（`lib/session-host/background.ts`：
+  老 daemon 迁移守卫 → LoopKitSpawner（`loop-kit-heartbeats`, unconditional）→ shutdown handlers）
+  + 默认工作区补建，两者均 fire-and-forget。没有第二个进程。
 
 ### Workspace directory layout (reference)
 
@@ -508,8 +518,7 @@ scripts/
                                    writes .env.local, patches shell rc; idempotent repair mode)
 
 bin/
-  load-env-local.js                dotenv-lite .env.local loader used by pi-daemon at boot (never overrides
-                                   existing process env; missing file = no-op)
+  pi-web.js                       npm bin wrapper — node 版本检查 + 直接 spawn next CLI（单进程：没有别的进程要拉起）
 
 app/api/
   sessions/route.ts                      GET  list all sessions (grouped by project/worktree root)
@@ -520,10 +529,12 @@ app/api/
   sessions/[id]/state|archive|restore|locate|auto-name/route.ts   session lifecycle helpers
   sessions/[id]/entries/[entryId]/thinking/route.ts               GET a thinking block
   agent/new/route.ts                     POST { cwd, message, toolNames?, provider?, modelId? }
-  agent/[id]/route.ts                    GET state | POST any command
-  agent/[id]/events/route.ts             GET SSE stream
+  agent/[id]/route.ts                    GET state | POST any command（全部直连 lib/session-host/facade，下同）
+  agent/[id]/events/route.ts             GET SSE stream（进程内 Web-stream，lib/session-host/sse.ts）
   agent/[id]/bash-output/route.ts        GET bash output for a tool call
   agent/running/events/route.ts          GET SSE stream of currently-running session ids
+  subagents/[id]/route.ts                GET subagent run status | POST steer/abort（facade getSubagentRunStatus/controlSubagent）
+  subagents/profiles|settings/route.ts   subagent profiles / builtInEnabled+maxConcurrent settings
   workspaces/route.ts                    GET list+templates | POST create/import a workspace | PATCH { order: [ids] } 手动排序（索引 sortOrder 重编，一次写；不碰 manifest/git）
   workspaces/[id]/route.ts               GET | PATCH (capabilities/name/skills/disabled) | DELETE
   workspaces/[id]/repositories/route.ts  GET | POST add(clone/init) | DELETE soft-remove | PATCH restore
@@ -532,12 +543,13 @@ app/api/
   workspaces/[id]/work-items/[key]/events/route.ts   POST record milestone
   workspaces/[id]/work-items/[key]/attachments/route.ts  POST multipart attachments upload（service.addWorkItemAttachments：attachments/ 落盘 + README「## 附件」小节 + attachment_added 事件）
   workspaces/[id]/work-items/[key]/content/route.ts  PUT update README body
-  workspaces/[id]/loops/route.ts                  GET kit loops 全量状态（collectStatus：frontmatter 摘要 + .lastrun/next-due/锁活性/paused，含 paused，管理面全量；web spec §5.1；D5 文件即声明 — no capability）| POST 创建（initLoop 脚手架）
+  workspaces/[id]/loops/route.ts                  GET kit loops 全量状态（collectStatus：frontmatter 摘要 + .lastrun/next-due/锁活性/paused + 附 additive interruptions[执行中断记录]，管理面全量；web spec §5.1；D5 文件即声明 — no capability）| POST 创建（initLoop 脚手架）
   workspaces/[id]/loops/[name]/route.ts           PATCH frontmatter 四字段（cron/timezone/level/max_minutes）round-trip — 正文 byte 保留（「人的手」，S5；纯逻辑 pi-loop/frontmatter.ts，tmp+rename 原子写）| DELETE 删除（锁活/绑定守卫）
-  workspaces/[id]/loops/[name]/run/route.ts       POST 立即跑一轮（launchManualRound，可选 itemKey → 合同追加优先项；返回 sessionId 供 UI 打开轮会话 tab）
+  workspaces/[id]/loops/[name]/run/route.ts       POST 立即跑一轮（launchManualRound，可选 itemKey → 合同追加优先项；返回 sessionId 供 UI 打开轮会话 tab；facade 两步建会话）
   workspaces/[id]/loops/[name]/pause/route.ts     POST 写 PAUSED 标记（幂等；在跑轮靠开场合同规则 6 合作收尾）
   workspaces/[id]/loops/[name]/resume/route.ts    POST 删 PAUSED 标记（幂等）
-  workspaces/[id]/loops/[name]/stop/route.ts      POST 终止本轮（daemon 持有 → destroy+reap+释放锁；beat 持有 → 409 提示走 pi-loop stop）
+  workspaces/[id]/loops/[name]/stop/route.ts      POST 终止本轮（宿主持有 → facade destroy+释放锁[定向杀，不 cwd 收割]；beat 持有 → 409 提示走 pi-loop stop）
+  workspaces/[id]/loops/[name]/recover/route.ts   POST 重新检查并恢复（spec §5.4）：detectSurvivingRoundProcesses 只读探测——残留命令进程 → 409 报 pid；干净 → resolveExecutionRecords（manual=true 记 recovered-manual/actor=user，否则 recovered-auto）解除恢复门禁
   workspaces/[id]/loops/[name]/docs/route.ts      GET 配置面板数据包 | PUT 唯一写入口（doc|body|constitution，mtime 乐观并发）
   git/status/route.ts                    GET ?cwd= — per-repo changed files + totals
   git/diff/route.ts                      GET ?cwd=&path= — unified patch for one file
@@ -562,7 +574,16 @@ app/api/
   worktrees/route.ts                     GET/POST/DELETE git worktrees
 
 lib/
-  abort-race.ts             raceAbort (promise vs AbortSignal, with onLateSettle cleanup) + creationTimeoutSignal — bounds session CREATION everywhere a startRpcSession hang would pin a turn/run (interactive create, kit round)  workspaces/
+  abort-race.ts             raceAbort (promise vs AbortSignal, with onLateSettle cleanup) + creationTimeoutSignal — bounds session CREATION everywhere a startRpcSession hang would pin a turn/run (interactive create, kit round)
+  session-host/                       THE in-process session host (2026-10 M1 single-process): the Next.js Node.js server owns every AgentSession
+    registry.ts            session registry (globalThis) + AgentSessionWrapper + startRpcSession + subagent controller（自 lib/daemon/rpc-manager.ts 迁入；attaches the global built-in subagent extension + wires SUBAGENT_CONTROLLER；routes 一律经 facade 消费，不直接 import 本模块）
+    facade.ts              typed in-process facade — createSession/sendCommand/probeSession/destroySession/autoNameSession/busyForCwd/reloadCwdSessions/liveSessions/runningStatus/getSubagentRunStatus/controlSubagent；SessionHostError(.status) owns error→HTTP mapping；live-first + cold-start-from-.jsonl revive（旧 daemon /v1/sessions 面的进程内移植）
+    sse.ts                 Web-stream SSE（serveSessionEventStream/serveRunningEventStream/openSessionEventStream）——ByteLengthQueuingStrategy + desiredSize<=0 的 drain-aware stall cap（SSE_STALL_BYTES_DEFAULT 1MB：慢客户端只看未排水字节，健康观看者总量再大也不切断）；connected 帧先行、30s 心跳注释、destroy 即断流、req.signal 只取消订阅不碰会话
+    heartbeat.ts           stall classify/warn/kill 纯逻辑（warn 5min / kill 20min，env PI_SESSION_STALL_*_MS）
+    jobs.ts                HostJob {id,start,stop} + HostJobRegistry —— 宿主后台 job 注册表（静态装配，无运行时发现）
+    loop-spawner.ts        LoopKitSpawner（HostJob loop-kit-heartbeats, 30s tick）+ runKitRound/waitForRoundSettle/settleRoundBookkeeping（D9）；deps 全注入；恢复门禁（pendingInterruption——未确认中断记录在场不起轮）；轮登记（markActive/clearActive，关停据此写中断记录）；reaper 默认 NO-OP（共享宿主禁 cwd 收割——destroy 定向杀，残余孤儿交恢复期只读探测）
+    background.ts          ensureHostBooted（globalThis 单次装配：老 daemon 迁移守卫 → LoopKitSpawner → shutdown handlers；PI_TEST_NO_BACKGROUND=1 测试缝）+ markRoundActive/clearRoundMark/listActiveRounds + registerShutdownHandlers/buildShutdownPlan（关停序列：停新轮 → 快照 running → destroy 全部 → 写中断记录 → exit 0）
+  workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
     service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments); **ensureDefaultWorkspace** — 初始化时补建默认「默认」工作区（name 默认 / slug default，最小能力集，见 Workspace Subsystem 章；幂等 + 墓碑 `.pi-default-deleted`，removeWorkspace 删默认时写，删后永不复活；目录在磁盘未注册 → importWorkspace 自愈重注册）
     templates.ts            capability init constants (MANDATORY/INIT checklist, normalizeInitCapabilities) + renderWorkspaceAgents (capability-driven) + renderWorkspaceRepositories + renderKnowledgeSection + legacy built-in templates
@@ -578,24 +599,13 @@ lib/
     extension.ts            pi extension: list/get/create/update/record-milestone tools
     web.ts                  error → HTTP mapping
     source-labels.ts        UI-safe source→中文标签 map (禅道) — 外部源脚本盖章的来源展示
-  loops/                             web-side loop control + prefill resolution (loop-surface spec §3–§5; imports pi-loop pure logic, no daemon deps of its own)
+  loops/                             web-side loop control + prefill resolution (loop-surface spec §3–§5; imports pi-loop pure logic, no host-side deps of its own)
     lookup.ts              findKitLoopByName — loop 名→declaration（name 字段优先，回落目录名；绑定存名，文件操作以 dir 为准）
-    rounds.ts              stopRound / launchManualRound（依赖全注入：daemon 会话面 + reap + 可选 runningSessionIds）+ RoundBusyError —— 无 daemon 新路由，经现有 POST /v1/sessions 两步建会话；手动轮锁保持持有靠 stale 窗（maxMinutes+15min）回收，无 D9 钩子；幽灵锁活性接管（isPhantomRoundLock + PHANTOM_LOCK_GRACE_MS 2min 宽限，见 Loop 章）：带 sessionId 的 daemon 锁不在 running set 即清锁重取（launch）/直接清锁返回 stopped（stop）
+    rounds.ts              stopRound / launchManualRound（依赖全注入：facade createSession/sendCommand/destroySession + 可选 reap + runningSessionIds）+ RoundBusyError —— 全走进程内宿主 facade（launch 两步建会话，stop 定向 destroy+释放锁；无 HTTP 往返）；手动轮锁保持持有靠 stale 窗（maxMinutes+15min）回收，无 D9 钩子；幽灵锁活性接管（isPhantomRoundLock + PHANTOM_LOCK_GRACE_MS 2min 宽限，见 Loop 章）：带 sessionId 的宿主锁不在 running set 即清锁重取（launch）/直接清锁返回 stopped（stop）
+    executions.ts          执行中断记录（spec §5.4）：ExecutionRecord（kind loop-round / runId / loopName / sessionId / workspacePath / host{pid,hostname} / startedAt/stoppedAt / stopResult interrupted-on-shutdown|recovered-auto|recovered-manual|confirmed-dead / needsAttention / diagnostic）+ writeExecutionRecord（tmp+rename 原子写）+ listPendingExecutionRecords（恢复门禁数据源）+ resolveExecutionRecords + detectSurvivingRoundProcesses（只读探测残留进程：ppid=1 + build/shell 命令 + cwd ∈ workspace）
     contract-prefill.ts    resolveContractPattern（纯函数）：工作项绑定 loop 名 → pattern（paused = 不存在；未命中/未绑定且恰 1 个 active → 该 loop；≥2 个 active → undefined 不猜，防误路由到不消费工作项的 loop）
     cron-summary.ts        summarizeCron（纯函数）：cron 人话摘要（常见形态；其它 → null，UI 回落原始 cron）
     manage.ts               loop 配置面服务端逻辑：getLoopDocs/writeLoopFile/createLoop/deleteLoop + 守卫（白名单/原子写/mtime 并发/锁活/绑定扫描）
-  daemon/                           THE pi-daemon: session-owning process + job registry (C2)
-    host.ts                 createDaemon() composition root — /health, route chain (sessions), jobs (loop-kit-heartbeats), startDaemon (PI_DAEMON_HOST/PORT)
-    http-sessions.ts        /v1/sessions/** surface (create/commands/probe/SSE/running/live/busy/reload-cwd/auto-name/teardown)
-    jobs.ts                 DaemonJob {id,start,stop} + registry — domains register background jobs here
-    http.ts                 shared route plumbing (DaemonRouteHandler, body/json, error→status)
-    client.ts               daemonClient — HTTP client to the daemon (PI_DAEMON_URL): session-daemon surface
-    rpc-manager.ts          DAEMON-ONLY session registry + AgentSessionWrapper + startRpcSession (moved here from lib/ root — the daemon domain's core; attaches the global built-in subagent extension + wires SUBAGENT_CONTROLLER)
-    session-heartbeat.ts    stall classify/warn/kill snapshot (moved with rpc-manager)
-    pi-subagent-roles.test.mjs  role discovery + precedence tests against the package's loadRoles
-    loop-spawner.ts          → lib/session-host/loop-spawner.ts（Task 6 迁入 web 宿主）pi-loop kit heartbeat spawner — LoopKitSpawner (HostJob loop-kit-heartbeats, 30s tick, unconditional): imports the pi-loop package's pure logic (protocol/fire/round-lock/contract) and runs the unified due+lock fire sequence per workspace — runKitRound (one-shot AgentSession, cwd=workspace root, opening contract + /skill:<pattern>) + waitForRoundSettle (max_minutes timeout → destroy) + D9 settleRoundBookkeeping (conversations backfill + auto-archive rounds without pending loop.gate); no in-memory slot/busy maps — .lastrun + .round.lock are the truth
-  session-daemon/                   sidecar lifecycle for the session daemon (C2)
-    sidecar.ts               ensureSessionDaemonStarted (probe→attach / spawn detached) + pure guards (decideSidecarAction, spawnableDaemonUrl, sidecarSpawnEnv)
   subagent-child.ts          subagentChild tagging by `pi-subagent-` id/name prefix (both eras: builtin children keep the prefix)
                              (id/name prefix `pi-subagent` — the only child-detection mechanism)
   (dev-loop/ retired — loops are per-workspace custom definitions; the R&D loop pattern lives in cxin-workspace, see Dev Loop section above)  git-changes.ts            getGitStatus (multi-repo groups) + getGitFileDiff (patch)
@@ -611,7 +621,7 @@ lib/
   tab-types.ts              Tab 类型（file/session 文件 tab）+ 右坞 rail 模块 id（FILES/LOOPS/KNOWLEDGE/WORK_ITEMS/TERMINALS_TAB_ID + MODULE_TAB_IDS/isModuleTabId，+测试；2026-10 rail 改版：模块激活走 dockRailMap，activeFileTabId 回归纯文件语义）——从 TabBar.tsx 下沉到此供 lib 层引用
   dropdown-layout.ts        body-portal 弹层定位（纯函数 computeMenuLayout + 测试，SessionTabBar 右键菜单与 WorkspaceSwitcher 共用）：top/right/maxHeight 一律钳进可视窗口（visualViewport 换算，scale=1 时即普通视口）——锚点被横向滚动裁剪出屏（rect.right > innerWidth 曾使 right 为负、菜单整体滑出屏幕右缘，2026-09 手机端报告）或贴左锚点向左生长被中栏 overflow:hidden 裁剪（2026-09 PC 端工作台切换器报告）都不再把菜单推出可视区
   session-reader.ts         index-backed SessionInfo mapping + buildSessionContext (tail window) + buildEarlierContext + path caches
-  session-payload.ts        buildSessionsPayload — the /api/sessions payload builder shared by the route and the SSR prefetch in app/page.tsx（方案二首帧真数据；daemon 合并 best-effort，getClient 注入获取语义：路由 daemonProxy 可等 sidecar，SSR 直连 daemonClient fail-fast）
+  session-payload.ts        buildSessionsPayload — the /api/sessions payload builder shared by the route and the SSR prefetch in app/page.tsx（方案二首帧真数据；live 合并 best-effort = 同进程 facade liveSessions/runningStatus，无传输可失败；daemonDown 恒 false，字段保留仅为客户端兼容）
   session-index.ts          persistent mtime-incremental session index (~/.pi/agent/sessions/.index.json, active + .archived; rebuildable cache)
   session-changed-files.ts  PURE deriveSessionChangedFiles — files written/edited in a session from the message stream (write/edit toolCalls; relative `file_path` args resolved against session cwd so openFile passes the /api/files allow-list; NOT git state; survives commits); isEditToolName consolidated here
   session-archive.ts        move .jsonl to/from .archived/ to hide/restore sessions
@@ -619,7 +629,6 @@ lib/
   worktree.ts               project/worktree resolution (worktree→main repo) + git worktree ops
   file-access.ts            allowed file roots for /api/files, /api/git, worktrees
   agent-client.ts           typed fetch helper for /api/agent commands
-  agent-proxy.ts            web-side entry to the session daemon: daemonProxy() (ensure sidecar + client) + daemonErrorStatus
   agent/                    agent event reducer + helpers + types
   stores/                   models-store, session-messages-cache, session-runtime-store, file-resource-cache, map-store
   sse/global-agent-events.ts  global running-session event fan-out
@@ -635,19 +644,19 @@ lib/
   npx.ts, skill-lock.ts, skill-message.ts, skills-service.ts, skill-updates.ts   skills/plugins plumbing (skill-message.ts also powers session titles: `skillMessageTitle` reduces pi's `/skill:` expansion wrapper — `header + SKILL.md body + </skill> + args` — back to the args or `/skill:name`, incl. a truncated-wrapper fallback for pre-v2 index clips; used by the session index, session-reader, locate route, auto-name, MessageView)
 
 packages/pi-loop/                      THE loop-host package: pure protocol logic + beat CLI (design: docs/pi-loop-host-design.md; npm workspace, independent package.json for future publish, imported by relative path — see Loop section)
-  protocol.ts             LoopDeclaration / parseLoopDeclaration / discoverKitLoops (.pi/loops/*/LOOP.md frontmatter; PAUSED skipped) / isWorkspaceHalted (loop-pause-all) — pure fs+yaml, no daemon deps; the web loops route imports it too
+  protocol.ts             LoopDeclaration / parseLoopDeclaration / discoverKitLoops (.pi/loops/*/LOOP.md frontmatter; PAUSED skipped) / isWorkspaceHalted (loop-pause-all) — pure fs+yaml, standalone (no pi-web/host deps); the web loops route imports it too
   cron.ts                 cronMatches (Vixie-cron matcher with timezone, never throws on bad input) + nextDue (first cron hit after a moment, minute granularity) — the fire judgment's clock
   round-lock.ts           .round.lock cross-host round mutex — acquire/read/update/releaseRoundLock + isRoundLockStale（唯一权威公式）; O_EXCL atomic create, stale = 无 sessionId 且 pid 死（启动窗口/beat 轮）或超 maxMinutes+15min 窗（带 sessionId 的锁一律窗口治理——web 手动轮锁 pid=web 进程，web 重启不得触发心跳双发）
   due.ts                  .lastrun machine truth (host-written ISO timestamp; STATE.md Last run stays narrative) + shouldFire = now >= nextDue(cron, tz, .lastrun) — anacron-lite catch-up (at most one round after downtime)
-  contract.ts             buildRoundPrompt — opening-contract assembly shared by daemon spawner (with sessionId, D9) and beat (without); D13 ledger path is per-loop
-  fire.ts                 runDueRound/runNow — the unified fire sequence (acquire lock → re-check shouldFire in-lock → write .lastrun → run → finally release); daemon tick and beat share it, cross-host TOCTOU-safe
+  contract.ts             buildRoundPrompt — opening-contract assembly shared by the in-process host spawner (with sessionId, D9) and beat (without); D13 ledger path is per-loop
+  fire.ts                 runDueRound/runNow — the unified fire sequence (acquire lock → re-check shouldFire in-lock → write .lastrun → run → finally release); host tick and beat share it, cross-host TOCTOU-safe
   beat.ts                 beat round runner — spawns `pi --name "<loop> · <slot>" -p --approve "<contract>"` (cwd=root, detached own process group); max_minutes timeout → group SIGTERM→3s→SIGKILL
   cli.ts                  pi-loop CLI entry (bin) — beat/run/stop/pause/resume/status/init/watch commands (host spec §4)
   status.ts               collectStatus — per-loop frontmatter summary + .lastrun + next-due + running (lock alive) / paused for `pi-loop status`
   init.ts                 initLoop — scaffold the kit/templates/basic five-piece set (D13 layout: loop/ + root/ + skill/) + SKILL.md skeleton; writes .lastrun = now (first round waits for a natural slot)
 
 kit/                                  pi-loop kit template library + protocol README (consumed by copy, not imported — see Loop section)
-  README.md                       the protocol contract: file layout (incl. host files .lastrun/.round.lock, agent-forbidden), host section (daemon auto / pi-loop beat + crontab, dual-host lock safety, catch-up semantics), L1/L2/L3 levels, breaker + budget rules, GitHub Actions scenario
+  README.md                       the protocol contract: file layout (incl. host files .lastrun/.round.lock, agent-forbidden), host section (宿主自动心跳 / pi-loop beat + crontab, dual-host lock safety, catch-up semantics), L1/L2/L3 levels, breaker + budget rules, GitHub Actions scenario
   templates/basic/               D13 two-level layout — loop/ {LOOP.md, STATE.md, loop-ledger.json} + root/ {loop-constraints.md, loop-budget.md} + skill/ {SKILL.md skeleton, spec §4}; pi-loop init scaffolds from here
   templates/github/loop.yml      GitHub Actions cron heartbeat template (pi -p + community subagent package)
 
@@ -662,7 +671,7 @@ components/
   HomeLanding.tsx           首页内容（宿主剩二：① 桌面 ＋ 占位 tab（居中窄栏 720px，⊞ 面板改居中浮卡）；② 零可用工作区时的移动端整页引导（创建/重启用 + ⚙ 设置逃生口）——移动端 ＋新建任务已直落 composer，两段式仅桌面保留。onSelectSession 走 handleSelectSession 的 C1 分派；onSelectWorkspace 桌面=开家 tab / 移动端=openNewSessionTab；**会话列表由 shell 注入（sessions prop，SSR 预取 + 5s 版本轮询常驻内存——不自取 /api/sessions，修「每次打开 ＋ 最近加载慢」）**。内容：问候语（按时段）+ 大输入卡 + 右上角 ⚙ 设置 + ⊞ 工作区底部面板（完整列表点选=进入；**已停用工作区暗淡行 + 已停用徽章，点击深链设置›工作区预选重启用**；+ 新建/导入，管理入口）+ 最近会话按工作区分组（HomeSessionGroups）；「是否有工作区」看全量列表（全部停用时不得掉进「创建第一个工作区」引导，2026-09 修复）；**⚙ 是零工作区态唯一全局配置入口——没有它，把唯一工作区停用后手机端找不到设置›工作区就无法自救（2026-09 修复）**
   HomeSessionGroups.tsx    全局会话分组列表（按工作区分组：组头点击=打开工作区，chevron 折叠默认全展开不持久化；会话行=共享 SessionRow）。宿主（树形侧栏改版后）：仅移动端 HomeLanding 最近区（过滤空组，不传管理 props）；桌面的会话树在 ProjectSidebar 内直构（复用 groupSessionsByWorkspace + SessionRow，不用本组件）；排序由 lib/home-quick-switch.ts 的 groupSessionsByWorkspace 负责（活跃度降序、空组沉底）
   SessionRow.tsx            会话行共享组件（运行/完成徽章 + Cmd/中键新 tab C1 手势 + 行内归档 + 可选相对时间；hover 只留归档按钮）——HomeSessionGroups 与移动端首页最近区共用
-  HomeNewSession.tsx       首页无主新会话页（B1 原地切换，反馈修订后无定制外壳）：直接渲染普通工作区同构的 ChatWindow 新会话视图（只有 composer，可直接发起对话；返回 = tab 栏首页按钮，activateTab 重置无主页模式）；工作区选择器经 ChatWindow inputLeadingControl → ChatInput leadingControl 槽渲染在 composer 控制行、上传图片按钮左侧（下拉向上展开；旧版挂在 PanelHeader meta 槽会被头部容器裁剪——即「点击无选项」bug 的成因），默认最近活跃（共识 Q11=a），草稿 draftKeyOverride="new:__home__"；首次发送走现有 /api/agent/new（cwd=所选工作区根，daemon 解析装配），onSessionCreated → useAppShellState.handleHomeSessionCreated **原地**落为首页会话聊天（反馈修订：不跳工作区 tab）。首页打开的会话由 useAppShellState.homeSession 承载：两 shell 首页分支渲染 ChatWindow(session=homeSession)，左侧中栏保持首页菜单并在列表里高亮；activateTab（含点首页按钮）重置。无可用工作区时显示创建引导
+  HomeNewSession.tsx       首页无主新会话页（B1 原地切换，反馈修订后无定制外壳）：直接渲染普通工作区同构的 ChatWindow 新会话视图（只有 composer，可直接发起对话；返回 = tab 栏首页按钮，activateTab 重置无主页模式）；工作区选择器经 ChatWindow inputLeadingControl → ChatInput leadingControl 槽渲染在 composer 控制行、上传图片按钮左侧（下拉向上展开；旧版挂在 PanelHeader meta 槽会被头部容器裁剪——即「点击无选项」bug 的成因），默认最近活跃（共识 Q11=a），草稿 draftKeyOverride="new:__home__"；首次发送走现有 /api/agent/new（cwd=所选工作区根，宿主 registry 解析装配），onSessionCreated → useAppShellState.handleHomeSessionCreated **原地**落为首页会话聊天（反馈修订：不跳工作区 tab）。首页打开的会话由 useAppShellState.homeSession 承载：两 shell 首页分支渲染 ChatWindow(session=homeSession)，左侧中栏保持首页菜单并在列表里高亮；activateTab（含点首页按钮）重置。无可用工作区时显示创建引导
   ProjectSidebar.tsx         项目树侧栏（桌面左侧单一侧栏 + 移动端抽屉/平板常驻的宿主，2026-09 改版 + 同月抽屉变体）：顶部导航三行（新建任务⌘N/搜索⌘K/插件&技能）+ 工作区分区（工作区节点整行=展开/折叠（桌面 hover 出 工作区首页/归档 钮；**移动变体 mobileActions = 常显 ＋ 新建会话/🗑 归档**——触屏无 hover）→会话行直挂（默认 5 条 + 显示更多，SessionRow rounded）+ 组尾归档行；折叠持久化 pi-tree-collapsed）+ 树底暗淡行（**已停用工作区：整行可点 + hover ⚙ → 设置›工作区预选重启用（停用后不能从所有面上消失）/ 目录不可用工作区：纯展示**）+ 分区 ＋（新建/导入工作区）+ 底部三入口 strip（设置/模型/Agents → 各自独立配置整页，高亮 = 页粒度 activeConfigPage）；**移动端变体（showModuleRows）：展开的工作区节点下渲染模块行（文件/工作项[capability]/知识库[capability]/Loops 常驻，ModuleRow 两列网格，onOpenModule）**；会话分组复用 lib/home-quick-switch；骨架门控
   PanelHeader.tsx           unified ~36px middle-column panel header (title + back + context actions + mobile ×) + PanelHeaderButton
   SettingsPanel.tsx         the 设置 panel — 移动端专用（2026-09 配置页拆分后 desktop 两栏模式删除）：全行索引 + 内嵌子页（‹设置 返回，归档行仅移动端）；PreferencesPage 也供桌面偏好分区复用
@@ -712,11 +721,11 @@ hooks/
 
 ## Key Design Decisions & Traps
 
-### AgentSession lifecycle (`lib/daemon/rpc-manager.ts` — daemon process)
+### AgentSession lifecycle (`lib/session-host/registry.ts` — Next.js host process)
 - One `AgentSessionWrapper` per session id, keyed in `globalThis.__piSessions`.
-- **Session CREATION is abortable + bounded** (`StartSessionOptions.signal`): `startRpcSession` races creation against the signal (`raceAbort`, `lib/abort-race.ts`) — an already-aborted signal throws immediately, a hung creation (e.g. stuck network call in model resolution) rejects on abort/timeout, and a session that materializes late (after the caller gave up) is destroyed on arrival so no live zombie wrapper stays in the registry. Callers bound it: subagent `runWorker` (parent tool signal + 5-min timeout; failure degrades to a failed WorkerResult, not a throw), kit rounds (`lib/daemon/loop-spawner.ts`, `creationTimeoutSignal` 5-min). Without this, a creation hang pinned the parent's turn, the daemon's `abort` path (which awaits idle), and the running set forever. The start-lock key for NEW sessions is a one-time `__new__<uuid>` — never `""`, which made concurrent creations (parallel subagents) coalesce onto the first session.
-- **Heartbeat monitor — the zombie safety net** (`lib/session-heartbeat.ts` + `startSessionHeartbeatMonitor` in rpc-manager, started from `getRegistry()` init): every 60s (unref'd, daemon-process only) each RUNNING wrapper is checked for time-since-last-activity (any agent event — streaming deltas, tool partials — or inbound command, tracked in `lastActivityAt`). Silent past `STALL_WARN_MS` (5min) → listed in `GET /v1/sessions/running`'s additive `stalled` snapshot and `get_state`'s `stalledMs`; silent past `STALL_KILL_MS` (20min, env `PI_SESSION_STALL_*_MS`) → synthetic `prompt_error` (visible as a chat notice, NOT persisted) then `destroy()` (aborts in-flight prompt, drops registry, closes SSE → badges clear; human resends to resume). Rationale: a false kill costs one resend, a zombie costs a daemon restart (REQ-0026: 4 silent hours). NOT covered: creation-phase hangs (bounded by `StartSessionOptions.signal`/raceAbort above), gate-paused sessions (not `running`, never monitored — human waits can be arbitrarily long), and sessions with a **pending extension UI request** (`hasPendingUiRequests()` — running but human-paused on a confirm/select dialog; exempt like gate-paused, since the dialog is replayed to any reconnecting viewer and stays answerable). The KILL margin exists for QUIET BUILDS: pi's bash tool only emits partials when there IS output, so a legit `npm install`/`mvn` (and a subagent parent waiting on such a child) is genuinely eventless — kill must outlive the longest normal build.
-- The registry lives in the **session daemon** (bin/pi-daemon.js). Its lifecycle no longer follows web hot-reloads — the `globalThis` guard survives daemon-internal restarts of the module graph, and a daemon restart cold-starts sessions from their .jsonl on demand (same revive semantics as commands).
+- **Session CREATION is abortable + bounded** (`StartSessionOptions.signal`): `startRpcSession` races creation against the signal (`raceAbort`, `lib/abort-race.ts`) — an already-aborted signal throws immediately, a hung creation (e.g. stuck network call in model resolution) rejects on abort/timeout, and a session that materializes late (after the caller gave up) is destroyed on arrival so no live zombie wrapper stays in the registry. Callers bound it: subagent `runWorker` (parent tool signal + 5-min timeout; failure degrades to a failed WorkerResult, not a throw), kit rounds (`lib/session-host/loop-spawner.ts`, `creationTimeoutSignal` 5-min). Without this, a creation hang pinned the parent's turn, the host's `abort` path (which awaits idle), and the running set forever. The start-lock key for NEW sessions is a one-time `__new__<uuid>` — never `""`, which made concurrent creations (parallel subagents) coalesce onto the first session.
+- **Heartbeat monitor — the zombie safety net** (`lib/session-host/heartbeat.ts` pure logic + `startSessionHeartbeatMonitor` in registry.ts, started from `getRegistry()` init): every 60s (unref'd) each RUNNING wrapper is checked for time-since-last-activity (any agent event — streaming deltas, tool partials — or inbound command, tracked in `lastActivityAt`). Silent past `STALL_WARN_MS` (5min) → listed in `facade.runningStatus()`'s additive `stalled` snapshot and `get_state`'s `stalledMs`; silent past `STALL_KILL_MS` (20min, env `PI_SESSION_STALL_*_MS`) → synthetic `prompt_error` (visible as a chat notice, NOT persisted) then `destroy()` (aborts in-flight prompt, drops registry, closes SSE → badges clear; human resends to resume). Rationale: a false kill costs one resend, a zombie costs a host restart (REQ-0026: 4 silent hours). NOT covered: creation-phase hangs (bounded by `StartSessionOptions.signal`/raceAbort above), gate-paused sessions (not `running`, never monitored — human waits can be arbitrarily long), and sessions with a **pending extension UI request** (`hasPendingUiRequests()` — running but human-paused on a confirm/select dialog; exempt like gate-paused, since the dialog is replayed to any reconnecting viewer and stays answerable). The KILL margin exists for QUIET BUILDS: pi's bash tool only emits partials when there IS output, so a legit `npm install`/`mvn` (and a subagent parent waiting on such a child) is genuinely eventless — kill must outlive the longest normal build.
+- The registry lives in the **Next.js Node.js server process**. The `globalThis` guard means Next.js route cold-loading and dev hot reload (HMR) can never create a second owner — a reloaded module graph re-attaches to the same `__piSessions` Map, wrappers survive, only code is swapped; a server restart cold-starts sessions from their .jsonl on demand (same revive semantics as commands).
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`).
 - **`destroy()` aborts an in-flight prompt** (`promptRunning || isStreaming → inner.abort()`). Without this, destroying a wrapper mid-run (Loop round timeout/abort) only unsubscribes events and drops the registry entry — the inner prompt keeps executing as an invisible zombie: still writing the .jsonl and spawning subagents for many minutes after every surface (run status, running badge, host probe) says it is gone. The idle-timer path is unaffected (it guards on `isRunning()` and never destroys a busy session), and fork is idle-only, so the abort branch fires only where a kill is intended.
 - Session creation resolves the enclosing **Workspace** (`findWorkspaceForPath`) and attaches its extensions + filtered skills. If none, only the global `subagent` extension is attached.
@@ -735,7 +744,7 @@ hooks/
 Pi stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and `ChatWindow.handleAgentEvent()` (streaming).
 
 ### New session tool preset
-Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[]`). For existing sessions, the active preset is inferred on mount via `get_tools` → `getPresetFromTools()`. When tools are fully disabled (`toolNames = []`), `rpc-manager.ts` passes an empty tool allow-list and forces `agent.state.systemPrompt = ""` after startup/reload/resource discovery.
+Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[]`). For existing sessions, the active preset is inferred on mount via `get_tools` → `getPresetFromTools()`. When tools are fully disabled (`toolNames = []`), `lib/session-host/registry.ts` passes an empty tool allow-list and forces `agent.state.systemPrompt = ""` after startup/reload/resource discovery.
 
 ### Workspace capability registry is the source of truth
 `ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered but currently inert — no factory, no template. The former `overview` capability is RETIRED — the overview dashboard renders unconditionally; manifests still listing `overview` get it stripped on read, see the capability system section.)
@@ -778,33 +787,76 @@ bundles** of the workspace and merges results.
   read (so `kb_search` and L0 always agree on which bundles exist).
 
 ### Subagent is global, not a workspace capability
-The built-in subagent tools (`Agent` / `get_subagent_result` / `steer_subagent`) are attached to **every** session in `rpc-manager.ts` via `createSubagentExtension` (`lib/subagent-extension.ts` + `SUBAGENT_CONTROLLER` wiring in the same file), regardless of workspace or capability. They are intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Profile discovery is cwd-based (`listSubagentProfiles(cwd)` reads `<cwd>/.pi/agents/` flat) and loop sessions run with cwd = workspace root, so workspace profiles load with zero wiring. Timeouts follow upstream semantics — no idle kill, no runtime cap; the daemon heartbeat monitor exempts subagent children (see the Subagent section).
-### The session daemon (C2 redesign): one process owns every AgentSession
+The built-in subagent tools (`Agent` / `get_subagent_result` / `steer_subagent`) are attached to **every** session in `lib/session-host/registry.ts` via `createSubagentExtension` (`lib/subagent-extension.ts` + `SUBAGENT_CONTROLLER` wiring in the same file), regardless of workspace or capability. They are intentionally absent from `WORKSPACE_EXTENSION_FACTORIES` and `ALL_WORKSPACE_CAPABILITIES`. Profile discovery is cwd-based (`listSubagentProfiles(cwd)` reads `<cwd>/.pi/agents/` flat) and loop sessions run with cwd = workspace root, so workspace profiles load with zero wiring. Timeouts follow upstream semantics — no idle kill, no runtime cap; the heartbeat monitor exempts subagent children (see the Subagent section).
+### Session Host (`lib/session-host/`): the Next.js process owns every AgentSession（2026-10 M1 单进程）
 
-The pi-daemon process (`npm run daemon` → `bin/pi-daemon.js` → `lib/daemon/host.ts`) — formerly the "loop host" — is **THE single session-owning daemon**, and a generic host for registered background jobs (`lib/daemon/jobs.ts`). Motivation for the original strangler: the old split — web process and loop host each holding AgentSessions, with the UI needing to answer "who owns session X" in six places (state probe, pin/reprobe, client-side badge merge, host probe, locate bypass, reducer promotion) — accreted a patch cluster that this redesign eliminates at the source. Strangler phases:
+The pi-daemon process is **GONE** — every session, subagent child and kit loop round runs inside the Next.js Node.js
+server. `instrumentation.ts` boots the host fire-and-forget (`ensureHostBooted()`, `lib/session-host/background.ts`);
+`lib/daemon/`、`lib/session-daemon/`、`lib/agent-proxy.ts`、`bin/pi-daemon.js`、`bin/load-env-local.js` 与 `npm run
+daemon` 已删除；原 daemon HTTP 面的所有调用方（/api/agent/** + SSE、/api/subagents/[id]、会话生命周期路由、
+project-trust、session-archive、session-payload + SSR 预取、loop run/stop）如今全部直连进程内 facade。历史：该
+单进程形态是 C2「daemon 单一会话宿主」strangler 的终态——两进程时代为「谁是会话 X 的 owner」在六处打的补丁簇
+（state probe / pin-reprobe / badge merge / host probe / locate bypass / reducer promotion）随 proxy 层一起消失。
 
-- **Phase 0 (done)**: all outbound/inbound channels removed (feishu/wecom/notify/exporters). The daemon surface is now purely sessions (loop heartbeats are a DaemonJob, not a route).
-- **Phase 1 (done)**: daemon command surface + sidecar lifecycle (below). Web routes still own interactive sessions locally — nothing flipped yet.
-- **Phase 2**: flip `/api/agent/new`, `/api/agent/[id]` (GET/POST), `/api/agent/[id]/events`, and the session lifecycle routes to pure proxies over the daemon client. The pin/reprobe/loop-badge-merge hacks retire here. The web proxy for create-session must call `allowFileRoot(cwd)` with the daemon's returned cwd (the files/git routes' allow-list lives in the web process).
-- **Phase 3 (done)**: the web-side session registry is gone — no `app/`/`components/` code imports `lib/daemon/rpc-manager` (its header now declares it daemon-process-only; `notifyRunningChange` is module-private). The probe-404-fallback double-writer race is structurally impossible: the web process never constructs an AgentSession, so it cannot race the daemon for a .jsonl.
+- **`registry.ts`** — 单一会话宿主：`AgentSessionWrapper` + `startRpcSession` + subagent controller 单例
+  （`globalThis.__piSubagentController`）。**globalThis 单例**：registry/start-locks/running-listeners 全挂
+  `globalThis`，Next.js 路由冷加载与 dev HMR 重载模块图后重新附着同一个 Map——**热重载永不出第二个 owner**（HMR
+  语义：wrapper 存活，只换代码）；服务器重启后按 .jsonl 冷启动 revive（与命令路径同一语义）。routes 不直接 import
+  本模块——一律经 facade（错误→状态映射与冷 revive 语义归 facade 所有）。
+- **`facade.ts`** — 类型化进程内 facade：`createSession/sendCommand/probeSession/destroySession/
+  autoNameSession/busyForCwd/reloadCwdSessions/liveSessions/runningStatus/getSubagentRunStatus/controlSubagent`；
+  `SessionHostError(.status)` 负责错误→HTTP 映射。live-first + cold-start-from-.jsonl revive（旧 daemon
+  `/v1/sessions` 面的进程内移植；wire 字段名 `liveInDaemon` 为客户端兼容保留，语义 = 「宿主注册表里有它」）。
+- **`sse.ts`** — 进程内 Web-stream SSE（`serveSessionEventStream`/`serveRunningEventStream`，外接入
+  `openSessionEventStream`）：connected 帧先行、30s 心跳注释、wrapper destroy 即断流（`onDestroy(cleanup)`）、
+  `req.signal` 只取消订阅不碰会话。慢客户端 stall 上限是 **drain-aware** 的：`ByteLengthQueuingStrategy({
+  highWaterMark: SSE_STALL_BYTES_DEFAULT /* 1MB 常量 */ })` + `desiredSize <= 0` —— 只按**未排水字节**判死，健康
+  观看者无论累计流过多少数据都不会被误切。
+- **`heartbeat.ts`** — stall classify/warn/kill 纯逻辑（warn 5min / kill 20min，env `PI_SESSION_STALL_*_MS`；
+  语义见上面 AgentSession lifecycle 节）。
+- **`jobs.ts`** — `HostJob {id,start,stop}` + `HostJobRegistry`，静态装配、无运行时发现。
+- **`loop-spawner.ts`** — `LoopKitSpawner`（HostJob `loop-kit-heartbeats`，30s tick，无条件注册，deps 可注入）。
+  **恢复门禁**：起轮前查 `listPendingExecutionRecords` —— 未确认中断记录在场则该 loop 不起新轮。**轮登记**：
+  `markActive/clearActive` 写入 background 的 active-round 表，关停据此决定给哪些轮写中断记录。reaper 依赖默认
+  **NO-OP**——共享宿主禁止按 cwd 收割（见下条 reaping 口径）；beat CLI 自带收割不受影响。
+- **`background.ts`** — `ensureHostBooted`（globalThis 单次装配：**老 daemon 迁移守卫** → LoopKitSpawner →
+  shutdown handlers；`PI_TEST_NO_BACKGROUND=1` 测试缝同时跳过守卫与默认 spawner）+ 轮登记原语
+  （`markRoundActive/clearRoundMark/listActiveRounds`）+ `registerShutdownHandlers`/`buildShutdownPlan`。
+  **关停序列**（SIGINT/SIGTERM）：停 spawner（不起新轮）→ 快照 running（必须在 destroy 前取——destroy 后
+  isRunning 恒 false）→ destroy **全部** wrapper → 为仍在跑的轮写中断记录（写失败不吞销毁流程，单条只记日志）→
+  exit 0。不承诺恢复内存中的模型调用现场，重启后按文件记录接续。**迁移守卫**：boot 时探测 `PI_DAEMON_URL`
+  （默认 `127.0.0.1:30142`，该 env 仅此一处幸存）的 `/health`——健康且 `service === "pi-daemon"` 说明旧 daemon
+  仍持有会话，拒绝启动（console error + `exit(1)`），杜绝双写会话文件；spawner 必须在守卫放行后才启动（注定
+  夭折的 boot 不许真起轮）。
 
-**Daemon command surface (`lib/daemon/http-sessions.ts`, mounted by `lib/daemon/host.ts`)**: `POST /v1/sessions` (create + optional pre-selected model/thinking/tools + optional first command — mirrors `/api/agent/new` including the one-time `__new__<uuid>` key), `POST /v1/sessions/:id/commands` (generic passthrough to `wrapper.send` — ANY command incl. extension UI responses; live-or-cold-started exactly like `/api/agent/[id]` POST), `GET /v1/sessions/running` (`{ids}` — the registry is keyed by real session id and contains interactive sessions + kit loop rounds, so this one set is the complete running answer; community subagent children are separate OS processes, not registry sessions, so they appear only on disk), plus the pre-existing `GET /v1/sessions/:id` probe and `/v1/sessions/:id/events` SSE. Client methods: `daemonClient.createSession/sendSessionCommand/runningSessionIds` (`lib/daemon/client.ts`).
-**Sidecar lifecycle (`lib/session-daemon/sidecar.ts`)**: `ensureSessionDaemonStarted()` — probe `/health` (attach if healthy), else spawn `node bin/pi-daemon.js` detached+unref'd and wait (≤15s) for health. Wired fire-and-forget from `instrumentation.ts` (`PI_SESSION_DAEMON_DISABLED=1` opts out). In-flight guard on `globalThis` dedupes concurrent callers and retries after failure. Guards: `spawnableDaemonUrl` refuses to spawn for non-local `PI_DAEMON_URL` (a remote URL means the daemon is managed elsewhere); `sidecarSpawnEnv` translates the URL → the child's `PI_DAEMON_HOST`/`PI_DAEMON_PORT` (explicit env wins) — without this a URL-only config spawns a daemon on the default port while the web polls the URL's port forever. Spawn races resolve quietly: the EADDRINUSE loser exits 0 (`bin/pi-daemon.js`). The "web owns no unattended timers" rule is preserved — daemon timers live in the daemon process and survive web restarts; the web only ever re-attaches by port probe.
+**执行中断记录与恢复门禁（`lib/loops/executions.ts`）**：关停为每个在跑轮写 `ExecutionRecord`（kind
+`loop-round`，runId/loopName/sessionId/workspacePath/host{pid,hostname}/startedAt/stoppedAt，`stopResult:
+interrupted-on-shutdown | recovered-auto | recovered-manual | confirmed-dead`，needsAttention，diagnostic）——
+tmp+rename 原子写。`listPendingExecutionRecords` 是 fire 门禁的数据源；管理面 `GET …/loops` 附带 `interruptions`
+字段呈现，`POST …/loops/[name]/recover` = `detectSurvivingRoundProcesses` **只读探测**（ppid=1 + build/shell 命令
++ cwd ∈ workspace）——残留进程在场 → 409（带 pid，manual 也不放行）；干净 → `resolveExecutionRecords`
+（manual=true 记 recovered-manual/actor=user，否则 recovered-auto）解除门禁。
 
-### Loop heartbeats run in the daemon; the web layer adds a management surface over the existing session surface
-`npm run daemon` starts the pi-daemon (`lib/daemon/host.ts`). The web server never starts loop timers (`instrumentation.ts`) — heartbeats are daemon-only. The web layer's loop surface (`app/api/workspaces/[id]/loops/**` + `lib/loops/`) is file-reads (`packages/pi-loop/status.ts.ts`) plus operations that reuse the **existing daemon session surface**: 「立即跑一轮」= `POST /v1/sessions` two-step create + prompt (manual round, no D9 auto-archive); 「终止本轮」= `DELETE /v1/sessions/:id` + package reap + lock release — **the daemon gains no loop routes**. The daemon hosts background jobs via the `DaemonJob` registry (`lib/daemon/jobs.ts`): the kit spawner (`LoopKitSpawner` → `loop-kit-heartbeats`, **unconditional** — the `PI_LOOP_KIT` gate was removed together with the v3 engine) is registered alone. Kit round sessions are normal one-shot daemon sessions — indistinguishable from user chats in the interactive registry; their run record is `STATE.md` + the workspace git log. The daemon is not the only host: standalone roots (no pi-web) get heartbeats from the `pi-loop` CLI's `beat` (any external cron; see the Loop section) — dual-host coexistence is safe because both run the same `packages/pi-loop/fire.ts.ts` sequence and mutual-exclude via `loops/<name>/.round.lock`. `pi-loop run` / `pi-loop stop` CLI commands remain for standalone hosts (host spec §4/§10); the web run/stop routes are their pi-web-side counterparts over daemon-held rounds.
+### Loop heartbeats run in the Next.js host; the web layer adds a management surface over the facade
+`instrumentation.ts` → `ensureHostBooted()` 装配 `LoopKitSpawner`（HostJob `loop-kit-heartbeats`，**无条件注册**——
+`PI_LOOP_KIT` 旗子已随 v3 引擎一起删除）。web 层 loop 面（`app/api/workspaces/[id]/loops/**` + `lib/loops/`）=
+文件读取（`packages/pi-loop/status.ts`）+ 经 facade 的操作（「立即跑一轮」两步建会话、无 D9 自动归档；「终止本轮」
+facade destroy + 释放锁）——**宿主没有 loop 专属路由**。kit 轮会话是一次性普通宿主会话——与用户会话同注册表，运行
+记录 = `STATE.md` + workspace git log。宿主不是唯一心跳源：standalone 根（无 pi-web）由 `pi-loop` CLI 的 `beat`
+驱动（任意外部 cron，见 Loop 章）——双宿主并存安全：同一 `packages/pi-loop/fire.ts` 序列 + `loops/<name>/.round.lock`
+互斥。`pi-loop run`/`pi-loop stop` CLI 仍服务 standalone 宿主；web 的 run/stop 路由是宿主持有轮的 pi-web 侧对应物。
 
-**Watching a live session (any session — interactive or kit loop round) is one mechanism now (C2).** The daemon owns every session; `/api/agent/[id]/events` is a pure pipe onto `/v1/sessions/:id/events`, which resolves via `findLiveSession` (the ordinary registry, where kit rounds live alongside interactive sessions) and cold-starts idle sessions for viewing. (Community subagent children run as separate pi processes — they're watched from their on-disk `.jsonl`, cold, not via live SSE.) Two subtleties remain:
+**Watching a live session (any session — interactive, subagent child or kit loop round) is one mechanism.** The host owns every session; `/api/agent/[id]/events` = `openSessionEventStream`（`lib/session-host/sse.ts`）— live-first（`getRpcSession` 命中即流式接上），miss 则按 .jsonl 冷启动一个 wrapper 供观看（idle timer 稍后回收）；kit 轮与交互会话同注册表，同一解析路径。(已删除的 community 包子会话曾是独立 OS 进程、只能冷看盘上 `.jsonl`；builtin 子会话是注册表会话，可 live 观看。) Two subtleties remain:
 
-1. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — a daemon session that is **alive but idle** (between turns, e.g. a gate-paused kit round session or any warm idle session) appears in NO running set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (so a resumed turn's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `liveInDaemon` and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the daemon no longer holds it).
+1. `globalAgentEvents.pinSession(sid)` (`lib/sse/global-agent-events.ts`) — a host session that is **alive but idle** (between turns, e.g. a gate-paused kit round session or any warm idle session) appears in NO running set, and `syncRunningIds` **disconnects** any source not in that set. A pinned sid is exempt from the sweep and stays connected while viewed (so a resumed turn's `agent_start` arrives live). `useAgentSession` pins on mount when the state response says `liveInDaemon` (wire field name kept for client compat — it now means "in the host registry") and unpins the previous session on switch/unmount. On a fatal SSE error a pinned session re-probes the state route before retrying (bounded retries; unpin when the host no longer holds it).
 2. The event reducer promotes `agentPhase` to `running_tools` on a `tool_execution_update` partial even without a prior `tool_execution_start` — a viewer joining mid-tool-run never saw the start event, and the streamed partials are the only proof the tool is running. Without this the phase sits on `waiting_model` (「思考中」) for the whole multi-minute run.
 
-**Opening a subagent child by click goes through `/api/sessions/[id]/locate`, never the cached `/api/sessions` list.** `handleOpenSessionViewer` resolves the child id via locate (daemon probe first — then a forced disk scan that bypasses the 30s list cache). The old list lookup silently no-op'd for a freshly spawned running child (it isn't in the cached list yet), which felt like "you must wait for the subagent to finish before you can open it". Locate also enriches a probe-hit from disk (real firstMessage/stats for the tab label, keeping the probe's authoritative path/cwd). (Community children are cold-opened from disk — the parent's result card jump works the same way.)
+**Opening a subagent child by click goes through `/api/sessions/[id]/locate`, never the cached `/api/sessions` list.** `handleOpenSessionViewer` resolves the child id via locate (registry probe via `facade.probeSession` first — then a forced disk scan that bypasses the list cache). The old list lookup silently no-op'd for a freshly spawned running child (it isn't in the cached list yet), which felt like "you must wait for the subagent to finish before you can open it". Locate also enriches a probe-hit from disk (real firstMessage/stats for the tab label, keeping the probe's authoritative path/cwd).
 
-**Running badges come from one server-side set.** `/api/agent/running/events` pipes the daemon's `/v1/sessions/running/events`; because the daemon registry holds interactive sessions + kit loop rounds alike (keyed by real session id), the sidebar/tab badges need no client-side merge anymore (the old `loopRunningSnapshot` merge existed only because the web set could never contain Loop sessions). Subagent children never show a running badge — they're not daemon sessions.
-**The daemon's session SSE ends on destroy.** `serveSessionSse` registers `session.onDestroy(cleanup)` — when a wrapper is destroyed (kit round `max_minutes` timeout, session delete/teardown) the stream closes, the browser's pinned EventSource fails fatally, `reprobePinned` sees the daemon no longer holds the session, unpins and clears the badge. Without this a destroyed round leaves the pinned runtime `agentRunning=true` forever (no `agent_end` is ever emitted after destroy), spinning the tab badge indefinitely.
+**Running badges come from one server-side set.** `/api/agent/running/events` = `serveRunningEventStream`（进程内 `subscribeRunningSessions`，快照先行）; because the host registry holds interactive sessions + subagent children + kit loop rounds alike (keyed by real session id), the sidebar/tab badges need no client-side merge anymore (the old `loopRunningSnapshot` merge existed only because the web set could never contain Loop sessions). Subagent children never show a running badge — the sidebar/tab strip hide them by prefix (`lib/subagent-child.ts`), so no row renders one even though their id may be in the set.
+**The host's session SSE ends on destroy.** `serveSessionEventStream` registers `session.onDestroy(cleanup)` — when a wrapper is destroyed (kit round `max_minutes` timeout, session delete/teardown) the stream closes, the browser's pinned EventSource fails fatally, `reprobePinned` sees the host no longer holds the session, unpins and clears the badge. Without this a destroyed round leaves the pinned runtime `agentRunning=true` forever (no `agent_end` is ever emitted after destroy), spinning the tab badge indefinitely.
 
-**Orphan-process reaping on kit-round timeout.** `session.destroy()` — reached from the spawner's `max_minutes` timeout path — does **not** kill the bash subprocesses a round spawned via subagents: pi-coding-agent's bash tool spawns each shell `detached` (own process group) and only sweeps its tracked detached children on a **process-level** SIGHUP/SIGTERM, which a never-exiting daemon never sends. Those `bash → npm → node` trees would otherwise orphan into launchd (PID 1) still holding `node_modules` handles (which is why `rm -rf` then fails and they sit at ~100% CPU). So `runKitRound` (`lib/daemon/loop-spawner.ts`) calls `reapOrphanedRoundProcesses` (`packages/pi-loop/reap.ts.ts`, scoped to the round's workspace cwd) after destroying the session: it SIGTERM→SIGKILL every pid in the round's trees — discovered as (a) direct children of the daemon whose cwd is in the workspace, plus (b) launchd-reparented (ppid 1) build/shell processes whose cwd is in the workspace. Pure parsers (`parsePgrepChildren`/`parseLsofCwd`/`parsePsRows`/`isCwdInWorkspace`/`isBuildOrShellCommand`) are tested. Scoped by workspace cwd so concurrent rounds in other workspaces are untouched; never throws (cleanup must not break the round flow — a reap failure is logged, never masks the round error).
+**Orphan processes after a kit-round kill — 定向杀，共享宿主禁 cwd 收割。** `destroy()` in the shared host is a **targeted** kill: the SDK destroy→dispose chain aborts bash and kills each execution's process group（pi 的 bash 工具把 shell 按进程组 detached spawn，进程级信号由 SDK 负责递达），所以 spawner 的 `max_minutes` 超时路径按设计不留孤儿。cwd 收敛收割器 `reapOrphanedRoundProcesses`（`packages/pi-loop/reap.ts`，SIGTERM→SIGKILL 该 workspace cwd 下的一切 build/shell 进程）因此是 spawner 的**默认 NO-OP 注入点**：同一 workspace 里并行着交互会话/其它轮的进程，按 cwd 杀会误伤它们；注入点留给测试/独立宿主。beat CLI 保留自带收割（standalone 根里只有它自己的轮）。漏网的残余（如硬崩溃）由恢复期**只读探测** `detectSurvivingRoundProcesses`（`lib/loops/executions.ts`：ppid=1 + build/shell 命令 + cwd ∈ workspace）上报为 409 pid，绝不静默击杀。
 
 ### Session changed-files quick access (SessionChangedFiles)
 "本会话改动 N 个文件" — a compact icon+count button at the end of the ChatInput controls row (right of the sound toggle; on mobile it lives inside the "更多控件" pill; not rendered in `embedded` view mode), opening a slide-in drawer (full-screen list on mobile). **Data source is the message stream, not git**: `deriveSessionChangedFiles` (`lib/session-changed-files.ts`, pure + tested) walks write/edit toolCalls (incl. `isEditToolName` variants) plus the streaming message for **real-time** counting. Subagent children no longer contribute — community-package children are separate pi processes whose file operations never appear in the parent stream. Scope is the **whole session file** (not just the current branch path), deduped **most-recent-first** with a ×N badge; bash-written files (`cat >`, `git commit`) are deliberately not counted. Clicking an entry → `openFile` (existing file-tab pipeline; `/api/files` allow-list already covers session cwds). The list intentionally **survives commits** — it answers "what did this session touch", not "what is uncommitted" (that's the Explorer 改动 tab). Drawer state is not persisted; switching sessions closes it.
@@ -822,7 +874,7 @@ On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming ==
 pi emits `compaction_start` / `compaction_end`; `handleAgentEvent` handles exactly these (the old `auto_compaction_*` spellings are gone — pi's version is pinned by this repo). Manual compact is a blocking POST — the button stays disabled until the response returns.
 
 ### Running state SSE + reconciliation
-- The sidebar listens to `/api/agent/running/events` — a pure pipe onto the daemon's running-id SSE (the complete set: interactive + children + kit rounds), so running badges update without polling.
+- The sidebar listens to `/api/agent/running/events` — the in-process running-id SSE (`lib/session-host/sse.ts`, the complete set: interactive + children + kit rounds), so running badges update without polling.
 - `useAgentSession` treats per-session SSE as primary, but while a run is active it periodically calls `GET /api/agent/[id]` and reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 
@@ -837,14 +889,14 @@ pi emits `compaction_start` / `compaction_end`; `handleAgentEvent` handles exact
 - `/api/files` and `/api/git/*` are intentionally not general filesystem browsers. Allowed roots come from session cwds, their resolved project roots, workspace paths, `~/pi-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - `/api/cwd/validate`, `/api/default-cwd`, `/api/worktrees`, and `/api/workspaces` (GET/POST) call `allowFileRoot()` when they make a new location browsable.
 
-### Local pi data home (`.env.local` + `bin/load-env-local.js`)
+### Local pi data home (`.env.local`)
 The pi data home is env-driven everywhere: `PI_CODING_AGENT_DIR` (SDK `getAgentDir()` — sessions, settings, models,
 skills, agents, auth, importer credentials, subagent registry), `PI_WORKSPACES_DIR` (`workspacesRoot()`),
 `PI_WORKSPACE_INDEX_FILE`. Docker deployments already set these (docker-compose.yml); `scripts/adopt-pi-home.mjs`
 pointed them at `<repo>/.pi/` for local dev. Wiring rules that must NOT regress:
-- **`bin/pi-daemon.js` self-loads `.env.local` at boot** (before anything resolves paths) — the daemon is spawned as a
-  web sidecar, via `npm run daemon`, or by hand, and only the sidecar inherits a web process whose Next runtime
-  already loaded `.env.local`; the loader (`bin/load-env-local.js`, dotenv-lite) NEVER overrides values already in
+- **`.env.local` is loaded by Next.js itself** — single process (2026-10 M1): every env consumer (session host,
+  spawner, workspaces) lives in the one server process, so there is no second boot path that could miss it (the old
+  `bin/load-env-local.js` self-loader died with `bin/pi-daemon.js`). Next.js NEVER overrides values already in
   `process.env`, so explicit environments (docker-compose, shell) always win.
 - **`.pi/agent` + `.pi/workspaces` are gitignored and carry secrets** (auth tokens, importer credentials, 19G of
   cloned repos). `.pi/workspace.yaml` (the pi-web workspace manifest) and `.pi/workspace-templates/` stay tracked.
