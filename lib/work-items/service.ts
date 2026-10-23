@@ -390,9 +390,10 @@ export async function readWorkItem(workspacePath: string, key: string): Promise<
 
 export async function listWorkItems(
   workspacePath: string,
-): Promise<{ items: WorkItemRecord[]; archivedItems: WorkItemRecord[]; invalid: InvalidWorkItem[] }> {
+): Promise<{ items: WorkItemRecord[]; archivedItems: WorkItemRecord[]; trashedItems: WorkItemRecord[]; invalid: InvalidWorkItem[] }> {
   const items: WorkItemRecord[] = [];
   const archivedItems: WorkItemRecord[] = [];
+  const trashedItems: WorkItemRecord[] = [];
   const invalid: InvalidWorkItem[] = [];
   for (const [directory, prefix] of [["requirements", "REQ-"], ["bugs", "BUG-"]] as const) {
     const root = workItemRoot(workspacePath, directory);
@@ -425,11 +426,35 @@ export async function listWorkItems(
       }
     }
   }
+  // 回收站清单（M2 T9 恢复面，T8 deferred 项）：同 read-only-item.yaml 纪律；
+  // trash 根不存在是常态（从未删除过）→ 静默跳过。坏墓碑计入 invalid，不阻塞。
+  const trashRoot = join(workspacePath, ".pi", "trash", "work-items");
+  try {
+    const trashEntries = await readdir(trashRoot, { withFileTypes: true });
+    for (const entry of trashEntries) {
+      if (!entry.isDirectory()) continue;
+      const path = join(trashRoot, entry.name);
+      const key = workItemKeyFromDirectoryName(entry.name);
+      try {
+        const item = parseWorkItem(parse(await readFile(join(path, "item.yaml"), "utf8")));
+        trashedItems.push(item);
+      } catch (error) {
+        invalid.push({
+          path,
+          key: key ?? entry.name,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  } catch {
+    // no trash root — nothing trashed yet
+  }
   const byUpdated = (left: WorkItemRecord, right: WorkItemRecord) =>
     right.updatedAt.localeCompare(left.updatedAt);
   items.sort(byUpdated);
   archivedItems.sort(byUpdated);
-  return { items, archivedItems, invalid };
+  trashedItems.sort(byUpdated);
+  return { items, archivedItems, trashedItems, invalid };
 }
 
 export type ExternalLookupOutcome =

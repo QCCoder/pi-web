@@ -5,9 +5,12 @@ import type { InvalidWorkItem, WorkItemRecord } from "./types";
  * keyed by workspaceId, so a mutation invalidating from either host is seen
  * by both. Pure data layer — no fetch, no timers, no DOM; the react hook
  * (hooks/useWorkItems.ts) owns fetching and polling on top of this store. */
+/** trashedItems (M2 T9): .pi/trash/work-items 墓碑清单——回收站范围的列表与
+ * 「从回收站恢复」入口数据源（恢复后走 restore-from-trash 路由）。 */
 export interface WorkItemsSnapshot {
   items: WorkItemRecord[];
   archivedItems: WorkItemRecord[];
+  trashedItems: WorkItemRecord[];
   invalid: InvalidWorkItem[];
   fetchedAt: number;
 }

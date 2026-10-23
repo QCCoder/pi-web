@@ -23,8 +23,8 @@ export interface WorkItemsFilters {
   source: "all" | "manual" | string;
   /** 仅看 阻塞（status blocked）或 待确认（需求/计划确认阶段）的项。 */
   flaggedOnly: boolean;
-  /** 列表范围：活动 | 归档。回收站随 T9 的恢复面接入。 */
-  scope: "active" | "archived";
+  /** 列表范围：活动 | 归档 | 回收站（T9 恢复面：只读 + 「从回收站恢复」）。 */
+  scope: "active" | "archived" | "trash";
 }
 
 export function defaultWorkItemFilters(): WorkItemsFilters {
@@ -45,7 +45,7 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T | und
 
 const TYPES = ["all", "requirement", "bug"] as const;
 const PRIORITIES = ["all", "P0", "P1", "P2", "P3"] as const;
-const SCOPES = ["active", "archived"] as const;
+const SCOPES = ["active", "archived", "trash"] as const;
 const ALL_PHASES = [
   "all",
   "intake", "analysis", "requirement_approval", "design", "plan_approval",

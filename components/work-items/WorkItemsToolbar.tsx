@@ -7,8 +7,9 @@ import type { WorkItemsFilters } from "./work-item-queries";
 
 /**
  * 列表/看板共享的筛选栏（spec §6.2）：搜索、类型、阶段、优先级、来源、
- * 阻塞·待确认、活动|归档（回收站随 T9 的恢复面接入）。值由 WorkItemsPage
- * 持有并按工作区持久化（pi-work-items-filters:<wsId>）；本组件只发 patch。
+ * 阻塞·待确认、活动|归档|回收站（T9 恢复面：回收站范围只读 + 详情侧恢复）。
+ * 值由 WorkItemsPage 持有并按工作区持久化（pi-work-items-filters:<wsId>）；
+ * 本组件只发 patch。
  */
 
 const ALL_PHASES: WorkItemPhase[] = [
@@ -35,6 +36,7 @@ export function WorkItemsToolbar({
   sources,
   activeCount,
   archivedCount,
+  trashedCount,
 }: {
   filters: WorkItemsFilters;
   onChange: (patch: Partial<WorkItemsFilters>) => void;
@@ -42,8 +44,10 @@ export function WorkItemsToolbar({
   sources: string[];
   activeCount: number;
   archivedCount: number;
+  /** 回收站条目数（T9 恢复面）。 */
+  trashedCount?: number;
 }) {
-  const scopeButton = (scope: "active" | "archived", label: string) => (
+  const scopeButton = (scope: "active" | "archived" | "trash", label: string) => (
     <button
       key={scope}
       type="button"
@@ -167,6 +171,7 @@ export function WorkItemsToolbar({
       >
         {scopeButton("active", `活动 ${activeCount}`)}
         {scopeButton("archived", `归档 ${archivedCount}`)}
+        {scopeButton("trash", `回收站 ${trashedCount ?? 0}`)}
       </div>
     </div>
   );

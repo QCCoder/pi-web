@@ -135,9 +135,14 @@ test("parseStoredWorkItemFilters: valid JSON hydrates, garbage falls back to def
   assert.deepEqual(parseStoredWorkItemFilters(JSON.stringify(filters)), filters);
   assert.deepEqual(parseStoredWorkItemFilters("not json"), defaultWorkItemFilters());
   assert.deepEqual(parseStoredWorkItemFilters(null), defaultWorkItemFilters());
-  // 未知枚举值按默认处理（老版本存储 / 手改 localStorage）
+  // 未知枚举值按默认处理（老版本存储 / 手改 localStorage）——"trash" 自 T9
+  // 起是合法 scope（回收站恢复面），改用真正未知的值当反例。
   assert.deepEqual(
-    parseStoredWorkItemFilters(JSON.stringify({ type: "epic", priority: "P9", scope: "trash", view: 1 })),
+    parseStoredWorkItemFilters(JSON.stringify({ type: "epic", priority: "P9", scope: "bogus", view: 1 })),
     defaultWorkItemFilters(),
+  );
+  assert.deepEqual(
+    parseStoredWorkItemFilters(JSON.stringify({ scope: "trash" })),
+    { ...defaultWorkItemFilters(), scope: "trash" },
   );
 });

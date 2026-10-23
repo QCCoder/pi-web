@@ -30,6 +30,7 @@ export interface UseWorkItemsResult {
 type WorkItemsPayload = {
   items?: WorkItemRecord[];
   archivedItems?: WorkItemRecord[];
+  trashedItems?: WorkItemRecord[];
   invalid?: InvalidWorkItem[];
 };
 
@@ -44,6 +45,7 @@ async function fetchWorkItemsSnapshot(workspaceId: string): Promise<FetchResult>
       snapshot: {
         items: data.items ?? [],
         archivedItems: data.archivedItems ?? [],
+        trashedItems: data.trashedItems ?? [],
         invalid: data.invalid ?? [],
         fetchedAt: Date.now(),
       },

@@ -4,13 +4,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWorkItems } from "@/hooks/useWorkItems";
 import { buildWorkItemsPageUrl } from "@/lib/work-items-page-url";
 import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
-import { formatRelativeTime } from "@/lib/format-time";
-import type { WorkItemRecord } from "@/lib/work-items/types";
+import type {
+  WorkItemDetail,
+  WorkItemImportOutcome,
+} from "@/lib/work-items/types";
 import { PanelHeader } from "../PanelHeader";
 import { WorkItemsToolbar } from "./WorkItemsToolbar";
 import { WorkItemsList } from "./WorkItemsList";
 import { WorkItemsBoard } from "./WorkItemsBoard";
-import { PHASE_LABELS, TYPE_LABELS } from "./work-item-phases";
+import { WorkItemDetailView } from "./WorkItemDetailView";
+import { WorkItemCreateForm, type WorkItemCreateFormValues } from "./WorkItemCreateForm";
+import { responseJson, uploadWorkItemAttachments } from "./work-item-api";
 import {
   defaultWorkItemFilters,
   filterWorkItems,
@@ -20,15 +24,17 @@ import {
 } from "./work-item-queries";
 
 /**
- * 中央工作项管理整页（M2 T8，spec §6.1/§6.2）：页头（工作区选择器 + 列表|看板
- * 分段 + ＋新建）+ 共享筛选栏 + 列表/看板 + 详情占位区（T9 接入完整详情）。
+ * 中央工作项管理整页（M2 T8 页骨架 + T9 详情/创建/回收站接入，spec
+ * §6.1/§6.2/§7）：页头（工作区选择器 + 列表|看板 分段 + ＋新建）+ 共享筛选栏
+ * （活动|归档|回收站）+ 列表/看板 + 详情面板（WorkItemDetailView：概况/设计/
+ * 证据/动作条/审计）。
  *
  * 页面身份显式绑定 props.workspaceId（spec §6.1：不用 activeWorkspace 代替，
  * 防止打开另一工作区的管理页时误写项目）。视图/筛选按工作区持久化：
  * `pi-work-items-view:<wsId>`、`pi-work-items-filters:<wsId>`。数据来自共享
- * store 的 useWorkItems（与右坞快捷面板同缓存）；选中项变化由页面自己 replace
- * URL（buildWorkItemsPageUrl，不埋历史陷阱）。移动端宿主由 T10 接入——本组件
- * 全响应式布局，不写死桌面宽度。
+ * store 的 useWorkItems（与右坞快捷面板同缓存）；mutation 成功统一走
+ * invalidate()。选中项变化由页面自己 replace URL（buildWorkItemsPageUrl，不埋
+ * 历史陷阱）。移动端宿主由 T10 接入——本组件全响应式布局，不写死桌面宽度。
  */
 
 type WorkItemsView = "list" | "board";
@@ -39,6 +45,9 @@ interface WorkItemsPageProps {
   initialItemKey?: string | null;
   /** 「查看会话」→ locate 打开聊天 tab（关闭中央页）。 */
   onOpenConversation: (sessionId: string) => void;
+  /** 执行中断「去处理」（T9，spec §5.4）→ 宿主打开 Loops 面板（T10 接
+   *  openRailModule(LOOPS_TAB_ID) 同款目的地）。 */
+  onOpenLoopsRecovery?: () => void;
   /** initialItemKey 已消费（宿主清 workItemsItemKeyRef）。 */
   onConsumedInitialItem?: () => void;
   /** ✕ 关闭中央页。 */
@@ -167,67 +176,11 @@ function HeaderWorkspaceSelector({
   );
 }
 
-function DetailPlaceholder({
-  item,
-  onOpenConversation,
-}: {
-  item: WorkItemRecord | null;
-  onOpenConversation: (sessionId: string) => void;
-}) {
-  if (!item) {
-    return (
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12.5 }}>
-        选择工作项
-      </div>
-    );
-  }
-  return (
-    <div style={{ flex: 1, overflowY: "auto", padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: item.type === "bug" ? "#dc2626" : "var(--accent)" }}>
-          {item.key}
-        </span>
-        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{TYPE_LABELS[item.type]}</span>
-        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>·</span>
-        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{PHASE_LABELS[item.phase]}</span>
-        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>{item.priority}</span>
-      </div>
-      <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", lineHeight: 1.5 }}>{item.title}</div>
-      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>更新于 {formatRelativeTime(item.updatedAt)}</div>
-      {item.conversations.length > 0 ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>关联会话 {item.conversations.length}</span>
-          <button
-            type="button"
-            onClick={() => onOpenConversation(item.conversations[item.conversations.length - 1])}
-            style={{
-              height: 26,
-              padding: "0 10px",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              background: "var(--bg)",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 11.5,
-              whiteSpace: "nowrap",
-            }}
-          >
-            查看会话
-          </button>
-        </div>
-      ) : null}
-      {/* T9 接入完整详情（概况/原始描述/附件/验收/设计/验证/历史/动作条）。 */}
-      <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 8 }}>
-        完整详情视图即将上线（当前为占位）。
-      </div>
-    </div>
-  );
-}
-
 export function WorkItemsPage({
   workspaceId,
   initialItemKey,
   onOpenConversation,
+  onOpenLoopsRecovery,
   onConsumedInitialItem,
   onClose,
   onOpenWorkItemsPage,
@@ -236,11 +189,18 @@ export function WorkItemsPage({
 }: WorkItemsPageProps) {
   const workspace = workspaces.find((w) => w.id === workspaceId) ?? null;
   const hasCapability = Boolean(workspace?.capabilities.includes("work-items"));
-  const { snapshot, loading, error, refresh } = useWorkItems(workspace && hasCapability ? workspaceId : null);
+  const { snapshot, loading, error, refresh, invalidate } = useWorkItems(workspace && hasCapability ? workspaceId : null);
 
   const [view, setView] = useState<WorkItemsView>("list");
   const [filters, setFilters] = useState<WorkItemsFilters>(defaultWorkItemFilters);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // ＋新建（T9）：表单面板开关 + 提交态。key 让每次打开都拿到干净草稿。
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createFormKey, setCreateFormKey] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  // 详情草稿态（概况/正文/设计编辑）——切项/切工作区前 confirm（spec §6.1）。
+  const detailDirtyRef = useRef(false);
 
   // 视图偏好 + 筛选按工作区持久化；换工作区时重读（FilesExplorerPanel 的
   // pi-explorer-tab 同款挂载后 hydrate 语义，避免 SSR/水合不一致）。
@@ -270,12 +230,20 @@ export function WorkItemsPage({
     onConsumedInitialItem?.();
   }, [initialItemKey, onConsumedInitialItem]);
 
+  /** 未保存草稿守卫（spec §6.1：切工作区/切项前 confirm）——创建表单开着或
+   *  详情处于编辑草稿态时拦截一次确认。 */
+  const confirmDiscardDrafts = useCallback((): boolean => {
+    if (!createOpen && !detailDirtyRef.current) return true;
+    return window.confirm("有未保存的草稿（创建表单或详情编辑），切换将丢失。继续？");
+  }, [createOpen]);
+
   const handleSelect = useCallback((key: string) => {
     if (key === selectedKey) return;
+    if (!confirmDiscardDrafts()) return;
     setSelectedKey(key);
     // 选中项变化由页面自己 replace URL（不埋历史陷阱；spec §6.1）。
     onReplaceUrl?.(buildWorkItemsPageUrl(workspaceId, key));
-  }, [selectedKey, workspaceId, onReplaceUrl]);
+  }, [confirmDiscardDrafts, selectedKey, workspaceId, onReplaceUrl]);
 
   const handleFilterChange = useCallback((patch: Partial<WorkItemsFilters>) => {
     setFilters((current) => ({ ...current, ...patch }));
@@ -283,16 +251,79 @@ export function WorkItemsPage({
 
   const handleSwitchWorkspace = useCallback((id: string) => {
     if (id === workspaceId || !onOpenWorkItemsPage) return;
-    // T9 接入创建/编辑表单后：切换前 confirm 未保存草稿（spec §6.1）。
+    if (!confirmDiscardDrafts()) return;
     onOpenWorkItemsPage(id);
-  }, [workspaceId, onOpenWorkItemsPage]);
+  }, [confirmDiscardDrafts, workspaceId, onOpenWorkItemsPage]);
+
+  const openCreateForm = useCallback(() => {
+    setCreateError(null);
+    setCreateFormKey((value) => value + 1);
+    setCreateOpen(true);
+  }, []);
+
+  /** 创建提交（沿用 WorkspaceManager 的流：POST 创建（含 enableDelivery）→
+   *  附件上到新项 → 选中；导入去重（existing/existing_trashed）不当作新建。 */
+  const handleCreate = useCallback(async (values: WorkItemCreateFormValues) => {
+    setCreating(true);
+    setCreateError(null);
+    try {
+      let detail = await responseJson<WorkItemDetail & { importOutcome?: WorkItemImportOutcome }>(
+        await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/work-items`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: values.type,
+            title: values.title,
+            originalDescription: values.originalDescription,
+            priority: values.priority,
+            repositories: values.repositories,
+            enableDelivery: values.enableDelivery,
+          }),
+        }),
+      );
+      if (detail.importOutcome && detail.importOutcome !== "created") {
+        // 导入去重（spec §8.1）：同 source+sourceId 已存在（含回收站墓碑）——
+        // 服务端原样返回既有项、未重复创建。回收站项提示切到回收站范围恢复。
+        setCreateOpen(false);
+        invalidate();
+        setCreateError(detail.importOutcome === "existing_trashed"
+          ? `同来源工作项 ${detail.item.key} 已在回收站，未重复创建——切到「回收站」范围可恢复`
+          : `同来源工作项 ${detail.item.key} 已存在，未重复创建`);
+        return;
+      }
+      if (values.files.length > 0) {
+        // 失败不静默丢：工作项已创建——报错并保留它，附件可后续在详情补传。
+        try {
+          detail = await uploadWorkItemAttachments(workspaceId, detail.item.key, values.files);
+        } catch (attachmentError) {
+          setCreateError(
+            `工作项 ${detail.item.key} 已创建，但附件上传失败：${
+              attachmentError instanceof Error ? attachmentError.message : String(attachmentError)
+            }`,
+          );
+        }
+      }
+      setCreateOpen(false);
+      invalidate();
+      setSelectedKey(detail.item.key);
+      onReplaceUrl?.(buildWorkItemsPageUrl(workspaceId, detail.item.key));
+    } catch (createError) {
+      setCreateError(createError instanceof Error ? createError.message : String(createError));
+    } finally {
+      setCreating(false);
+    }
+  }, [invalidate, onReplaceUrl, workspaceId]);
 
   const allItems = useMemo(
     () => [...(snapshot?.items ?? []), ...(snapshot?.archivedItems ?? [])],
     [snapshot],
   );
   const scoped = useMemo(
-    () => (filters.scope === "archived" ? snapshot?.archivedItems ?? [] : snapshot?.items ?? []),
+    () => filters.scope === "archived"
+      ? snapshot?.archivedItems ?? []
+      : filters.scope === "trash"
+        ? snapshot?.trashedItems ?? []
+        : snapshot?.items ?? [],
     [snapshot, filters.scope],
   );
   const visible = useMemo(() => sortWorkItems(filterWorkItems(scoped, filters)), [scoped, filters]);
@@ -303,10 +334,17 @@ export function WorkItemsPage({
     }
     return [...set].sort();
   }, [allItems]);
-  const selectedItem = useMemo(
-    () => allItems.find((item) => item.key === selectedKey) ?? null,
-    [allItems, selectedKey],
+  // 选中项跨范围解析：活动∪归档优先；仅存在于回收站时按 trashed 记录渲染
+  // （详情进入只读 + 恢复模式）。同 key 复用（新建占掉被删 key）时以活树为准。
+  const trashedSelected = useMemo(
+    () => snapshot?.trashedItems.find((item) => item.key === selectedKey) ?? null,
+    [snapshot, selectedKey],
   );
+  const selectedItem = useMemo(
+    () => allItems.find((item) => item.key === selectedKey) ?? trashedSelected,
+    [allItems, selectedKey, trashedSelected],
+  );
+  const selectedIsTrashed = selectedItem != null && !allItems.some((item) => item.key === selectedItem.key);
 
   const viewButton = (value: WorkItemsView, label: string) => (
     <button
@@ -367,32 +405,82 @@ export function WorkItemsPage({
     );
   } else {
     const emptyHint = scoped.length === 0
-      ? (filters.scope === "archived" ? "暂无归档工作项" : "暂无工作项")
+      ? (filters.scope === "archived"
+        ? "暂无归档工作项"
+        : filters.scope === "trash"
+          ? "回收站为空"
+          : "暂无工作项")
       : undefined;
-    body = view === "board" ? (
-      <WorkItemsBoard items={visible} selectedKey={selectedKey} onSelect={handleSelect} />
-    ) : (
+    // 详情面板（列表/看板共用，T9）：选中项 → WorkItemDetailView（回收站命中
+    // 时只读 + 恢复）；未选中 → 空态。看板横向滚动，详情列同样贴右。
+    const detailPane = (
+      <div
+        style={{
+          flex: "0 0 34%",
+          minWidth: 260,
+          maxWidth: 420,
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+          borderLeft: "1px solid var(--border)",
+          background: "var(--bg-panel)",
+        }}
+      >
+        <div style={{ height: 30, display: "flex", alignItems: "center", padding: "0 12px", flexShrink: 0, borderBottom: "1px solid var(--border)", fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.04em" }}>
+          详情
+        </div>
+        {selectedItem ? (
+          <WorkItemDetailView
+            workspaceId={workspaceId}
+            item={selectedItem}
+            repositories={workspace?.repositories ?? []}
+            trashed={selectedIsTrashed}
+            onOpenConversation={onOpenConversation}
+            onOpenLoopsRecovery={onOpenLoopsRecovery}
+            onChanged={invalidate}
+            onClose={() => {
+              setSelectedKey(null);
+              onReplaceUrl?.(buildWorkItemsPageUrl(workspaceId));
+            }}
+            onRestored={(key) => {
+              handleFilterChange({ scope: "active" });
+              setSelectedKey(key);
+              onReplaceUrl?.(buildWorkItemsPageUrl(workspaceId, key));
+            }}
+            onDirtyChange={(dirty) => {
+              detailDirtyRef.current = dirty;
+            }}
+          />
+        ) : (
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12.5 }}>
+            选择工作项
+          </div>
+        )}
+      </div>
+    );
+    body = (
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <WorkItemsList items={visible} selectedKey={selectedKey} onSelect={handleSelect} emptyHint={emptyHint} />
+          {createOpen ? (
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 14 }}>
+              <WorkItemCreateForm
+                key={createFormKey}
+                repositories={(workspace?.repositories ?? []).filter((repository) => repository.status === "active")}
+                saving={creating}
+                onCancel={() => {
+                  setCreateOpen(false);
+                  setCreateError(null);
+                }}
+                onSubmit={(values) => void handleCreate(values)}
+              />
+            </div>
+          ) : view === "board" ? (
+            <WorkItemsBoard items={visible} selectedKey={selectedKey} onSelect={handleSelect} />
+          ) : (
+            <WorkItemsList items={visible} selectedKey={selectedKey} onSelect={handleSelect} emptyHint={emptyHint} />
+          )}
         </div>
-        <div
-          style={{
-            flex: "0 0 34%",
-            minWidth: 260,
-            maxWidth: 420,
-            display: "flex",
-            flexDirection: "column",
-            minHeight: 0,
-            borderLeft: "1px solid var(--border)",
-            background: "var(--bg-panel)",
-          }}
-        >
-          <div style={{ height: 30, display: "flex", alignItems: "center", padding: "0 12px", flexShrink: 0, borderBottom: "1px solid var(--border)", fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.04em" }}>
-            详情
-          </div>
-          <DetailPlaceholder item={selectedItem} onOpenConversation={onOpenConversation} />
-        </div>
+        {detailPane}
       </div>
     );
   }
@@ -414,11 +502,11 @@ export function WorkItemsPage({
               {viewButton("list", "列表")}
               {viewButton("board", "看板")}
             </div>
-            {/* T9 接入创建表单；本任务先占位（disabled）。 */}
             <button
               type="button"
-              disabled
-              title="新建工作项表单即将上线"
+              onClick={openCreateForm}
+              disabled={createOpen}
+              title="新建工作项（需求 / Bug，可选启用标准交付流程）"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -428,11 +516,11 @@ export function WorkItemsPage({
                 border: "1px solid var(--border)",
                 borderRadius: 6,
                 background: "var(--bg)",
-                color: "var(--text-dim)",
+                color: "var(--text-muted)",
                 fontSize: 12,
                 fontWeight: 600,
-                cursor: "default",
-                opacity: 0.6,
+                cursor: createOpen ? "default" : "pointer",
+                opacity: createOpen ? 0.6 : 1,
                 whiteSpace: "nowrap",
                 flexShrink: 0,
               }}
@@ -450,7 +538,33 @@ export function WorkItemsPage({
           sources={sources}
           activeCount={snapshot?.items.length ?? 0}
           archivedCount={snapshot?.archivedItems.length ?? 0}
+          trashedCount={snapshot?.trashedItems.length ?? 0}
         />
+      )}
+      {createError && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            borderBottom: "1px solid var(--border)",
+            background: "color-mix(in srgb, #ef4444 6%, var(--bg))",
+            color: "#dc2626",
+            fontSize: 11.5,
+          }}
+        >
+          <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{createError}</span>
+          <button
+            type="button"
+            onClick={() => setCreateError(null)}
+            aria-label="关闭提示"
+            style={{ border: 0, background: "transparent", color: "inherit", cursor: "pointer", fontSize: 13, lineHeight: 1 }}
+          >
+            ×
+          </button>
+        </div>
       )}
       {body}
     </div>

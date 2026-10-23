@@ -12,6 +12,9 @@ import {
   type DeliveryCandidate,
   type DeliveryMetadata,
 } from "./delivery-types.ts";
+// legalDeliveryActions moved to the client-safe pure module (M2 T9); the
+// re-export keeps this module's public surface (tests, server consumers).
+export { legalDeliveryActions } from "./legal-actions.ts";
 import {
   WorkItemConflictError,
   WorkItemNotFoundError,
@@ -409,24 +412,6 @@ export function planDeliveryTransition(
       };
     }
   }
-}
-
-/** Legal actions for the detail page action bar (spec §7.2). Unmanaged and
- *  cancelled items expose none. */
-export function legalDeliveryActions(item: WorkItemRecord): DeliveryAction[] {
-  if (item.delivery?.protocolVersion !== 1) return [];
-  if (item.status === "cancelled") return [];
-  if (item.status === "blocked") return ["unblock", "cancel"];
-  const phaseActions: Partial<Record<WorkItemPhase, DeliveryAction[]>> = {
-    intake: ["start-design"],
-    design: ["confirm-design"],
-    ready_for_implementation: ["start-development", "rework"],
-    implementation: ["submit-verification", "rework"],
-    verification: ["record-verification", "rework"],
-    release_ready: ["prepare-release", "record-release", "rework"],
-    // released: frozen baseline — only display actions below stay legal
-  };
-  return [...(phaseActions[item.phase] ?? []), "block", "cancel"];
 }
 
 function designPathFor(itemPath: string): string {

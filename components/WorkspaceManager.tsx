@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { MarkdownBody } from "./MarkdownBody";
 import { CapabilityToggle } from "./CapabilityToggle";
@@ -23,6 +22,12 @@ import type {
 } from "@/lib/work-items/types";
 import { sourceLabel } from "@/lib/work-items/source-labels";
 import type { SkillInfo } from "@/lib/api-types";
+// 工作项共用件（M2 T9 抽取）：创建表单 / 事件时间线 / 来源行与仓库 chips /
+// fetch 帮手。本面板与中央 WorkItemsPage 两处引用同一实现。
+import { WorkItemCreateForm, type WorkItemCreateFormValues } from "./work-items/WorkItemCreateForm";
+import { WorkItemEvents } from "./work-items/WorkItemEvents";
+import { SourceRefValue, WorkItemRepositoryChips } from "./work-items/WorkItemMeta";
+import { responseJson, uploadWorkItemAttachments } from "./work-items/work-item-api";
 
 interface WorkspaceListResponse {
   root: string;
@@ -117,18 +122,6 @@ const PHASE_OPTIONS: WorkItemPhase[] = [
 ];
 const PRIORITY_OPTIONS: WorkItemPriority[] = ["P0", "P1", "P2", "P3"];
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
-}
-
 const CAPABILITY_LABELS: Record<string, string> = {
   sessions: "会话",
   explorer: "Explorer",
@@ -178,12 +171,6 @@ function formatDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
-}
-
-async function responseJson<T>(response: Response): Promise<T> {
-  const data = await response.json().catch(() => ({})) as T & { error?: string };
-  if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-  return data;
 }
 
 function SelectField<T extends string>({
@@ -278,14 +265,10 @@ export function WorkspaceManager({
     return event.clientY > rect.top + rect.height / 2 ? "after" : "before";
   };
   const [createWorkItemOpen, setCreateWorkItemOpen] = useState(false);
-  const [workItemType, setWorkItemType] = useState<WorkItemType>("bug");
-  const [workItemTitle, setWorkItemTitle] = useState("");
-  const [workItemDescription, setWorkItemDescription] = useState("");
-  const [workItemPriority, setWorkItemPriority] = useState<WorkItemPriority>("P2");
-  const [workItemRepositories, setWorkItemRepositories] = useState<string[]>([]);
-  // 新建表单的待上传附件（File 对象，创建成功后走 work-items attachments 路由）。
-  const [workItemFiles, setWorkItemFiles] = useState<File[]>([]);
-  const workItemFileInputRef = useRef<HTMLInputElement>(null);
+  // 创建表单草稿归 WorkItemCreateForm 持有（T9 抽取）；这里只留「打开时的
+  // 预选类型」与 remount key（每次打开拿到干净草稿）。
+  const [workItemInitialType, setWorkItemInitialType] = useState<WorkItemType>("bug");
+  const [workItemCreateFormKey, setWorkItemCreateFormKey] = useState(0);
   const [contentDraft, setContentDraft] = useState("");
   const [contentEditing, setContentEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -314,15 +297,10 @@ export function WorkspaceManager({
   }, [selectedWorkspace?.id, selectedWorkspace?.name]);
 
   const openCreateWorkItem = useCallback((type?: WorkItemType) => {
-    if (type) setWorkItemType(type);
-    setWorkItemFiles([]);
-    setWorkItemRepositories(
-      selectedWorkspace?.repositories
-        .filter((repository) => repository.status === "active" && repository.kind === "code")
-        .map((repository) => repository.id) ?? [],
-    );
+    if (type) setWorkItemInitialType(type);
+    setWorkItemCreateFormKey((value) => value + 1);
     setCreateWorkItemOpen(true);
-  }, [selectedWorkspace]);
+  }, []);
 
   const loadWorkspaces = useCallback(async () => {
     setLoading(true);
@@ -749,7 +727,7 @@ export function WorkspaceManager({
     }
   }, [loadWorkspaces]);
 
-  const createWorkItem = useCallback(async () => {
+  const createWorkItem = useCallback(async (values: WorkItemCreateFormValues) => {
     if (!selectedWorkspaceId) return;
     setSaving(true);
     setError(null);
@@ -759,11 +737,12 @@ export function WorkspaceManager({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            type: workItemType,
-            title: workItemTitle,
-            originalDescription: workItemDescription,
-            priority: workItemPriority,
-            repositories: workItemRepositories,
+            type: values.type,
+            title: values.title,
+            originalDescription: values.originalDescription,
+            priority: values.priority,
+            repositories: values.repositories,
+            enableDelivery: values.enableDelivery,
           }),
         }),
       );
@@ -772,10 +751,6 @@ export function WorkspaceManager({
         // 服务端原样返回既有项、未重复创建，不当作新建成功。回收站项不打开
         // 详情（其路径在 .pi/trash 下，详情面板后续操作会 404），仅提示。
         setCreateWorkItemOpen(false);
-        setWorkItemTitle("");
-        setWorkItemDescription("");
-        setWorkItemRepositories([]);
-        setWorkItemFiles([]);
         if (detail.importOutcome === "existing") {
           setSelectedWorkItem(detail);
           setContentDraft(detail.content);
@@ -789,20 +764,11 @@ export function WorkspaceManager({
         );
         return;
       }
-      if (workItemFiles.length > 0) {
+      if (values.files.length > 0) {
         // 附件上到刚建的工作项下（attachments/ + README 引用）。失败不静默丢：
         // 工作项已创建——报错并保留它，附件可后续在工作台·文件里补传。
         try {
-          const formData = new FormData();
-          for (const file of workItemFiles) {
-            formData.append("files", file, file.name);
-          }
-          detail = await responseJson<WorkItemDetail>(
-            await fetch(
-              `/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/work-items/${encodeURIComponent(detail.item.key)}/attachments`,
-              { method: "POST", body: formData },
-            ),
-          );
+          detail = await uploadWorkItemAttachments(selectedWorkspaceId, detail.item.key, values.files);
         } catch (attachmentError) {
           setError(
             `工作项 ${detail.item.key} 已创建，但附件上传失败：${attachmentError instanceof Error ? attachmentError.message : String(attachmentError)}`,
@@ -810,10 +776,6 @@ export function WorkspaceManager({
         }
       }
       setCreateWorkItemOpen(false);
-      setWorkItemTitle("");
-      setWorkItemDescription("");
-      setWorkItemRepositories([]);
-      setWorkItemFiles([]);
       setSelectedWorkItem(detail);
       setContentDraft(detail.content);
       await loadWorkItems(selectedWorkspaceId);
@@ -826,23 +788,8 @@ export function WorkspaceManager({
   }, [
     loadWorkItems,
     selectedWorkspaceId,
-    workItemDescription,
-    workItemFiles,
-    workItemPriority,
-    workItemRepositories,
-    workItemTitle,
-    workItemType,
     onWorkItemsChanged,
   ]);
-
-  /** 附件选择：允许多次点击叠加；清空 value 使同名文件移除后可重选。 */
-  const handleWorkItemFilesPicked = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    const picked = Array.from(event.target.files ?? []);
-    if (picked.length > 0) {
-      setWorkItemFiles((current) => [...current, ...picked]);
-    }
-    event.target.value = "";
-  }, []);
 
   /** 「按合同执行」/「收养续跑」（D11 客户端预填）：onRunContract 写入新会话
    *  composer 草稿并切到该 workspace 的 chat 视图（预填不会失败）；这里仅
@@ -1552,25 +1499,7 @@ export function WorkspaceManager({
                       <div className="workspace-field workspace-field-compact">
                         <span>来源</span>
                         <div style={{ padding: "9px 0", fontSize: 13 }}>
-                          {selectedWorkItem.item.external.url ? (
-                            <a
-                              href={selectedWorkItem.item.external.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{ color: "var(--accent)" }}
-                            >
-                              {sourceLabel(selectedWorkItem.item.external.source)} #{selectedWorkItem.item.external.sourceId} ↗
-                            </a>
-                          ) : (
-                            <span>
-                              {sourceLabel(selectedWorkItem.item.external.source)} #{selectedWorkItem.item.external.sourceId}
-                            </span>
-                          )}
-                          {selectedWorkItem.item.external.lastSyncedAt && (
-                            <span style={{ color: "var(--text-dim)", marginLeft: 8, fontSize: 11 }}>
-                              同步于 {formatDate(selectedWorkItem.item.external.lastSyncedAt)}
-                            </span>
-                          )}
+                          <SourceRefValue external={selectedWorkItem.item.external} />
                         </div>
                       </div>
                     )}
@@ -1601,14 +1530,10 @@ export function WorkspaceManager({
                     verifiable 判定读它；详情页只在非空时展示，不再提供勾选。 */}
                   {selectedWorkItem.item.repositories.length > 0 && (
                     <div className="work-item-repositories" aria-label="Repository scope">
-                      {selectedWorkItem.item.repositories.map((repositoryId) => {
-                        const repository = selectedWorkspace.repositories.find((repo) => repo.id === repositoryId);
-                        return (
-                          <span className="work-item-repository" key={repositoryId}>
-                            {repository ? repository.name : repositoryId}{repository?.status === "removed" ? "（已停用）" : ""}
-                          </span>
-                        );
-                      })}
+                      <WorkItemRepositoryChips
+                        repositoryIds={selectedWorkItem.item.repositories}
+                        repositories={selectedWorkspace.repositories}
+                      />
                     </div>
                   )}
                   {contentEditing ? (
@@ -1642,42 +1567,20 @@ export function WorkspaceManager({
                     </div>
                   )}
                   <section className="work-item-events">
-                    <div className="work-item-events-header">
-                      <h3>执行里程碑</h3>
-                      <button
-                        className="workspace-action"
-                        disabled={saving}
-                        onClick={() => void trashWorkItem()}
-                      >
-                        移到回收站
-                      </button>
-                    </div>
-                    {selectedWorkItem.events.map((event) => {
-                      const eventConversationId = event.conversationId;
-                      return (
-                        <div className="work-item-event" key={event.id}>
-                          <time>{formatDate(event.at)}</time>
-                          <div>
-                            <strong>{event.type}</strong>
-                            <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>{event.actor}</span>
-                            {typeof event.data?.summary === "string" && (
-                              <div style={{ color: "var(--text-muted)", marginTop: 3 }}>
-                                {event.data.summary}
-                              </div>
-                            )}
-                          </div>
-                          {onOpenConversation && eventConversationId && (
-                            <button
-                              className="workspace-action"
-                              onClick={() => onOpenConversation(eventConversationId)}
-                              title={`打开产生此里程碑的会话查看完整消息（${eventConversationId}）`}
-                            >
-                              查看会话
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
+                    <WorkItemEvents
+                      events={selectedWorkItem.events}
+                      onOpenConversation={onOpenConversation}
+                      title="执行里程碑"
+                      headerActions={
+                        <button
+                          className="workspace-action"
+                          disabled={saving}
+                          onClick={() => void trashWorkItem()}
+                        >
+                          移到回收站
+                        </button>
+                      }
+                    />
                   </section>
     </div>
   ) : null;
@@ -1690,129 +1593,18 @@ export function WorkspaceManager({
                     </button>
                   </div>
                   {createWorkItemOpen && (
-                    <div className="workspace-form-card" style={{ marginBottom: 14 }}>
-                      <div className="workspace-form-grid">
-                        <label className="workspace-field">
-                          <span>类型</span>
-                          <select
-                            value={workItemType}
-                            onChange={(event) => setWorkItemType(event.target.value as WorkItemType)}
-                          >
-                            <option value="requirement">需求</option>
-                            <option value="bug">Bug</option>
-                          </select>
-                        </label>
-                        <label className="workspace-field">
-                          <span>优先级</span>
-                          <select
-                            value={workItemPriority}
-                            onChange={(event) => setWorkItemPriority(event.target.value as WorkItemPriority)}
-                          >
-                            {PRIORITY_OPTIONS.map((priority) => (
-                              <option key={priority} value={priority}>{priority}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                          <span>标题</span>
-                          <input
-                            value={workItemTitle}
-                            onChange={(event) => setWorkItemTitle(event.target.value)}
-                            placeholder="简短描述需要完成或修复的事情"
-                            autoFocus
-                          />
-                        </label>
-                        <label className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                          <span>原始描述</span>
-                          <textarea
-                            value={workItemDescription}
-                            onChange={(event) => setWorkItemDescription(event.target.value)}
-                            placeholder="保留你最初的描述，Agent 后续分析不会覆盖它。"
-                          />
-                        </label>
-                        {selectedWorkspace.repositories.length > 0 && (
-                          <div className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                            <span>关联仓库</span>
-                            <div className="work-item-repositories" style={{ marginBottom: 0 }}>
-                              {selectedWorkspace.repositories
-                                .filter((repository) => repository.status === "active")
-                                .map((repository) => (
-                                <label className="work-item-repository" key={repository.id}>
-                                  <input
-                                    type="checkbox"
-                                    checked={workItemRepositories.includes(repository.id)}
-                                    onChange={(event) => {
-                                      setWorkItemRepositories((current) => event.target.checked
-                                        ? [...new Set([...current, repository.id])]
-                                        : current.filter((id) => id !== repository.id));
-                                    }}
-                                  />
-                                  {repository.name} · {repository.kind === "code" ? "代码" : "知识库"}
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <div className="workspace-field" style={{ gridColumn: "1 / -1" }}>
-                          <span>附件</span>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                            <button
-                              type="button"
-                              className="workspace-action"
-                              onClick={() => workItemFileInputRef.current?.click()}
-                            >
-                              + 添加附件
-                            </button>
-                            {workItemFiles.map((file, index) => (
-                              <span
-                                key={`${file.name}-${file.size}-${index}`}
-                                style={{
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: 4,
-                                  border: "1px solid var(--border)",
-                                  borderRadius: 999,
-                                  padding: "2px 8px",
-                                  fontSize: 12,
-                                  color: "var(--text-muted)",
-                                  maxWidth: "100%",
-                                }}
-                              >
-                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {file.name} · {formatFileSize(file.size)}
-                                </span>
-                                <button
-                                  type="button"
-                                  aria-label={`移除附件 ${file.name}`}
-                                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--text-dim)", lineHeight: 1 }}
-                                  onClick={() =>
-                                    setWorkItemFiles((current) => current.filter((_, i) => i !== index))
-                                  }
-                                >
-                                  ×
-                                </button>
-                              </span>
-                            ))}
-                            <input
-                              ref={workItemFileInputRef}
-                              type="file"
-                              multiple
-                              hidden
-                              onChange={handleWorkItemFilesPicked}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
-                        <button className="workspace-action" onClick={() => setCreateWorkItemOpen(false)}>取消</button>
-                        <button
-                          className="workspace-action"
-                          disabled={saving || !workItemTitle.trim() || !workItemDescription.trim()}
-                          onClick={() => void createWorkItem()}
-                        >
-                          {saving ? "创建中…" : "创建工作项"}
-                        </button>
-                      </div>
+                    <div style={{ marginBottom: 14 }}>
+                      <WorkItemCreateForm
+                        key={workItemCreateFormKey}
+                        repositories={selectedWorkspace.repositories.filter((repository) => repository.status === "active")}
+                        initialType={workItemInitialType}
+                        defaultRepositoryIds={selectedWorkspace.repositories
+                          .filter((repository) => repository.status === "active" && repository.kind === "code")
+                          .map((repository) => repository.id)}
+                        saving={saving}
+                        onCancel={() => setCreateWorkItemOpen(false)}
+                        onSubmit={(values) => void createWorkItem(values)}
+                      />
                     </div>
                   )}
                   <div className="work-item-toolbar">

@@ -1,4 +1,4 @@
-import type { WorkItemPhase, WorkItemType } from "@/lib/work-items/types";
+import type { WorkItemPhase, WorkItemStatus, WorkItemType } from "@/lib/work-items/types";
 
 /**
  * Phase → board-column projection for the central WorkItemsPage board view
@@ -34,6 +34,16 @@ export const BOARD_COLUMN_LABELS: Record<BoardColumn, string> = {
 export const TYPE_LABELS: Record<WorkItemType, string> = {
   requirement: "需求",
   bug: "缺陷",
+};
+
+/** 状态标签（详情/列表共用；M2 T9 起与 PHASE_LABELS 同居本模块——中央页组件
+ *  不再从 WorkspaceManager 反向导入）。 */
+export const STATUS_LABELS: Record<WorkItemStatus, string> = {
+  open: "待处理",
+  in_progress: "处理中",
+  blocked: "已阻塞",
+  done: "已完成",
+  cancelled: "已取消",
 };
 
 /** 全量 phase 标签（含老流程子阶段与 complete）：看板卡片上老项显示
