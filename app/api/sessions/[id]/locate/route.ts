@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { daemonClient } from "@/lib/daemon/client";
+import { probeSession } from "@/lib/session-host/facade";
 import { findSessionIndexEntry } from "@/lib/session-index";
 import { resolveProject } from "@/lib/worktree";
 import { cacheSessionPath, firstMessageTitle } from "@/lib/session-reader";
@@ -12,8 +12,9 @@ export const dynamic = "force-dynamic";
  *  Used by `handleOpenConversation` (work-item linked conversations, opened
  *  by id) and `handleOpenSessionViewer` (subagent children). Two sources,
  *  in order of authority:
- *    1. daemon probe — a live session (kit round / subagent child) physically
- *       lives in the daemon, which knows its cwd + sessionFile immediately.
+ *    1. host probe — a live session (kit round / subagent child) physically
+ *       lives in this process's session registry, which knows its cwd +
+ *       sessionFile immediately.
  *    2. Session index — mtime-incremental over `~/.pi/agent/sessions` (active +
  *       `.archived/`), so a freshly written .jsonl resolves without a full disk
  *       scan and WITHOUT invalidating the (cheap) list cache.
@@ -43,7 +44,7 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
-    const meta = await daemonClient.probeSession(id);
+    const meta = await probeSession(id);
     if (meta) {
       const session: SessionInfo = {
         path: meta.sessionFile ?? "",
@@ -65,7 +66,7 @@ export async function GET(
       // Seed the path cache from the probe even when the index misses: a
       // freshly spawned subagent child's .jsonl may not exist yet (pi creates
       // it lazily on first append), so the index cannot know it — but the
-      // daemon registry already does. With the path cached, GET
+      // host registry already does. With the path cached, GET
       // /api/sessions/[id] answers the empty-but-valid placeholder and the
       // viewer renders live SSE on top instead of 404ing ("cannot resolve").
       if (meta.sessionFile) cacheSessionPath(id, meta.sessionFile);
@@ -86,7 +87,7 @@ export async function GET(
       return NextResponse.json({ session, source: "loop" });
     }
   } catch {
-    // Daemon unreachable — fall through to the index.
+    // Probe failed — fall through to the index.
   }
   const found = await sessionInfoFromIndex(id);
   if (found) return NextResponse.json({ session: found, source: "disk" });

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { daemonClient, DaemonHttpError } from "@/lib/daemon/client";
+import { controlSubagent, getSubagentRunStatus, SessionHostError } from "@/lib/session-host/facade";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
@@ -10,10 +10,10 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
-    const { run } = await daemonClient.getSubagentRun(id);
+    const run = await getSubagentRunStatus(id);
     return NextResponse.json({ run });
   } catch (error) {
-    if (error instanceof DaemonHttpError) {
+    if (error instanceof SessionHostError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
@@ -34,15 +34,15 @@ export async function POST(
       if (typeof body.message !== "string" || !body.message.trim()) {
         return NextResponse.json({ error: "message required" }, { status: 400 });
       }
-      await daemonClient.controlSubagent(id, "steer", body.message);
+      await controlSubagent(id, "steer", body.message);
     } else if (body.action === "abort") {
-      await daemonClient.controlSubagent(id, "abort");
+      await controlSubagent(id, "abort");
     } else {
       return NextResponse.json({ error: "action must be steer or abort" }, { status: 400 });
     }
-    return NextResponse.json({ ok: true, run: (await daemonClient.getSubagentRun(id)).run });
+    return NextResponse.json({ ok: true, run: await getSubagentRunStatus(id) });
   } catch (error) {
-    if (error instanceof DaemonHttpError) {
+    if (error instanceof SessionHostError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
     const message = error instanceof Error ? error.message : String(error);

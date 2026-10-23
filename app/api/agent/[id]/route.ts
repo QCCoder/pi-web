@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
+import { probeSession, sendCommand, SessionHostError } from "@/lib/session-host/facade";
 
 // POST /api/agent/[id] - Send a command to an existing session.
-// Pure proxy over the session daemon (C2): the daemon is the single session
-// owner, so ANY command (prompt, fork, navigate_tree, extension UI responses,
-// …) is forwarded verbatim. The daemon cold-starts idle sessions from their
-// .jsonl exactly like this route used to — semantics preserved end-to-end.
+// Direct call into the in-process host facade — the single session owner, so
+// ANY command (prompt, fork, navigate_tree, extension UI responses, …) goes
+// verbatim. The facade cold-starts idle sessions from their .jsonl exactly
+// like this route used to through the daemon — semantics preserved end-to-end.
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -23,24 +23,23 @@ export async function POST(
     if (typeof body.type !== "string") {
       return NextResponse.json({ error: "command type is required" }, { status: 400 });
     }
-    const client = await daemonProxy();
-    const result = await client.sendSessionCommand(id, body);
+    const result = await sendCommand(id, body);
     promptAccepted = body.type === "prompt";
-    return NextResponse.json({ success: true, data: result.data });
+    return NextResponse.json({ success: true, data: result });
   } catch (error) {
     return NextResponse.json({
       error: error instanceof Error ? error.message : String(error),
       ...(commandType === "prompt" && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
-    }, { status: daemonErrorStatus(error) });
+    }, { status: error instanceof SessionHostError ? error.status : 500 });
   }
 }
 
 // GET /api/agent/[id] - Get current agent state.
-// Pure proxy: the daemon owns every session, so "is it running + its state"
-// has exactly one answer — the daemon's. An idle session (no live wrapper in
-// the daemon) reports { running: false }, same as before.
+// Direct probe through the facade: the host owns every session, so "is it
+// running + its state" has exactly one answer. An idle session (no live
+// wrapper in the registry) reports { running: false }, same as before.
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -48,13 +47,12 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const client = await daemonProxy();
-    const meta = await client.probeSession(id);
+    const meta = await probeSession(id);
     if (!meta) {
       return NextResponse.json({ running: false });
     }
     return NextResponse.json({ running: meta.running, state: meta.state ?? undefined });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: daemonErrorStatus(error) });
+    return NextResponse.json({ error: String(error) }, { status: error instanceof SessionHostError ? error.status : 500 });
   }
 }

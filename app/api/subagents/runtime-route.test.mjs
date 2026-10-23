@@ -8,18 +8,27 @@ const source = await readFile(new URL("./[id]/route.ts", import.meta.url), "utf8
 const httpSessionsSource = await readFile(new URL("../../../lib/daemon/http-sessions.ts", import.meta.url), "utf8");
 const clientSource = await readFile(new URL("../../../lib/daemon/client.ts", import.meta.url), "utf8");
 
-test("subagent control route proxies the daemon, never importing rpc-manager in-process", () => {
-  assert.match(source, /import \{ daemonClient, DaemonHttpError \} from "@\/lib\/daemon\/client";/);
-  assert.doesNotMatch(source, /from "@\/lib\/rpc-manager"/);
-  assert.match(source, /daemonClient\.getSubagentRun\(id\)/);
-  assert.match(source, /daemonClient\.controlSubagent\(id, "steer", body\.message\)/);
-  assert.match(source, /daemonClient\.controlSubagent\(id, "abort"\)/);
+test("subagent control route goes through the host facade, never the registry directly", () => {
+  assert.match(source, /import \{ controlSubagent, getSubagentRunStatus, SessionHostError \} from "@\/lib\/session-host\/facade";/);
+  assert.doesNotMatch(source, /from "@\/lib\/session-host\/registry"/);
+  assert.match(source, /getSubagentRunStatus\(id\)/);
+  assert.match(source, /controlSubagent\(id, "steer", body\.message\)/);
+  assert.match(source, /controlSubagent\(id, "abort"\)/);
 });
 
-test("subagent control route keeps the API-request guards and daemon status passthrough", () => {
+test("subagent control route keeps the API-request guards and host status passthrough", () => {
   assert.match(source, /isApiRequestAllowed\(req\)/);
   assert.match(source, /hasJsonContentType\(req\)/);
-  assert.match(source, /error instanceof DaemonHttpError[\s\S]*?error\.status/);
+  assert.match(source, /error instanceof SessionHostError[\s\S]*?error\.status/);
+});
+
+test("subagent control route keeps the controller-rejection 409 mapping", () => {
+  // Rebuilt from the old daemon route (lib/daemon/http-sessions.ts): a
+  // controller rejection whose message includes "not running" → 409, any
+  // other controller failure → 500.
+  assert.match(source, /message\.includes\("not running"\) \? 409 : 500/);
+  assert.match(source, /"action must be steer or abort"/);
+  assert.match(source, /typeof body\.message !== "string" \|\| !body\.message\.trim\(\)/);
 });
 
 test("daemon side exposes the subagent control surface wired to the controller", () => {

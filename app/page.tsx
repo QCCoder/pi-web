@@ -4,7 +4,6 @@ import { AppShell } from "@/components/AppShell";
 import { I18nProvider } from "@/hooks/useI18n";
 import { discoverWorkspaces } from "@/lib/workspaces/service";
 import { buildSessionsPayload } from "@/lib/session-payload";
-import { daemonClient } from "@/lib/daemon/client";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 import type { SessionInfo } from "@/lib/types";
 
@@ -28,15 +27,13 @@ const MOBILE_UA = /Android|iPhone|iPod|iPad|Mobile|Windows Phone|webOS|BlackBerr
  *
  * Failure semantics: EITHER prefetch may fail (best-effort `null`) — the
  * client then fetches as before, with skeleton gating in the sidebar instead
- * of lying empty states. The daemon merge here uses the DIRECT daemonClient
- * (fails fast); a render must never block on sidecar startup (≤15s) — that
- * wait stays on the API route, where callers already tolerate it.
+ * of lying empty states.
  */
 export default async function Home() {
   const userAgent = (await headers()).get("user-agent") ?? "";
   const [workspaces, sessionsPayload] = await Promise.all([
     discoverWorkspaces().catch(() => null),
-    buildSessionsPayload(async () => daemonClient).catch(() => null),
+    buildSessionsPayload().catch(() => null),
   ]);
   const initialWorkspaces: WorkspaceSummary[] | null = workspaces ?? null;
   const initialSessions: SessionInfo[] | null = sessionsPayload?.sessions ?? null;
