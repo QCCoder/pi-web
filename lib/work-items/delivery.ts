@@ -389,7 +389,10 @@ export function planDeliveryTransition(
       }
       return {
         phase: item.phase,
-        status: "in_progress",
+        // Released baseline: block is a display/attention flag — unblock must
+        // return the frozen baseline to its terminal status "done" (not
+        // in_progress, which no other writer could repair on a managed item).
+        status: item.phase === "released" ? "done" : "in_progress",
         delivery: base,
         eventType: "delivery.unblock",
         eventData: { phase: item.phase },
