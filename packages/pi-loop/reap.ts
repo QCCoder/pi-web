@@ -5,7 +5,8 @@
  * Why this exists: pi-coding-agent's bash tool spawns each shell
  * `detached: true` (so it becomes its own process-group leader) and tracks the
  * pid in a global set that is ONLY swept when the whole pi process receives a
- * process-level SIGHUP/SIGTERM. The pi-daemon (`bin/pi-daemon.js`) is a
+ * process-level SIGHUP/SIGTERM. The loop host (the pi-web in-process host;
+ * formerly the standalone pi-daemon) is a
  * long-lived process that never exits, and the spawner tears a round down
  * with `session.destroy()` — which does NOT fire the in-flight tool's `AbortSignal`.
  * So a round that is aborted or times out while an `npm install` / `mvn` is

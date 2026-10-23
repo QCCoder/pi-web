@@ -25,13 +25,7 @@ test("deleting an unpersisted runtime session answers ok and invalidates the cac
   // (upstream edf0deb): the wrapper was torn down, so treat it as deleted.
   const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-empty-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const previousDaemonDisabled = process.env.PI_SESSION_DAEMON_DISABLED;
-  const previousDaemonUrl = process.env.PI_DAEMON_URL;
   process.env.PI_CODING_AGENT_DIR = dir;
-  // Keep the route's best-effort daemon teardown fully hermetic: no probe,
-  // no spawn, and never a fetch at a real daemon address.
-  process.env.PI_SESSION_DAEMON_DISABLED = "1";
-  process.env.PI_DAEMON_URL = "http://127.0.0.1:30199";
   invalidateSessionListCache();
 
   const manager = SessionManager.create(dir, dir);
@@ -45,10 +39,6 @@ test("deleting an unpersisted runtime session answers ok and invalidates the cac
   t.after(() => {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-    if (previousDaemonDisabled === undefined) delete process.env.PI_SESSION_DAEMON_DISABLED;
-    else process.env.PI_SESSION_DAEMON_DISABLED = previousDaemonDisabled;
-    if (previousDaemonUrl === undefined) delete process.env.PI_DAEMON_URL;
-    else process.env.PI_DAEMON_URL = previousDaemonUrl;
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
     return rm(dir, { recursive: true, force: true });

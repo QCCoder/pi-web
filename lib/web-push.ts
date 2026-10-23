@@ -182,11 +182,12 @@ declare global {
 }
 
 // The web process (config/subscribe routes) keeps a process-wide notifier so
-// repeated requests reuse one in-memory state. The pi-daemon process calls
-// notifySessionComplete() below, but it NEVER owns key generation or
-// subscription writes — the web process owns web-push.json — so each send
-// pass re-reads the persisted state with a throwaway notifier instead of
-// caching a (possibly stale, possibly empty) snapshot at first use.
+// repeated requests reuse one in-memory state. The in-process session host
+// (lib/session-host/registry.ts) calls notifySessionComplete() below, but it
+// NEVER owns key generation or subscription writes — the routes own
+// web-push.json — so each send pass re-reads the persisted state with a
+// throwaway notifier instead of caching a (possibly stale, possibly empty)
+// snapshot at first use.
 function getNotifier(): Promise<WebPushNotifier> {
   if (!globalThis.__piWebPushNotifier) {
     globalThis.__piWebPushNotifier = Promise.resolve().then(() => createWebPushNotifier(getDefaultEnvironment()));

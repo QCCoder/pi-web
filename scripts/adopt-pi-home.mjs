@@ -16,12 +16,13 @@
  *       (both old and new values are plain ASCII paths).
  *   - drops the rebuildable session-index caches (.index.json)
  *
- * It then writes .env.local (the daemon self-loads it; Next loads it natively)
+ * It then writes .env.local (Next loads it natively)
  * and appends a guarded `export PI_CODING_AGENT_DIR=…` block to the shell rc
  * so the terminal `pi` CLI shares the SAME home (option A: one home).
  *
- * Run from a plain terminal, with pi sessions closed. The running pi-daemon
- * is stopped automatically; restart `npm run dev` afterwards. Re-running is
+ * Run from a plain terminal, with pi sessions closed. A stale legacy
+ * pi-daemon still listening on the default port is stopped automatically;
+ * restart `npm run dev` afterwards. Re-running is
  * safe (detects the adopted state and only repairs .env.local / shell rc).
  */
 import { execFileSync } from "node:child_process";
@@ -57,7 +58,7 @@ const exists = (p) => fs.existsSync(p);
 const log = (s) => process.stdout.write(`${s}\n`);
 
 function stopDaemon() {
-  const base = (process.env.PI_DAEMON_URL ?? process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
+  const base = (process.env.PI_LOOP_URL ?? "http://127.0.0.1:30142").replace(/\/$/, "");
   let port;
   try {
     port = new URL(base).port || "30142";

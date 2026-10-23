@@ -1,5 +1,5 @@
-/** web 侧轮控制（spec §4/§5.2，S3/S4）：全部走现有 daemon 会话面 + pi-loop
- *  纯逻辑，无 daemon 新路由。依赖全部可注入（.test.mjs 直 import 测试）。 */
+/** web 侧轮控制（spec §4/§5.2，S3/S4）：全部走进程内宿主 facade
+ *  （lib/session-host/facade）+ pi-loop 纯逻辑。依赖全部可注入（.test.mjs 直 import 测试）。 */
 import { hostname } from "node:os";
 import type { LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
 import {
@@ -15,12 +15,11 @@ import { writeLastrun } from "../../packages/pi-loop/due.ts";
 import { buildRoundPrompt } from "../../packages/pi-loop/contract.ts";
 
 export interface StopRoundDeps {
-  /** daemonProxy().destroySession —— DELETE /v1/sessions/:id（wrapper destroy，
-   *  中止在飞 prompt）。 */
+  /** facade destroySession —— 进程内 wrapper destroy（定向中止在飞 prompt）。 */
   destroySession: (sessionId: string) => Promise<unknown>;
   /** pi-loop/reap.ts 的孤儿收割（cwd 收敛到 workspace）。 */
   reap: (workspacePath: string) => Promise<unknown> | void;
-  /** daemonProxy().runningSessionIds 包装——幽灵锁活性判定用（可选：缺省或探测
+  /** facade runningStatus().ids 包装——幽灵锁活性判定用（可选：缺省或探测
    *  失败都退化为旧行为，不判幽灵）。 */
   runningSessionIds?: () => Promise<string[]>;
 }
@@ -34,7 +33,7 @@ export async function stopRound(
   const lock = readRoundLock(declaration.dir);
   if (!lock) return "not-running";
   // stale 判定与抢占/状态同公式（sessionId 感知）：带 sessionId 的手动轮锁
-  // （pid=web 进程）在 web 重启后仍可被正确停止——destroy 其 daemon 会话。
+  // （pid=web 进程）在 web 重启后仍可被正确停止——destroy 其轮会话。
   if (isRoundLockStale(lock, declaration.maxMinutes * 60_000 + 15 * 60_000)) {
     releaseRoundLock(declaration.dir); // stale 锁顺手清理（与 stale-takeover 同效果）
     return "not-running";
@@ -69,7 +68,7 @@ export class RoundBusyError extends Error {
  *  误判成已死，导致双发起轮/误停）。 */
 export const PHANTOM_LOCK_GRACE_MS = 2 * 60_000;
 
-/** 幽灵锁判定：daemon 锁带 sessionId、过宽限期、且不在 daemon running set
+/** 幽灵锁判定：daemon 锁带 sessionId、过宽限期、且不在宿主 running set
  *  → 轮已实际结束。手动轮锁成功路径无人 await 轮结束（stale 窗兜底回收），
  *  轮收尾/会话空闲被逐出后锁仍活——表现为最长 maxMinutes+15min 的假「运行
  *  中」（运行按钮禁用 + 409 误报 + 心跳槽被吃）。活性接管把这个窗口收窄
@@ -90,13 +89,13 @@ async function isPhantomRoundLock(
 }
 
 export interface LaunchRoundDeps {
-  /** daemonProxy().createSession —— POST /v1/sessions（不带 command：sessionId
-   *  要进开场合同第 3 条，而它建完会话才知道 → 两步走）。 */
+  /** facade createSession —— 进程内建会话（不带 command：sessionId 要进
+   *  开场合同第 3 条，而它建完会话才知道 → 两步走）。 */
   createSession: (input: { cwd: string }) => Promise<{ sessionId: string; cwd?: string; sessionFile?: string }>;
-  /** daemonProxy().sendSessionCommand —— POST /v1/sessions/:id/commands。 */
+  /** facade sendSessionCommand —— 向会话发命令。 */
   sendCommand: (sessionId: string, command: { type: string; [key: string]: unknown }) => Promise<unknown>;
   destroySession: (sessionId: string) => Promise<unknown>;
-  /** daemonProxy().runningSessionIds 包装——幽灵锁活性接管用（可选：缺省或探测
+  /** facade runningStatus().ids 包装——幽灵锁活性接管用（可选：缺省或探测
    *  失败都退化为 RoundBusyError，不接管）。 */
   runningSessionIds?: () => Promise<string[]>;
 }
