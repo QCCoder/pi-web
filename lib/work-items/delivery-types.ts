@@ -46,7 +46,9 @@ export interface DeliveryMetadata {
   lastRequest?: { requestId: string; action: DeliveryAction; at: string };
 }
 
-const DELIVERY_ACTIONS: readonly DeliveryAction[] = [
+/** Canonical action slug list (single source of truth for the HTTP route's
+ * slug gate — M2 Task 3; also backs lastRequest.action validation below). */
+export const DELIVERY_ACTIONS: readonly DeliveryAction[] = [
   "start-design",
   "confirm-design",
   "start-development",
