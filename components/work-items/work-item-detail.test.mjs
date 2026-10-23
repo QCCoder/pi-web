@@ -137,3 +137,20 @@ test("delivery submit posts {expectedRevision, requestId, payload} through the d
   assert.match(source, /crypto\.randomUUID\(\)/);
   assert.match(source, /expectedRevision/);
 });
+
+test("interruption recovery link is wired into the desktop shell host (fix round: 执行中断跳转接线)", () => {
+  // WorkItemDetailView 只在 interruptionPending && onOpenLoopsRecovery 同时成立
+  // 时渲染「去处理」链接——桌面宿主（DesktopShell 的 WorkItemsPage 渲染）必须
+  // 传 prop，否则链接在全产品不可见、spec §5.4 的 M1 留口成死代码。
+  const pageSource = readFileSync(new URL("./WorkItemsPage.tsx", import.meta.url), "utf8");
+  assert.match(pageSource, /onOpenLoopsRecovery\?:/, "WorkItemsPage declares the prop");
+  assert.match(pageSource, /onOpenLoopsRecovery=\{onOpenLoopsRecovery\}/, "WorkItemsPage forwards it to WorkItemDetailView");
+  const shellSource = readFileSync(new URL("../shell/DesktopShell.tsx", import.meta.url), "utf8");
+  const renderSite = shellSource.match(/<WorkItemsPage[\s\S]*?\/>/);
+  assert.ok(renderSite, "DesktopShell renders <WorkItemsPage>");
+  assert.match(
+    renderSite[0],
+    /onOpenLoopsRecovery=\{\(\) => openRailModule\(LOOPS_TAB_ID\)\}/,
+    "DesktopShell passes onOpenLoopsRecovery → openRailModule(LOOPS_TAB_ID)",
+  );
+});

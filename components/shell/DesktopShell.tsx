@@ -489,6 +489,7 @@ export function DesktopShell() {
           workspaceId={page.workspaceId}
           initialItemKey={workItemsItemKeyRef.current}
           onOpenConversation={handleOpenConversation}
+          onOpenLoopsRecovery={() => openRailModule(LOOPS_TAB_ID)}
           onConsumedInitialItem={consumeWorkItemsItemKey}
           onClose={closeCenterPage}
           onOpenWorkItemsPage={openWorkItemsPage}
