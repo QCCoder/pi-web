@@ -1188,9 +1188,13 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
   if (!globalThis.__piSessions) {
     globalThis.__piSessions = new Map();
     const cleanup = () => globalThis.__piSessions?.forEach((s) => s.destroy());
+    // 信号清理刻意不在这里注册：信号监听器按注册顺序触发，而本 init 在首个
+    // 页面渲染时就跑（早于宿主异步引导链完成）—— 若在此挂 SIGINT/SIGTERM
+    // cleanup，它会先于 lib/session-host/background.ts 的有序关停
+    // （registerShutdownHandlers）销毁全部 wrapper，把 running 快照清零、
+    // 静默丢掉所有 loop 轮中断记录（恢复门禁失效）。有序关停归 background；
+    // 下面的 `exit` 钩子只是绕过有序关停路径的幂等兜底。
     process.once("exit", cleanup);
-    process.once("SIGINT", cleanup);
-    process.once("SIGTERM", cleanup);
     startSessionHeartbeatMonitor();
   }
   return globalThis.__piSessions;
@@ -1260,10 +1264,11 @@ export function getAllRpcSessions(): AgentSessionWrapper[] {
   return Array.from(getRegistry().values()).filter((session) => session.isAlive());
 }
 
-/** Stalled snapshot of currently-RUNNING sessions (see lib/session-heartbeat.ts):
+/** Stalled snapshot of currently-RUNNING sessions (see lib/session-host/heartbeat.ts):
  *  sessions silent past STALL_WARN_MS, classified and sorted longest-idle first.
- *  Exposed via the daemon's running endpoints for surfacing (badge/tooltip) —
- *  additive data, existing consumers that only read `ids` are unaffected. */
+ *  Exposed via the in-process facade's runningStatus payload for surfacing
+ *  (badge/tooltip) — additive data, existing consumers that only read `ids`
+ *  are unaffected. */
 export function getStalledSessionSnapshot(): StalledSessionInfo[] {
   const running = Array.from(getRegistry().values())
     .filter((session) => session.isRunning())
@@ -1281,8 +1286,9 @@ export function getStalledSessionSnapshot(): StalledSessionInfo[] {
 // such sessions automatically once they cross STALL_KILL_MS: a synthetic
 // prompt_error tells live viewers why, then destroy() aborts the in-flight
 // prompt and drops the wrapper — badges clear, the human resends to resume.
-// Daemon-process only (this module never loads in the web server); the
-// interval is unref'd so it never keeps the process alive. Gate-paused
+// Runs inside the Next.js host process (the single session owner since M1 —
+// there is no separate daemon anymore); the interval is unref'd so it never
+// keeps the server alive. Gate-paused
 // sessions are NOT running and are never touched; sessions with a pending
 // extension UI request (confirm/select/…) are running but human-paused —
 // likewise exempt (AgentSessionWrapper.hasPendingUiRequests); creation-phase

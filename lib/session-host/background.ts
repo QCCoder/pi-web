@@ -7,7 +7,9 @@
  *      — route cold-loading and dev hot reload must never create a second
  *      timer), and
  *  (3) installs shutdown handlers (stop-new-work → abort → record → exit,
- *      spec §5.4).
+ *      spec §5.4) SYNCHRONOUSLY at the top of the boot — before the async
+ *      chain, so the ordered shutdown is always the process's first signal
+ *      listener (see ensureHostBooted).
  *  Background entry points are assembled HERE, never from an interactive
  *  session happening to be open (spec §4). */
 import { hostname } from "node:os";
@@ -132,9 +134,35 @@ export interface HostBootOptions {
   createSpawner?: () => { start(): void; stop(): void; timer?: unknown };
 }
 
+/** 模块级 spawner 停止引用 —— 关停钩子在 spawner 启动**之前**就注册（见
+ *  ensureHostBooted），所以信号到来时 spawner 可能尚未启动 / 启动失败：
+ * null 即安全 no-op。 */
+let stopLoopSpawner: (() => void) | null = null;
+
+/** 关停序列里的「停新轮」步骤，绝不能抛出信号处理器（那会吞掉后续的
+ * running 快照 → destroy → 写中断记录）：spawner 未启动 = no-op，
+ * stop() 抛错 = 记日志后照常走完关停。 */
+function stopBackgroundSafely(): void {
+  if (!stopLoopSpawner) return;
+  try {
+    stopLoopSpawner();
+  } catch (error) {
+    console.error("[pi-web] stopping loop spawner on shutdown failed:", error);
+  }
+}
+
 export function ensureHostBooted(options: HostBootOptions = {}): void {
   if (g.__piHostBooted) return;
   g.__piHostBooted = true;
+  // 关停钩子必须**同步**注册在这里 —— 在下方异步引导链之前。信号监听器按
+  // 注册顺序触发：本进程的 SIGINT/SIGTERM 处理器必须以这条有序关停
+  // （停新轮 → running 快照 → destroy → 写中断记录 → exit）为第一顺位，
+  // 否则任何更早注册的清理（如旧版 registry 的信号 cleanup，首个页面渲染
+  // 即注册、早于本函数的异步链完成）会先 destroy 全部 wrapper，把 running
+  // 快照清零、静默丢掉全部中断记录。registry 自身不再挂信号处理器（见
+  // registry.ts getRegistry 注释），只留 `exit` 尾保。install-once 守卫
+  // 保证不重复挂。stopBackgroundSafely 容忍 spawner 未启动/启动失败。
+  registerShutdownHandlers(stopBackgroundSafely);
   // Test escape hatch (PI_TEST_NO_BACKGROUND=1): skip BOTH the migration
   // guard and the DEFAULT spawner — tests must never exit(1) on a live dev
   // daemon nor start real heartbeats. An explicitly injected spawner is
@@ -154,9 +182,8 @@ export function ensureHostBooted(options: HostBootOptions = {}): void {
         ? (options.createSpawner() as unknown as LoopKitSpawner)
         : new LoopKitSpawner();
       spawner.start();
+      stopLoopSpawner = () => spawner.stop();
       g.__piLoopSpawnerTimer = (spawner as unknown as { timer?: unknown }).timer;
-      // 关停钩子与 spawner 同生命周期：停新轮 → abort 全部会话 → 写中断记录。
-      registerShutdownHandlers(() => spawner.stop());
     })
     .catch((error) => {
       console.error("[pi-web] loop heartbeat spawner failed to start:", error);

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
 import { launchManualRound, RoundBusyError, type LaunchRoundDeps } from "@/lib/loops/rounds";
+import { listPendingExecutionRecords } from "@/lib/loops/executions";
 import { createSession, destroySession, runningStatus, sendCommand, SessionHostError } from "@/lib/session-host/facade";
 import { markRoundActive } from "@/lib/session-host/background";
 import { allowFileRoot } from "@/lib/file-access";
@@ -24,6 +25,20 @@ export async function POST(
     const body = (await req.json().catch(() => ({}))) as { itemKey?: string };
     if (body.itemKey !== undefined && typeof body.itemKey !== "string") {
       return NextResponse.json({ error: "itemKey must be a string" }, { status: 400 });
+    }
+    // 恢复门禁（spec §5.4）同样管手动起轮：该 loop 有未确认的执行中断记录
+    // （上次关停遗留）时拒绝起轮 —— 与心跳路径同一道门，先走
+    // Loops 面板的「重新检查并恢复」解除，不得绕过。
+    const pending = await listPendingExecutionRecords(workspacePath, declaration.loopName);
+    if (pending.length > 0) {
+      return NextResponse.json(
+        {
+          error:
+            `loop ${declaration.loopName} 存在 ${pending.length} 条未确认的执行中断记录（上次关停遗留），` +
+            "已阻塞新轮。请先在 Loops 面板执行「重新检查并恢复」，确认旧轮已停止后再手动起轮。",
+        },
+        { status: 409 },
+      );
     }
     const deps: LaunchRoundDeps = {
       createSession: (input) => createSession(input),

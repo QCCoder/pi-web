@@ -1,7 +1,7 @@
 /**
  * Session heartbeat stall classification (pure).
  *
- * The daemon's heartbeat monitor asks one question every tick: for each
+ * The host's heartbeat monitor asks one question every tick: for each
  * RUNNING session wrapper, how long since its last activity (any agent event —
  * streaming deltas, tool-execution partials, message boundaries — or an
  * inbound command)? A healthy turn is never silent for long: the model streams
@@ -26,7 +26,7 @@
  *              build (and a subagent parent is likewise silent while its child
  *              builds). Bias is still toward the rare false kill being
  *              recoverable (resend) over the certain zombie being permanent
- *              (manual daemon restart) — REQ-0026 sat 4 hours before anyone
+ *              (manual host restart) — REQ-0026 sat 4 hours before anyone
  *              noticed; 20 min bounds that class.
  *
  * NOT covered here: hangs during session CREATION (wrapper not in the registry
@@ -51,8 +51,10 @@ function envMs(name: string): number | undefined {
 export const STALL_WARN_MS = envMs("PI_SESSION_STALL_WARN_MS") ?? 5 * 60 * 1000;
 export const STALL_KILL_MS = envMs("PI_SESSION_STALL_KILL_MS") ?? 20 * 60 * 1000;
 
-/** Monitor tick cadence (daemon-side, unref'd interval — never keeps the
- *  process alive, and never runs in the web process; see rpc-manager header). */
+/** Monitor tick cadence (unref'd interval — never keeps the process alive).
+ *  The monitor runs inside the Next.js host process itself (single-process
+ *  session owner since M1; started by getRegistry() in
+ *  lib/session-host/registry.ts). */
 export const HEARTBEAT_TICK_MS = 60 * 1000;
 
 export type StallLevel = "none" | "warn" | "kill";
