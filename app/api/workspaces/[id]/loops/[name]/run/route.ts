@@ -3,6 +3,7 @@ import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
 import { launchManualRound, RoundBusyError, type LaunchRoundDeps } from "@/lib/loops/rounds";
 import { createSession, destroySession, runningStatus, sendCommand, SessionHostError } from "@/lib/session-host/facade";
+import { markRoundActive } from "@/lib/session-host/background";
 import { allowFileRoot } from "@/lib/file-access";
 import { cacheSessionPath, invalidateSessionListCache } from "@/lib/session-reader";
 
@@ -36,6 +37,15 @@ export async function POST(
       body.itemKey ? { itemKey: body.itemKey } : {},
       deps,
     );
+    // 手动轮登记（spec §5.4）：关停时若该会话仍在 running set → 写中断记录
+    // 阻塞恢复。轮结束无从得知（人不等）——已收尾的轮在关停序列里被
+    // runningBySession 过滤，登记只作陈旧标记留在内存，进程退出即清。
+    markRoundActive(result.sessionId, {
+      loopName: declaration.loopName,
+      workspacePath: declaration.workspacePath,
+      dir: declaration.dir,
+      startedAt: Date.now(),
+    });
     // /api/agent/new 同款后处理：files 路由 allow-list 同步 + id→path 缓存播种
     // （.jsonl 懒建，不播种则紧随其后的 locate 404）+ 会话列表缓存失效。
     if (result.cwd) allowFileRoot(result.cwd);
