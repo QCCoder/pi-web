@@ -14,6 +14,7 @@ import type {
 import { INIT_CAPABILITY_CHECKLIST, MANDATORY_CAPABILITIES } from "@/lib/workspaces/templates";
 import type {
   WorkItemDetail,
+  WorkItemImportOutcome,
   WorkItemPhase,
   WorkItemPriority,
   WorkItemRecord,
@@ -753,7 +754,7 @@ export function WorkspaceManager({
     setSaving(true);
     setError(null);
     try {
-      let detail = await responseJson<WorkItemDetail>(
+      let detail = await responseJson<WorkItemDetail & { importOutcome?: WorkItemImportOutcome }>(
         await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/work-items`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -766,6 +767,28 @@ export function WorkspaceManager({
           }),
         }),
       );
+      if (detail.importOutcome && detail.importOutcome !== "created") {
+        // 导入去重（spec §8.1）：同 source+sourceId 已存在（含回收站墓碑）——
+        // 服务端原样返回既有项、未重复创建，不当作新建成功。回收站项不打开
+        // 详情（其路径在 .pi/trash 下，详情面板后续操作会 404），仅提示。
+        setCreateWorkItemOpen(false);
+        setWorkItemTitle("");
+        setWorkItemDescription("");
+        setWorkItemRepositories([]);
+        setWorkItemFiles([]);
+        if (detail.importOutcome === "existing") {
+          setSelectedWorkItem(detail);
+          setContentDraft(detail.content);
+        }
+        await loadWorkItems(selectedWorkspaceId);
+        onWorkItemsChanged?.();
+        setError(
+          detail.importOutcome === "existing_trashed"
+            ? `同来源工作项 ${detail.item.key} 已在回收站，未重复创建`
+            : `同来源工作项 ${detail.item.key} 已存在，未重复创建`,
+        );
+        return;
+      }
       if (workItemFiles.length > 0) {
         // 附件上到刚建的工作项下（attachments/ + README 引用）。失败不静默丢：
         // 工作项已创建——报错并保留它，附件可后续在工作台·文件里补传。

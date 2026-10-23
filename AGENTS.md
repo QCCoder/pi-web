@@ -248,7 +248,15 @@ File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage und
 Key behavior:
 - `listWorkItems()` reads ONLY `item.yaml` per directory (README/events are detail payloads — reading them here was the list hotspot) and returns `{ items, archivedItems, invalid }` in ONE pass — the sidebar's active+archived fetches and external-source sync scripts' dedup scans (active ∪ archived) both consume this single result.
 - The `KEY` counter lives in `manifest.work_items.next{Requirement,Bug}Number` and is incremented under the workspace
-  write lock (`reserveWorkItemKey`).
+  write lock (`reserveWorkItemKey`; createWorkItem 在自己的锁窗内改用不可重入变体 `reserveWorkItemKeyUnlocked`——见下条)。
+- **导入去重（2026-10 M2，spec §8.1）**：`createWorkItem` 带 `external` 时，去重查找（`findExistingByExternal`：
+  活动 ∪ 归档（`listWorkItems`）∪ 回收站——trash 里的 item.yaml 即来源去重墓碑，坏墓碑跳过不阻塞）+ key 预留 +
+  落盘全在**同一工作区写锁窗**内（并发同源导入只建一项；锁不可重入故 key 预留走 unlocked 变体）。命中即**原样返回
+  既有项**（`existing` 从活动布局读，`existing_trashed` 从 `.pi/trash/work-items/<dir>/` 读——`readWorkItemDirectory`
+  支持显式目录），不覆盖任何字段、不消耗 key 计数。返回值 `{ detail, importOutcome: "created"|"existing"|"existing_trashed" }`；
+  POST `/work-items` 响应 = detail 展开 + `importOutcome`，状态码 201 created / 200 existing*（旧脚本按 detail 字段读仍兼容）；
+  extension `workspace_create_work_item` 取 `.detail` 附加 outcome；WorkspaceManager 创建流程把 existing 视为
+  「已存在，未重复创建」提示（existing 打开既有项详情，existing_trashed 仅提示——回收站项路径不在活动布局，详情操作会 404）。
 - Updates take `expectedRevision` (optimistic concurrency); appending a milestone via `recordWorkItemMilestone` does
   **not** bump the revision.
 - **会话自链接（服务层不变式，2026-09）**：任何带 `conversationId` 的事件/更新都把该会话合并进 `item.conversations` ——
@@ -594,8 +602,8 @@ lib/
     extensions.ts           WORKSPACE_EXTENSION_FACTORIES + buildWorkspaceExtensions (tool modules)
     id.ts                   ULID generator
   work-items/
-    types.ts                WorkItemRecord / phases / events (incl. optional `external` source ref)
-    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation
+    types.ts                WorkItemRecord / phases / events (incl. optional `external` source ref) / WorkItemImportOutcome
+    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation, import dedup (findExistingByExternal: active ∪ archived ∪ trash; createWorkItem 锁内查+建, returns { detail, importOutcome })
     extension.ts            pi extension: list/get/create/update/record-milestone tools
     web.ts                  error → HTTP mapping
     source-labels.ts        UI-safe source→中文标签 map (禅道) — 外部源脚本盖章的来源展示

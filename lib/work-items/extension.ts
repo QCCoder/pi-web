@@ -87,8 +87,11 @@ export function createWorkspaceWorkItemExtension(
             description: "绑定的 kit loop 名（loops/<name> 目录声明的 loop）；留空表示未绑定",
           })),
         }),
-        execute: async (_callId, params, _signal, _update, ctx) => result(
-          await createWorkItem(workspaceId, {
+        execute: async (_callId, params, _signal, _update, ctx) => {
+          // createWorkItem now returns { detail, importOutcome }（导入去重，
+          // spec §8.1）——LLM 工具不透传 external，去重分支实际不触发；结果
+          // JSON 附上 importOutcome 以便结果可见，主体仍是 WorkItemDetail。
+          const { detail, importOutcome } = await createWorkItem(workspaceId, {
             type: params.type as WorkItemType,
             title: params.title,
             originalDescription: params.original_description,
@@ -98,8 +101,9 @@ export function createWorkspaceWorkItemExtension(
             ...(params.loop ? { loop: params.loop } : {}),
             actor: "agent",
             conversationId: ctx.sessionManager.getSessionId(),
-          }),
-        ),
+          });
+          return result({ ...detail, importOutcome });
+        },
       });
 
       pi.registerTool({

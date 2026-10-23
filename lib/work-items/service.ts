@@ -14,7 +14,7 @@ import {
   commitWorkspaceChanges,
   getWorkspace,
   readWorkspaceManifest,
-  reserveWorkItemKey,
+  reserveWorkItemKeyUnlocked,
   withWorkspaceWriteLock,
 } from "../workspaces/service.ts";
 import type { WorkspaceManifest } from "../workspaces/types.ts";
@@ -35,6 +35,7 @@ import {
   type WorkItemDetail,
   type WorkItemEvent,
   type WorkItemExternalRef,
+  type WorkItemImportOutcome,
   type WorkItemPhase,
   type WorkItemPriority,
   type WorkItemRecord,
@@ -350,9 +351,12 @@ function validateRepositorySelection(manifest: WorkspaceManifest, repositories: 
   }
 }
 
-export async function readWorkItem(workspacePath: string, key: string): Promise<WorkItemDetail> {
-  const type = workItemTypeFromKey(key);
-  const path = await findWorkItemDirectory(workspacePath, type, key);
+/** Assemble a WorkItemDetail from an explicit item DIRECTORY: parse item.yaml,
+ *  verify the directory name still begins with the item key, and load README.md
+ *  + events.jsonl. Works for both the live layout and trashed directories
+ *  (trash names keep the `KEY-` prefix, so the dirname check still passes).
+ *  ENOENT on item.yaml maps to WorkItemNotFoundError. */
+async function readWorkItemDirectory(path: string, key: string): Promise<WorkItemDetail> {
   let metadata: string;
   try {
     metadata = await readFile(join(path, "item.yaml"), "utf8");
@@ -374,6 +378,12 @@ export async function readWorkItem(workspacePath: string, key: string): Promise<
     content,
     events: eventLines.map(parseEvent),
   };
+}
+
+export async function readWorkItem(workspacePath: string, key: string): Promise<WorkItemDetail> {
+  const type = workItemTypeFromKey(key);
+  const path = await findWorkItemDirectory(workspacePath, type, key);
+  return readWorkItemDirectory(path, key);
 }
 
 export async function listWorkItems(
@@ -420,11 +430,54 @@ export async function listWorkItems(
   return { items, archivedItems, invalid };
 }
 
+export type ExternalLookupOutcome =
+  | { outcome: "existing"; key: string }
+  | { outcome: "existing_trashed"; key: string; trashPath: string }
+  | { outcome: undefined; key?: undefined };
+
+/** 按 source+sourceId 查找已存在项：活动 ∪ 归档（listWorkItems）∪ 回收站
+ *  （spec §8.1 —— 回收站 item.yaml 即来源去重墓碑）。坏文件跳过不阻塞。
+ *  可锁外调用，但 createWorkItem 在同一锁窗内调它以保证「并发同源只建一项」。 */
+export async function findExistingByExternal(
+  workspacePath: string,
+  source: string,
+  sourceId: string,
+): Promise<ExternalLookupOutcome> {
+  const { items, archivedItems } = await listWorkItems(workspacePath);
+  for (const item of [...items, ...archivedItems]) {
+    if (item.external?.source === source && item.external.sourceId === sourceId) {
+      return { outcome: "existing", key: item.key };
+    }
+  }
+  const trashRoot = join(workspacePath, ".pi", "trash", "work-items");
+  let entries;
+  try {
+    entries = await readdir(trashRoot, { withFileTypes: true });
+  } catch {
+    return { outcome: undefined };
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const trashPath = join(trashRoot, entry.name);
+    try {
+      const item = parseWorkItem(
+        parse(await readFile(join(trashPath, "item.yaml"), "utf8")),
+      );
+      if (item.external?.source === source && item.external.sourceId === sourceId) {
+        return { outcome: "existing_trashed", key: item.key, trashPath };
+      }
+    } catch {
+      // malformed trash entry — skip (a broken tombstone never blocks the scan)
+    }
+  }
+  return { outcome: undefined };
+}
+
 
 export async function createWorkItem(
   workspaceId: string,
   input: CreateWorkItemInput,
-): Promise<WorkItemDetail> {
+): Promise<{ detail: WorkItemDetail; importOutcome: WorkItemImportOutcome }> {
   const { path: workspacePath, manifest } = await getWorkspace(workspaceId);
   const type = requireEnum(input.type, ["requirement", "bug"] as const, "type");
   const title = requireText(input.title, "title");
@@ -445,54 +498,74 @@ export async function createWorkItem(
   const actor = input.actor === undefined
     ? "user"
     : requireEnum(input.actor, WORK_ITEM_ACTORS, "actor");
-  const key = await reserveWorkItemKey(workspacePath, type);
-  const now = new Date().toISOString();
-  const item: WorkItemRecord = {
-    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-    id: createUlid(),
-    key,
-    revision: 1,
-    type,
-    title,
-    status: "open",
-    phase: "intake",
-    priority,
-    repositories,
-    tags,
-    conversations: input.conversationId ? [input.conversationId] : [],
-    relatedItems: [],
-    designs: [],
-    plans: [],
-    ...(loop ? { loop } : {}),
-    ...(delivery ? { delivery } : {}),
-    ...(external ? { external } : {}),
-    archivedAt: null,
-    createdAt: now,
-    updatedAt: now,
-  };
-  const finalPath = join(
-    workItemRoot(workspacePath, workItemDirectoryName(type)),
-    `${key}-${workItemTitleSlug(title)}`,
-  );
-  const temporaryPath = `${finalPath}.creating-${createUlid()}`;
-  await mkdir(join(temporaryPath, "attachments"), { recursive: true });
-  try {
-    await Promise.all([
-      writeFile(join(temporaryPath, "item.yaml"), serializeWorkItem(item), "utf8"),
-      writeFile(join(temporaryPath, "README.md"), renderWorkItemReadme(title, description, type), "utf8"),
-      writeFile(join(temporaryPath, "events.jsonl"), "", "utf8"),
-    ]);
-    await appendEvent(
-      temporaryPath,
-      eventFor("work_item.created", actor, input.conversationId, { key, type }),
+  // ONE write-lock window wraps dedup lookup + key reservation + creation
+  // (spec §8.1: concurrent same-source imports create exactly one item — the
+  // dedup check and the item creation must not interleave). The lock is NOT
+  // re-entrant, so the key counter is reserved via the unlocked variant.
+  return withWorkspaceWriteLock(workspacePath, async () => {
+    if (external) {
+      const found = await findExistingByExternal(workspacePath, external.source, external.sourceId);
+      if (found.outcome === "existing") {
+        // 重复来源返回现有项，不覆盖任何字段。
+        return { detail: await readWorkItem(workspacePath, found.key), importOutcome: "existing" };
+      }
+      if (found.outcome === "existing_trashed") {
+        // 回收站 item.yaml 即去重墓碑：从 trash 目录原样读出既有项。
+        return {
+          detail: await readWorkItemDirectory(found.trashPath, found.key),
+          importOutcome: "existing_trashed",
+        };
+      }
+    }
+    const key = await reserveWorkItemKeyUnlocked(workspacePath, type);
+    const now = new Date().toISOString();
+    const item: WorkItemRecord = {
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+      id: createUlid(),
+      key,
+      revision: 1,
+      type,
+      title,
+      status: "open",
+      phase: "intake",
+      priority,
+      repositories,
+      tags,
+      conversations: input.conversationId ? [input.conversationId] : [],
+      relatedItems: [],
+      designs: [],
+      plans: [],
+      ...(loop ? { loop } : {}),
+      ...(delivery ? { delivery } : {}),
+      ...(external ? { external } : {}),
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const finalPath = join(
+      workItemRoot(workspacePath, workItemDirectoryName(type)),
+      `${key}-${workItemTitleSlug(title)}`,
     );
-    await rename(temporaryPath, finalPath);
-  } catch (error) {
-    await rm(temporaryPath, { recursive: true, force: true });
-    throw error;
-  }
-  await commitWorkspaceChanges(workspacePath, `workspace: create ${key}`);
-  return readWorkItem(workspacePath, key);
+    const temporaryPath = `${finalPath}.creating-${createUlid()}`;
+    await mkdir(join(temporaryPath, "attachments"), { recursive: true });
+    try {
+      await Promise.all([
+        writeFile(join(temporaryPath, "item.yaml"), serializeWorkItem(item), "utf8"),
+        writeFile(join(temporaryPath, "README.md"), renderWorkItemReadme(title, description, type), "utf8"),
+        writeFile(join(temporaryPath, "events.jsonl"), "", "utf8"),
+      ]);
+      await appendEvent(
+        temporaryPath,
+        eventFor("work_item.created", actor, input.conversationId, { key, type }),
+      );
+      await rename(temporaryPath, finalPath);
+    } catch (error) {
+      await rm(temporaryPath, { recursive: true, force: true });
+      throw error;
+    }
+    await commitWorkspaceChanges(workspacePath, `workspace: create ${key}`);
+    return { detail: await readWorkItem(workspacePath, key), importOutcome: "created" };
+  });
 }
 
 function changedFields(before: WorkItemRecord, after: WorkItemRecord): Record<string, unknown> {

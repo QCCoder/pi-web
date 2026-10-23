@@ -27,7 +27,14 @@ export async function POST(
   try {
     const { id } = await params;
     const input = await req.json() as CreateWorkItemInput;
-    return NextResponse.json(await createWorkItem(id, input), { status: 201 });
+    // 导入去重（spec §8.1）：同 source+sourceId 已存在（含归档/回收站墓碑）
+    // → 200 + 既有项（原样返回，未覆盖）；新建 → 201。响应体保留
+    // WorkItemDetail 字段（path/item/content/events 展开），旧脚本读得到。
+    const { detail, importOutcome } = await createWorkItem(id, input);
+    return NextResponse.json(
+      { ...detail, importOutcome },
+      { status: importOutcome === "created" ? 201 : 200 },
+    );
   } catch (error) {
     return workItemErrorResponse(error);
   }

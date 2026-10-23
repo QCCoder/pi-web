@@ -418,25 +418,35 @@ export async function writeWorkspaceManifest(
   );
 }
 
+/** Caller-already-holds-the-lock variant: createWorkItem wraps dedup lookup +
+ *  key reservation + file creation in ONE write-lock window (import dedup,
+ *  spec §8.1), so it must not re-enter withWorkspaceWriteLock — the in-process
+ *  promise queue is not re-entrant and would self-deadlock. */
+export async function reserveWorkItemKeyUnlocked(
+  workspacePath: string,
+  type: "requirement" | "bug",
+): Promise<string> {
+  const manifest = await readWorkspaceManifest(workspacePath);
+  const isRequirement = type === "requirement";
+  const number = isRequirement
+    ? manifest.workItems.nextRequirementNumber
+    : manifest.workItems.nextBugNumber;
+  if (isRequirement) {
+    manifest.workItems.nextRequirementNumber += 1;
+  } else {
+    manifest.workItems.nextBugNumber += 1;
+  }
+  manifest.updatedAt = new Date().toISOString();
+  await writeWorkspaceManifest(workspacePath, manifest);
+  return `${isRequirement ? "REQ" : "BUG"}-${String(number).padStart(4, "0")}`;
+}
+
 export async function reserveWorkItemKey(
   workspacePath: string,
   type: "requirement" | "bug",
 ): Promise<string> {
-  return withWorkspaceWriteLock(workspacePath, async () => {
-    const manifest = await readWorkspaceManifest(workspacePath);
-    const isRequirement = type === "requirement";
-    const number = isRequirement
-      ? manifest.workItems.nextRequirementNumber
-      : manifest.workItems.nextBugNumber;
-    if (isRequirement) {
-      manifest.workItems.nextRequirementNumber += 1;
-    } else {
-      manifest.workItems.nextBugNumber += 1;
-    }
-    manifest.updatedAt = new Date().toISOString();
-    await writeWorkspaceManifest(workspacePath, manifest);
-    return `${isRequirement ? "REQ" : "BUG"}-${String(number).padStart(4, "0")}`;
-  });
+  return withWorkspaceWriteLock(workspacePath, () =>
+    reserveWorkItemKeyUnlocked(workspacePath, type));
 }
 
 export async function readWorkspaceManifest(workspacePath: string): Promise<WorkspaceManifest> {

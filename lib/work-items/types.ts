@@ -107,6 +107,13 @@ export interface CreateWorkItemInput {
   loop?: string;
 }
 
+/** Import dedup outcome (spec §8.1), carried by createWorkItem's result and the
+ *  POST /work-items response: "created" made a new item; "existing" /
+ *  "existing_trashed" found an item with the same source+sourceId among
+ *  active ∪ archived ∪ trashed (a trashed item.yaml is the dedup tombstone)
+ *  and returned it UNMODIFIED — nothing was overwritten. */
+export type WorkItemImportOutcome = "created" | "existing" | "existing_trashed";
+
 export interface UpdateWorkItemInput {
   expectedRevision: number;
   title?: string;
