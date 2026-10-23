@@ -188,8 +188,16 @@ export function useWorkItems(
       setError(null);
       return;
     }
-    // Catch up in case the store changed between render and this effect.
-    setSnapshotState(getSnapshot(workspaceId));
+    // Catch up in case the store changed between render and this effect. Runs
+    // on EVERY workspaceId change: a hot switch away from a workspace whose
+    // fetch was still in flight (or had errored) must not leak that
+    // loading/error onto the new workspace — reset both from the new
+    // workspace's store state (fresh snapshot → not loading; none → loading
+    // until the mount effect's fetch settles).
+    const current = getSnapshot(workspaceId);
+    setSnapshotState(current);
+    setLoading(current === null);
+    setError(null);
     return subscribeWorkItems(workspaceId, (next) => setSnapshotState(next));
   }, [workspaceId]);
 

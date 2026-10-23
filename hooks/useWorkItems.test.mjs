@@ -35,4 +35,15 @@ test("hook source contract: one refcounted poller per workspace with visibility/
   // SSR safety: no bare `document`/`window` access at module scope — DOM
   // touches sit behind typeof guards or inside functions called from effects.
   assert.match(source, /typeof document === "undefined"/);
+
+  // Hot-switching workspaceId (same component, no remount) must reset
+  // loading/error on EVERY id change: the previous workspace's in-flight
+  // fetch is cancelled and its settle path skips setState, so a fresh
+  // snapshot on the new workspace would otherwise leave loading stuck true
+  // (and a stale error visible) over displayed data.
+  assert.match(
+    source,
+    /const current = getSnapshot\(workspaceId\);\s*\n\s*setSnapshotState\(current\);\s*\n\s*setLoading\(current === null\);\s*\n\s*setError\(null\);/,
+    "the id-change catch-up branch must reset loading and error from the new workspace's store state",
+  );
 });
