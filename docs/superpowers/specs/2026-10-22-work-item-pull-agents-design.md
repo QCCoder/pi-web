@@ -8,6 +8,11 @@
 
 架构图更新：2026-10-23。灰色为已有能力，橙色为增强，绿色为新增；图示为待实施的设计目标态。
 
+当前先对齐架构图，分为五个职责层：用户交互、应用接口、交付领域、执行运行、文件与状态。
+执行层内部用嵌套框表达 daemon 进程包含 pi SDK，角色 agent 是其中的 AgentSession 实例；角色不再单独作为架构层。
+pi-extension 是由本仓实现、通过 SDK 加载的工具适配入口，调用交付领域服务；领域服务作为共享模块在调用方进程内执行。
+本轮图示对齐不代表阶段细节、实现方案或实施计划已获确认。
+
 ![Pi Web 需求自动交付分层架构](assets/work-item-delivery-architecture.png)
 
 [可缩放 SVG 源图](assets/work-item-delivery-architecture.svg)
