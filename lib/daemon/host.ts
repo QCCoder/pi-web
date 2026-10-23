@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { LoopKitSpawner } from "./loop-spawner.ts";
+import { LoopKitSpawner } from "../session-host/loop-spawner.ts";
 import { createSessionsRoutes } from "./http-sessions.ts";
 import { daemonErrorStatus, sendJson, type DaemonRouteHandler } from "./http.ts";
-import { DaemonJobRegistry } from "./jobs.ts";
+import { HostJobRegistry } from "../session-host/jobs.ts";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 30142;
@@ -14,7 +14,7 @@ const DEFAULT_PORT = 30142;
  *  things:
  *    1. the session surface (lib/daemon/http-sessions.ts — the daemon's own
  *       identity),
- *    2. a DaemonJob registry (lib/daemon/jobs.ts) — domains register their
+ *    2. a HostJob registry (lib/session-host/jobs.ts) — domains register their
  *       long-lived timers; the daemon starts/stops them uniformly and never
  *       imports their logic,
  *    3. a route mounting point — each domain exports a DaemonRouteHandler
@@ -25,7 +25,7 @@ const DEFAULT_PORT = 30142;
  *  registering it here — one line each for routes and jobs. */
 export function createDaemon() {
   // ---- Background jobs ----------------------------------------------------
-  const jobs = new DaemonJobRegistry();
+  const jobs = new HostJobRegistry();
   // pi-loop kit spawner（design: docs/pi-loop-kit-design.md）— 转正为唯一的
   // loop 心跳（v3 loop-triggers cron 已随 v3 引擎拆除，生产翻转后无旗子门控）。
   jobs.register(new LoopKitSpawner()); // id: loop-kit-heartbeats

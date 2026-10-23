@@ -2,8 +2,8 @@
  *  一轮 = 一次性 AgentSession：开场合同（含 /skill: 展开）→ settle → 事后钩子。
  *  无 RUNS.jsonl、无 orchestrator 索引 — 运行记录 = STATE.md + workspace git log。 */
 import { creationTimeoutSignal } from "../abort-race.ts";
-import { startRpcSession, type AgentSessionWrapper } from "../session-host/registry.ts";
-import type { DaemonJob } from "./jobs.ts";
+import { startRpcSession, type AgentSessionWrapper } from "./registry.ts";
+import type { HostJob } from "./jobs.ts";
 import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/service.ts";
 import { discoverWorkspaces, readWorkspaceManifest } from "../workspaces/service.ts";
 import { archiveSession } from "../session-archive.ts";
@@ -186,7 +186,7 @@ export async function settleRoundBookkeeping(
   }
 }
 
-// --- 心跳 DaemonJob（Task 6/10）------------------------------------------
+// --- 心跳 HostJob（Task 6/10）--------------------------------------------
 
 const SPAWNER_TICK_MS = 30_000;
 
@@ -198,10 +198,10 @@ export interface SpawnerDeps {
   now?: () => Date;
 }
 
-/** 心跳 job（DaemonJob）：每 30s 扫已注册 workspace 的 loops/<loopName>/LOOP.md；
+/** 心跳 job（HostJob）：每 30s 扫已注册 workspace 的 loops/<loopName>/LOOP.md；
  *  due（.lastrun 补跑判定）+ .round.lock 跨宿主互斥 → 起一轮 —— fire 序列与
  *  beat 共用（pi-loop/fire.ts），多 loop 各自独立 due/锁，不再整 workspace 串行。 */
-export class LoopKitSpawner implements DaemonJob {
+export class LoopKitSpawner implements HostJob {
   readonly id = "loop-kit-heartbeats";
   private timer?: ReturnType<typeof setInterval>;
   private readonly deps: Required<SpawnerDeps>;
