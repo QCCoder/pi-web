@@ -154,6 +154,9 @@ const PHASE_LABELS: Record<WorkItemPhase, string> = {
   implementation: "实现",
   verification: "验证",
   complete: "完成",
+  ready_for_implementation: "待实现",
+  release_ready: "待发布",
+  released: "已发布",
 };
 
 function slugify(value: string): string {

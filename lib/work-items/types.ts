@@ -1,3 +1,5 @@
+import type { DeliveryMetadata } from "./delivery-types";
+
 export const WORK_ITEM_SCHEMA_VERSION = 1 as const;
 
 export type WorkItemType = "requirement" | "bug";
@@ -10,7 +12,12 @@ export type WorkItemPhase =
   | "plan_approval"
   | "implementation"
   | "verification"
-  | "complete";
+  | "complete"
+  // 2026-10 M2 delivery flow (standard mode): after implementation is ready,
+  // and the two release stages (spec: delivery metadata model).
+  | "ready_for_implementation"
+  | "release_ready"
+  | "released";
 export type WorkItemPriority = "P0" | "P1" | "P2" | "P3";
 export type WorkItemActor = "user" | "agent" | "system" | "external";
 
@@ -36,6 +43,9 @@ export interface WorkItemRecord {
   loop?: string;
   /** 外部源脚本经 HTTP API 盖章的外部链接；手动创建的项无此字段。 */
   external?: WorkItemExternalRef;
+  /** Optional standard delivery-flow metadata (M2): present only when the item
+   *  opted in at creation (enableDelivery). protocolVersion 1, mode manual. */
+  delivery?: DeliveryMetadata;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -89,6 +99,10 @@ export interface CreateWorkItemInput {
   conversationId?: string;
   /** 外部源脚本经 HTTP API 盖章（如 cxin scripts/chandao-sync.py）；LLM 工具不透传。 */
   external?: WorkItemExternalRef;
+  /** Opt the new item into the standard delivery flow (HTTP form checkbox;
+   *  LLM tools do not pass this through). Seeds delivery = protocolVersion 1,
+   *  mode manual; the item phase starts at "intake" as usual. */
+  enableDelivery?: boolean;
   /** Optional kit-loop binding by loop name (soft — existence not checked). */
   loop?: string;
 }

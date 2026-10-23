@@ -18,6 +18,12 @@ import {
   withWorkspaceWriteLock,
 } from "../workspaces/service.ts";
 import type { WorkspaceManifest } from "../workspaces/types.ts";
+import { parseDelivery } from "./delivery-types.ts";
+import {
+  WorkItemConflictError,
+  WorkItemNotFoundError,
+  WorkItemValidationError,
+} from "./errors.ts";
 import {
   WORK_ITEM_SCHEMA_VERSION,
   type CreateWorkItemInput,
@@ -35,6 +41,11 @@ import {
   type WorkItemStatus,
   type WorkItemType,
 } from "./types.ts";
+
+// Error classes live in ./errors.ts (shared leaf — delivery-types and future
+// delivery-flow services throw the same classes web.ts maps via instanceof).
+// Re-exported here so existing importers (web.ts, tests) are unchanged.
+export { WorkItemConflictError, WorkItemNotFoundError, WorkItemValidationError };
 
 const WORK_ITEM_KEY_RE = /^(REQ|BUG)-\d{4,}$/;
 const WORK_ITEM_DIRECTORY_RE = /^((?:REQ|BUG)-\d{4,})(?:-|$)/;
@@ -54,13 +65,13 @@ const WORK_ITEM_PHASES: readonly WorkItemPhase[] = [
   "implementation",
   "verification",
   "complete",
+  // M2 standard delivery flow stages.
+  "ready_for_implementation",
+  "release_ready",
+  "released",
 ];
 const WORK_ITEM_PRIORITIES: readonly WorkItemPriority[] = ["P0", "P1", "P2", "P3"];
 const WORK_ITEM_ACTORS: readonly WorkItemActor[] = ["user", "agent", "system", "external"];
-
-export class WorkItemValidationError extends Error {}
-export class WorkItemConflictError extends Error {}
-export class WorkItemNotFoundError extends Error {}
 
 function requireText(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) {
@@ -172,6 +183,7 @@ function serializeWorkItem(item: WorkItemRecord): string {
     designs: item.designs,
     plans: item.plans,
     ...(item.loop ? { loop: item.loop } : {}),
+    ...(item.delivery ? { delivery: item.delivery } : {}),
     ...(item.external
       ? {
           external: {
@@ -218,6 +230,9 @@ export function parseWorkItem(value: unknown): WorkItemRecord {
     designs: requireStringArray(record.designs, "designs"),
     plans: requireStringArray(record.plans, "plans"),
     ...(typeof record.loop === "string" && record.loop.trim() ? { loop: record.loop.trim() } : {}),
+    ...(record.delivery !== undefined && record.delivery !== null
+      ? { delivery: parseDelivery(record.delivery) }
+      : {}),
     ...(record.external !== undefined && record.external !== null
       ? { external: parseExternalRef(record.external) }
       : {}),
@@ -417,6 +432,11 @@ export async function createWorkItem(
   const tags = requireStringArray(input.tags, "tags");
   const loop = typeof input.loop === "string" && input.loop.trim() ? input.loop.trim() : undefined;
   const external = input.external === undefined ? undefined : parseExternalRef(input.external);
+  // Standard delivery flow opt-in (HTTP form checkbox; LLM tools don't pass it):
+  // seed the protocol-v1 manual block — phase stays the default "intake".
+  const delivery = input.enableDelivery === true
+    ? { protocolVersion: 1 as const, mode: "manual" as const }
+    : undefined;
   const priority = input.priority === undefined
     ? "P2"
     : requireEnum(input.priority, WORK_ITEM_PRIORITIES, "priority");
@@ -442,6 +462,7 @@ export async function createWorkItem(
     designs: [],
     plans: [],
     ...(loop ? { loop } : {}),
+    ...(delivery ? { delivery } : {}),
     ...(external ? { external } : {}),
     archivedAt: null,
     createdAt: now,
