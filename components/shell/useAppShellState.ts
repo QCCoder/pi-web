@@ -853,11 +853,11 @@ export function useAppShellState(seed?: {
       }
       // 无效 workspace id → 清掉 page/item 参数（replace，不埋历史陷阱），
       // 落回正常 tab 投影（该 workspace 查不到 → 首页），深链不落死胡同。
+      // navigateUrl 吃裸 query（自己补 "?"）——toString() 即裸 query。
       const cleaned = new URLSearchParams(params);
       cleaned.delete("page");
       cleaned.delete("item");
-      const cleanedQuery = cleaned.toString();
-      navigateUrl(cleanedQuery ? `?${cleanedQuery}` : null, true);
+      navigateUrl(cleaned.toString() || null, true);
     } else {
       // URL 驱动导航到达非页面 URL：中央区整页让位。配置页从不写 URL，
       // 到达这里的 URL 一定指向某个聊天/首页目标——popstate 后退/前进

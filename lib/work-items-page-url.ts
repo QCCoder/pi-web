@@ -6,6 +6,11 @@
  * `applyUrlToTabs` runs its tab projection so a chat-tab URL effect can never
  * override the management deep link. Build and parse share this one module;
  * the round-trip is covered by tests.
+ *
+ * 注意：`buildWorkItemsPageUrl` 返回**裸 query**（不带前导 `?`）——
+ * `navigateUrl` 的契约是裸 query（它自己补 `?`）。带 `?` 传入会组合出
+ * `??workspace=...`，URLSearchParams 只剥一个 `?`，深链在刷新/后退时即死
+ * （fix round 1 的 Critical 回归测试钉住这一点）。
  */
 
 export function buildWorkItemsPageUrl(workspaceId: string, itemKey?: string): string {
@@ -13,7 +18,7 @@ export function buildWorkItemsPageUrl(workspaceId: string, itemKey?: string): st
   params.set("workspace", workspaceId);
   params.set("page", "work-items");
   if (itemKey) params.set("item", itemKey);
-  return `?${params.toString()}`;
+  return params.toString();
 }
 
 /** `params.get("page") === "work-items"` → `{ workspaceId, itemKey? }`;

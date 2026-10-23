@@ -29,7 +29,7 @@ import type { SessionInfo } from "@/lib/types";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "@/lib/terminal-tab-state";
 import { useShell } from "./context";
 import type { SessionTabState } from "@/lib/session-tabs";
-import { createNewSessionTab } from "@/lib/session-tabs";
+import { createNewSessionTab, tabQuery } from "@/lib/session-tabs";
 import { ChatToolbar } from "./ChatToolbar";
 
 /** 右坞模块 tab 的标签与图标（工作区工具行 + dock tab 条共用）。 */
@@ -438,7 +438,15 @@ export function DesktopShell() {
   // （ConfigCenterPage，2026-09 拆分——此前四入口共用一个两栏设置页只换预选
   // 分区，用户反馈「跳转的页面都一模一样」），项目树「归档」行打开归档整页。
   // 整页占中央区，tab 条保持可见——点任何会话 tab 即关闭回聊天。
-  const closeCenterPage = () => setCenterPage(null);
+  /** ✕ 关闭中央区整页：清页面 + URL 回写到活动 tab 的投影（无活动 tab →
+   * 首页）——work-items 页面深链写过 URL，留着过期的 ?page=work-items 会在
+   * 刷新时复活已关闭的页面（fix round 1）。与 closeTab 的 URL 回写同构
+   * （push；navigateUrl 对相同 URL 去重，配置/归档页（从不写 URL）关闭时
+   * 无副作用）。 */
+  const closeCenterPage = useCallback(() => {
+    setCenterPage(null);
+    navigateUrl(activeTab ? tabQuery(activeTab) : "tab=home");
+  }, [setCenterPage, activeTab, navigateUrl]);
 
   // work-items 深链选中项的一次性消费回调（稳定身份：WorkItemsPage 的消费
   // effect 以它为依赖）。

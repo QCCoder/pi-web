@@ -45,7 +45,7 @@ interface WorkItemsPageProps {
   onClose?: () => void;
   /** 页头切换工作区（保持中央页形态，换页面身份）。 */
   onOpenWorkItemsPage?: (workspaceId: string, itemKey?: string) => void;
-  /** 页面内选中项变化 → replace URL（query 含前导 ?）。 */
+  /** 页面内选中项变化 → replace URL（裸 query，navigateUrl 自己补 "?"）。 */
   onReplaceUrl?: (query: string) => void;
   /** 工作区列表（页头选择器 + capability/名称解析）。 */
   workspaces: WorkspaceSummary[];
