@@ -5,9 +5,11 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import type { Dirent } from "node:fs";
 import { parse, stringify } from "yaml";
 import { createUlid } from "../workspaces/id.ts";
 import {
@@ -953,4 +955,91 @@ export async function trashWorkItem(
     await commitWorkspaceChanges(workspacePath, `workspace: remove ${key}`);
     return { trashedPath };
   });
+}
+
+/** 扫回收站找承载 `key` 的条目（目录名以 `<KEY>-` 开头），多个时取最新
+ *  mtime（= 最近一次移入）。无命中 / 回收站不存在 → null。 */
+async function newestTrashEntryFor(trashRoot: string, key: string): Promise<string | null> {
+  let entries;
+  try {
+    entries = await readdir(trashRoot, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(`${key}-`))
+    .map((entry) => join(trashRoot, entry.name));
+  if (candidates.length === 0) return null;
+  let newest = candidates[0]!;
+  let newestMtime = -1;
+  for (const path of candidates) {
+    const mtime = (await stat(path)).mtimeMs;
+    if (mtime > newestMtime) {
+      newest = path;
+      newestMtime = mtime;
+    }
+  }
+  return newest;
+}
+
+/** 回收站恢复（M2 Task 5）：锁内原子 rename 回 type 目录 + `work_item.restored`
+ *  事件。测试与路由薄壳共用（路由层 getWorkspace 后调本函数，同 GET/DELETE 面）。
+ *  冲突判定在移动之前：key 已被任何活目录承载（含同 key 不同 slug 的再建项）
+ *  → Conflict；墓碑 item.yaml 坏 → Validation（不把垃圾搬回活树）。 */
+export async function restoreWorkItemFromTrashInRoot(
+  workspacePath: string,
+  key: string,
+): Promise<WorkItemDetail> {
+  return withWorkspaceWriteLock(workspacePath, async () => {
+    const type = workItemTypeFromKey(key); // 非法 key 形态在此拦下（Validation）
+    const trashedPath = await newestTrashEntryFor(
+      join(workspacePath, ".pi", "trash", "work-items"),
+      key,
+    );
+    if (!trashedPath) {
+      throw new WorkItemNotFoundError(`No trashed Work Item: ${key}`);
+    }
+    const liveRoot = workItemRoot(workspacePath, workItemDirectoryName(type));
+    const liveEntries = await readdir(liveRoot, { withFileTypes: true })
+      .catch(() => [] as Dirent[]);
+    if (
+      liveEntries.some(
+        (entry) => entry.isDirectory() && workItemKeyFromDirectoryName(entry.name) === key,
+      )
+    ) {
+      throw new WorkItemConflictError(`Work Item key ${key} is already in use`);
+    }
+    let item: WorkItemRecord;
+    try {
+      item = parseWorkItem(parse(await readFile(join(trashedPath, "item.yaml"), "utf8")));
+    } catch (error) {
+      throw new WorkItemValidationError(
+        `Trashed Work Item ${key} is corrupted: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    if (item.key !== key) {
+      throw new WorkItemValidationError(`Trashed Work Item directory must carry ${key}`);
+    }
+    // git 不跟踪空目录：全部条目被清空过的 workspace 克隆里 type 目录可能
+    // 不存在，rename 的目标父目录要先就位。
+    await mkdir(liveRoot, { recursive: true });
+    const destination = join(liveRoot, basename(trashedPath));
+    await rename(trashedPath, destination);
+    await appendEvent(
+      destination,
+      eventFor("work_item.restored", "user", undefined, { restoredFrom: trashedPath }),
+    );
+    await commitWorkspaceChanges(workspacePath, `workspace: restore ${key}`);
+    return readWorkItemDirectory(destination, key);
+  });
+}
+
+export async function restoreWorkItemFromTrash(
+  workspaceId: string,
+  key: string,
+): Promise<WorkItemDetail> {
+  const { path: workspacePath } = await getWorkspace(workspaceId);
+  return restoreWorkItemFromTrashInRoot(workspacePath, key);
 }
