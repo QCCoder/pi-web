@@ -1,278 +1,243 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1860" viewBox="0 0 2400 1860" role="img" aria-labelledby="title desc"><title id="title">Pi Web 目标架构：移除独立 daemon 的单进程分层方案</title><desc id="desc">五个职责层：用户交互、应用接口、交付领域、执行运行、文件状态。接口、领域服务和执行管理均在同一个 Next.js 常驻 Node.js 进程中，通过函数调用协作。pi SDK 作为库加载，设计、开发、验证和发布准备角色是不同 AgentSession 实例。pi-web 实现的 Extension 加载到 SDK，再调用交付领域服务。没有独立 daemon 进程和会话 HTTP 代理；服务端重启后从持久化记录恢复工作。</desc><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="#98a9bf"/></marker></defs><rect width="2400" height="1860" fill="#ffffff"/><g font-family="PingFang SC,Microsoft YaHei,Noto Sans CJK SC,Arial,sans-serif">
-<text x="40" y="56" font-size="41" fill="#253449" font-weight="500" text-anchor="start">Pi Web · 单进程目标架构｜pi SDK 原样复用</text>
-<text x="40" y="98" font-size="24" fill="#62748c" font-weight="400" text-anchor="start">架构讨论稿 / 待确认　·　角色属于 pi-web 应用侧，Extension 负责接入，底层 SDK 不增加业务角色</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1615" viewBox="0 0 2400 1615" role="img" aria-labelledby="title desc"><title id="title">Pi Web 六层目标架构</title><desc id="desc">按用户指定的六层组织：用户交互层是 pi-web 前端，应用接口层是 Next.js 接口，pi-extension 层容纳对 pi 的工作项交付、任务领取、角色与 loop 等扩展，pi SDK 层原样复用，文件与状态层保存工作区和会话资料，部署基建采用单一 Next.js 常驻 Node.js 宿主。业务角色和项目规则不进入底层 SDK。</desc><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="#98a8bf"/></marker></defs><rect width="2400" height="1615" fill="#ffffff"/><g font-family="PingFang SC,Microsoft YaHei,Noto Sans CJK SC,Arial,sans-serif">
+<text x="40" y="56" font-size="41" fill="#263449" font-weight="500" text-anchor="start">Pi Web · 六层目标架构</text>
+<text x="40" y="98" font-size="24" fill="#64748b" font-weight="400" text-anchor="start">按约定分层｜扩展承载项目能力，pi SDK 原样复用｜单一 Next.js 常驻 Node.js 宿主，当前仅设计</text>
 <rect x="1920" y="36" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
 <text x="1954" y="58" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
 <rect x="2032" y="36" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
 <text x="2066" y="58" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
 <rect x="2144" y="36" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
 <text x="2178" y="58" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="40" y="139" font-size="23" fill="#62748c" font-weight="500" text-anchor="start">职责层</text>
-<text x="338" y="139" font-size="23" fill="#62748c" font-weight="500" text-anchor="start">pi-web 自有实现 / pi SDK 依赖</text>
-<text x="1920" y="139" font-size="23" fill="#62748c" font-weight="500" text-anchor="start">工作区资源 / 外部依赖</text>
-<rect x="40" y="158" width="270" height="134" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="61" y="208" font-size="29" fill="#253449" font-weight="500" text-anchor="start">① 用户交互层</text>
-<text x="61" y="249" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">pi-web 前端</text>
-<text x="61" y="281" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">浏览器 / React</text>
-<rect x="338" y="158" width="1550" height="134" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<rect x="362" y="181" width="362" height="88" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
+<text x="40" y="139" font-size="23" fill="#64748b" font-weight="500" text-anchor="start">架构层</text>
+<text x="338" y="139" font-size="23" fill="#64748b" font-weight="500" text-anchor="start">组件与职责</text>
+<text x="1920" y="139" font-size="23" fill="#64748b" font-weight="500" text-anchor="start">工作区资源 / 外部依赖</text>
+<rect x="40" y="158" width="270" height="134" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="61" y="208" font-size="29" fill="#263449" font-weight="500" text-anchor="start">① 用户交互层</text>
+<text x="61" y="249" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">pi-web 前端</text>
+<text x="61" y="281" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">浏览器 / React</text>
+<rect x="338" y="158" width="1550" height="134" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<rect x="362" y="181" width="362" height="88" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
 <rect x="641" y="169" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
 <text x="675" y="191" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
-<text x="380" y="211" font-size="25" fill="#253449" font-weight="500" text-anchor="start">会话与工作区</text>
-<text x="380" y="241" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">聊天 / 文件 / Loops</text>
+<text x="380" y="213" font-size="25" fill="#263449" font-weight="500" text-anchor="start">会话与工作区</text>
+<text x="380" y="246" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">聊天 / 文件 / Loops</text>
 <rect x="742" y="181" width="362" height="88" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
 <rect x="1021" y="169" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
 <text x="1055" y="191" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="760" y="211" font-size="25" fill="#253449" font-weight="500" text-anchor="start">工作项视图</text>
-<text x="760" y="241" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">阶段 / 产物 / 执行进展</text>
+<text x="760" y="213" font-size="25" fill="#263449" font-weight="500" text-anchor="start">工作项视图</text>
+<text x="760" y="246" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">需求阶段 / 产物 / 执行进展</text>
 <rect x="1122" y="181" width="362" height="88" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
 <rect x="1401" y="169" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
 <text x="1435" y="191" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="1140" y="211" font-size="25" fill="#253449" font-weight="500" text-anchor="start">人工决策入口</text>
-<text x="1140" y="241" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">确认 / 答复 / 恢复 / 发布登记</text>
+<text x="1140" y="213" font-size="25" fill="#263449" font-weight="500" text-anchor="start">人工决策入口</text>
+<text x="1140" y="246" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">确认 / 答复 / 恢复 / 发布登记</text>
 <rect x="1502" y="181" width="362" height="88" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
 <rect x="1781" y="169" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
 <text x="1815" y="191" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="1520" y="211" font-size="25" fill="#253449" font-weight="500" text-anchor="start">配置与管理</text>
-<text x="1520" y="241" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">工作区 / Agents / 自动交付</text>
+<text x="1520" y="213" font-size="25" fill="#263449" font-weight="500" text-anchor="start">设置与配置</text>
+<text x="1520" y="246" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">工作区 / Agents / 扩展配置</text>
 <rect x="1920" y="158" width="440" height="134" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
 <rect x="1938" y="172" width="404" height="106" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="207" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">人类参与者</text>
-<text x="2140" y="243" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">产品 / 开发 / 测试 / 发布人</text>
-<text x="2140" y="271" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">在界面查看与作出决定</text>
-<path d="M1113,296V317" fill="none" stroke="#98a9bf" stroke-width="2" marker-end="url(#arrow)"/>
-<text x="1135" y="315" font-size="20" fill="#62748c" font-weight="400" text-anchor="start">浏览器 ↔ 服务端：HTTP / SSE</text>
-<rect x="326" y="326" width="1574" height="1120" rx="20" fill="none" stroke="#6485b8" stroke-width="1.6" stroke-dasharray="8 6"/>
-<rect x="40" y="330" width="270" height="130" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="61" y="380" font-size="29" fill="#253449" font-weight="500" text-anchor="start">② 应用接口层</text>
-<text x="61" y="421" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">pi-web 的 Next.js API</text>
-<text x="61" y="453" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">请求适配与事件订阅</text>
-<rect x="338" y="330" width="1550" height="130" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<rect x="354" y="353" width="362" height="84" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="633" y="341" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="667" y="363" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="372" y="383" font-size="25" fill="#253449" font-weight="500" text-anchor="start">工作区 / 工作项 API</text>
-<text x="372" y="413" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">创建 / 更新 / 查询 / 附件</text>
-<rect x="734" y="353" width="362" height="84" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1013" y="341" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1047" y="363" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="752" y="383" font-size="25" fill="#253449" font-weight="500" text-anchor="start">交付操作 API</text>
-<text x="752" y="413" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">加入 / 确认 / 停止 / 恢复</text>
-<rect x="1114" y="353" width="362" height="84" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="1393" y="341" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="1427" y="363" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="1132" y="383" font-size="25" fill="#253449" font-weight="500" text-anchor="start">会话 API（调整）</text>
-<text x="1132" y="413" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">进程内调用 / 消息 / SSE</text>
-<rect x="1494" y="353" width="362" height="84" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="1773" y="341" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="1807" y="363" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="1512" y="383" font-size="25" fill="#253449" font-weight="500" text-anchor="start">配置 API</text>
-<text x="1512" y="413" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">角色 / 预算 / 验证配置</text>
-<rect x="1920" y="330" width="440" height="130" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
-<rect x="1938" y="344" width="404" height="102" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="379" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">禅道 / 需求来源</text>
-<text x="2140" y="415" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">工作区同步脚本 → 工作项 API</text>
-<text x="2140" y="443" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">沿用来源引用与去重方式</text>
-<path d="M1113,464V485" fill="none" stroke="#98a9bf" stroke-width="2" marker-end="url(#arrow)"/>
-<text x="1135" y="483" font-size="20" fill="#62748c" font-weight="400" text-anchor="start">调用领域服务</text>
-<rect x="40" y="498" width="270" height="170" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="61" y="548" font-size="29" fill="#253449" font-weight="500" text-anchor="start">③ 交付领域层</text>
-<text x="61" y="589" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">pi-web 共享业务模块</text>
-<text x="61" y="621" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">API 与扩展共用规则</text>
-<rect x="338" y="498" width="1550" height="170" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="362" y="529" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">同一 Next.js 进程内的业务模块：API 与 Extension 共用领取、阶段和证据规则</text>
-<rect x="362" y="550" width="362" height="94" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="641" y="538" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="675" y="560" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="380" y="588" font-size="25" fill="#253449" font-weight="500" text-anchor="start">工作项领域服务</text>
-<text x="380" y="626" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">状态 / 正文 / 事件 / 来源</text>
-<rect x="742" y="550" width="362" height="94" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1021" y="538" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1055" y="560" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="760" y="588" font-size="25" fill="#253449" font-weight="500" text-anchor="start">TaskPool · 就绪任务池</text>
-<text x="760" y="626" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">角色 / 依赖 / 优先级筛选</text>
-<rect x="1122" y="550" width="362" height="94" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1401" y="538" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1435" y="560" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="1140" y="588" font-size="25" fill="#253449" font-weight="500" text-anchor="start">ClaimService · 领取交接</text>
-<text x="1140" y="626" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">原子领取 / 幂等 / 占用恢复</text>
-<rect x="1502" y="550" width="362" height="94" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1781" y="538" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1815" y="560" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="1520" y="588" font-size="25" fill="#253449" font-weight="500" text-anchor="start">阶段与证据规则</text>
-<text x="1520" y="626" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">确认 / 验证 / 返工 / 版本失效</text>
-<rect x="1920" y="498" width="440" height="170" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
-<rect x="1938" y="512" width="404" height="142" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="547" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">工作区交付配置</text>
-<text x="2140" y="583" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">delivery.yaml / AGENTS.md</text>
-<text x="2140" y="611" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">角色映射 / 验证办法 / 预算</text>
-<text x="2140" y="639" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">项目方法配置，业务规则程序校验</text>
-<path d="M1113,672V693" fill="none" stroke="#98a9bf" stroke-width="2" marker-end="url(#arrow)"/>
-<text x="1135" y="691" font-size="20" fill="#62748c" font-weight="400" text-anchor="start">执行控制请求 / 就绪状态查询</text>
-<rect x="40" y="706" width="270" height="730" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="61" y="756" font-size="29" fill="#253449" font-weight="500" text-anchor="start">④ 执行运行层</text>
-<text x="61" y="797" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">同一 Next.js Node 进程</text>
-<text x="61" y="829" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">应用代码与 SDK 分开</text>
-<text x="61" y="861" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">业务角色定义在上层</text>
-<rect x="338" y="706" width="1550" height="730" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="362" y="744" font-size="26" fill="#253449" font-weight="500" text-anchor="start">同进程不等于同归属：pi-web 通过公开 API 使用 SDK，不修改底层运行机制</text>
-<rect x="362" y="766" width="1502" height="305" rx="16" fill="#ffffff" stroke="#98a9bf" stroke-width="1.6" />
-<text x="384" y="802" font-size="26" fill="#253449" font-weight="500" text-anchor="start">pi-web 应用侧｜执行管理与业务角色（本仓代码 + 工作区 Profile）</text>
-<rect x="384" y="822" width="351" height="116" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="652" y="810" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="686" y="832" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="402" y="860" font-size="25" fill="#253449" font-weight="500" text-anchor="start">Loop 心跳触发（迁移）</text>
-<text x="402" y="898" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">复用 cron / 锁 / 起轮逻辑</text>
-<text x="402" y="930" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">Next 启动时幂等注册</text>
-<rect x="753" y="822" width="351" height="116" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1021" y="810" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1055" y="832" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="771" y="860" font-size="25" fill="#253449" font-weight="500" text-anchor="start">WorkerWaker</text>
-<text x="771" y="898" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">交付域后台任务</text>
-<text x="771" y="930" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">有就绪任务才唤醒角色</text>
-<rect x="1122" y="822" width="351" height="116" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1390" y="810" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1424" y="832" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="1140" y="860" font-size="25" fill="#253449" font-weight="500" text-anchor="start">RoleSessionLauncher</text>
-<text x="1140" y="898" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">装配 Profile 与工作区</text>
-<text x="1140" y="930" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">创建角色会话 / 隔离目录</text>
-<rect x="1491" y="822" width="351" height="116" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="1759" y="810" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="1793" y="832" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="1509" y="860" font-size="25" fill="#253449" font-weight="500" text-anchor="start">会话与执行管理</text>
-<text x="1509" y="898" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">注册 / SSE / 停止 / 子会话</text>
-<text x="1509" y="930" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">补充执行关联与续约</text>
-<text x="384" y="955" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">业务角色｜由上层配置职责、任务、权限与上下文，再使用 SDK 创建通用会话</text>
-<rect x="384" y="977" width="351" height="80" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="652" y="965" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="686" y="987" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="402" y="1007" font-size="25" fill="#253449" font-weight="500" text-anchor="start">需求与设计 agent</text>
-<text x="402" y="1037" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">澄清 / 验收条件 / 方案</text>
-<rect x="753" y="977" width="351" height="80" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1021" y="965" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1055" y="987" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="771" y="1007" font-size="25" fill="#253449" font-weight="500" text-anchor="start">开发 agent</text>
-<text x="771" y="1037" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">隔离实现 / 候选提交</text>
-<rect x="1122" y="977" width="351" height="80" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1390" y="965" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1424" y="987" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="1140" y="1007" font-size="25" fill="#253449" font-weight="500" text-anchor="start">测试与审查 agent</text>
-<text x="1140" y="1037" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">独立上下文 / 指定版本验证</text>
-<rect x="1491" y="977" width="351" height="80" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1759" y="965" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1793" y="987" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="1509" y="1007" font-size="25" fill="#253449" font-weight="500" text-anchor="start">发布准备 agent</text>
-<text x="1509" y="1037" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">发布说明 / 检查 / 回滚材料</text>
-<path d="M1113,1075V1096" fill="none" stroke="#98a9bf" stroke-width="2" marker-end="url(#arrow)"/>
-<text x="1135" y="1094" font-size="20" fill="#62748c" font-weight="400" text-anchor="start">使用公开 SDK API；注册所需工具</text>
-<rect x="362" y="1109" width="1502" height="140" rx="16" fill="#ffffff" stroke="#98a9bf" stroke-width="1.6" />
-<text x="384" y="1144" font-size="25" fill="#253449" font-weight="500" text-anchor="start">pi-extension 适配｜本仓实现，通过 SDK 扩展接口注册；工具回调③领域服务</text>
-<rect x="384" y="1166" width="474" height="70" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="775" y="1154" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="809" y="1176" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="402" y="1196" font-size="25" fill="#253449" font-weight="500" text-anchor="start">工作项 / 交付 Extension</text>
-<text x="402" y="1226" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">查询 → 领取 → 提交 → ③领域服务</text>
-<rect x="876" y="1166" width="474" height="70" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<rect x="1267" y="1154" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
-<text x="1301" y="1176" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
-<text x="894" y="1196" font-size="25" fill="#253449" font-weight="500" text-anchor="start">知识库 Extension</text>
-<text x="894" y="1226" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">kb_search → 知识检索实现</text>
-<rect x="1368" y="1166" width="474" height="70" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<rect x="1759" y="1154" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
-<text x="1793" y="1176" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
-<text x="1386" y="1196" font-size="25" fill="#253449" font-weight="500" text-anchor="start">subagent Extension</text>
-<text x="1386" y="1226" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">Agent 等工具 → 宿主的子会话管理</text>
-<path d="M1113,1278V1257" fill="none" stroke="#98a9bf" stroke-width="2" marker-end="url(#arrow)"/>
-<text x="1135" y="1272" font-size="20" fill="#62748c" font-weight="400" text-anchor="start">SDK 回调 Extension 工具，工具调用③领域服务</text>
-<rect x="362" y="1287" width="1502" height="125" rx="16" fill="#eaf0fb" stroke="#6485b8" stroke-width="1.6" />
-<text x="384" y="1323" font-size="25" fill="#253449" font-weight="500" text-anchor="start">pi harness / pi SDK｜原样依赖，不改源码，不定义需求、开发、测试或发布业务</text>
-<rect x="384" y="1338" width="351" height="66" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<rect x="652" y="1326" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
-<text x="686" y="1348" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
-<text x="402" y="1367" font-size="25" fill="#253449" font-weight="500" text-anchor="start">AgentSession</text>
-<text x="402" y="1393" font-size="22" fill="#62748c" font-weight="400" text-anchor="start">通用会话 API</text>
-<rect x="753" y="1338" width="351" height="66" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<rect x="1021" y="1326" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
-<text x="1055" y="1348" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
-<text x="771" y="1367" font-size="25" fill="#253449" font-weight="500" text-anchor="start">模型与工具循环</text>
-<text x="771" y="1393" font-size="22" fill="#62748c" font-weight="400" text-anchor="start">模型推理 / 工具调用</text>
-<rect x="1122" y="1338" width="351" height="66" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<rect x="1390" y="1326" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
-<text x="1424" y="1348" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
-<text x="1140" y="1367" font-size="25" fill="#253449" font-weight="500" text-anchor="start">资源与扩展机制</text>
-<text x="1140" y="1393" font-size="22" fill="#62748c" font-weight="400" text-anchor="start">Skills / Extensions 接口</text>
-<rect x="1491" y="1338" width="351" height="66" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<rect x="1759" y="1326" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
-<text x="1793" y="1348" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
-<text x="1509" y="1367" font-size="25" fill="#253449" font-weight="500" text-anchor="start">会话文件与基础工具</text>
-<text x="1509" y="1393" font-size="22" fill="#62748c" font-weight="400" text-anchor="start">会话 JSONL / read / bash</text>
-<rect x="1920" y="706" width="440" height="730" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
-<rect x="1938" y="725" width="404" height="213" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="766" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">工作区角色与策略资源</text>
-<text x="2140" y="807" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">.pi/agents/*.md（Profiles）</text>
-<text x="2140" y="840" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">Skills / AGENTS.md</text>
-<text x="2140" y="873" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">应用侧组织角色与任务</text>
-<text x="2140" y="906" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">通过 SDK 公开接口装配</text>
-<rect x="1938" y="960" width="404" height="147" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="1002" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">代码与验证环境</text>
-<text x="2140" y="1043" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">Git / worktree / 测试命令</text>
-<text x="2140" y="1075" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">测试环境 / 人工检查</text>
-<rect x="1938" y="1129" width="404" height="125" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="1171" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">模型服务 / LLM Provider</text>
-<text x="2140" y="1211" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">沿用现有模型配置与凭据</text>
-<rect x="1938" y="1276" width="404" height="141" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="1318" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">现有 loop 文件协议</text>
-<text x="2140" y="1359" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">LOOP.md / Skill / STATE.md</text>
-<text x="2140" y="1391" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">由心跳启动普通 pi 轮会话</text>
-<path d="M1113,1440V1461" fill="none" stroke="#98a9bf" stroke-width="2" marker-end="url(#arrow)"/>
-<text x="1135" y="1459" font-size="20" fill="#62748c" font-weight="400" text-anchor="start">领域服务与 SDK 各自读写对应文件</text>
-<rect x="40" y="1474" width="270" height="188" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="61" y="1524" font-size="29" fill="#253449" font-weight="500" text-anchor="start">⑤ 文件与状态层</text>
-<text x="61" y="1565" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">本地文件持久化</text>
-<text x="61" y="1597" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">工作项文件是事实源</text>
-<rect x="338" y="1474" width="1550" height="188" rx="18" fill="#f5f7fb" stroke="#98a9bf" stroke-width="1.6" />
-<text x="362" y="1507" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">工作项、角色配置与会话记录是不同数据；任务池是工作项状态的投影</text>
-<rect x="362" y="1529" width="362" height="122" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="641" y="1517" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="675" y="1539" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="380" y="1567" font-size="25" fill="#253449" font-weight="500" text-anchor="start">工作项状态与历史</text>
-<text x="380" y="1605" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">item.yaml / README.md</text>
-<text x="380" y="1637" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">events.jsonl / delivery 元数据</text>
-<rect x="742" y="1529" width="362" height="122" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
-<rect x="1021" y="1517" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
-<text x="1055" y="1539" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
-<text x="760" y="1567" font-size="25" fill="#253449" font-weight="500" text-anchor="start">交付证据与执行记录</text>
-<text x="760" y="1605" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">设计 / 候选 / 验证 / 发布材料</text>
-<text x="760" y="1637" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">不可变产物 / attempts</text>
-<rect x="1122" y="1529" width="362" height="122" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="1401" y="1517" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="1435" y="1539" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="1140" y="1567" font-size="25" fill="#253449" font-weight="500" text-anchor="start">工作区定义与配置</text>
-<text x="1140" y="1605" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">Profiles / Skills / LOOP / STATE</text>
-<text x="1140" y="1637" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">delivery.yaml（新增）</text>
-<rect x="1502" y="1529" width="362" height="122" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
-<rect x="1781" y="1517" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
-<text x="1815" y="1539" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
-<text x="1520" y="1567" font-size="25" fill="#253449" font-weight="500" text-anchor="start">会话与运行态文件</text>
-<text x="1520" y="1605" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">会话 JSONL 沿用 agentDir</text>
-<text x="1520" y="1637" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">心跳 / 锁 / 启动占用</text>
-<rect x="1920" y="1474" width="440" height="188" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
-<rect x="1938" y="1488" width="404" height="160" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
-<text x="2140" y="1523" font-size="26" fill="#253449" font-weight="500" text-anchor="middle">本地文件系统 / Git 历史</text>
-<text x="2140" y="1559" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">候选提交与证据可恢复</text>
-<text x="2140" y="1587" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">锁和心跳不作为业务证据</text>
-<text x="2140" y="1615" font-size="23" fill="#62748c" font-weight="400" text-anchor="middle">不新增数据库写权威</text>
-<rect x="40" y="1698" width="2320" height="108" rx="18" fill="#eef2f7" stroke="#98a9bf" stroke-width="1.6" />
-<text x="61" y="1744" font-size="29" fill="#253449" font-weight="500" text-anchor="start">部署基座</text>
-<text x="61" y="1780" font-size="23" fill="#62748c" font-weight="400" text-anchor="start">目标：单服务进程</text>
-<rect x="338" y="1715" width="654" height="74" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<text x="665" y="1745" font-size="25" fill="#253449" font-weight="500" text-anchor="middle">Next.js Node.js :30141</text>
-<text x="665" y="1776" font-size="22" fill="#62748c" font-weight="400" text-anchor="middle">API / 业务 / 会话 / loop 同进程</text>
-<rect x="1010" y="1715" width="654" height="74" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<text x="1337" y="1745" font-size="25" fill="#253449" font-weight="500" text-anchor="middle">本地工作区 + Git / worktree</text>
-<text x="1337" y="1776" font-size="22" fill="#62748c" font-weight="400" text-anchor="middle">文件协议 / 隔离目录 / 证据记录</text>
-<rect x="1682" y="1715" width="654" height="74" rx="12" fill="#ffffff" stroke="#c9d4e2" stroke-width="1.6" />
-<text x="2009" y="1745" font-size="25" fill="#253449" font-weight="500" text-anchor="middle">生命周期与恢复</text>
-<text x="2009" y="1776" font-size="22" fill="#62748c" font-weight="400" text-anchor="middle">服务重启中断执行，依持久化记录恢复</text>
-<text x="40" y="1843" font-size="24" fill="#62748c" font-weight="400" text-anchor="start">边界：业务与角色属于 pi-web / 工作区；Extension 负责接入；pi SDK 只提供原有通用能力，保持原样。</text>
+<text x="2140" y="207" font-size="26" fill="#263449" font-weight="500" text-anchor="middle">人类参与者</text>
+<text x="2140" y="243" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">产品 / 开发 / 测试 / 发布人</text>
+<text x="2140" y="271" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">使用界面，作出业务决定</text>
+<path d="M1113,296V317" fill="none" stroke="#98a8bf" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1135" y="315" font-size="20" fill="#64748b" font-weight="400" text-anchor="start">浏览器 ↔ 服务端：HTTP / SSE</text>
+<rect x="326" y="326" width="1574" height="868" rx="20" fill="none" stroke="#8da6ca" stroke-width="1.6" stroke-dasharray="8 6"/>
+<rect x="40" y="330" width="270" height="134" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="61" y="380" font-size="29" fill="#263449" font-weight="500" text-anchor="start">② 应用接口层</text>
+<text x="61" y="421" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">pi-web 的 Next.js 接口</text>
+<text x="61" y="453" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">请求适配 / 认证 / 事件</text>
+<rect x="338" y="330" width="1550" height="134" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<rect x="362" y="353" width="362" height="88" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
+<rect x="641" y="341" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="675" y="363" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<text x="380" y="385" font-size="25" fill="#263449" font-weight="500" text-anchor="start">工作区 / 工作项 API</text>
+<text x="380" y="418" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">创建 / 查询 / 附件 / 更新</text>
+<rect x="742" y="353" width="362" height="88" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<rect x="1021" y="341" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
+<text x="1055" y="363" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
+<text x="760" y="385" font-size="25" fill="#263449" font-weight="500" text-anchor="start">交付操作 API</text>
+<text x="760" y="418" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">加入 / 确认 / 暂停 / 恢复</text>
+<rect x="1122" y="353" width="362" height="88" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
+<rect x="1401" y="341" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="1435" y="363" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<text x="1140" y="385" font-size="25" fill="#263449" font-weight="500" text-anchor="start">会话 API</text>
+<text x="1140" y="418" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">消息 / SSE / 启动 / 停止</text>
+<rect x="1502" y="353" width="362" height="88" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
+<rect x="1781" y="341" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="1815" y="363" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<text x="1520" y="385" font-size="25" fill="#263449" font-weight="500" text-anchor="start">资源与配置 API</text>
+<text x="1520" y="418" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">扩展 / 角色 / 技能 / 模型</text>
+<rect x="1920" y="330" width="440" height="134" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
+<rect x="1938" y="344" width="404" height="106" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
+<text x="2140" y="379" font-size="26" fill="#263449" font-weight="500" text-anchor="middle">禅道 / 其他需求来源</text>
+<text x="2140" y="415" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">工作区同步脚本 → 工作项 API</text>
+<text x="2140" y="443" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">沿用现有来源引用与去重</text>
+<path d="M1113,468V489" fill="none" stroke="#98a8bf" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1135" y="487" font-size="20" fill="#64748b" font-weight="400" text-anchor="start">调用扩展服务，或直接使用 SDK 通用接口</text>
+<rect x="40" y="502" width="270" height="478" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="61" y="552" font-size="29" fill="#263449" font-weight="500" text-anchor="start">③ pi-extension</text>
+<text x="61" y="593" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">对 pi 的扩展</text>
+<text x="61" y="625" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">本仓或工作区提供实现</text>
+<text x="61" y="657" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">业务职责在这一层</text>
+<rect x="338" y="502" width="1550" height="478" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="362" y="536" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">工具 / 命令 / 事件接入 + 扩展内部业务服务；API 与 SDK 工具回调共用同一份实现</text>
+<rect x="362" y="562" width="1502" height="248" rx="16" fill="#ffffff" stroke="#98a8bf" stroke-width="1.6" />
+<text x="384" y="599" font-size="28" fill="#263449" font-weight="500" text-anchor="start">工作项 / 需求交付扩展</text>
+<rect x="1776" y="574" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="1810" y="596" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<rect x="384" y="620" width="351" height="78" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<rect x="652" y="608" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
+<text x="686" y="630" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
+<text x="402" y="652" font-size="25" fill="#263449" font-weight="500" text-anchor="start">TaskPool · 任务池</text>
+<text x="402" y="685" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">就绪条件 / 依赖 / 优先级</text>
+<rect x="753" y="620" width="351" height="78" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<rect x="1021" y="608" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
+<text x="1055" y="630" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
+<text x="771" y="652" font-size="25" fill="#263449" font-weight="500" text-anchor="start">ClaimService · 领取</text>
+<text x="771" y="685" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">互斥 / 幂等 / 占用恢复</text>
+<rect x="1122" y="620" width="351" height="78" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<rect x="1390" y="608" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
+<text x="1424" y="630" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
+<text x="1140" y="652" font-size="25" fill="#263449" font-weight="500" text-anchor="start">阶段与证据规则</text>
+<text x="1140" y="685" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">确认 / 验证 / 返工 / 版本</text>
+<rect x="1491" y="620" width="351" height="78" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<rect x="1759" y="608" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
+<text x="1793" y="630" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
+<text x="1509" y="652" font-size="25" fill="#263449" font-weight="500" text-anchor="start">角色唤醒与执行</text>
+<text x="1509" y="685" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">有任务才唤醒 / 调用 SDK</text>
+<text x="384" y="728" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">扩展使用的业务角色与策略｜由 Profiles / Skills 配置，使用 SDK 原有 AgentSession 执行</text>
+<rect x="384" y="749" width="351" height="45" rx="10" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<text x="559.5" y="779" font-size="25" fill="#263449" font-weight="500" text-anchor="middle">需求与设计 agent</text>
+<rect x="753" y="749" width="351" height="45" rx="10" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<text x="928.5" y="779" font-size="25" fill="#263449" font-weight="500" text-anchor="middle">开发 agent</text>
+<rect x="1122" y="749" width="351" height="45" rx="10" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<text x="1297.5" y="779" font-size="25" fill="#263449" font-weight="500" text-anchor="middle">测试与审查 agent</text>
+<rect x="1491" y="749" width="351" height="45" rx="10" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<text x="1666.5" y="779" font-size="25" fill="#263449" font-weight="500" text-anchor="middle">发布准备 agent</text>
+<rect x="362" y="849" width="488.6666666666667" height="110" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
+<rect x="767.6666666666667" y="837" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="801.6666666666667" y="859" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<text x="380" y="881" font-size="25" fill="#263449" font-weight="500" text-anchor="start">Loop 触发扩展（迁移）</text>
+<text x="380" y="914" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">心跳 / LOOP.md / STATE.md</text>
+<text x="380" y="946" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">启动入口由 Next.js 装配</text>
+<rect x="868.6666666666667" y="849" width="488.6666666666667" height="110" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="1274.3333333333335" y="837" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="1308.3333333333335" y="859" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="886.6666666666667" y="881" font-size="25" fill="#263449" font-weight="500" text-anchor="start">subagent 扩展</text>
+<text x="886.6666666666667" y="914" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">Agent 工具 / 子会话管理</text>
+<text x="886.6666666666667" y="946" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">角色发现 / 隔离 worktree</text>
+<rect x="1375.3333333333335" y="849" width="488.6666666666667" height="110" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="1781.0000000000002" y="837" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="1815.0000000000002" y="859" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="1393.3333333333335" y="881" font-size="25" fill="#263449" font-weight="500" text-anchor="start">知识库及其他扩展</text>
+<text x="1393.3333333333335" y="914" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">kb_search / 项目自定义工具</text>
+<text x="1393.3333333333335" y="946" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">按工作区能力选择加载</text>
+<rect x="1920" y="502" width="440" height="478" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
+<rect x="1938" y="521" width="404" height="165" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
+<text x="2140" y="562" font-size="26" fill="#263449" font-weight="500" text-anchor="middle">角色与扩展配置</text>
+<text x="2140" y="603" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">Profiles / Skills / AGENTS.md</text>
+<text x="2140" y="633" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">delivery.yaml / LOOP.md</text>
+<text x="2140" y="663" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">角色是扩展配置，不是 SDK 代码</text>
+<rect x="1938" y="706" width="404" height="109" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
+<text x="2140" y="746" font-size="26" fill="#263449" font-weight="500" text-anchor="middle">代码仓库 / Git 平台</text>
+<text x="2140" y="785" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">本地仓库 / worktree / 提交</text>
+<rect x="1938" y="835" width="404" height="126" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
+<text x="2140" y="875" font-size="26" fill="#263449" font-weight="500" text-anchor="middle">验证与发布环境</text>
+<text x="2140" y="914" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">测试命令 / 测试环境 / 人工检查</text>
+<text x="2140" y="943" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">首版发布由人执行</text>
+<path d="M1113,984V1005" fill="none" stroke="#98a8bf" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1135" y="1003" font-size="20" fill="#64748b" font-weight="400" text-anchor="start">公开 API / 扩展接口；SDK 通过工具和事件回调扩展</text>
+<rect x="40" y="1018" width="270" height="166" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="61" y="1068" font-size="29" fill="#263449" font-weight="500" text-anchor="start">④ pi-sdk 层</text>
+<text x="61" y="1109" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">pi 原有通用能力</text>
+<text x="61" y="1141" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">原样依赖，不改源码</text>
+<rect x="338" y="1018" width="1550" height="166" rx="18" fill="#edf2fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="362" y="1051" font-size="25" fill="#263449" font-weight="500" text-anchor="start">pi harness / SDK｜保持通用，不定义需求阶段、交付规则或业务角色</text>
+<rect x="362" y="1074" width="237" height="87" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="516" y="1062" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="550" y="1084" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="378" y="1107" font-size="25" fill="#263449" font-weight="500" text-anchor="start">AgentSession</text>
+<text x="378" y="1140" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">通用会话 API</text>
+<rect x="615" y="1074" width="237" height="87" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="769" y="1062" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="803" y="1084" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="631" y="1107" font-size="25" fill="#263449" font-weight="500" text-anchor="start">模型循环</text>
+<text x="631" y="1140" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">推理 / 工具迭代</text>
+<rect x="868" y="1074" width="237" height="87" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="1022" y="1062" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="1056" y="1084" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="884" y="1107" font-size="25" fill="#263449" font-weight="500" text-anchor="start">工具系统</text>
+<text x="884" y="1140" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">调用与执行</text>
+<rect x="1121" y="1074" width="237" height="87" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="1275" y="1062" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="1309" y="1084" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="1137" y="1107" font-size="25" fill="#263449" font-weight="500" text-anchor="start">资源与扩展加载</text>
+<text x="1137" y="1140" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">Skills / Extensions</text>
+<rect x="1374" y="1074" width="237" height="87" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="1528" y="1062" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="1562" y="1084" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="1390" y="1107" font-size="25" fill="#263449" font-weight="500" text-anchor="start">SessionManager</text>
+<text x="1390" y="1140" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">会话 JSONL</text>
+<rect x="1627" y="1074" width="237" height="87" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<rect x="1781" y="1062" width="68" height="30" rx="7" fill="#f1f5f9" stroke="none" stroke-width="1.6" />
+<text x="1815" y="1084" font-size="20" fill="#64748b" font-weight="500" text-anchor="middle">已有</text>
+<text x="1643" y="1107" font-size="25" fill="#263449" font-weight="500" text-anchor="start">基础工具</text>
+<text x="1643" y="1140" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">read / bash / edit</text>
+<rect x="1920" y="1018" width="440" height="166" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
+<rect x="1938" y="1032" width="404" height="138" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
+<text x="2140" y="1067" font-size="26" fill="#263449" font-weight="500" text-anchor="middle">模型服务 / LLM Provider</text>
+<text x="2140" y="1103" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">沿用模型配置与凭据</text>
+<text x="2140" y="1131" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">SDK 调用模型服务</text>
+<path d="M1113,1188V1209" fill="none" stroke="#98a8bf" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1135" y="1207" font-size="20" fill="#64748b" font-weight="400" text-anchor="start">扩展与 SDK 各自持久化对应数据</text>
+<rect x="40" y="1222" width="270" height="188" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="61" y="1272" font-size="29" fill="#263449" font-weight="500" text-anchor="start">⑤ 文件与状态层</text>
+<text x="61" y="1313" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">工作区文件与 agentDir</text>
+<text x="61" y="1345" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">业务状态 / 证据 / 会话</text>
+<rect x="338" y="1222" width="1550" height="188" rx="18" fill="#f5f7fb" stroke="#98a8bf" stroke-width="1.6" />
+<text x="362" y="1256" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">工作项文件为业务事实源；任务池是投影；临时心跳与锁不作为交付证据</text>
+<rect x="362" y="1277" width="362" height="110" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
+<rect x="641" y="1265" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="675" y="1287" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<text x="380" y="1309" font-size="25" fill="#263449" font-weight="500" text-anchor="start">工作项状态与历史</text>
+<text x="380" y="1342" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">item.yaml / README.md</text>
+<text x="380" y="1374" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">events.jsonl / delivery 元数据</text>
+<rect x="742" y="1277" width="362" height="110" rx="12" fill="#eaf8f3" stroke="#0d786b" stroke-width="1.6" />
+<rect x="1021" y="1265" width="68" height="30" rx="7" fill="#eaf8f3" stroke="none" stroke-width="1.6" />
+<text x="1055" y="1287" font-size="20" fill="#0d786b" font-weight="500" text-anchor="middle">新增</text>
+<text x="760" y="1309" font-size="25" fill="#263449" font-weight="500" text-anchor="start">交付产物与执行记录</text>
+<text x="760" y="1342" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">设计 / 候选 / 验证 / 发布材料</text>
+<text x="760" y="1374" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">不可变产物 / attempts</text>
+<rect x="1122" y="1277" width="362" height="110" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
+<rect x="1401" y="1265" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="1435" y="1287" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<text x="1140" y="1309" font-size="25" fill="#263449" font-weight="500" text-anchor="start">工作区定义与策略</text>
+<text x="1140" y="1342" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">Profiles / Skills / AGENTS</text>
+<text x="1140" y="1374" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">delivery.yaml / LOOP / STATE</text>
+<rect x="1502" y="1277" width="362" height="110" rx="12" fill="#fff7e8" stroke="#a06310" stroke-width="1.6" />
+<rect x="1781" y="1265" width="68" height="30" rx="7" fill="#fff7e8" stroke="none" stroke-width="1.6" />
+<text x="1815" y="1287" font-size="20" fill="#a06310" font-weight="500" text-anchor="middle">增强</text>
+<text x="1520" y="1309" font-size="25" fill="#263449" font-weight="500" text-anchor="start">会话与运行态文件</text>
+<text x="1520" y="1342" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">会话 JSONL / 执行关联</text>
+<text x="1520" y="1374" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">心跳 / 锁 / 启动占用</text>
+<rect x="1920" y="1222" width="440" height="188" rx="18" fill="#fcfbf5" stroke="#c5ae64" stroke-width="1.6" stroke-dasharray="6 5"/>
+<rect x="1938" y="1236" width="404" height="160" rx="12" fill="#ffffff" stroke="#dfd1a2" stroke-width="1.6" />
+<text x="2140" y="1271" font-size="26" fill="#263449" font-weight="500" text-anchor="middle">本地持久化 / Git 历史</text>
+<text x="2140" y="1307" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">文件协议保持可读、可恢复</text>
+<text x="2140" y="1335" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">会话结束后保留候选与证据</text>
+<text x="2140" y="1363" font-size="23" fill="#64748b" font-weight="400" text-anchor="middle">不新增数据库写权威</text>
+<rect x="40" y="1448" width="2320" height="108" rx="18" fill="#eef2f7" stroke="#98a8bf" stroke-width="1.6" />
+<text x="61" y="1494" font-size="29" fill="#263449" font-weight="500" text-anchor="start">⑥ 部署基建</text>
+<text x="61" y="1530" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">单一服务端宿主</text>
+<rect x="338" y="1465" width="654" height="74" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<text x="665" y="1495" font-size="25" fill="#263449" font-weight="500" text-anchor="middle">Next.js 常驻 Node.js :30141</text>
+<text x="665" y="1526" font-size="22" fill="#64748b" font-weight="400" text-anchor="middle">接口、扩展、SDK 同宿主，去掉独立 daemon</text>
+<rect x="1010" y="1465" width="654" height="74" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<text x="1337" y="1495" font-size="25" fill="#263449" font-weight="500" text-anchor="middle">本地目录 + Git / worktree</text>
+<text x="1337" y="1526" font-size="22" fill="#64748b" font-weight="400" text-anchor="middle">持久化文件 / 隔离工作目录 / 命令子进程</text>
+<rect x="1682" y="1465" width="654" height="74" rx="12" fill="#ffffff" stroke="#c9d3e1" stroke-width="1.6" />
+<text x="2009" y="1495" font-size="25" fill="#263449" font-weight="500" text-anchor="middle">生命周期与恢复</text>
+<text x="2009" y="1526" font-size="22" fill="#64748b" font-weight="400" text-anchor="middle">宿主重启中断执行，依持久化记录恢复</text>
+<text x="40" y="1595" font-size="23" fill="#64748b" font-weight="400" text-anchor="start">边界：前端展示，接口适配，扩展实现业务，SDK 原样执行，文件保存状态，基建提供运行环境。当前仅对齐架构，未改运行代码。</text>
 </g></svg>
