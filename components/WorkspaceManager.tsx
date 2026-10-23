@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { MarkdownBody } from "./MarkdownBody";
 import { CapabilityToggle } from "./CapabilityToggle";
+import { useWorkItems } from "@/hooks/useWorkItems";
 import type {
   WorkspaceCapability,
   WorkspaceRepositoryState,
@@ -32,11 +33,6 @@ import { responseJson, uploadWorkItemAttachments } from "./work-items/work-item-
 interface WorkspaceListResponse {
   root: string;
   workspaces: WorkspaceSummary[];
-}
-
-interface WorkItemListResponse {
-  items: WorkItemRecord[];
-  invalid: Array<{ key: string; path: string; error: string }>;
 }
 
 interface RepositoryListResponse {
@@ -100,8 +96,12 @@ interface Props {
    *  等错误在 handler 内 alert 直陈。 */
   onRunLoopRound?: (workspace: WorkspaceSummary, item: WorkItemRecord, loopName: string) => void;
   /** Open one of the item's linked conversation sessions by id (locate
-   *  pipeline) — renders the `conversations` list as clickable entries. */
+   * pipeline) — renders the `conversations` list as clickable entries. */
   onOpenConversation?: (sessionId: string) => void;
+  /** 「打开完整管理」（M2 T10，spec §6.1）：panel 模式（右坞快捷面板）顶部
+   *  入口 → 宿主的 openWorkItemsPage(wsId)——中央整页与快捷面板是同一工作项
+   *  域的两个面。rail 图标单击语义不变（模块切换），入口是面板内按钮。 */
+  onOpenWorkItemsPage?: (workspaceId: string, itemKey?: string) => void;
   onWorkspaceDeleted?: (workspace: WorkspaceSummary) => void;
   onWorkItemsChanged?: () => void;
   /** Reports the rail's current selection up (e.g. the right-column
@@ -221,6 +221,7 @@ export function WorkspaceManager({
   onRunContract,
   onRunLoopRound,
   onOpenConversation,
+  onOpenWorkItemsPage,
   onWorkspaceDeleted,
   onWorkItemsChanged,
   onSelectedWorkspaceChange,
@@ -228,7 +229,6 @@ export function WorkspaceManager({
   const [section, setSection] = useState<ManagerSection>(initialSection);
   const [workspaceData, setWorkspaceData] = useState<WorkspaceListResponse | null>(null);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
-  const [workItemData, setWorkItemData] = useState<WorkItemListResponse>({ items: [], invalid: [] });
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
   const [selectedWorkItem, setSelectedWorkItem] = useState<WorkItemDetail | null>(null);
@@ -236,7 +236,6 @@ export function WorkspaceManager({
   const [showArchived, setShowArchived] = useState(false);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
-  const [itemsLoading, setItemsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
@@ -320,23 +319,38 @@ export function WorkspaceManager({
     }
   }, [activeWorkspacePath]);
 
-  const loadWorkItems = useCallback(async (workspaceId: string) => {
-    setItemsLoading(true);
-    setError(null);
-    try {
-      const data = await responseJson<WorkItemListResponse>(
-        await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/work-items`),
-      );
-      setWorkItemData(data);
-      setSelectedWorkItem((current) => (
-        current && data.items.some((item) => item.key === current.item.key) ? current : null
-      ));
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
-    } finally {
-      setItemsLoading(false);
-    }
-  }, []);
+  // 工作项列表数据（M2 T10，spec §6.3）：改走共享 store 的 useWorkItems——
+  // 中央整页（WorkItemsPage）与本面板（右坞快捷面板/设置页）同一缓存、同一
+  // 轮询器（per-workspace 单例）；mutation 一律 invalidate()，两面即时互见。
+  // 归档池合并进列表（快照 items=活动、archivedItems=归档），「查看归档」
+  // 开关按 archivedAt 过滤——旧本地拉取只取 items，归档开关恒空（本切换顺
+  // 带修复）。选中项的失效清理由快照 effect 承担（见下）。
+  const workItemsWorkspaceId = (open || embedded)
+    && selectedWorkspace
+    && selectedWorkspace.capabilities.includes("work-items")
+    ? selectedWorkspace.id
+    : null;
+  const {
+    snapshot: workItemsSnapshot,
+    loading: itemsLoading,
+    error: workItemsError,
+    invalidate: invalidateWorkItems,
+  } = useWorkItems(workItemsWorkspaceId);
+  const workItemItems = useMemo(
+    () => [
+      ...(workItemsSnapshot?.items ?? []),
+      ...(workItemsSnapshot?.archivedItems ?? []),
+    ],
+    [workItemsSnapshot],
+  );
+  const workItemInvalid = workItemsSnapshot?.invalid ?? [];
+  // 快照更新时清理已消失的选中项（旧 loadWorkItems 的清理语义收编；归档项
+  // 仍在活动∪归档池里，详情不因归档被踢回列表——与中央页一致）。
+  useEffect(() => {
+    setSelectedWorkItem((current) => (
+      current && workItemItems.some((item) => item.key === current.item.key) ? current : null
+    ));
+  }, [workItemItems]);
 
   const loadRepositories = useCallback(async (workspaceId: string) => {
     try {
@@ -350,7 +364,6 @@ export function WorkspaceManager({
   }, []);
 
   const loadWorkItem = useCallback(async (workspaceId: string, key: string) => {
-    setItemsLoading(true);
     setError(null);
     try {
       const detail = await responseJson<WorkItemDetail>(
@@ -363,8 +376,6 @@ export function WorkspaceManager({
       setContentEditing(false);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
-    } finally {
-      setItemsLoading(false);
     }
   }, []);
 
@@ -376,14 +387,8 @@ export function WorkspaceManager({
 
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId) {
-      setWorkItemData({ items: [], invalid: [] });
       setRepositories([]);
       return;
-    }
-    if (selectedWorkspace?.capabilities.includes("work-items")) {
-      void loadWorkItems(selectedWorkspaceId);
-    } else {
-      setWorkItemData({ items: [], invalid: [] });
     }
     if (selectedWorkspace?.capabilities.includes("repositories")) {
       void loadRepositories(selectedWorkspaceId);
@@ -393,7 +398,6 @@ export function WorkspaceManager({
   }, [
     embedded,
     loadRepositories,
-    loadWorkItems,
     open,
     selectedWorkspace,
     selectedWorkspaceId,
@@ -497,7 +501,7 @@ export function WorkspaceManager({
 
   const visibleWorkItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return workItemData.items.filter((item) => {
+    return workItemItems.filter((item) => {
       if (showArchived !== Boolean(item.archivedAt)) return false;
       if (filter !== "all" && item.type !== filter) return false;
       if (!normalizedQuery) return true;
@@ -505,7 +509,7 @@ export function WorkspaceManager({
         || item.title.toLowerCase().includes(normalizedQuery)
         || item.tags.some((tag) => tag.toLowerCase().includes(normalizedQuery));
     });
-  }, [filter, query, showArchived, workItemData.items]);
+  }, [filter, query, showArchived, workItemItems]);
 
   const createWorkspace = useCallback(async () => {
     setSaving(true);
@@ -755,7 +759,7 @@ export function WorkspaceManager({
           setSelectedWorkItem(detail);
           setContentDraft(detail.content);
         }
-        await loadWorkItems(selectedWorkspaceId);
+        invalidateWorkItems();
         onWorkItemsChanged?.();
         setError(
           detail.importOutcome === "existing_trashed"
@@ -778,7 +782,7 @@ export function WorkspaceManager({
       setCreateWorkItemOpen(false);
       setSelectedWorkItem(detail);
       setContentDraft(detail.content);
-      await loadWorkItems(selectedWorkspaceId);
+      invalidateWorkItems();
       onWorkItemsChanged?.();
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : String(createError));
@@ -786,7 +790,7 @@ export function WorkspaceManager({
       setSaving(false);
     }
   }, [
-    loadWorkItems,
+    invalidateWorkItems,
     selectedWorkspaceId,
     onWorkItemsChanged,
   ]);
@@ -808,7 +812,7 @@ export function WorkspaceManager({
         );
         setSelectedWorkItem(detail);
         setContentDraft(detail.content);
-        await loadWorkItems(selectedWorkspaceId);
+        invalidateWorkItems();
         onWorkItemsChanged?.();
       }
     } catch (contractError) {
@@ -816,7 +820,7 @@ export function WorkspaceManager({
     } finally {
       setSaving(false);
     }
-  }, [loadWorkItems, onRunContract, onWorkItemsChanged, selectedWorkspace, selectedWorkspaceId, selectedWorkItem]);
+  }, [invalidateWorkItems, onRunContract, onWorkItemsChanged, selectedWorkspace, selectedWorkspaceId, selectedWorkItem]);
 
   // T7: `loop` rides the explicit intersection arm (string | null — null
   // clears the binding); putting it in the Pick too would intersect away
@@ -844,14 +848,14 @@ export function WorkspaceManager({
       );
       setSelectedWorkItem(detail);
       setContentDraft(detail.content);
-      await loadWorkItems(selectedWorkspaceId);
+      invalidateWorkItems();
       onWorkItemsChanged?.();
     } catch (patchError) {
       setError(patchError instanceof Error ? patchError.message : String(patchError));
     } finally {
       setSaving(false);
     }
-  }, [loadWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
+  }, [invalidateWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
 
   const toggleWorkItemArchive = useCallback(async () => {
     if (!selectedWorkItem) return;
@@ -883,14 +887,14 @@ export function WorkspaceManager({
       setSelectedWorkItem(detail);
       setContentDraft(detail.content);
       setContentEditing(false);
-      await loadWorkItems(selectedWorkspaceId);
+      invalidateWorkItems();
       onWorkItemsChanged?.();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
       setSaving(false);
     }
-  }, [contentDraft, loadWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
+  }, [contentDraft, invalidateWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
 
   const trashWorkItem = useCallback(async () => {
     if (!selectedWorkspaceId || !selectedWorkItem) return;
@@ -905,14 +909,14 @@ export function WorkspaceManager({
         ),
       );
       setSelectedWorkItem(null);
-      await loadWorkItems(selectedWorkspaceId);
+      invalidateWorkItems();
       onWorkItemsChanged?.();
     } catch (trashError) {
       setError(trashError instanceof Error ? trashError.message : String(trashError));
     } finally {
       setSaving(false);
     }
-  }, [loadWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
+  }, [invalidateWorkItems, onWorkItemsChanged, selectedWorkItem, selectedWorkspaceId]);
 
   if (!open && !embedded) return null;
 
@@ -1588,6 +1592,19 @@ export function WorkspaceManager({
     <>
                   <div className="workspace-page-header">
                     <h2>{selectedWorkspace.name} · 工作项</h2>
+                    {/* 「打开完整管理」（M2 T10，spec §6.1）：仅快捷面板（panel）
+                        形态渲染——设置›工作区 的管理面（同为 panel 宿主）不传
+                        prop 自然不出现；rail 图标单击仍是模块切换，与此入口
+                        互不冲突。 */}
+                    {panel && onOpenWorkItemsPage && (
+                      <button
+                        className="workspace-action"
+                        onClick={() => onOpenWorkItemsPage(selectedWorkspace.id)}
+                        title="在中央区打开完整工作项管理页（列表/看板/筛选/回收站）"
+                      >
+                        打开完整管理
+                      </button>
+                    )}
                     <button className="workspace-action" onClick={() => openCreateWorkItem()}>
                       + 新建工作项
                     </button>
@@ -1667,7 +1684,7 @@ export function WorkspaceManager({
                         {showArchived ? "没有匹配的归档工作项。" : "没有匹配的工作项。"}
                       </div>
                     )}
-                    {workItemData.invalid.map((item) => (
+                    {workItemInvalid.map((item) => (
                       <div className="workspace-error" key={item.path}>
                         <strong>{item.key}</strong>：{item.error}
                       </div>
@@ -1809,7 +1826,9 @@ export function WorkspaceManager({
       className="workspace-content"
       style={splitMode ? { flex: 1, minHeight: 0 } : undefined}
     >
-            {error && <div className="workspace-error">{error}</div>}
+            {(error || (section === "work-items" ? workItemsError : null)) && (
+              <div className="workspace-error">{error ?? workItemsError}</div>
+            )}
 
             {detailFocus && section === "workspaces" && (
               <div style={{ display: "flex", marginBottom: 8 }}>

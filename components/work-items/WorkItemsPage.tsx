@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWorkItems } from "@/hooks/useWorkItems";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { buildWorkItemsPageUrl } from "@/lib/work-items-page-url";
 import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 import type {
   WorkItemDetail,
   WorkItemImportOutcome,
+  WorkItemType,
 } from "@/lib/work-items/types";
 import { PanelHeader } from "../PanelHeader";
 import { WorkItemsToolbar } from "./WorkItemsToolbar";
@@ -34,7 +36,10 @@ import {
  * `pi-work-items-view:<wsId>`、`pi-work-items-filters:<wsId>`。数据来自共享
  * store 的 useWorkItems（与右坞快捷面板同缓存）；mutation 成功统一走
  * invalidate()。选中项变化由页面自己 replace URL（buildWorkItemsPageUrl，不埋
- * 历史陷阱）。移动端宿主由 T10 接入——本组件全响应式布局，不写死桌面宽度。
+ * 历史陷阱）。移动端宿主（M2 T10）：本组件全响应式——窄屏（≤640px）隐藏
+ * 页头工作区选择器/视图分段，看板回落为阶段筛选列表（toolbar 的阶段筛选
+ * 即筛选器），详情以全屏覆盖层呈现（列表→详情导航语义）；`onBack` 是移动
+ * 端 ‹返回（回聊天）的透传，`createRequest` 承接总览「新建工作项」深链。
  */
 
 type WorkItemsView = "list" | "board";
@@ -52,6 +57,12 @@ interface WorkItemsPageProps {
   onConsumedInitialItem?: () => void;
   /** ✕ 关闭中央页。 */
   onClose?: () => void;
+  /** 移动端 ‹返回（回聊天；PanelHeader 透传，与其它目的地页同款）。 */
+  onBack?: () => void;
+  backLabel?: string;
+  /** 宿主的一次性「打开创建表单」请求（nonce 驱动；移动端总览「新建工作项」
+   *  → 目的地页直达表单，与右坞快捷面板消费 createWorkItemRequest 同构）。 */
+  createRequest?: { type: WorkItemType; id: number } | null;
   /** 页头切换工作区（保持中央页形态，换页面身份）。 */
   onOpenWorkItemsPage?: (workspaceId: string, itemKey?: string) => void;
   /** 页面内选中项变化 → replace URL（裸 query，navigateUrl 自己补 "?"）。 */
@@ -183,6 +194,9 @@ export function WorkItemsPage({
   onOpenLoopsRecovery,
   onConsumedInitialItem,
   onClose,
+  onBack,
+  backLabel,
+  createRequest,
   onOpenWorkItemsPage,
   onReplaceUrl,
   workspaces,
@@ -190,13 +204,19 @@ export function WorkItemsPage({
   const workspace = workspaces.find((w) => w.id === workspaceId) ?? null;
   const hasCapability = Boolean(workspace?.capabilities.includes("work-items"));
   const { snapshot, loading, error, refresh, invalidate } = useWorkItems(workspace && hasCapability ? workspaceId : null);
+  // 窄屏形态（移动端宿主，M2 T10 spec §6.1）：页头瘦身（选择器/视图分段
+  // 隐藏，meta 显工作区名）、看板回落为列表（toolbar 阶段筛选即筛选器）、
+  // 详情全屏覆盖（列表→详情导航）。
+  const narrow = useMediaQuery("(max-width: 640px)");
 
   const [view, setView] = useState<WorkItemsView>("list");
   const [filters, setFilters] = useState<WorkItemsFilters>(defaultWorkItemFilters);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  // ＋新建（T9）：表单面板开关 + 提交态。key 让每次打开都拿到干净草稿。
+  // ＋新建（T9）：表单面板开关 + 提交态。key 让每次打开都拿到干净草稿；
+  // createFormType 记录打开时的预选类型（createRequest 深链带来，表单内仍可改）。
   const [createOpen, setCreateOpen] = useState(false);
   const [createFormKey, setCreateFormKey] = useState(0);
+  const [createFormType, setCreateFormType] = useState<WorkItemType>("bug");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   // 详情草稿态（概况/正文/设计编辑）——切项/切工作区前 confirm（spec §6.1）。
@@ -255,11 +275,19 @@ export function WorkItemsPage({
     onOpenWorkItemsPage(id);
   }, [confirmDiscardDrafts, workspaceId, onOpenWorkItemsPage]);
 
-  const openCreateForm = useCallback(() => {
+  const openCreateForm = useCallback((type?: WorkItemType) => {
+    if (type) setCreateFormType(type);
     setCreateError(null);
     setCreateFormKey((value) => value + 1);
     setCreateOpen(true);
   }, []);
+
+  // 宿主的一次性创建深链（nonce 驱动，重复请求可重复触发）：总览「新建
+  // 工作项」在移动端直达目的地页的创建表单。
+  useEffect(() => {
+    if (!createRequest) return;
+    openCreateForm(createRequest.type);
+  }, [createRequest, openCreateForm]);
 
   /** 创建提交（沿用 WorkspaceManager 的流：POST 创建（含 enableDelivery）→
    *  附件上到新项 → 选中；导入去重（existing/existing_trashed）不当作新建。 */
@@ -412,10 +440,19 @@ export function WorkItemsPage({
           : "暂无工作项")
       : undefined;
     // 详情面板（列表/看板共用，T9）：选中项 → WorkItemDetailView（回收站命中
-    // 时只读 + 恢复）；未选中 → 空态。看板横向滚动，详情列同样贴右。
-    const detailPane = (
+    // 时只读 + 恢复）；未选中 → 空态。宽屏 = 贴右列（看板横向滚动同样贴右）；
+    // 窄屏（移动端）= 全屏覆盖层盖住列表（列表→详情导航，详情 ‹关闭/自身
+    // onClose 回列表）。
+    const detailContent = (
       <div
-        style={{
+        style={narrow ? {
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+          background: "var(--bg-panel)",
+        } : {
           flex: "0 0 34%",
           minWidth: 260,
           maxWidth: 420,
@@ -459,12 +496,13 @@ export function WorkItemsPage({
       </div>
     );
     body = (
-      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", position: "relative" }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
           {createOpen ? (
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 14 }}>
               <WorkItemCreateForm
                 key={createFormKey}
+                initialType={createFormType}
                 repositories={(workspace?.repositories ?? []).filter((repository) => repository.status === "active")}
                 saving={creating}
                 onCancel={() => {
@@ -474,13 +512,19 @@ export function WorkItemsPage({
                 onSubmit={(values) => void handleCreate(values)}
               />
             </div>
-          ) : view === "board" ? (
+          ) : view === "board" && !narrow ? (
             <WorkItemsBoard items={visible} selectedKey={selectedKey} onSelect={handleSelect} />
           ) : (
             <WorkItemsList items={visible} selectedKey={selectedKey} onSelect={handleSelect} emptyHint={emptyHint} />
           )}
         </div>
-        {detailPane}
+        {narrow
+          ? (selectedItem && !createOpen ? (
+            <div style={{ position: "absolute", inset: 0, zIndex: 10, display: "flex", flexDirection: "column", background: "var(--bg)" }}>
+              {detailContent}
+            </div>
+          ) : null)
+          : detailContent}
       </div>
     );
   }
@@ -489,22 +533,27 @@ export function WorkItemsPage({
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
       <PanelHeader
         title="工作项"
+        meta={narrow ? workspace?.name : undefined}
+        onBack={onBack}
+        backLabel={backLabel}
         actions={
           <>
-            {workspace && (
+            {workspace && !narrow && (
               <HeaderWorkspaceSelector
                 workspaces={workspaces.filter(isWorkspaceSelectable)}
                 selected={workspace}
                 onSelect={handleSwitchWorkspace}
               />
             )}
-            <div role="tablist" aria-label="视图" style={{ display: "flex", gap: 2, padding: 2, background: "var(--bg-hover)", borderRadius: 7, flexShrink: 0 }}>
-              {viewButton("list", "列表")}
-              {viewButton("board", "看板")}
-            </div>
+            {!narrow && (
+              <div role="tablist" aria-label="视图" style={{ display: "flex", gap: 2, padding: 2, background: "var(--bg-hover)", borderRadius: 7, flexShrink: 0 }}>
+                {viewButton("list", "列表")}
+                {viewButton("board", "看板")}
+              </div>
+            )}
             <button
               type="button"
-              onClick={openCreateForm}
+              onClick={() => openCreateForm()}
               disabled={createOpen}
               title="新建工作项（需求 / Bug，可选启用标准交付流程）"
               style={{

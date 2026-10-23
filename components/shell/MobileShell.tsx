@@ -14,6 +14,7 @@ import { SettingsPanel } from "../SettingsPanel";
 import { HomeLanding } from "../HomeLanding";
 import { HomeNewSession } from "../HomeNewSession";
 import { ProjectSidebar } from "../ProjectSidebar";
+import { WorkItemsPage } from "../work-items/WorkItemsPage";
 import { WorkspaceOverview } from "../WorkspaceOverview";
 import { type SwitcherModuleEntry } from "../WorkspaceSwitcherPanel";
 import { WorkspaceSelector } from "../WorkspaceSelector";
@@ -455,7 +456,14 @@ export function MobileShell() {
                   setMobilePage("settings");
                 }}
                 onOpenWorkItems={() => setMobilePage("work-items")}
-                onCreateWorkItem={handleCreateWorkItem}
+                onOpenWorkItemsPage={() => setMobilePage("work-items")}
+                onCreateWorkItem={(type) => {
+                  // 总览「新建工作项」：落工作项目的地页（WorkItemsPage 经
+                  // createRequest 直达创建表单；handleCreateWorkItem 只置请求
+                  // + 写 dock rail 状态（移动端 inert）——不导航的话按钮没反应。
+                  handleCreateWorkItem(type);
+                  setMobilePage("work-items");
+                }}
                 onSelectSession={handleSelectSession}
                 onSwitchSidebarView={(view) => setMobilePage(view === "knowledge" ? "knowledge" : "files")}
                 onAddRepository={() => {
@@ -487,28 +495,35 @@ export function MobileShell() {
           </div>
         );
       case "work-items":
+        // 工作项目的地页宿中央同款 WorkItemsPage（M2 T10，spec §6.1/§6.3）：
+        // 同一共享数据缓存与同一套 列表/筛选/详情/创建/回收站；窄屏形态由
+        // 页面自适配（看板回落为阶段筛选列表、详情全屏覆盖）。‹返回 = 回聊天
+        // （mobilePage 切回，页面内部列表→详情导航自持）；「查看会话」= 关
+        // 目的地页 + 既有 locate 打开会话路径（focusChat 也会关目的地页，
+        // 双保险）；Loops 恢复 → loops 目的地页。capability 门控沿用模块条
+        // （入口不渲染则此页不可达）。
         if (!activeWorkspace) return null;
         return (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-            <PanelHeader title="工作项" meta={activeWorkspace.name} onBack={() => setMobilePage(null)} backLabel="聊天" />
-            <WorkspaceManager
-              key={activeWorkspace.id}
-              open
-              embedded
-              panel
-              initialSection="work-items"
-              activeWorkspacePath={activeWorkspace.path}
-              createWorkItemRequest={createWorkItemRequest}
-              onClose={() => {}}
-              onOpenWorkspace={(workspace) => openNewSessionTab(workspace)}
-              onOpenWorkItemConversation={handleOpenWorkItemConversation}
-              onRunLoopRound={handleRunLoopRound}
-              onRunContract={handleRunContract}
-              onOpenConversation={handleOpenConversation}
-              onWorkspaceDeleted={handleWorkspaceDeleted}
-              onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
-            />
-          </div>
+          <WorkItemsPage
+            key={activeWorkspace.id}
+            workspaceId={activeWorkspace.id}
+            createRequest={createWorkItemRequest}
+            onOpenConversation={(sessionId) => {
+              setMobilePage(null);
+              handleOpenConversation(sessionId);
+            }}
+            onOpenLoopsRecovery={() => setMobilePage("loops")}
+            onBack={() => setMobilePage(null)}
+            backLabel="聊天"
+            onOpenWorkItemsPage={(id) => {
+              // ≥768px 平板形态：页头工作区选择器可见（narrow=false），切换 =
+              // 换上下文锚定（页面 key=activeWorkspace.id 随之重挂载到新工作区；
+              // 窄屏选择器隐藏，此回调不可达）。
+              const target = workspaces.find((w) => w.id === id);
+              if (target && isWorkspaceSelectable(target)) ensureWorkspaceContext(target);
+            }}
+            workspaces={workspaces}
+          />
         );
       case "knowledge":
         if (!activeWorkspace) return null;

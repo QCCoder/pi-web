@@ -14,7 +14,13 @@ interface Props {
   workspaces: WorkspaceSummary[];
   onNewSession: () => void;
   onOpenSettings: () => void;
+  /** 工作项行点击 → 右坞工作项模块（既有行为，保留）。 */
   onOpenWorkItems: () => void;
+  /** 「打开完整管理」（M2 T10，spec §6.1）：活跃工作项区头部入口 → 中央
+   *  工作项管理整页（桌面 = openWorkItemsPage(wsId)；移动端 = 落工作项目
+   * 的地页——那页宿的就是同一个 WorkItemsPage）。与 onOpenWorkItems 并存：
+   * 一个开右坞快捷面板，一个开完整管理页。 */
+  onOpenWorkItemsPage?: () => void;
   onCreateWorkItem: (type: WorkItemType) => void;
   onSelectSession: (session: SessionInfo) => void;
   /** 仓库/知识库行导航：仓库 → 右坞「文件」tab；知识库 → 右坞「知识库」tab
@@ -84,6 +90,7 @@ export function WorkspaceOverview({
   onNewSession,
   onOpenSettings,
   onOpenWorkItems,
+  onOpenWorkItemsPage,
   onCreateWorkItem,
   onSelectSession,
   onSwitchSidebarView,
@@ -231,6 +238,15 @@ export function WorkspaceOverview({
               活跃工作项
               <span style={{ color: "var(--text-dim)", fontSize: 12, fontWeight: 400 }}>{activeWorkItems.length}</span>
               <span style={{ flex: 1 }} />
+              {onOpenWorkItemsPage && (
+                <button
+                  onClick={onOpenWorkItemsPage}
+                  title="打开完整的工作项管理页（列表/看板/筛选/回收站）"
+                  style={sectionHeaderLinkStyle}
+                >
+                  打开完整管理
+                </button>
+              )}
               <button
                 onClick={() => onCreateWorkItem("requirement")}
                 style={{

@@ -488,7 +488,16 @@ export function DesktopShell() {
           key={page.workspaceId}
           workspaceId={page.workspaceId}
           initialItemKey={workItemsItemKeyRef.current}
-          onOpenConversation={handleOpenConversation}
+          onOpenConversation={(sessionId) => {
+            // 「查看/开始会话」闭环（M2 T10，spec §6.1）：关中央页 → 开聊天
+            // tab（handleOpenConversation = locate 管道 → openSessionTab →
+            // activateTab 清 centerPage）→ 同时把右坞定位到该工作项所在工作
+            // 区的快捷面板（openDockModule 显式按页面工作区——不用
+            // openRailModule，它跟随当前 tab 的工作区，异步 locate 落地前后
+            // 可能不是同一个），允许用户从右栏回到该工作项。
+            handleOpenConversation(sessionId);
+            openDockModule(page.workspaceId, WORK_ITEMS_TAB_ID);
+          }}
           onOpenLoopsRecovery={() => openRailModule(LOOPS_TAB_ID)}
           onConsumedInitialItem={consumeWorkItemsItemKey}
           onClose={closeCenterPage}
@@ -782,6 +791,7 @@ export function DesktopShell() {
               openCenterPage({ kind: "settings" });
             }}
             onOpenWorkItems={() => openRailModule(WORK_ITEMS_TAB_ID)}
+            onOpenWorkItemsPage={() => openWorkItemsPage(activeTab.workspace.id)}
             onCreateWorkItem={handleCreateWorkItem}
             onSelectSession={handleSelectSession}
             onSwitchSidebarView={(view) => {
@@ -1095,6 +1105,7 @@ export function DesktopShell() {
               onRunLoopRound={handleRunLoopRound}
               onRunContract={handleRunContract}
               onOpenConversation={handleOpenConversation}
+              onOpenWorkItemsPage={openWorkItemsPage}
               onWorkspaceDeleted={handleWorkspaceDeleted}
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
             />
