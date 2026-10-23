@@ -156,6 +156,7 @@ export function DesktopShell() {
     handleReorderWorkspaces,
     explorerRefreshKey,
     createWorkItemRequest,
+    setCreateWorkItemRequest,
     openRepositoryFormRequest,
     workspaceSettingsRequest,
     requestWorkspaceSettings,
@@ -1099,6 +1100,7 @@ export function DesktopShell() {
               initialSection="work-items"
               activeWorkspacePath={panelWorkspace.path}
               createWorkItemRequest={createWorkItemRequest}
+              onConsumedCreateRequest={() => setCreateWorkItemRequest(null)}
               onClose={() => {}}
               onOpenWorkspace={handleOpenWorkspace}
               onOpenWorkItemConversation={handleOpenWorkItemConversation}

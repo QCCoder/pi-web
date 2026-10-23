@@ -74,6 +74,11 @@ interface Props {
   initialSection?: ManagerSection;
   activeWorkspacePath?: string | null;
   createWorkItemRequest?: { type: WorkItemType; id: number } | null;
+  /** createWorkItemRequest 已消费（fix round 1 Important，nonce 一次性）：
+   *  面板打开创建表单后回调宿主清空请求——同 WorkItemsPage 的
+   *  onConsumedCreateRequest 模式；不清空的话换工作区重挂载（key 变化）
+   *  会让残留 nonce 再次自启表单。 */
+  onConsumedCreateRequest?: () => void;
   createWorkspaceOnOpen?: boolean;
   openRepositoryFormRequest?: number;
   /** 深链预选（已停用工作区的重启用路径）：设置›工作区分区打开时选中指定
@@ -212,6 +217,7 @@ export function WorkspaceManager({
   initialSection = "workspaces",
   activeWorkspacePath,
   createWorkItemRequest,
+  onConsumedCreateRequest,
   createWorkspaceOnOpen = false,
   openRepositoryFormRequest,
   selectWorkspaceRequest,
@@ -346,11 +352,16 @@ export function WorkspaceManager({
   const workItemInvalid = workItemsSnapshot?.invalid ?? [];
   // 快照更新时清理已消失的选中项（旧 loadWorkItems 的清理语义收编；归档项
   // 仍在活动∪归档池里，详情不因归档被踢回列表——与中央页一致）。
+  // null 快照短路（fix round 1 Critical）：invalidate() 先 clearSnapshot，
+  // 订阅者会同步收到 null——此刻池为 [] 是「数据暂缺」不是「项已消失」，
+  // 若照跑清理会把 mutation 刚 set 的 selectedWorkItem 清空（详情被关）。
+  // 清理只在真实快照上判定。
   useEffect(() => {
+    if (!workItemsSnapshot) return;
     setSelectedWorkItem((current) => (
       current && workItemItems.some((item) => item.key === current.item.key) ? current : null
     ));
-  }, [workItemItems]);
+  }, [workItemsSnapshot, workItemItems]);
 
   const loadRepositories = useCallback(async (workspaceId: string) => {
     try {
@@ -465,7 +476,11 @@ export function WorkspaceManager({
     if ((!open && !embedded) || !createWorkItemRequest) return;
     setSection("work-items");
     openCreateWorkItem(createWorkItemRequest.type);
-  }, [createWorkItemRequest, embedded, open, openCreateWorkItem]);
+    // 消费即清（fix round 1 Important）：表单已开，清掉宿主侧 nonce——
+    // 防换工作区重挂载（key 变化）时残留请求再次自启表单。宿主清成 null
+    // 会再触发本 effect 一次，被首行守卫短路（no-op）。
+    onConsumedCreateRequest?.();
+  }, [createWorkItemRequest, embedded, open, openCreateWorkItem, onConsumedCreateRequest]);
 
   // Work-item detail split (desktop): report selection changes up (the
   // right-column header + shell mirror), and honor the right column's ×

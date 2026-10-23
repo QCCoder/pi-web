@@ -63,6 +63,10 @@ interface WorkItemsPageProps {
   /** 宿主的一次性「打开创建表单」请求（nonce 驱动；移动端总览「新建工作项」
    *  → 目的地页直达表单，与右坞快捷面板消费 createWorkItemRequest 同构）。 */
   createRequest?: { type: WorkItemType; id: number } | null;
+  /** createRequest 已消费（nonce 一次性，fix round 1 Important）：页面打开
+   *  表单后回调宿主清空请求——同 onConsumedInitialItem 的 consume-and-clear
+   *  模式；不清空的话移动端 ‹聊天 卸载重挂载会让残留 nonce 自启表单。 */
+  onConsumedCreateRequest?: () => void;
   /** 页头切换工作区（保持中央页形态，换页面身份）。 */
   onOpenWorkItemsPage?: (workspaceId: string, itemKey?: string) => void;
   /** 页面内选中项变化 → replace URL（裸 query，navigateUrl 自己补 "?"）。 */
@@ -197,6 +201,7 @@ export function WorkItemsPage({
   onBack,
   backLabel,
   createRequest,
+  onConsumedCreateRequest,
   onOpenWorkItemsPage,
   onReplaceUrl,
   workspaces,
@@ -283,11 +288,13 @@ export function WorkItemsPage({
   }, []);
 
   // 宿主的一次性创建深链（nonce 驱动，重复请求可重复触发）：总览「新建
-  // 工作项」在移动端直达目的地页的创建表单。
+  // 工作项」在移动端直达目的地页的创建表单。消费即清（nonce 一次性——
+  // 宿主清 shell 态，防止宿主重挂载时残留 nonce 再次自启表单）。
   useEffect(() => {
     if (!createRequest) return;
     openCreateForm(createRequest.type);
-  }, [createRequest, openCreateForm]);
+    onConsumedCreateRequest?.();
+  }, [createRequest, openCreateForm, onConsumedCreateRequest]);
 
   /** 创建提交（沿用 WorkspaceManager 的流：POST 创建（含 enableDelivery）→
    *  附件上到新项 → 选中；导入去重（existing/existing_trashed）不当作新建。 */

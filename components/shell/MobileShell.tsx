@@ -75,6 +75,7 @@ export function MobileShell() {
     refreshKey,
     explorerRefreshKey,
     createWorkItemRequest,
+    setCreateWorkItemRequest,
     openRepositoryFormRequest,
     workspaceSettingsRequest,
     requestWorkspaceSettings,
@@ -508,6 +509,7 @@ export function MobileShell() {
             key={activeWorkspace.id}
             workspaceId={activeWorkspace.id}
             createRequest={createWorkItemRequest}
+            onConsumedCreateRequest={() => setCreateWorkItemRequest(null)}
             onOpenConversation={(sessionId) => {
               setMobilePage(null);
               handleOpenConversation(sessionId);
@@ -588,6 +590,7 @@ export function MobileShell() {
           activeWorkspacePath={activeWorkspace?.path ?? null}
           openRepositoryFormRequest={openRepositoryFormRequest}
           selectWorkspaceRequest={workspaceSettingsRequest}
+          onConsumedCreateRequest={() => setCreateWorkItemRequest(null)}
           onClose={() => {}}
           onOpenWorkspace={(workspace) => openNewSessionTab(workspace)}
           onOpenWorkItemConversation={handleOpenWorkItemConversation}
