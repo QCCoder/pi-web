@@ -165,7 +165,7 @@ async function findWorkItemDirectory(
   }
 }
 
-function serializeWorkItem(item: WorkItemRecord): string {
+export function serializeWorkItem(item: WorkItemRecord): string {
   return stringify({
     schema_version: item.schemaVersion,
     id: item.id,
@@ -270,7 +270,9 @@ function parseEvent(line: string, index: number): WorkItemEvent {
   };
 }
 
-async function writeAtomic(filePath: string, content: string): Promise<void> {
+// Exported for the delivery-flow service (delivery.ts) which shares the same
+// atomic-write/event idioms under the workspace write lock.
+export async function writeAtomic(filePath: string, content: string): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${createUlid()}.tmp`;
   try {
@@ -282,7 +284,7 @@ async function writeAtomic(filePath: string, content: string): Promise<void> {
   }
 }
 
-function eventFor(
+export function eventFor(
   type: string,
   actor: WorkItemActor,
   conversationId?: string,
@@ -298,7 +300,7 @@ function eventFor(
   };
 }
 
-async function appendEvent(itemPath: string, event: WorkItemEvent): Promise<void> {
+export async function appendEvent(itemPath: string, event: WorkItemEvent): Promise<void> {
   const serialized = {
     id: event.id,
     at: event.at,
@@ -524,6 +526,15 @@ export async function updateWorkItem(
   const { path: workspacePath } = await getWorkspace(workspaceId);
   return withWorkspaceWriteLock(workspacePath, async () => {
     const current = await readWorkItem(workspacePath, key);
+    // 标准流程项：phase/status 只能走流程动作（spec §7.2），generic PATCH 绕门禁即 400
+    if (current.item.delivery?.protocolVersion === 1 && (input.phase !== undefined || input.status !== undefined)) {
+      throw new WorkItemValidationError(
+        "Standard-flow items change phase/status only through delivery actions");
+    }
+    // 已发布基线冻结：仅展示性字段（spec §7.3）
+    if (current.item.phase === "released" && (input.repositories !== undefined || input.loop !== undefined)) {
+      throw new WorkItemValidationError("Released baseline is frozen — create a follow-up item instead");
+    }
     if (input.expectedRevision !== current.item.revision) {
       throw new WorkItemConflictError(
         `Expected revision ${input.expectedRevision}, current revision is ${current.item.revision}`,
@@ -604,6 +615,21 @@ export async function updateWorkItemContent(
     }
     if (content === current.content) return current;
     const next = structuredClone(current.item);
+    // §7.3 输入变化的确定性回退：已确认设计后修改需求（README 正文）→ 撤销
+    // 确认与下游证据，回 design 等待重新确认。revision 照常 bump，失效事件
+    // 在既有 work_item.content_updated 之外追加。
+    const invalidated = current.item.delivery?.protocolVersion === 1
+      && current.item.phase !== "released"
+      && current.item.delivery.designConfirmed !== undefined;
+    if (invalidated && next.delivery) {
+      next.delivery = {
+        ...next.delivery,
+        designConfirmed: undefined,
+        candidates: undefined,
+        verification: undefined,
+      };
+      next.phase = "design";  // 已确认后修改需求 → 撤销确认与下游证据，回设计等待重新确认
+    }
     next.revision += 1;
     next.updatedAt = new Date().toISOString();
     await writeAtomic(join(current.path, "README.md"), content);
@@ -621,6 +647,17 @@ export async function updateWorkItemContent(
         },
       ),
     );
+    if (invalidated) {
+      await appendEvent(
+        current.path,
+        eventFor(
+          "delivery.invalidated",
+          input.actor ?? "user",
+          input.conversationId,
+          { reason: "requirement-changed", fromPhase: current.item.phase, revision: next.revision },
+        ),
+      );
+    }
     await commitWorkspaceChanges(workspacePath, `workspace: update ${key} content`);
     return readWorkItem(workspacePath, key);
   });

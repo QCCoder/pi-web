@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
+import { withWorkspaceFileLock } from "./file-lock.ts";
 import { createUlid } from "./id.ts";
 import { scanWorkspaceRepositories } from "./scan.ts";
 import {
@@ -105,6 +106,12 @@ function workspaceWriteLocks(): Map<string, Promise<void>> {
   return globalThis.__piWorkspaceWriteLocks;
 }
 
+/** Two-layer workspace write lock (spec §8.2): the in-process promise queue
+ *  serializes this process's own writers (and prevents self-lock contention),
+ *  and the cross-process file lock (`<ws>/.pi/.write-lock`) lets external
+ *  peers (pi-loop CLI / future loaders) share the same mutual exclusion.
+ *  File-keyed callers (the workspace/session index) get a sibling lock file;
+ *  a key path that does not exist yet skips the file layer. */
 export async function withWorkspaceWriteLock<T>(
   workspacePath: string,
   operation: () => Promise<T>,
@@ -120,7 +127,7 @@ export async function withWorkspaceWriteLock<T>(
   locks.set(key, tail);
   await previous;
   try {
-    return await operation();
+    return await withWorkspaceFileLock(key, operation);
   } finally {
     release();
     if (locks.get(key) === tail) locks.delete(key);
