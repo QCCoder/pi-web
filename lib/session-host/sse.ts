@@ -1,13 +1,19 @@
 /** In-process SSE serving for Next.js route handlers.
  *
  *  The daemon used a node-http ServerResponse writer with a writableLength
- *  stall cap (the 2026-08-30 OOM lesson). Web ReadableStreams have no
- *  readable backpressure signal, so the cap here is our own byte counter:
- *  once a viewer leaves >SSE_STALL_BYTES enqueued and undrained, close the
- *  stream — the browser reconnects on its next poll (same recovery as any
- *  dropped SSE connection). Semantics preserved: connected frame first, 30s
- *  heartbeat comments, stream ends when the session is destroyed, aborting
- *  the request signal only cancels the subscription (never the session). */
+ *  stall cap (the 2026-08-30 OOM lesson). Web ReadableStreams buffer
+ *  undelivered chunks in this process's heap, so the same slow-client policy
+ *  is enforced here: each stream is constructed with a
+ *  ByteLengthQueuingStrategy({ highWaterMark: SSE_STALL_BYTES_DEFAULT }) and
+ *  the writer declares the viewer stalled once the platform reports
+ *  desiredSize <= 0 — i.e. more than SSE_STALL_BYTES are enqueued AND
+ *  undrained (desiredSize recovers as the peer reads, so a healthy viewer
+ *  streaming far more than the cap in total is never cut — only a stopped
+ *  one is). The stream is then closed — the browser reconnects on its next
+ *  poll (same recovery as any dropped SSE connection). Semantics preserved:
+ *  connected frame first, 30s heartbeat comments, stream ends when the
+ *  session is destroyed, aborting the request signal only cancels the
+ *  subscription (never the session). */
 import type { AgentSessionWrapper } from "./registry.ts";
 import { getRunningRpcSessionIds, getRpcSession, startRpcSession, subscribeRunningSessions } from "./registry.ts";
 import { resolveSessionPath } from "../session-reader.ts";
@@ -31,18 +37,23 @@ export interface WebSseWriter {
 export interface WebSseController {
   enqueue(chunk: Uint8Array): void;
   close(): void;
+  /** Remaining queue budget (highWaterMark − undrained bytes); recovers as
+   *  the consumer reads. Null once the stream is closed/cancelled. */
+  readonly desiredSize: number | null;
 }
 
 export function createWebSseWriter(
   controller: WebSseController,
-  stallBytes: number,
   onStall: () => void,
 ): WebSseWriter {
-  let queued = 0;
   let stalled = false;
   const encoder = new TextEncoder();
   const checkStall = (): void => {
-    if (!stalled && queued >= stallBytes) {
+    if (stalled) return;
+    // desiredSize turns null once the stream is closed/cancelled — nothing is
+    // queued anymore, so there is no backlog to guard (no stall check).
+    const desired = controller.desiredSize;
+    if (typeof desired === "number" && desired <= 0) {
       stalled = true;
       onStall();
     }
@@ -51,14 +62,12 @@ export function createWebSseWriter(
     writeEvent(data: unknown): void {
       if (stalled) return;
       const chunk = encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
-      queued += chunk.byteLength;
       controller.enqueue(chunk);
       checkStall();
     },
     writeRaw(text: string): void {
       if (stalled) return;
       const chunk = encoder.encode(text);
-      queued += chunk.byteLength;
       controller.enqueue(chunk);
       checkStall();
     },
@@ -85,7 +94,7 @@ export function serveSessionEventStream(session: AgentSessionWrapper, signal: Ab
         offDestroy();
         try { controller.close(); } catch { /* already closed */ }
       };
-      const writer = createWebSseWriter(controller, SSE_STALL_BYTES_DEFAULT, cleanup);
+      const writer = createWebSseWriter(controller, cleanup);
       writer.writeEvent({ type: "connected", sessionId: session.sessionId });
       unsubscribe = session.onEvent((event) => writer.writeEvent(event));
       const heartbeat = setInterval(() => writer.writeRaw(": \n\n"), HEARTBEAT_MS);
@@ -93,7 +102,7 @@ export function serveSessionEventStream(session: AgentSessionWrapper, signal: Ab
       signal.addEventListener("abort", cleanup, { once: true });
     },
     cancel() { cleanup(); },
-  });
+  }, new ByteLengthQueuingStrategy({ highWaterMark: SSE_STALL_BYTES_DEFAULT }));
   return sseResponse(stream);
 }
 
@@ -109,14 +118,14 @@ export function serveRunningEventStream(signal: AbortSignal): Response {
         unsubscribe();
         try { controller.close(); } catch { /* already closed */ }
       };
-      const writer = createWebSseWriter(controller, SSE_STALL_BYTES_DEFAULT, cleanup);
+      const writer = createWebSseWriter(controller, cleanup);
       unsubscribe = subscribeRunningSessions((ids) => writer.writeEvent({ type: "running", runningSessionIds: ids }));
       writer.writeEvent({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
       const heartbeat = setInterval(() => writer.writeRaw(": \n\n"), HEARTBEAT_MS);
       signal.addEventListener("abort", cleanup, { once: true });
     },
     cancel() { cleanup(); },
-  });
+  }, new ByteLengthQueuingStrategy({ highWaterMark: SSE_STALL_BYTES_DEFAULT }));
   return sseResponse(stream);
 }
 
