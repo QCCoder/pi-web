@@ -166,7 +166,7 @@ there is no `@`-include expansion; large content must be *referenced* and the mo
 Desktop is three vertical strips: **`[ProjectSidebar tree sidebar 200–560px drag-resizable/collapsible] [main area: ChatToolbar + SessionTabBar + CenterPage/Overview/chat] [file dock 42%, default-OPEN]`** — the 44px icon rail + middle-column-panel pair is RETIRED (W-中收敛后栏里只剩一个模块图标，为它维持双轨不值）；左侧合并为单一树形侧栏。**作用域即位置：树 = 工作区资源（会话/归档），顶部+底部 = 全局配置入口（顶部 插件&技能，底部 设置/模型/Agents；打开时可带工作区上下文）。** The top tab bar is SESSION-keyed（2026-09 会话 tab 化，docs/session-tabs-design.md）：每个 tab = 一个会话/新会话占位/工作区家 tab（总览），跨工作区混排；`SessionTabState` 纯逻辑（C1 点击分派/X1 邻居回落/U1 去重/URL 投影/R2 持久化恢复）在 `lib/session-tabs.ts`（+测试）。工作区从一级容器降级为跟随当前 tab 的环境上下文（`activeWorkspace = activeTab.workspace` 链不变）。交互：列表普通点击=当前 tab 原地变身（家 tab 上点击=开新 tab）、Cmd/中键=新开、fork=新 tab、关 tab=先左后右邻居回落（最后一个→首页）、会话删除/归档自动关 tab；＋=当前工作区开新占位 tab（**2026-09 占位去重：`openNewSessionTab` 内置 `findReusableNewSessionTab` —— 同工作区已有「未发起」（composer 草稿为空：无文字/图片/文件）的占位 tab → 激活复用不重复创建；草稿非空不笫「未发起」（复用会冲字），照旧开新 tab；工作项预填/insertIfEmpty 因此天然安全**）；**＋ 新占位 tab 先渲染 HomeLanding 首页内容（问候语/最近分组/工作区面板，两 shell 同构——2026-09「都要变」；点大输入卡才展开 composer，显式「新建会话」入口经 newSessionDirect 标记绕过首页直落 composer）**；**⊞ 工作区选择器已删除（2026-09：桌面早退役走项目树，移动端亦删——工作区切换走 设置›工作区；组件内 picker 代码与 onPickWorkspace prop 一并移除）**；tab 条全量存 `pi-session-tabs`，重载恢复（失效 id 静默跳过，URL 深链优先决定 active）；只挂载当前 tab 的 ChatWindow，tab 徽章靠 running/events 全局流。**移动端不渲染 SessionTabBar（2026-09 树抽屉重构：chips 行删除，切会话走抽屉树，见「移动端抽屉」节；组件保留给桌面）**。** **2026-10 右坞三次改版（docs/right-dock-design.md §13，反转 §12「模块 tab 按需打开」——「打开 cxin 看不到工作项/Loops」）：右坞 = 44px 常驻图标列（rail）+ 展开面板，**IDEA 形态：图标列贴窗口最右缘、面板从其左侧展开（激活指示条 = 图标右缘 border-right）**。图标列五项 **文件 / Loops / 工作项 / 知识库 / 终端**（终端从文件条混排扶正为第五模块）；点未激活图标 = 切模块并展开，点**已激活**图标 = 收起到只剩 rail；**rail 在有工作区上下文的形态下永不消失**（配置整页打开/无工作区上下文时整个右坞隐藏）。激活模块 + 展开态 **per-workspace 持久化**（`pi-dock-rail`，useAppShellState 的 `dockRailMap` + `dockRailFor/openDockModule/setDockExpanded` 原语），默认 `{文件, 展开}`。**文件 tab 住「文件」模块面板内横条**（`[文件(树) | file1 | …]`，`FILES_TAB_ID` 仍是文件树伪 tab；F1 沿用：文件 tab 状态挂会话 tab，关最后一个回落文件树）；任何路径打开文件 → `handleOpenFile` 统一 `openDockModule(wsId, FILES)` 自动切模块+展开。**终端 tab 住「终端」模块面板内横条**（`[终端1 | 终端2…] + ＋新建`；per-cwd 复用/重启/常驻挂载语义保留，激活选中 = DesktopShell 自持 `activeTerminalId`，不再借道 `activeFileTabId`——后者回归纯文件语义）。`dockModuleTabs`/`ensureDockModule`/坞排空收起逻辑**退役**；工具行删「文件」捷径、WorkspaceSwitcherPanel 桌面不再传 `moduleEntries`（转可选，rail 是唯一桌面模块入口；总览 hub 按钮保留 = 激活 rail 项）；宽度语义 = 整个右坞（min 344 = 44+300，收起态固定 44px 无拖拽把手），顶部固定 toggle 按钮退役；门控沿用（knowledge/work-items capability 没开则图标不渲染，Loops/终端常驻）；模块体仍按 workspace key 常驻挂载（决策 #6）。**2026-09-27 二次改版（§12：模块 tab 按需打开 + 工具行/切换面板入口）与 2026-09 S1（tab 化扩展坞、`leadingTabs` 钉死模块组）均为历史形态，已被 §13 取代。**
 
 **会话侧栏 = `components/ProjectSidebar.tsx`**（2026-09-27 侧栏瘦身：原项目树退役——工作区节点/模块行/hover 快捷键/拖拽排序/「项目＋」菜单/折叠持久化全部移除；工作区切换 + 模块入口 = 顶部工具行「工作区名 ▾」的 WorkspaceSwitcherPanel 两端共用面板；侧栏 = headerSlot（移动端抽屉头切换块）+ 新建任务/搜索/插件&技能 三行 + **「项目」分区行**（📁 图标 + 13px 标题与导航行同字号 + 「# 分组」chip + 右端 ＋ 新建工作区/导入目录菜单 + 收起/展开 chevron——收起整个项目列表[含归档行]，持久化 `pi-projects-collapsed` 缺省展开）。分组组头（2026-09-27 晚回归折叠）：整行可点收起/展开该项目会话（持久化沿用 `pi-tree-collapsed`，老用户偏好自动延续）+ **会话清单**（2026-09-27 晚「# 分组」开关：开 = 全部项目分组[静态组头，每组 5 条+显示更多]；关 = 最近活跃平铺[前 20+显示更多]；持久化 `pi-sidebar-grouped` 缺省开；归档行 = 当前工作区回收站）+ 底部 设置/模型/Agents。树时代描述存档：顶部「＋ 新建任务」= 上下文快速路径（有活动工作区→handleWorkspaceNewSession 开新占位 tab，首页→handleReturnHome 首页 composer）；**两 shell 的新会话占位 tab composer 控制行都带工作区选择器**（共享 `WorkspaceSelector`，从 HomeNewSession 抽出；占位 tab 改选 = 原地重定向，同 id 保草稿，DesktopShell/MobileShell 均经 ChatWindow inputLeadingControl 注入，2026-09 补齐移动端；家 tab workspace-home 不加——工作区是它自身的语义）；折叠/展开由 ChatToolbar 的 ☰ 开关承担；「工作区」分区标题（与新建任务左对齐）+ 右侧 ＋（新建工作区/导入目录菜单，body-portal）；工作区节点（缩进一级，**整行 = 展开/折叠开关**——文件夹开/合两种形态；**hover 右侧出 工作区首页🏠/归档🗑 两个快捷按钮**，取代徽章/计数，SessionRow 同款 hover-action 模式；不选中高亮；总览/归档由此入口）→ 会话行直挂（共享 `SessionRow` rounded：Cmd/中键新 tab + 行内归档 + 徽章 + 选中圆角高亮；**每组默认 5 条，超出收进「显示更多（共 N）」**，展开为会话内临时态）+ **组尾暗淡「归档」行**（作用域就地）；不可用工作区暗淡行挂树底；顶部第三行「插件&技能」导航行 + 底部三入口 strip（设置/模型/Agents；圆角按钮内缩）。折叠持久化 `pi-tree-collapsed`；骨架门控同旧（未加载渲染骨架行）。会话分组复用 `lib/home-quick-switch.ts` 的 `groupSessionsByWorkspace`（含空工作区的 header-only 组），但**树用 `orderBy:"workspaces"` 保持传入列表序（= 手动排序），不按活跃度自动重排（2026-09）；工作区节点可拖拽排序（drop 到节点上半/下半 = 插前/插后，列表尾空区 = 移到末位，插入指示线 `workspace-drop-line` 带入场动画）→ `onReorderWorkspaces` 全量 PATCH；移动端首页「最近」仍用默认 activity 序**。知识库/工作项/Loops/工作区切换不进侧栏（2026-09-27 瘦身：住顶部切换面板 + 右坞 + 总览 hub，见下）。
-**中央区整页（CenterPage，`useAppShellState` 的 `centerPage` 状态；2026-09 配置页拆分）**：**设置 / 模型 / 插件&技能 / Agents 四个独立配置整页 + 归档**（工作区作用域）。此前四入口共用一个两栏设置页只换预选分区（页头永远是「设置」、左索引列永远全量六项），用户反馈「跳转的页面都一模一样」，拆分后每个入口一页：页面本体 = `ConfigCenterPage`（`components/ConfigCenterPage.tsx`）——**整页打开时 DesktopShell 隐藏会话 tab 条（2026-09 用户反馈「点击插件和技能的时候为什么还有顶部 tab」；tab 条隐藏后回聊天 = 页头 ✕ / 侧栏点会话 / toggle）**，页面 chrome 为 ZCode 市场页同款 hero：accent 图标章 + 大标题（19px/700）+ 描述行（`PAGE_DESCRIPTIONS`）+ meta + ✕，多分区页用**分区 pills**（ZCode「公开/个人」同款分段按钮：设置 = 工作区/偏好，插件&技能 = 插件/技能）；设置›工作区 = inline-split WorkspaceManager 经 workspaceSlot 注入（meta 用 workspaceSettingsName），偏好分区 = PreferencesPage（居中 700px 文档流），模型/Agents 单分区页直接宿主 Config 组件（内部 列表+详情 分栏即两栏视觉），**插件&技能页的 插件/技能 分区 = `market` 布局**（2026-09 ZCode 市场同款：`PluginsConfig`/`SkillsConfig` 的 `market` prop——搜索框 + 「已安装」卡片网格（图标章 + 名称 + 摘要/描述 + 启用开关 + 详情/检查更新/移除）+ 添加区（技能 = AddSkillPanel skills.sh 远程市场搜索安装）+ 详情弹窗（PackageDetail/SkillDetail 全量复用）；与分栏模式共用同一套状态与操作，移动端设置子页仍为 embedded 分栏）。设置›工作区 = inline-split WorkspaceManager 经 workspaceSlot 注入（meta 用 workspaceSettingsName）；偏好分区 = PreferencesPage（居中 700px 文档流）。页内分区切换写 `settingsPage`（兼作分区记忆，不动 centerPage 身份）；点任何会话 tab（activateTab）即关闭回聊天；从不持久化；toggle 语义（同页再点关，异页原地切换）；导航高亮 = 页粒度（DesktopShell 传 `activeConfigPage = centerPage.kind`，不再跟页内分区实时切换）。归档 = ArchiveModal embedded（带工作区名 meta）。移动端不经 ConfigCenterPage：抽屉导航四入口统一落设置目的地页对应子页，面板仍是 `SettingsPanel`（全行索引 + 内嵌子页；desktop 两栏模式与 `DESKTOP_NAV_SECTIONS` 已删除）。Skills/插件面板保持双作用域（全局 + 当前工作区项目层，`settingsCwd`/`globalOnly` 不变）；模型保持全局默认 + per-session 选择器（manifest.agent.default_model 死字段不激活）。**右坞面板内容体不变**（2026-09 S1/S2/S3；**2026-10 rail 改版：模块入口 = 常驻图标列，见 Navigation 右坞节**）：工作项 = WorkspaceManager panel 模式，知识库 = KnowledgeBrowser，Loops = LoopsDockPanel；总览 hub 不变（模块按钮经 `openRailModule` 激活 rail 项 + 展开）。配置整页打开时工作区工具行随 SessionTabBar 一起隐藏，右坞（rail + 面板）整体也隐藏。
+**中央区整页（CenterPage，`useAppShellState` 的 `centerPage` 状态；2026-09 配置页拆分）**：**设置 / 模型 / 插件&技能 / Agents 四个独立配置整页 + 归档**（工作区作用域）+ **工作项管理整页**（2026-10 M2，`kind: "work-items"`——不走 ConfigCenterPage，页面本体是 `components/work-items/WorkItemsPage`，深链 `?workspace=<id>&page=work-items[&item=<key>]` 见「工作项」条目与 Work Items 章）。此前四入口共用一个两栏设置页只换预选分区（页头永远是「设置」、左索引列永远全量六项），用户反馈「跳转的页面都一模一样」，拆分后每个入口一页：页面本体 = `ConfigCenterPage`（`components/ConfigCenterPage.tsx`）——**整页打开时 DesktopShell 隐藏会话 tab 条（2026-09 用户反馈「点击插件和技能的时候为什么还有顶部 tab」；tab 条隐藏后回聊天 = 页头 ✕ / 侧栏点会话 / toggle）**，页面 chrome 为 ZCode 市场页同款 hero：accent 图标章 + 大标题（19px/700）+ 描述行（`PAGE_DESCRIPTIONS`）+ meta + ✕，多分区页用**分区 pills**（ZCode「公开/个人」同款分段按钮：设置 = 工作区/偏好，插件&技能 = 插件/技能）；设置›工作区 = inline-split WorkspaceManager 经 workspaceSlot 注入（meta 用 workspaceSettingsName），偏好分区 = PreferencesPage（居中 700px 文档流），模型/Agents 单分区页直接宿主 Config 组件（内部 列表+详情 分栏即两栏视觉），**插件&技能页的 插件/技能 分区 = `market` 布局**（2026-09 ZCode 市场同款：`PluginsConfig`/`SkillsConfig` 的 `market` prop——搜索框 + 「已安装」卡片网格（图标章 + 名称 + 摘要/描述 + 启用开关 + 详情/检查更新/移除）+ 添加区（技能 = AddSkillPanel skills.sh 远程市场搜索安装）+ 详情弹窗（PackageDetail/SkillDetail 全量复用）；与分栏模式共用同一套状态与操作，移动端设置子页仍为 embedded 分栏）。设置›工作区 = inline-split WorkspaceManager 经 workspaceSlot 注入（meta 用 workspaceSettingsName）；偏好分区 = PreferencesPage（居中 700px 文档流）。页内分区切换写 `settingsPage`（兼作分区记忆，不动 centerPage 身份）；点任何会话 tab（activateTab）即关闭回聊天；从不持久化；toggle 语义（同页再点关，异页原地切换）；导航高亮 = 页粒度（DesktopShell 传 `activeConfigPage = centerPage.kind`，不再跟页内分区实时切换）。归档 = ArchiveModal embedded（带工作区名 meta）。移动端不经 ConfigCenterPage：抽屉导航四入口统一落设置目的地页对应子页，面板仍是 `SettingsPanel`（全行索引 + 内嵌子页；desktop 两栏模式与 `DESKTOP_NAV_SECTIONS` 已删除）。Skills/插件面板保持双作用域（全局 + 当前工作区项目层，`settingsCwd`/`globalOnly` 不变）；模型保持全局默认 + per-session 选择器（manifest.agent.default_model 死字段不激活）。**右坞面板内容体不变**（2026-09 S1/S2/S3；**2026-10 rail 改版：模块入口 = 常驻图标列，见 Navigation 右坞节**）：工作项 = WorkspaceManager panel 模式，知识库 = KnowledgeBrowser，Loops = LoopsDockPanel；总览 hub 不变（模块按钮经 `openRailModule` 激活 rail 项 + 展开）。配置整页打开时工作区工具行随 SessionTabBar 一起隐藏，右坞（rail + 面板）整体也隐藏。
 **The standalone 仓库 view is REMOVED** — repo browsing lives in the 工作台 file tree, add/manage in 设置 › 工作区 + the overview dashboard. Stale `pi-active-view` values pointing at removed views fall back via the `visibleActivityViews` validation.
 
 The panel bodies（树形侧栏改版后）：左栏只剩 `ProjectSidebar` 一棵树（见上）；配置/归档面全部走中央区整页（CenterPage，见上）。知识库/工作项/Loops 住**右坞**（S1/S2/S3 内容不变；2026-10 rail 化后 = 常驻图标列的模块面板）：工作项 = **右坞工作项模块（`WorkspaceManager` panel 模式：列表→详情面板内推进航；门控 = work-items capability（图标不渲染）；总览工作项按钮/新建 → 激活 rail 项；2026-10 M2 T10：面板列表数据走共享 `useWorkItems` store（与中央 `WorkItemsPage` 同一缓存/轮询器，mutation 一律 invalidate()，两面即时互见；「查看归档」从此有数据——旧本地拉取只取 items 恒空），面板顶部「打开完整管理」→ `openWorkItemsPage(wsId)` 开中央整页（rail 图标单击语义不变）；移动端 = 抽屉目的地页 work-items 宿 `WorkItemsPage` 本体（窄屏 ≤640px 自适应：页头瘦身、看板回落为阶段筛选列表、详情全屏覆盖；`createRequest`/`onBack(‹聊天)` 透传）**；知识库 = **右坞知识库模块（`KnowledgeBrowser` 直挂：chips 选 bundle + FileExplorer + open index.md 提示；门控 = knowledge capability；总览知识库行 → 激活 rail 项；移动端 = 抽屉目的地页 knowledge）**；Loops = **右坞 Loops 模块（`LoopsDockPanel`：列表+状态/暂停恢复/停止本轮/「运行」手动起轮 + 配置/新建内联 LoopsConfig 推导航）**；总览 Loops 区块瘦身为摘要行（`onOpenLoopsTab` → 激活 rail 项）；frontmatter 编辑在 LoopsConfig 配置面，见 Loop 章「Loop 配置面」；STATE.md + workspace git log remain the run observability。设置/模型/插件&技能/Agents 桌面 = `ConfigCenterPage` 独立整页（见上）；移动端 = `SettingsPanel` 全行索引 + 内嵌子页，归档行仅移动端。 The remaining `WorkspaceManager` modal is the home create-workspace wizard only.
@@ -241,14 +241,22 @@ File-backed **Requirements (`REQ-####`)** and **Bugs (`BUG-####`)**. Storage und
 `<workspace>/.pi/work-items/<requirements|bugs>/<KEY>-<slug>/`（2026-09 布局，`lib/work-items/service.ts` 的
 `workItemRoot`；旧根级 requirements//bugs/ 目录已一次性收进 .pi/，迁移脚本已删）:
 
-- `item.yaml` — structured metadata (status/phase/priority/repositories/conversations/… + optional top-level `loop?: string` kit-loop binding by loop NAME, S1 soft validation — existence NOT checked; protocol semantics in `kit/README.md` 工作项绑定一节), `schemaVersion 1`.
+- `item.yaml` — structured metadata (status/phase/priority/repositories/conversations/… + optional top-level `loop?: string` kit-loop binding by loop NAME, S1 soft validation — existence NOT checked; protocol semantics in `kit/README.md` 工作项绑定一节; + optional `delivery` 标准交付流块, see below), `schemaVersion 1`.
 - `README.md` — human body. **Original Description is preserved verbatim**; later analysis is appended, never overwriting it.
 - `events.jsonl` — **append-only** timeline (id/at/type/actor/optional conversationId/data). Never rewrite it.
+- `delivery/artifacts/design.md` — 设计文档（仅 `enableDelivery` 项；`start-design` 时若不存在则播种模板「# 设计：… ## 方案 ## 验收条件」）。空/纯空白视同未编写——`confirm-design` 会以 400 拒绝（缺设计依据）。
 
 Key behavior:
-- `listWorkItems()` reads ONLY `item.yaml` per directory (README/events are detail payloads — reading them here was the list hotspot) and returns `{ items, archivedItems, invalid }` in ONE pass — the sidebar's active+archived fetches and external-source sync scripts' dedup scans (active ∪ archived) both consume this single result.
+- `listWorkItems()` reads ONLY `item.yaml` per directory (README/events are detail payloads — reading them here was the list hotspot) and returns `{ items, archivedItems, trashedItems, invalid }` in ONE pass — the sidebar's active+archived fetches, the recycle-bin read-only list, and external-source sync scripts' dedup scans (active ∪ archived) all consume this single result.
 - The `KEY` counter lives in `manifest.work_items.next{Requirement,Bug}Number` and is incremented under the workspace
   write lock (`reserveWorkItemKey`; createWorkItem 在自己的锁窗内改用不可重入变体 `reserveWorkItemKeyUnlocked`——见下条)。
+- **跨进程短写锁（2026-10 M2，spec §8.2）**：`withWorkspaceWriteLock`（lib/workspaces/service.ts）= **双层锁** —— 进程内
+  per-workspace Promise 队列（同进程写串行）套 `withWorkspaceFileLock`（`lib/workspaces/file-lock.ts`：O_EXCL 创建
+  `<ws>/.pi/.write-lock`，内容 = owner token `${pid}@${host}:${uuid}:${createdAt}`；获取失败读持有者——pid 已死或超 stale 窗
+  （默认 30s，短事务）删锁重试一次，仍失败抛 `WorkItemConflictError`（HTTP 409）；释放前核对 token 再删，不误删被抢占重写
+  的他人锁；不可解析的锁以 mtime 兜底防抢占「创建窗」内的锁）。文件层让 web 宿主与外部写者（pi-loop CLI / 外部脚本加载
+  同一 workspace）互斥；**锁不可重入**——锁内路径要再取 key 计数/查重必须走 unlocked 变体。file-keyed 调用方（如 session
+  index）用 sibling `<file>.write-lock`（`resolveLockPath`：目录 → `.pi/.write-lock`，文件 → sibling，不存在 → null 跳过文件层）。
 - **导入去重（2026-10 M2，spec §8.1）**：`createWorkItem` 带 `external` 时，去重查找（`findExistingByExternal`：
   活动 ∪ 归档（`listWorkItems`）∪ 回收站——trash 里的 item.yaml 即来源去重墓碑，坏墓碑跳过不阻塞）+ key 预留 +
   落盘全在**同一工作区写锁窗**内（并发同源导入只建一项；锁不可重入故 key 预留走 unlocked 变体）。命中即**原样返回
@@ -257,6 +265,39 @@ Key behavior:
   POST `/work-items` 响应 = detail 展开 + `importOutcome`，状态码 201 created / 200 existing*（旧脚本按 detail 字段读仍兼容）；
   extension `workspace_create_work_item` 取 `.detail` 附加 outcome；WorkspaceManager 创建流程把 existing 视为
   「已存在，未重复创建」提示（existing 打开既有项详情，existing_trashed 仅提示——回收站项路径不在活动布局，详情操作会 404）。
+- **标准交付流 / delivery flow（2026-10 M2，`lib/work-items/delivery-types.ts` + `delivery.ts`；人工模式，无自动化）**：
+  创建表单勾选「标准交付流程」（`CreateWorkItemInput.enableDelivery`，HTTP 表单专用——LLM 工具不透传；缺省不勾）即给
+  `item.yaml` 顶层播种 `delivery: { protocolVersion: 1, mode: "manual" }` 块（`parseDelivery` 逐字段校验；未知
+  protocolVersion / 非 manual mode 是硬错误 = 配置错误，不静默降级）。块内子结构：`designConfirmed`（requirementDigest +
+  designDigest 双绑定）、`candidates[]`（{repositoryId, commit}）、`verification`（requirementDigest + candidateDigest +
+  checks[]）、`releasePlan`、`release`（version + candidates + notes/rollback）、`lastRequest`（幂等指纹）。**七阶段**（phase 枚举
+  扩展，与老子阶段共存）：`intake → design → ready_for_implementation → implementation → verification → release_ready →
+  released`；`block`/`unblock` 改 status 不动 phase，`cancel` 终止。**状态机**：`planDeliveryTransition`（纯函数，无 fs——
+  README/design.md 的 sha256 digest 由 apply 计算注入；`contentDigest`/`candidatesDigest` 在 delivery-types.ts）产出
+  {phase, status, delivery, eventType, eventData}；`applyDeliveryAction` 在工作区写锁内编排（读现态 → 幂等检查 → revision
+  检查 → plan → design.md 播种 → 写 item.yaml + appendEvent + workspace git commit）。**requestId 幂等**（spec §9）：同
+  requestId+action 重放直接返回现态 `{detail, replayed: true}`，不 bump revision、不追加事件；每次受理把指纹写进
+  `delivery.lastRequest`。**证据绑定**：confirm-design 绑定当时的 requirement+design digest、record-verification 绑定
+  requirement+candidates digest——缺依据（无 design.md / 无 candidates / 有未通过检查项）一律 400 拒绝推进；rework 回退时
+  撤销全部下游证据（designConfirmed/candidates/verification/releasePlan 清空，须重新挣得）。**失效回退（确定性，spec §7.3）**：
+  已确认设计后修改需求（README 正文，`updateWorkItemContent`）或修改已确认的 design.md（`updateDesignContent`）→ 清
+  designConfirmed/candidates/verification + phase 回 `design` + 追加 `delivery.invalidated` 事件（reason
+  requirement-changed / design-changed）。**门禁与冻结**：generic PATCH 对 managed 项改 phase/status → 400（阶段只走流程动作）；
+  `released` 基线冻结——非展示性动作（block/unblock/cancel 外）、PATCH 的 repositories/loop、design.md 编辑均拒绝（「请创建关联后续项」）；
+  released 上 unblock 恢复 `done`（不是 in_progress——冻结基线上没有别的写者能修复它）。**动作 API**：
+  `POST /api/workspaces/[id]/work-items/[key]/delivery/[action]`（body {expectedRevision, requestId, payload}；slug 门 =
+  delivery-types 的 `DELIVERY_ACTIONS` 权威表；错误 400 Validation/404 NotFound|未播种 design.md/409 Conflict=revision 或锁忙）；
+  `GET|POST .../[key]/design` = 设计文档读/写（POST 即 updateDesignContent，同样走失效回退）。**合法动作计算**：
+  `legalDeliveryActions` 的 client-safe 家在 `lib/work-items/legal-actions.ts`（纯类型导入，浏览器 bundle 安全；delivery.ts
+  re-export 保服务端旧消费面）；动作条投影 `legalActionBarActions` 在 released 上额外去掉 cancel（released+cancelled
+  是不可能态——WorkItemActionbar 据此不渲染 cancel）。事件类型：`delivery.<action>` + `work_item.design_updated` +
+  `delivery.invalidated`。错误类住在 `lib/work-items/errors.ts`（叶子模块；service.ts re-export——web.ts 的 instanceof →
+  HTTP 映射要求所有 thrower 共享同一 class 身份）。
+- **回收站（trash，2026-10 M2）**：DELETE（trash）把条目 rename 进 `.pi/trash/work-items/<KEY>-<ISO 时间戳>/`（同一 key 多次
+  移入取最新 mtime）；恢复 = `restoreWorkItemFromTrashInRoot(workspacePath, key)`（锁内原子 rename 回 type 目录 + `work_item.restored`
+  事件；key 已被任何活目录承载 → 409；墓碑 item.yaml 坏 → 400 不把垃圾搬回活树；无命中 → 404）——HTTP
+  `POST .../work-items/[key]/restore-from-trash`，测试经 workspacePath 缝注入。回收站在 `listWorkItems().trashedItems`
+  只读列出（中央页「回收站」筛选 + 恢复入口）；其 item.yaml 兼任外部源去重墓碑（见上条）。
 - Updates take `expectedRevision` (optimistic concurrency); appending a milestone via `recordWorkItemMilestone` does
   **not** bump the revision.
 - **会话自链接（服务层不变式，2026-09）**：任何带 `conversationId` 的事件/更新都把该会话合并进 `item.conversations` ——
@@ -270,8 +311,31 @@ Key behavior:
   字段仍由创建表单/外部源脚本/LLM 工具写入，loop 选品 verifiable 判定读它）。历史孤儿数据不迁移——旧行的「查看会话」按钮同样可达。
 - The pi extension (`work-items/extension.ts`) registers `workspace_list_work_items`, `workspace_get_work_item`,
   `workspace_create_work_item`, `workspace_update_work_item`, `workspace_record_milestone`. create/update **透传可选 `loop` 绑定字段**（string；update 接受 null 清除——S1，软校验：存 loop 名、不验存在性，未命中按未绑定处理）。UI 入口 = 详情「Loop」下拉（WorkspaceManager，空=未绑定）。
+  **LLM 工具 managed 门控（2026-10 M2）**：`list` 默认**排除 managed 项**（= 挂 delivery 块的标准流程项——loop 取项不该捡走
+  流程管着的项），`include_managed: true` 显式opt-in 才附带；每项带 `managed` 标记（`get` 恒附）；`update` 不绕 service
+  （直调 `updateWorkItem`，managed 项改 phase/status 即吃到 service 层 400 门禁，工具描述里写明引导走 delivery 动作）。
 - **来源展示**: items carrying `external` (外部源脚本经 HTTP API 盖章) render their provenance — 详情「来源」行（禅道 #id ↗ + 最近同步时间）+ 列表 KEY 旁「禅道」小徽章（`source-labels.ts` 的标签映射；手动创建的项无此字段，不加徽章）。
 - **附件（attachments）**: `addWorkItemAttachments`（service.ts）把上传文件落 `<item>/attachments/`（basename 剥离路径、去控制字符、磁盘/批内重名自动 `-1` 后缀，中文名保留）并在 README 维护单个 `## 附件` 小节（图片 `![]()`、其余 `[]()`，目标 URL 编码，重复引用不追加；README 变更时与 content 更新同构地 bump revision）。事件类型 `work_item.attachment_added`（data.files）。路由 `POST …/work-items/[key]/attachments`（multipart `files`，限额同 /api/files：单文件 25MB / 总 100MB）；创建表单（WorkspaceManager）在创建成功后上传，失败不静默丢——报错并保留已建工作项。详情页 `MarkdownBody cwd` 直接渲染这些相对引用（与外部源脚本同机制）。
+- **前端（2026-10 M2 T7–T10）**：**共享缓存层** = `lib/work-items/store.ts`（per-workspace 模块级 snapshot
+  {items, archivedItems, trashedItems, invalid} + listener 广播 + `shouldRefetch` 5s 年龄门——双宿主秒开不拉请求风暴）+
+  `hooks/useWorkItems.ts`（**单轮询器引用计数**：同 workspaceId 无论挂几个宿主只有一个 interval（默认 5s，仅可见时轮询；
+  visibilitychange 停表/回可见立即校验，focus 校验一次；单飞 in-flight 合并）；mutation 成功统一 `invalidate()`（清快照+强制
+  重取，两宿主经订阅即时互见）；workspaceId 热切换时 loading/error 从新工作区的 store 状态复位（在飞的旧请求不得把错误漏到
+  新工作区））。**中央管理整页** = `components/work-items/`：`WorkItemsPage`（页头 工作区选择器+列表|看板分段+＋新建 →
+  Toolbar 筛选（活动|归档|回收站）→ `WorkItemsList`/`WorkItemsBoard`（七列看板，无拖拽跳阶段）→ `WorkItemDetailView`
+  （概况/设计编辑/证据（确认/候选/验证/发布）/动作条 `WorkItemActionbar`/事件审计 `WorkItemEvents`）+ `WorkItemCreateForm`
+  （`enableDelivery` 复选框**缺省不勾**）。看板投影在 `work-item-phases.ts`（纯模块）：老子阶段（analysis/
+  requirement_approval/plan_approval）投影进 design 列但**显示原始 phase 标签**（不谎报已进标准列）；老 `complete` 投影进
+  released 列但经 `isHistoricalComplete` 收进「历史已完成」折叠组——**不推断已发布**（「旧 complete ≠ 已发布」）。筛选/排序
+  纯逻辑在 `work-item-queries.ts`，HTTP 封装在 `work-item-api.ts`。**深链**：`?workspace=<id>&page=work-items[&item=<key>]`
+  （builder/parse 同居 `lib/work-items-page-url.ts`，`buildWorkItemsPageUrl` 返回**裸 query**——navigateUrl 自补 `?`；
+  解析在 `applyUrlToTabs` 里先于 tab 投影，页面是 CenterPage 不是会话 tab；✕ 关闭/选中项变化 replace 重写 URL 不埋历史
+  陷阱）。**入口**：右坞快捷面板顶部「打开完整管理」+ 总览工作项区头部同款（rail 图标单击语义不变）；快捷面板列表已切
+  `useWorkItems` 共享层（与中央页单轮询器）。移动端 work-items 目的地页宿 `WorkItemsPage` 本体（capability 门控沿用模块条——入口不渲染则
+  页面不可达；窄屏 ≤640px：看板回落为阶段筛选列表、详情全屏覆盖；`onBack`=‹返回回聊天；「查看会话」= 关目的地页回聊天再
+  locate 开会话；`onOpenLoopsRecovery` → loops 目的地页）。中央页「查看会话」= 关中央页开会话 tab + `openDockModule(ws,
+  WORK_ITEMS)` 定位快捷面板；工作项详情的**执行中断跳转**：`item.loop` 命中 loops interruptions → 「去处理」跳 Loops rail
+  模块（`onOpenLoopsRecovery`）。
 - **Archive cascade** (`lib/archive-cascade.ts`): archiving a work item tucks its conversations into the session
   archive **only if no other active work item references them**; restoring brings them back. Sessions are physically
   moved to a `.archived/` subdirectory (`lib/session-archive.ts`) so `SessionManager.listAll()` no longer sees them.
@@ -497,8 +561,9 @@ strictly gitignored / tsc+eslint excluded / pruned by git-discovery.
     workspace-<slug>/                    （或任意外部路径的工作区根）
       AGENTS.md                          （永远在根：pi 从 cwd 根注入）
       .pi/workspace.yaml                 manifest（repositories[].path = 仓库相对路径）
-      .pi/work-items/{requirements,bugs,designs,plans}/
-                                         work items: <KEY>-<slug>/{item.yaml, README.md, events.jsonl, attachments/}
+      .pi/work-items/{requirements,bugs}/
+                                         work items: <KEY>-<slug>/{item.yaml, README.md, events.jsonl, attachments/[, delivery/artifacts/design.md]}
+      .pi/trash/work-items/<KEY>-<ts>/   回收站（DELETE 移入；item.yaml 兼任外部源去重墓碑；restore-from-trash 恢复）
       .pi/skills/<pattern>/SKILL.md      项目技能合同（pi 原生发现 <cwd>/.pi/skills/；旧 .agents/skills/ 已迁移）
       .pi/loops/<name>/{LOOP.md, STATE.md, loop-ledger.json, .lastrun, .round.lock, [PAUSED], LEARN/}
                                          kit loop declaration + memory spine (D5 文件即声明)
@@ -551,6 +616,9 @@ app/api/
   workspaces/[id]/work-items/[key]/events/route.ts   POST record milestone
   workspaces/[id]/work-items/[key]/attachments/route.ts  POST multipart attachments upload（service.addWorkItemAttachments：attachments/ 落盘 + README「## 附件」小节 + attachment_added 事件）
   workspaces/[id]/work-items/[key]/content/route.ts  PUT update README body
+  workspaces/[id]/work-items/[key]/delivery/[action]/route.ts  POST 标准交付流动作（body {expectedRevision, requestId, payload}；slug 门 = DELIVERY_ACTIONS 权威表；applyDeliveryAction 锁内 + requestId 幂等，replay 返回 replayed:true；400 Validation/404 NotFound|未播种 design.md/409 revision|锁忙）
+  workspaces/[id]/work-items/[key]/design/route.ts   GET 设计文档（readDesign：未播种 404）| POST 编辑（updateDesignContent：失效回退 + revision bump）
+  workspaces/[id]/work-items/[key]/restore-from-trash/route.ts  POST 从回收站恢复（restoreWorkItemFromTrashInRoot：key 被占 409 / 墓碑损坏 400 / 无命中 404）
   workspaces/[id]/loops/route.ts                  GET kit loops 全量状态（collectStatus：frontmatter 摘要 + .lastrun/next-due/锁活性/paused + 附 additive interruptions[执行中断记录]，管理面全量；web spec §5.1；D5 文件即声明 — no capability）| POST 创建（initLoop 脚手架）
   workspaces/[id]/loops/[name]/route.ts           PATCH frontmatter 四字段（cron/timezone/level/max_minutes）round-trip — 正文 byte 保留（「人的手」，S5；纯逻辑 pi-loop/frontmatter.ts，tmp+rename 原子写）| DELETE 删除（锁活/绑定守卫）
   workspaces/[id]/loops/[name]/run/route.ts       POST 立即跑一轮（launchManualRound，可选 itemKey → 合同追加优先项；返回 sessionId 供 UI 打开轮会话 tab；facade 两步建会话）
@@ -593,7 +661,8 @@ lib/
     background.ts          ensureHostBooted（globalThis 单次装配：老 daemon 迁移守卫 → LoopKitSpawner → shutdown handlers；PI_TEST_NO_BACKGROUND=1 测试缝）+ markRoundActive/clearRoundMark/listActiveRounds + registerShutdownHandlers/buildShutdownPlan（关停序列：停新轮 → 快照 running → destroy 全部 → 写中断记录 → exit 0）
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
-    service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments); **ensureDefaultWorkspace** — 初始化时补建默认「默认」工作区（name 默认 / slug default，最小能力集，见 Workspace Subsystem 章；幂等 + 墓碑 `.pi-default-deleted`，removeWorkspace 删默认时写，删后永不复活；目录在磁盘未注册 → importWorkspace 自愈重注册）
+    service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments); **ensureDefaultWorkspace** — 初始化时补建默认「默认」工作区（name 默认 / slug default，最小能力集，见 Workspace Subsystem 章；幂等 + 墓碑 `.pi-default-deleted`，removeWorkspace 删默认时写，删后永不复活；目录在磁盘未注册 → importWorkspace 自愈重注册）; **withWorkspaceWriteLock** = 双层写锁（进程内 Promise 队列 × file-lock.ts 文件层，见 Work Items 章锁条目）
+    file-lock.ts            跨进程短写锁（2026-10 M2）：withWorkspaceFileLock（O_EXCL + owner token + stale 30s 抢占 + token 校验释放）+ resolveLockPath（目录 `.pi/.write-lock` / 文件 sibling `<file>.write-lock`）；busy → WorkItemConflictError(409)
     templates.ts            capability init constants (MANDATORY/INIT checklist, normalizeInitCapabilities) + renderWorkspaceAgents (capability-driven) + renderWorkspaceRepositories + renderKnowledgeSection + legacy built-in templates
     okf.ts                  OKF v0.2 structure constants + renderOkfSeed (index.md/log.md/example concept for newly init'd knowledge repos)
     kb-search/              opt-in L1 `kb_search` tool + pure-JS BM25 index (self-healing, cross-bundle)
@@ -602,9 +671,14 @@ lib/
     extensions.ts           WORKSPACE_EXTENSION_FACTORIES + buildWorkspaceExtensions (tool modules)
     id.ts                   ULID generator
   work-items/
-    types.ts                WorkItemRecord / phases / events (incl. optional `external` source ref) / WorkItemImportOutcome
-    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation, import dedup (findExistingByExternal: active ∪ archived ∪ trash; createWorkItem 锁内查+建, returns { detail, importOutcome })
-    extension.ts            pi extension: list/get/create/update/record-milestone tools
+    types.ts                WorkItemRecord / phases（七阶段 delivery 扩展 + 老子阶段）/ events (incl. optional `external` source ref) / WorkItemImportOutcome / CreateWorkItemInput.enableDelivery
+    delivery-types.ts       DeliveryAction 11 个 + DeliveryMetadata（protocolVersion 1 / mode manual；designConfirmed/candidates/verification/releasePlan/release/lastRequest）+ contentDigest/candidatesDigest（sha256）+ parseDelivery（未知 protocolVersion/非 manual 硬错误）+ DELIVERY_ACTIONS 权威表
+    delivery.ts             标准交付流（2026-10 M2）：planDeliveryTransition（纯，digest 注入）+ applyDeliveryAction（锁内 + requestId 幂等 + design.md 播种）+ readDesign/updateDesignContent（design.md 编辑 + 失效回退）；re-export legalDeliveryActions
+    legal-actions.ts        legalDeliveryActions / legalActionBarActions 的 client-safe 家（纯类型导入，详情页动作条不拖 node:fs 进浏览器 bundle；delivery.ts re-export 保服务端消费面）
+    errors.ts               错误类叶子模块（Validation/Conflict/NotFound）—— service/delivery-types/file-lock 共用，web.ts 的 instanceof→HTTP 映射要求同一 class 身份（service.ts re-export）
+    service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation, import dedup (findExistingByExternal: active ∪ archived ∪ trash; createWorkItem 锁内查+建, returns { detail, importOutcome }), managed 门禁（PATCH phase/status 400）+ released 冻结 + 失效回退（updateWorkItemContent）, trash/restoreWorkItemFromTrashInRoot
+    extension.ts            pi extension: list/get/create/update/record-milestone tools（managed 门控：list 默认排除标准流程项 include_managed opt-in + managed 标记；get 附标记；update 不绕 service）
+    store.ts                per-workspace 共享 snapshot 缓存（module 级 Map + listener + shouldRefetch 5s 年龄门）—— 中央页与右坞快捷面板同缓存，纯数据层（fetch/轮询在 hooks/useWorkItems）
     web.ts                  error → HTTP mapping
     source-labels.ts        UI-safe source→中文标签 map (禅道) — 外部源脚本盖章的来源展示
   loops/                             web-side loop control + prefill resolution (loop-surface spec §3–§5; imports pi-loop pure logic, no host-side deps of its own)
@@ -627,6 +701,7 @@ lib/
   shell-is-mobile.ts        mobile-shell 路由决策（纯函数 + 测试，`useViewportIsMobile` 消费）：①视口≤640 ②UA 手机种子不降级（宽视口手机：横屏/折叠/记住的缩小） ③纯触屏设备（pointer:coarse 且无 any-pointer:fine，兑住「电脑版网站」改写 UA+撑宽视口）→ mobile，否则 desktop
   session-tabs.ts           会话 tab 模型纯逻辑层（+测试）：SessionTabState（session/new-session/workspace-home 三种 kind，id 前缀 s:/new:/ws:）、createX 工厂、resolveOpenSessionTarget（C1 分派）、findReusableNewSessionTab（占位去重：同工作区 + 空草稿谓词注入）、nextActiveTabId（X1 邻居回落）、contextCloseTargetIds/nextActiveAfterBatchClose（右键批量关闭：其他/左侧/右侧目标集合 + 批量版 X1 激活回落）、tabQuery（URL 投影）、serializeTabs/parseStoredTabs/restoreTabs（R2 持久化，失效 id 静默跳过）
   tab-types.ts              Tab 类型（file/session 文件 tab）+ 右坞 rail 模块 id（FILES/LOOPS/KNOWLEDGE/WORK_ITEMS/TERMINALS_TAB_ID + MODULE_TAB_IDS/isModuleTabId，+测试；2026-10 rail 改版：模块激活走 dockRailMap，activeFileTabId 回归纯文件语义）——从 TabBar.tsx 下沉到此供 lib 层引用
+  work-items-page-url.ts    中央工作项管理页深链（+测试）：`?workspace=<id>&page=work-items[&item=<key>]` 的 build/parse 同居模块；builder 返回裸 query（navigateUrl 契约，带 ? 会拼出 `??` 杀死深链）；解析先于 applyUrlToTabs 的 tab 投影（页面是 CenterPage 不是会话 tab）
   dropdown-layout.ts        body-portal 弹层定位（纯函数 computeMenuLayout + 测试，SessionTabBar 右键菜单与 WorkspaceSwitcher 共用）：top/right/maxHeight 一律钳进可视窗口（visualViewport 换算，scale=1 时即普通视口）——锚点被横向滚动裁剪出屏（rect.right > innerWidth 曾使 right 为负、菜单整体滑出屏幕右缘，2026-09 手机端报告）或贴左锚点向左生长被中栏 overflow:hidden 裁剪（2026-09 PC 端工作台切换器报告）都不再把菜单推出可视区
   session-reader.ts         index-backed SessionInfo mapping + buildSessionContext (tail window) + buildEarlierContext + path caches
   session-payload.ts        buildSessionsPayload — the /api/sessions payload builder shared by the route and the SSR prefetch in app/page.tsx（方案二首帧真数据；live 合并 best-effort = 同进程 facade liveSessions/runningStatus，无传输可失败；daemonDown 恒 false，字段保留仅为客户端兼容）
@@ -687,6 +762,7 @@ components/
 
   FilesExplorerPanel.tsx   the「文件」面板体（桌面右栏钉死 tab + 移动端抽屉文件目的地页同体）— [ 文件 | 改动(N) ] toolbar + ⟳ + FileExplorer/ChangesPanel (cwd = workspace root); exports ExplorerSegmentedTabs; reveal switches its segmented back to 文件
   WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant — 宿主：桌面右坞工作项 tab + 移动抽屉目的地页 work-items / 设置›工作区 workspaceSlot（右坞 S3；workItemSplit portal 机制已退役）; `split={{ inline: true }}` = 列表+详情并排单容器（设置›工作区的中央区页面，2026-09 搬家）; the settings detail carries the 基本信息 card — rename (PATCH name) + 暂时停用 toggle (PATCH disabled; disabled workspaces keep a settings-only「已停用」badge, the sole re-enable surface — 到达路径：桌面项目树树底暗淡行 ⚙ / 移动抽屉树底暗淡行 ⚙ / 零工作区态 HomeLanding ⊞ 暗淡行与 ⚙，均经 `requestWorkspaceSettings` → `selectWorkspaceRequest` 深链预选，2026-09 修复；**预选同时触发详情优先（detailFocus）：rail（全部工作区列表）收起、目标工作区详情独占 +「‹ 全部工作区」返回**（带工作区上下文的入口只看该工作区，不带上下文的底部设置入口仍落全局列表）；两 shell 在设置面关闭/离开时 `clearWorkspaceSettingsRequest` 防闪回)；the rail is drag-sortable (HTML5 DnD，同 SessionTabBar 模式：drop 到目标上=插到它前面，列表尾空区=移到末尾；一次拖放 = PATCH /api/workspaces 全量期望序); remaining modal = home create-workspace wizard
+  work-items/               中央工作项管理整页组件族（2026-10 M2；宿主 = DesktopShell CenterPage kind"work-items" + MobileShell work-items 目的地页，同一本体）：WorkItemsPage（页骨架 + 深链消费）/ WorkItemsToolbar（活动|归档|回收站筛选 + 看板阶段筛选）/ WorkItemsList / WorkItemsBoard（七列，无拖拽）/ WorkItemRow / WorkItemDetailView（概况/设计/证据/动作/审计）+ WorkItemActionbar（legalActionBarActions 投影，released 不渲染 cancel）/ WorkItemCreateForm（enableDelivery 缺省不勾）/ WorkItemEvents / WorkItemMeta；纯逻辑 = work-item-phases.ts（看板投影 + 标签，老 complete ≠ 已发布）+ work-item-queries.ts（筛选/排序）+ work-item-api.ts（HTTP 封装），均有 node:test
   WorkspaceOverview.tsx     workspace dashboard — the DESKTOP 家 tab landing (移动端不渲染——抽屉目的地页取代；更早的 WorkspaceHomeMenu 已随树抽屉重构退役)：quick actions, 活跃工作项 with 「立即跑一轮」B-button + Loop 绑定下拉, 仓库/知识库 rows, 「会话」区块（WorkspaceSessionList），Loops 摘要行（onOpenLoopsTab → 右坞 Loops rail 模块，必传）
   WorkspaceSessionList.tsx  本工作区会话列表（拉 /api/sessions 后前缀过滤、排除 subagent 子会话）：默认前 20 条 + 显示全部，行内删除（RecentSessionRow）；宿主 = 移动端工作区 tab「会话」子页（showHeader=false）+ WorkspaceOverview「会话」区块（桌面家 tab）
   SessionTabBar.tsx          the SESSION tab strip（桌面 only；2026-09 树抽屉重构后移动端不再渲染，切会话走抽屉树，组件保留给桌面）：会话/占位/家 tab chips（运行呼吸点/未看完成点 + 拖拽排序）+ ＋新会话（无活动 tab 时隐藏；**sticky right——tab 多到溢出时吸附在条的最右不被滚走**，scrollPaddingRight 让活跃 chip 不被＋盖住）；**「首页」 chip 已删除（桌面 `showHomeTab={false}`，prop 默认 true 仅为兼容）**；⊞工作区选择器已删除（桌面走项目树；picker/WorkspaceIcon/色点板已从组件移除）+ tab 右键菜单（关闭/关闭其他/关闭左侧/关闭右侧——目标集合 contextCloseTargetIds，批量关闭走 useAppShellState.closeTabs：合并草稿确认只弹一次、运行中 tab 照常摘除不终止会话；菜单定位复用 computeMenuLayout + portal 遮罩，Escape/滚轮/拖拽关闭）；无 isMobile 分支
@@ -715,6 +791,7 @@ components/
 
 hooks/
   useAgentSession.ts        messages + streaming + SSE + fork/navigate/reconciliation logic
+  useWorkItems.ts           per-workspace 工作项共享层（2026-10 M2，+store 测试）：单轮询器引用计数（同 workspaceId 多宿主一个 interval，默认 5s 可见轮询 + visibilitychange/focus 校验 + 单飞合并）；snapshot 订阅自 lib/work-items/store；invalidate = 清快照强取；workspaceId 热切换复位 loading/error
   useGitStatus.ts           polls /api/git/status for the Changes panel
   useKitLoops.ts            loops 状态 hook（GET /api/workspaces/:id/loops + pause/resume/stop，refreshKey 驱动）——右坞 Loops tab 与 WorkspaceOverview 共用
   useSessionActivity.ts     running-session activity signals
