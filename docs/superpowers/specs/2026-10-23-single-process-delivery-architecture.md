@@ -4,6 +4,8 @@
 
 状态：架构讨论稿，待对齐；尚未修改运行代码。
 
+明确约束：底层 pi SDK 原样复用，不修改 SDK 源码，也不在 SDK 中新增需求、设计、开发、测试或发布角色。业务角色及其编排属于 pi-web 应用侧与工作区配置。
+
 范围：在取消独立 daemon 的目标下，对齐整体职责分层、运行位置与实现归属。本文不是 daemon 移除方案或实施计划。
 
 ![Pi Web 单进程目标架构](assets/work-item-delivery-single-process.png)
@@ -34,7 +36,9 @@
 
 ## 3. 执行层内部包含关系
 
-Next.js Node.js 进程包含本仓执行管理模块，后者通过 SDK 创建 AgentSession。
+Next.js Node.js 进程同时加载本仓应用代码和 pi SDK 依赖。二者在同一进程执行，不意味着应用角色属于 SDK 源码或 SDK 的业务模型。
+执行层按实现归属分为三个独立区域：上层 pi-web 执行管理与角色、中间 pi-extension 工具适配、底层原样 pi SDK。
+应用通过 SDK 公开 API 创建和控制通用 AgentSession；SDK 不需要知道这个会话承担需求设计、开发、验证还是发布准备。
 
 - **Loop 触发模块**：复用现有 cron、到期判断、轮级锁和文件合同，改为在 Next.js 宿主幂等注册。
 - **WorkerWaker**：发现角色存在可领取工作后唤醒角色；无就绪工作不调用模型。
@@ -43,10 +47,11 @@ Next.js Node.js 进程包含本仓执行管理模块，后者通过 SDK 创建 A
 
 上述前三项的新增或迁移不意味着创建独立服务。宿主启动、开发热重载和重复注册需要在后续实现中验证。
 
-pi harness / SDK 提供 AgentSession、模型与工具循环、资源加载、Extension 机制、SessionManager 和基础工具。
-设计、开发、测试与发布准备 agent 是使用不同 Profile 的会话实例；它们不是额外架构层，也不是四个 Extension。
+pi harness / SDK 只提供既有的 AgentSession、模型与工具循环、资源加载、Extension 机制、SessionManager 和基础工具。
+设计、开发、测试与发布准备 agent 在应用侧配置职责、任务、权限与上下文，使用原有 AgentSession 接口执行。
+这些角色不属于 SDK 基础层，也不是四个 Extension；它们位于 pi-web 执行管理与工作区 Profile 一侧。
 
-pi-web 实现的工作项/交付、知识库、subagent Extension 加载到 SDK，作为工具入口。
+pi-web 实现的工作项/交付、知识库、subagent Extension 通过 SDK 原有扩展接口注册，作为工具入口；注册扩展不修改 SDK 源码。
 交付工具调用③的领取与阶段服务；subagent 工具调用本仓的子会话执行管理，再使用 SDK 创建子会话。
 
 ## 4. 工作区与外部依赖
