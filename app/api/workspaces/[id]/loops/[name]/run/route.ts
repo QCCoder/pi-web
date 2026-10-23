@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
-import { launchManualRound, RoundBusyError } from "@/lib/loops/rounds";
-import { daemonErrorStatus, daemonProxy } from "@/lib/agent-proxy";
+import { launchManualRound, RoundBusyError, type LaunchRoundDeps } from "@/lib/loops/rounds";
+import { createSession, destroySession, runningStatus, sendCommand, SessionHostError } from "@/lib/session-host/facade";
 import { allowFileRoot } from "@/lib/file-access";
 import { cacheSessionPath, invalidateSessionListCache } from "@/lib/session-reader";
 
 /** 「立即跑一轮」（spec §4，S3）：web 进程 import pi-loop 纯逻辑组装开场合同，
- *  经现有 daemon 会话面起轮（不新增 daemon 路由）。itemKey 存在则合同追加
+ *  经宿主 facade 直连起轮。itemKey 存在则合同追加
  *  「本轮优先处理 <KEY>」。返回 sessionId，UI 打开会话 tab 实时观看。 */
 export async function POST(
   req: Request,
@@ -24,17 +24,17 @@ export async function POST(
     if (body.itemKey !== undefined && typeof body.itemKey !== "string") {
       return NextResponse.json({ error: "itemKey must be a string" }, { status: 400 });
     }
-    const client = await daemonProxy();
+    const deps: LaunchRoundDeps = {
+      createSession: (input) => createSession(input),
+      sendCommand: (sessionId, command) => sendCommand(sessionId, command),
+      destroySession: async (sessionId) => destroySession(sessionId),
+      // 幽灵锁活性接管：锁里的 sessionId 不在宿主 running set 即可清锁重起
+      runningSessionIds: async () => runningStatus().ids,
+    };
     const result = await launchManualRound(
       declaration,
       body.itemKey ? { itemKey: body.itemKey } : {},
-      {
-        createSession: (input) => client.createSession(input),
-        sendCommand: (sessionId, command) => client.sendSessionCommand(sessionId, command),
-        destroySession: (sessionId) => client.destroySession(sessionId),
-        // 幽灵锁活性接管：锁里的 sessionId 不在 daemon running set 即可清锁重起
-        runningSessionIds: async () => (await client.runningSessionIds()).ids,
-      },
+      deps,
     );
     // /api/agent/new 同款后处理：files 路由 allow-list 同步 + id→path 缓存播种
     // （.jsonl 懒建，不播种则紧随其后的 locate 404）+ 会话列表缓存失效。
@@ -51,7 +51,7 @@ export async function POST(
     }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : String(error) },
-      { status: daemonErrorStatus(error) },
+      { status: error instanceof SessionHostError ? error.status : 500 },
     );
   }
 }

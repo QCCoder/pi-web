@@ -11,7 +11,6 @@ import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "../..
 import { runDueRound } from "../../packages/pi-loop/fire.ts";
 import { updateRoundLock } from "../../packages/pi-loop/round-lock.ts";
 import { buildRoundPrompt } from "../../packages/pi-loop/contract.ts";
-import { reapOrphanedRoundProcesses } from "../../packages/pi-loop/reap.ts";
 import { hostname } from "node:os";
 
 /** 跑一条 prompt 并等它 settle（prompt_done）。超时 / prompt_error / destroy 均 reject。
@@ -50,7 +49,11 @@ export function waitForRoundSettle(
 
 export interface RoundDeps {
   starter?: typeof startRpcSession;
-  reaper?: typeof reapOrphanedRoundProcesses;
+  /** 默认不收割：共享 Next.js 宿主禁止按 cwd 杀进程（spec §5.4）。SDK 的
+   *  destroy()→dispose()→abortBash() 会对每个在飞 bash 调 killProcessTree
+   *  （按执行进程组定向）；残余孤儿由恢复期只读探测处理。beat CLI（独立
+   *  进程）不受影响，pi-loop 包内收割函数原样保留。 */
+  reaper?: (workspacePath: string) => Promise<unknown> | void;
   /** D9 事后钩子注入点（默认真实现）—— 成功与失败路径都会被调（见 runKitRound）。 */
   bookkeeper?: typeof settleRoundBookkeeping;
   /** startRpcSession 解构出 realSessionId 后立即回调（先于命名/开场合同）——
@@ -62,7 +65,7 @@ export interface RoundDeps {
  *  内置 subagent 的 profile 发现按 `<cwd>/.pi/agents/` 自带）→ 命名 → 开场合同 → settle → 事后钩子。 */
 export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps = {}): Promise<string> {
   const starter = deps.starter ?? startRpcSession;
-  const reaper = deps.reaper ?? reapOrphanedRoundProcesses;
+  const reaper = deps.reaper ?? (async () => undefined);
   const bookkeeper = deps.bookkeeper ?? settleRoundBookkeeping;
   const creation = creationTimeoutSignal(5 * 60_000, "kit round session creation timed out");
   let session: AgentSessionWrapper;
@@ -84,8 +87,9 @@ export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps 
   try {
     await waitForRoundSettle(session, buildRoundPrompt(declaration, { sessionId: realSessionId }), declaration.maxMinutes * 60_000);
   } catch (error) {
-    // 超时/销毁/prompt 错误：中止在飞 prompt，并收割它遗留的 bash/npm 进程树
-    //（cwd 收敛到本 workspace — v3 收割经验的唯一保留点）。
+    // 超时/销毁/prompt 错误：destroy() 定向中止在飞 prompt（abortBash 按执行
+    // 进程组杀）；reaper 默认 no-op —— 共享宿主禁止按 cwd 收割（spec §5.4），
+    // 注入点保留给测试/独立宿主，残余孤儿交由恢复期只读探测报告。
     try {
       session.destroy();
     } catch {
