@@ -31,7 +31,9 @@ export function createWorkspaceWorkItemExtension(
       pi.registerTool({
         name: "workspace_list_work_items",
         label: "List Workspace Work Items",
-        description: "List Requirements and Bugs in the current Pi Workspace. Archived items are excluded unless archived=true.",
+        description:
+          "List Requirements and Bugs in the current Pi Workspace. Archived items are excluded unless archived=true. "
+          + "Standard delivery-flow items (managed: true) are excluded unless include_managed=true; each returned item carries a managed flag.",
         promptSnippet: "List file-backed Requirements and Bugs for this Workspace",
         parameters: Type.Object({
           type: Type.Optional(Type.Union([
@@ -41,14 +43,30 @@ export function createWorkspaceWorkItemExtension(
           archived: Type.Optional(Type.Boolean({
             description: "Return archived items instead of active ones. Default false.",
           })),
+          include_managed: Type.Optional(Type.Boolean({
+            description:
+              "Also include standard delivery-flow (managed) items. Default false — loop-facing agents "
+              + "should only pick up unmanaged items; managed items change phase/status via the delivery flow, not these tools.",
+          })),
         }),
         execute: async (_callId, params) => {
           const data = await listWorkItems(workspacePath);
           const source = params.archived ? data.archivedItems : data.items;
+          // Managed gating (spec §7.2): by default hide standard-flow items so
+          // loop agents don't auto-pick them; explicit opt-in keeps them
+          // visible (read-only posture) with a per-item managed flag.
+          const includeManaged = params.include_managed === true;
+          const visible = includeManaged
+            ? source
+            : source.filter((item) => item.delivery?.protocolVersion !== 1);
           return result({
-            items: params.type
-              ? source.filter((item) => item.type === params.type)
-              : source,
+            items: (params.type
+              ? visible.filter((item) => item.type === params.type)
+              : visible
+            ).map((item) => ({
+              ...item,
+              managed: item.delivery?.protocolVersion === 1,
+            })),
           });
         },
       });
@@ -56,11 +74,19 @@ export function createWorkspaceWorkItemExtension(
       pi.registerTool({
         name: "workspace_get_work_item",
         label: "Read Workspace Work Item",
-        description: "Read a Work Item's structured metadata, Markdown body, and execution timeline.",
+        description:
+          "Read a Work Item's structured metadata, Markdown body, and execution timeline. The response carries "
+          + "managed: true when the item is on the standard delivery flow (phase/status change only via delivery actions).",
         parameters: Type.Object({
           key: Type.String({ description: "Human key such as REQ-0001 or BUG-0001" }),
         }),
-        execute: async (_callId, params) => result(await readWorkItem(workspacePath, params.key)),
+        execute: async (_callId, params) => {
+          const detail = await readWorkItem(workspacePath, params.key);
+          return result({
+            ...detail,
+            managed: detail.item.delivery?.protocolVersion === 1,
+          });
+        },
       });
 
       pi.registerTool({
@@ -109,10 +135,13 @@ export function createWorkspaceWorkItemExtension(
       pi.registerTool({
         name: "workspace_update_work_item",
         label: "Update Workspace Work Item",
-        description: "Revision-safely update Work Item status, phase, priority, scope, or title.",
+        description:
+          "Revision-safely update Work Item status, phase, priority, scope, or title. Items on the standard "
+          + "delivery flow (managed) reject phase/status updates here — those change only via delivery actions.",
         promptGuidelines: [
           "Read the Work Item first and pass its current revision as expected_revision.",
           "Record only meaningful workflow changes; detailed reasoning belongs in README.md or the Conversation.",
+          "For managed items (managed: true from list/get) do not set phase or status — the update is rejected; the delivery flow owns them.",
         ],
         parameters: Type.Object({
           key: Type.String(),
