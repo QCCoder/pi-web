@@ -17,20 +17,21 @@ import { createSubagentController } from "../subagent-runtime";
 import { listSubagentProfiles, readSubagentSessionResources, SUBAGENT_CONTROL_TOOL_NAMES } from "../subagents";
 import { isBuiltInSubagentsEnabled } from "../subagent-settings";
 import { raceAbort } from "../abort-race";
-import { buildStalledSnapshot, classifyStall, HEARTBEAT_TICK_MS, stallInterruptMessage, type StalledSessionInfo } from "./session-heartbeat";
+import { buildStalledSnapshot, classifyStall, HEARTBEAT_TICK_MS, stallInterruptMessage, type StalledSessionInfo } from "./heartbeat";
 import { findWorkspaceForPath } from "../workspaces/service";
 import { notifySessionComplete } from "../web-push";
 import { isSubagentChildSession } from "../subagent-child";
 
 // ============================================================================
-// SESSION REGISTRY — daemon-process code only (C2 Phase 3)
+// SESSION REGISTRY — the single in-process session owner.
 // ============================================================================
-// This module owns every AgentSession in the pi-daemon process
-// (bin/pi-daemon.js). NO web-process code may import it: the Next.js routes are
-// pure proxies (lib/agent-proxy.ts → lib/daemon/client.ts) and the web side
-// never touches a live session. If a web route needs something from here, it
-// must be exposed as a daemon route (lib/daemon/host.ts) and called through the
-// client instead.
+// This module owns every AgentSession in the Next.js Node.js host process:
+// interactive sessions, subagent children and kit loop rounds share one
+// registry keyed by real session id. Web routes consume it through the typed
+// facade (lib/session-host/facade.ts) — do not import this module from routes
+// directly; the facade owns error→status mapping and cold-revive semantics.
+// The registry lives on globalThis so Next.js route cold-loading and dev hot
+// reload can never create a second owner.
 // ============================================================================
 // Types
 // ============================================================================
@@ -1180,6 +1181,7 @@ declare global {
   var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
   var __piStartingSessionCwds: Map<string, number> | undefined;
   var __piRunningListeners: Set<(ids: string[]) => void> | undefined;
+  var __piSubagentController: ReturnType<typeof createSubagentController> | undefined;
 }
 
 function getRegistry(): Map<string, AgentSessionWrapper> {
@@ -1251,6 +1253,11 @@ export function getRunningRpcSessionIds(): string[] {
     if (session.isRunning()) ids.add(session.sessionId || sessionId);
   }
   return [...ids];
+}
+
+/** Every alive wrapper (shutdown path iterates this to abort everything). */
+export function getAllRpcSessions(): AgentSessionWrapper[] {
+  return Array.from(getRegistry().values()).filter((session) => session.isAlive());
 }
 
 /** Stalled snapshot of currently-RUNNING sessions (see lib/session-heartbeat.ts):
@@ -1618,14 +1625,22 @@ async function reopenSubagentSession(sessionId: string, sessionFile: string): Pr
   return session;
 }
 
-const SUBAGENT_CONTROLLER = createSubagentController({
-  getSession: (sessionId) => getRegistry().get(sessionId),
-  registerSession: (inner) => registerSubagentChild(inner),
-  reopenSession: reopenSubagentSession,
-  resolveSessionPath,
-  invalidateSessionList: invalidateSessionListCache,
-  isBuiltInSubagentsEnabled,
-});
+function getSubagentControllerSingleton() {
+  const g = globalThis as typeof globalThis & { __piSubagentController?: ReturnType<typeof createSubagentController> };
+  if (!g.__piSubagentController) {
+    g.__piSubagentController = createSubagentController({
+      getSession: (sessionId) => getRegistry().get(sessionId),
+      registerSession: (inner) => registerSubagentChild(inner),
+      reopenSession: reopenSubagentSession,
+      resolveSessionPath,
+      invalidateSessionList: invalidateSessionListCache,
+      isBuiltInSubagentsEnabled,
+    });
+  }
+  return g.__piSubagentController;
+}
+
+const SUBAGENT_CONTROLLER = getSubagentControllerSingleton();
 
 export function getSubagentRun(sessionId: string) {
   return SUBAGENT_CONTROLLER.get(sessionId);

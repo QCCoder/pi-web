@@ -2,7 +2,7 @@
  *  一轮 = 一次性 AgentSession：开场合同（含 /skill: 展开）→ settle → 事后钩子。
  *  无 RUNS.jsonl、无 orchestrator 索引 — 运行记录 = STATE.md + workspace git log。 */
 import { creationTimeoutSignal } from "../abort-race.ts";
-import { startRpcSession, type AgentSessionWrapper } from "./rpc-manager.ts";
+import { startRpcSession, type AgentSessionWrapper } from "../session-host/registry.ts";
 import type { DaemonJob } from "./jobs.ts";
 import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/service.ts";
 import { discoverWorkspaces, readWorkspaceManifest } from "../workspaces/service.ts";

@@ -15,7 +15,7 @@ import {
   steerSubagent,
   subscribeRunningSessions,
   type AgentSessionWrapper,
-} from "./rpc-manager.ts";
+} from "../session-host/registry.ts";
 import { resolveSessionPath } from "../session-reader.ts";
 import { generateSessionTitle } from "../session-title.ts";
 import { createSseWriter } from "./sse-writer.ts";
@@ -116,7 +116,7 @@ export function createSessionsRoutes(): DaemonRouteHandler {
     // session id.
     if (request.method === "GET" && url.pathname === "/v1/sessions/running") {
       // `stalled` is additive heartbeat data (sessions running but silent
-      // past STALL_WARN_MS — see lib/daemon/session-heartbeat.ts); consumers
+      // past STALL_WARN_MS — see lib/session-host/heartbeat.ts); consumers
       // that only read `ids` are unaffected.
       sendJson(response, 200, { ids: getRunningRpcSessionIds(), stalled: getStalledSessionSnapshot() });
       return true;
