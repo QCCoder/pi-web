@@ -14,6 +14,7 @@ import { WorkspaceSwitcherPanel } from "../WorkspaceSwitcherPanel";
 import { PanelHeader } from "../PanelHeader";
 import { ConfigCenterPage } from "../ConfigCenterPage";
 import { LoopsDockPanel } from "../LoopsDockPanel";
+import { WorkItemsPage } from "../work-items/WorkItemsPage";
 import { HomeLanding } from "../HomeLanding";
 import { HomeNewSession } from "../HomeNewSession";
 import { WorkspaceSelector } from "../WorkspaceSelector";
@@ -109,6 +110,9 @@ export function DesktopShell() {
     centerPage,
     setCenterPage,
     openCenterPage,
+    openWorkItemsPage,
+    workItemsItemKeyRef,
+    navigateUrl,
     loopFilesReveal,
     settingsPage,
     setSettingsPage,
@@ -242,12 +246,15 @@ export function DesktopShell() {
   // 没有任何可用工作区时不动：HomeNewSession 首页页接手（创建/选工作区引导）。
   useEffect(() => {
     if (!navReady || activeTabId !== null) return;
+    // 中央区整页（配置/归档/工作项管理）打开时不做空态自动落 home——整页占
+    // 着中央区，深链直达（如 ?page=work-items）不应被家 tab 接管清掉。
+    if (centerPage) return;
     if (s.homeSession || s.homeNewSession.open) return;
     const targetId = defaultHomeNewSessionWorkspaceId(workspaces, s.sessionActivity.sessions, s.mruIds);
     const target = targetId ? workspaces.find((w) => w.id === targetId) : undefined;
     if (!target || !isWorkspaceSelectable(target)) return;
     handleOpenWorkspace(target, { replace: true });
-  }, [navReady, activeTabId, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, handleOpenWorkspace]);
+  }, [navReady, activeTabId, centerPage, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, handleOpenWorkspace]);
 
   /** 关掉最后一个 tab ≠ 落首页空态：先关（草稿确认取消时 closeTab 返回 false，
    *  不动），紧接着开/激活该工作区的家 tab 接住——同一事件内批处理，不闪首页页。
@@ -433,6 +440,12 @@ export function DesktopShell() {
   // 整页占中央区，tab 条保持可见——点任何会话 tab 即关闭回聊天。
   const closeCenterPage = () => setCenterPage(null);
 
+  // work-items 深链选中项的一次性消费回调（稳定身份：WorkItemsPage 的消费
+  // effect 以它为依赖）。
+  const consumeWorkItemsItemKey = useCallback(() => {
+    workItemsItemKeyRef.current = null;
+  }, [workItemsItemKeyRef]);
+
   // 当前配置整页的页内分区（settingsPage 派生）：设置页 workspace/preferences、
   // 插件&技能页 plugins/skills；单分区页不消费，给个无害缺省。
   const configSection = centerPage?.kind === "plugins"
@@ -457,6 +470,25 @@ export function DesktopShell() {
   const renderCenterPage = () => {
     const page = centerPage;
     if (!page) return null;
+
+    // 工作项管理整页（M2 T8，spec §6.1）：工作区作用域（页面绑定
+    // workspaceId，不跟随 activeWorkspace）；聊天 chrome/右坞隐藏由外层
+    // `centerPage != null` 条件统一覆盖（本 kind 不例外）。
+    if (page.kind === "work-items") {
+      return (
+        <WorkItemsPage
+          key={page.workspaceId}
+          workspaceId={page.workspaceId}
+          initialItemKey={workItemsItemKeyRef.current}
+          onOpenConversation={handleOpenConversation}
+          onConsumedInitialItem={consumeWorkItemsItemKey}
+          onClose={closeCenterPage}
+          onOpenWorkItemsPage={openWorkItemsPage}
+          onReplaceUrl={(query) => navigateUrl(query, true)}
+          workspaces={workspaces}
+        />
+      );
+    }
 
     if (page.kind !== "archive") {
       return (
@@ -543,30 +575,31 @@ export function DesktopShell() {
         zIndex: 200,
       } as React.CSSProperties}
     >
-      <ProjectSidebar
-        workspaces={workspaces}
-        allSessions={sessionActivity.sessions}
-        runningSessionIds={sessionActivity.runningIds}
-        completedSessionIds={sessionActivity.completedIds}
-        selectedSessionId={selectedSession?.id ?? homeSession?.id ?? null}
-        activeWorkspace={activeWorkspace}
-        activeConfigPage={centerPage && centerPage.kind !== "archive" ? centerPage.kind : null}
-        workspacesLoaded={workspacesLoaded}
-        sessionsLoaded={sessionActivity.loaded}
-        onNewSession={() => {
-          if (activeWorkspace) newSessionDirect();
-          else handleReturnHome();
-        }}
-        onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
-        onSelectSession={handleSelectSession}
-        onSelectSearchHit={handleSelectSearchHit}
-        sessionListVersion={sessionActivity.listVersion}
-        onOpenSessionInNewTab={openSessionTab}
-        onSessionRemoved={handleSessionRemoved}
-        onCreateWorkspace={handleCreateWorkspace}
-        onImportDirectory={() => setImportPickerOpen(true)}
-        onOpenCenterPage={openCenterPage}
-      />
+        {/* work-items 不是配置导航行（工作区作用域管理页），不参与导航高亮。 */}
+        <ProjectSidebar
+          workspaces={workspaces}
+          allSessions={sessionActivity.sessions}
+          runningSessionIds={sessionActivity.runningIds}
+          completedSessionIds={sessionActivity.completedIds}
+          selectedSessionId={selectedSession?.id ?? homeSession?.id ?? null}
+          activeWorkspace={activeWorkspace}
+          activeConfigPage={centerPage && (centerPage.kind === "settings" || centerPage.kind === "models" || centerPage.kind === "agents" || centerPage.kind === "plugins") ? centerPage.kind : null}
+          workspacesLoaded={workspacesLoaded}
+          sessionsLoaded={sessionActivity.loaded}
+          onNewSession={() => {
+            if (activeWorkspace) newSessionDirect();
+            else handleReturnHome();
+          }}
+          onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
+          onSelectSession={handleSelectSession}
+          onSelectSearchHit={handleSelectSearchHit}
+          sessionListVersion={sessionActivity.listVersion}
+          onOpenSessionInNewTab={openSessionTab}
+          onSessionRemoved={handleSessionRemoved}
+          onCreateWorkspace={handleCreateWorkspace}
+          onImportDirectory={() => setImportPickerOpen(true)}
+          onOpenCenterPage={openCenterPage}
+        />
     </div>
     {/* Desktop sidebar resize handle (drag to widen/narrow; double-click resets) */}
     {sidebarOpen && (

@@ -21,13 +21,14 @@ import { getFileName } from "@/lib/file-paths";
 import { buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { resolveContractPattern } from "@/lib/loops/contract-prefill";
+import { buildWorkItemsPageUrl, parseWorkItemsPageParams } from "@/lib/work-items-page-url";
 import { defaultHomeNewSessionWorkspaceId, workspaceForSession } from "@/lib/home-quick-switch";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "../ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { WorkItemDetail, WorkItemRecord } from "@/lib/work-items/types";
-import type { WorkspaceSummary } from "@/lib/workspaces/types";
+import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/types";
 import { type Tab, FILES_TAB_ID, WORK_ITEMS_TAB_ID, isModuleTabId, type ModuleTabId } from "@/lib/tab-types";
 import {
   type SessionTabState,
@@ -51,23 +52,30 @@ import {
 type SessionCopyField = "file" | "id";
 
 /** 中央区整页（2026-09 树形侧栏改版，grill 共识；同月配置页拆分）：导航入口
- *  （设置/模型/插件&技能/Agents）各自打开**独立整页**（此前四入口共用一个
- *  两栏设置页只换预选分区，页头永远是「设置」——用户反馈「跳转的页面都一
- *  模一样」）。页面本体渲染在 `ConfigCenterPage`（页内多分区页的分区切换走
- *  settingsPage，不动 centerPage）。点任何会话 tab（activateTab）即关闭回
- *  到聊天；从不持久化。归档是工作区作用域，带 workspaceId。 */
+ * （设置/模型/插件&技能/Agents）各自打开**独立整页**（此前四入口共用一个
+ * 两栏设置页只换预选分区，页头永远是「设置」——用户反馈「跳转的页面都一
+ * 模一样」）。页面本体渲染在 `ConfigCenterPage`（页内多分区页的分区切换走
+ * settingsPage，不动 centerPage）。点任何会话 tab（activateTab）即关闭回
+ * 到聊天；从不持久化。归档是工作区作用域，带 workspaceId。
+ * 2026-10 M2 T8：新增工作项管理整页 `work-items`（spec §6.1）——工作区
+ * 作用域 + 深链 `?workspace=<id>&page=work-items&item=<key>`（lib/work-items-page-url.ts
+ * 是唯一解析/生成协议）；页面身份显式绑定 workspaceId，不用 activeWorkspace。 */
 export type CenterPage =
   | { kind: "settings" }
   | { kind: "models" }
   | { kind: "agents" }
   | { kind: "plugins" }
-  | { kind: "archive"; workspaceId: string };
+  | { kind: "archive"; workspaceId: string }
+  | { kind: "work-items"; workspaceId: string };
 
-/** 两次打开指向同一页（归档比 workspaceId）→ 导航入口再点一次 = 关闭
- *  （toggle）。 */
+/** 两次打开指向同一页（归档/工作项比 workspaceId）→ 导航入口再点一次 = 关闭
+ * （toggle）。 */
 function sameCenterPage(current: CenterPage | null, next: CenterPage): boolean {
   if (current == null || current.kind !== next.kind) return false;
   if (current.kind === "archive" && next.kind === "archive") {
+    return current.workspaceId === next.workspaceId;
+  }
+  if (current.kind === "work-items" && next.kind === "work-items") {
     return current.workspaceId === next.workspaceId;
   }
   return true;
@@ -169,6 +177,10 @@ export function useAppShellState(seed?: {
   // 激活（activateTab）都会把它清空——配置页只是盖在聊天之上的一层，点
   // tab 即回。从不持久化；toggle 语义由 sameCenterPage 提供（同页再点关）。
   const [centerPage, setCenterPage] = useState<CenterPage | null>(null);
+  // 工作项中央页的深链选中项（M2 T8）：openWorkItemsPage / applyUrlToTabs 的
+  // work-items 分支写入，WorkItemsPage 消费后经 onConsumedInitialItem 清空。
+  // 一次性意图，非持久视图状态（同 loopFilesReveal 的信号模式）。
+  const workItemsItemKeyRef = useRef<string | null>(null);
   const openCenterPage = useCallback((page: CenterPage) => {
     setCenterPage((current) => (sameCenterPage(current, page) ? null : page));
     // 配置整页拆分后（2026-09），settingsPage 兼作多分区页的「页内分区」记忆：
@@ -603,6 +615,17 @@ export function useAppShellState(seed?: {
     else window.history.pushState(null, "", target);
   }, []);
 
+  /** 打开中央工作项管理整页（M2 T8，spec §6.1）。页面身份显式绑定传入的
+   * workspaceId（打开另一工作区的管理页时不能误用当前聊天 tab 的
+   * activeWorkspace）。不动 tabs、不 focusChat：页面只是盖在聊天之上，
+   * 点任何会话 tab（activateTab）即回。URL 用 replace 写（页面内选中项
+   * 变化也由页面自己 replace），不给浏览器历史埋 popstate 陷阱。 */
+  const openWorkItemsPage = useCallback((workspaceId: string, itemKey?: string) => {
+    if (itemKey) workItemsItemKeyRef.current = itemKey;
+    setCenterPage({ kind: "work-items", workspaceId });
+    navigateUrl(buildWorkItemsPageUrl(workspaceId, itemKey), true);
+  }, [navigateUrl]);
+
   /** U1 会话 tab 唯一性：已开则聚焦（制新 session 信息），未开则新建并激活。
    *  归属工作区由 session.cwd 派生（最长前缀）；无归属时回退当前 tab 的工作区
    *  上下文，两者皆无则不开（与旧模型「无归属会话不可开」一致）。 */
@@ -816,6 +839,31 @@ export function useAppShellState(seed?: {
   // workspaces are loaded) and by popstate (back/forward). This is the *only*
   // place the URL drives state, so user clicks can never race a URL→state effect.
   const applyUrlToTabs = useCallback(async (params: URLSearchParams) => {
+    // 工作项中央页深链前置（spec §6.1）：先识别页面，再走 tab URL 投影——
+    // 页面是 CenterPage 不是会话 tab，tab 投影不能覆盖它。刷新 / 后退前进
+    // 重新到达页面 URL 都走这里。
+    const workItemsPage = parseWorkItemsPageParams(params);
+    if (workItemsPage) {
+      const workspace = workspaces.find((w) => w.id === workItemsPage.workspaceId && isWorkspaceSelectable(w));
+      if (workspace) {
+        if (workItemsPage.itemKey) workItemsItemKeyRef.current = workItemsPage.itemKey;
+        setCenterPage({ kind: "work-items", workspaceId: workspace.id });
+        // 不动 tabs：聊天 tab 状态原样保留，返回即回（页面盖在聊天之上）。
+        return;
+      }
+      // 无效 workspace id → 清掉 page/item 参数（replace，不埋历史陷阱），
+      // 落回正常 tab 投影（该 workspace 查不到 → 首页），深链不落死胡同。
+      const cleaned = new URLSearchParams(params);
+      cleaned.delete("page");
+      cleaned.delete("item");
+      const cleanedQuery = cleaned.toString();
+      navigateUrl(cleanedQuery ? `?${cleanedQuery}` : null, true);
+    } else {
+      // URL 驱动导航到达非页面 URL：中央区整页让位。配置页从不写 URL，
+      // 到达这里的 URL 一定指向某个聊天/首页目标——popstate 后退/前进
+      // 离开 work-items 页面 URL 时由此关闭页面（activateTab 内亦有兜底）。
+      setCenterPage(null);
+    }
     if (params.get("tab") === "home" || !params.get("workspace")) {
       setActiveTabId(null);
       return;
@@ -897,7 +945,7 @@ export function useAppShellState(seed?: {
     // 家 tab（overview 落地）。
     const homeId = ensureHomeTab(workspace);
     activateTab(homeId);
-  }, [workspaces, sessionActivity.sessions, ensureHomeTab, activateTab]);
+  }, [workspaces, sessionActivity.sessions, ensureHomeTab, activateTab, navigateUrl]);
 
   // Initial restore: once workspaces are loaded, (a) R2 恢复 tab 条全量（URL
   // 深链优先决定 active；URL 为首页则停在首页；URL 为空才用恢复的 active），
@@ -908,7 +956,10 @@ export function useAppShellState(seed?: {
     if (!workspacesLoaded || initialNavDoneRef.current) return;
     initialNavDoneRef.current = true;
     const params = new URLSearchParams(window.location.search);
-    const urlPointsSomewhere = Boolean(params.get("workspace") || params.get("tab"));
+    // work-items 页面深链不指定 tab（页面只是盖在聊天之上）——不算「URL 指向
+    // 某个 tab」，恢复的 active tab 照常应用，返回即回原会话。
+    const urlPointsSomewhere = Boolean(params.get("tab"))
+      || (Boolean(params.get("workspace")) && params.get("page") !== "work-items");
     void (async () => {
       let restoredTabs: SessionTabState[] = [];
       let restoredActive: string | null = null;
@@ -1821,6 +1872,8 @@ export function useAppShellState(seed?: {
     centerPage,
     setCenterPage,
     openCenterPage,
+    openWorkItemsPage,
+    workItemsItemKeyRef,
     loopFilesReveal,
     setLoopFilesReveal,
     refreshKey,

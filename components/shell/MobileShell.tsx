@@ -218,12 +218,15 @@ export function MobileShell() {
   // 历史埋可 popstate 回跳的陷阱。零可用工作区时不动：HomeLanding 引导接手。
   useEffect(() => {
     if (!navReady || activeTabId !== null) return;
+    // 中央区整页（如 work-items 深链）打开时不做空态自动落 composer——
+    // openNewSessionTab 会清 centerPage 并改写 URL，吃掉深链。
+    if (s.centerPage) return;
     if (s.homeSession || s.homeNewSession.open) return;
     const targetId = defaultHomeNewSessionWorkspaceId(workspaces, s.sessionActivity.sessions, s.mruIds);
     const target = workspaces.find((w) => w.id === targetId);
     if (!target || !isWorkspaceSelectable(target)) return;
     openNewSessionTab(target, { replace: true });
-  }, [navReady, activeTabId, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, openNewSessionTab]);
+  }, [navReady, activeTabId, s.centerPage, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, openNewSessionTab]);
 
   // ---- 抽屉 / 常驻树头部的模块条（2026-09-27 晚：工作区切换器撤下——分组
   // 会话清单已列全部项目，点会话即切上下文；模块入口保留为紧凑图标条）------
