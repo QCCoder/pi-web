@@ -20,7 +20,8 @@
 // "repository not registered: <id>"（与池子谓词的 repo-not-registered 对应
 // ——第一道在池子，claim 事务前置复验在这里）。
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { addWorktree, listWorktrees } from "../../worktree.ts";
 import { readWorkspaceManifest } from "../../workspaces/service.ts";
 import type { WorkspaceManifest } from "../../workspaces/types.ts";
@@ -150,15 +151,126 @@ export function verifyCandidateCommits(
     if (repo === undefined) {
       throw new WorkItemValidationError(
         `candidate references unknown repository ${candidate.repositoryId} `
-          + `(commit ${candidate.commit}): repository not in the prepared worktree set`,
+        + `(commit ${candidate.commit}): repository not in the prepared worktree set`,
       );
     }
     const result = run({ repo, commit: candidate.commit });
     if (!result.ok) {
       throw new WorkItemValidationError(
         `candidate commit ${candidate.commit} is not a commit in repository `
-          + `${candidate.repositoryId} (${repo})${result.stderr ? `: ${result.stderr}` : ""}`,
+        + `${candidate.repositoryId} (${repo})${result.stderr ? `: ${result.stderr}` : ""}`,
       );
     }
   }
+}
+
+// ------------------------------------------------------- verify checkouts (Phase-4 T2)
+
+/** 分支命名：仅作 worktree 目录名载体（addWorktree 不支持检出指定 commit——
+ *  只在分支存在时复用/否则在 HEAD 新建，detached 检出必须第二步补）。 */
+export function verifyBranch(key: string, generation: number): string {
+  return `pi-verify/${key}/gen${generation}`;
+}
+
+export interface PrepareVerifyCheckoutsDeps {
+  addWorktree?: typeof addWorktree;
+  /** worktree 内 detached checkout 缝（默认 spawnSync git checkout --detach）。 */
+  checkout?: (args: { worktreePath: string; commit: string }) => { ok: boolean; stderr?: string };
+}
+
+/** 镜像 lib/worktree.ts 的 sanitizeBranchForDir（未导出；目录推导必须与
+ *  addWorktree 完全一致——漂移 = 幂等 existsSync 预检失效）。 */
+function sanitizeBranchForDir(branch: string): string {
+  return branch.replace(/[\/\\:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function defaultVerifyCheckout(args: { worktreePath: string; commit: string }): { ok: boolean; stderr?: string } {
+  const result = spawnSync(
+    "git",
+    ["-C", args.worktreePath, "checkout", "--detach", args.commit],
+    {
+      timeout: 10_000,
+      maxBuffer: 1024 * 1024,
+      // 与 defaultVerifyRun 同习语：钉死 locale，错误文本可断言。
+      env: { ...process.env, LC_ALL: "C" },
+    },
+  );
+  if (result.error) return { ok: false, stderr: result.error.message };
+  const stderr = result.stderr?.toString().trim();
+  return { ok: result.status === 0, stderr: stderr || undefined };
+}
+
+/**
+ * 每候选仓一个 detached checkout，检出到该仓的候选 commit（Phase-4 T2，
+ * verifier claim 事务的前置——状态落盘之前调用，失败零状态）。
+ *
+ * 两步法：`addWorktree(repoPath, pi-verify/<KEY>/gen<N>)` 建目录（分支仅作
+ * 目录名载体，目录名 sanitize 为 `pi-verify-<KEY>-gen<N>`）→ `git checkout
+ * --detach <commit>` 检出到候选。
+ *
+ * 幂等：同 gen 目录已存在 → 跳过创建但【仍】checkout --detach 目标 commit——
+ * 修复半建残留（目录在、checkout 未发生或停在别的 commit；对已处目标 commit
+ * 的 worktree 是幂等 no-op）。预检用确定性路径 existsSync 而非 P3 的按分支找：
+ * detached 后 porcelain 不再报 branch，按分支找不到自己刚建的 checkout。
+ *
+ * 单仓失败 → 整体抛 WorkItemValidationError（带 repositoryId / commit / 路
+ * 径 / 原因），已建的不回滚（孤儿 worktree 无害——generation 单调，下代领取
+ * 用新目录）。同仓多候选按序处理，后者覆盖前者的 checkout（last-wins；候选
+ * 集每仓一条的约束由上游 digest 绑定保证）。
+ */
+export async function prepareVerifyCheckouts(
+  workspacePath: string,
+  item: { key: string },
+  candidates: Array<{ repositoryId: string; commit: string }>,
+  generation: number,
+  repoPaths: Map<string, string>,
+  deps: PrepareVerifyCheckoutsDeps = {},
+): Promise<RoleWorktree[]> {
+  const addWorktreeImpl = deps.addWorktree ?? addWorktree;
+  const checkout = deps.checkout ?? defaultVerifyCheckout;
+  const branch = verifyBranch(item.key, generation);
+
+  const results: RoleWorktree[] = [];
+  for (const candidate of candidates) {
+    const repoPath = repoPaths.get(candidate.repositoryId);
+    if (repoPath === undefined) {
+      throw new WorkItemValidationError(
+        `verify candidate references unknown repository ${candidate.repositoryId} `
+        + `(commit ${candidate.commit}): repository not in the prepared worktree set `
+        + `(workspace ${workspacePath})`,
+      );
+    }
+    // 与 addWorktree 的目录推导一致：<resolve(repoRoot)>-worktrees/<sanitized>。
+    const expectedPath = join(`${resolve(repoPath)}-worktrees`, sanitizeBranchForDir(branch));
+    let path = expectedPath;
+    if (!existsSync(expectedPath)) {
+      try {
+        path = (await addWorktreeImpl(repoPath, branch)).path;
+      } catch (error) {
+        throw new WorkItemValidationError(
+          `verify checkout preparation failed for repository ${candidate.repositoryId} `
+          + `(${repoPath}, branch ${branch}): ${errorMessage(error)}`,
+        );
+      }
+    } else {
+      // 对齐 addWorktree 的路径形态：它的 repoRoot 来自 git 的 common-dir（已
+      // 解引用符号链接——macOS 上 /var → /private/var），而 resolve() 不解引用；
+      // realpath 化使复用路径与首建路径逐字一致（幂等 deepEqual / claim 快照稳定）。
+      try {
+        path = realpathSync(expectedPath);
+      } catch {
+        // 保留 expectedPath（existsSync 刚过——竞态删除时 checkout 阶段会给出权威错误）。
+      }
+    }
+    const checkedOut = checkout({ worktreePath: path, commit: candidate.commit });
+    if (!checkedOut.ok) {
+      throw new WorkItemValidationError(
+        `verify checkout failed for repository ${candidate.repositoryId} `
+        + `(commit ${candidate.commit}, worktree ${path})`
+        + `${checkedOut.stderr ? `: ${checkedOut.stderr}` : ""}`,
+      );
+    }
+    results.push({ repositoryId: candidate.repositoryId, repoPath, path, branch });
+  }
+  return results;
 }
