@@ -1,11 +1,13 @@
 // Phase-3 Task 1: 双角色 TaskPool 投影（designer P2 + developer 谓词，spec
-// 2026-10-24-phase-three §3/§1.2）。就绪任务不是存储实体——每次查询从文件
-// 状态推导。本模块分两层：
+// 2026-10-24-phase-three §3/§1.2）；Phase-4 T1 增第三角色 verifier（spec
+// 2026-10-24-phase-four §3：verification 阶段谓词）。就绪任务不是存储实体——
+// 每次查询从文件状态推导。本模块分两层：
 //
 //   projectDeliveryPool —— 纯投影：零 fs，全部输入（含每项预计算的
-//     requirementDigest 与 manifest 仓库登记表）由调用方传入；只比较、只排序、
-//     只分桶标记。角色由项所处阶段决定（spec §1.2）：
-//     ready_for_implementation → developer（§3 谓词），其余 → designer——
+//     requirementDigest、manifest 仓库登记表与配置验证命令 checks）由调用方
+//     传入；只比较、只排序、只分桶标记。角色由项所处阶段决定（spec §1.2 +
+//     phase-four §6）：ready_for_implementation → developer（§3 谓词），
+//     verification → verifier（phase-four §3 谓词），其余 → designer——
 //     designer 谓词保持 P2 行为逐字节不变（非 intake 阶段照旧 wrong-phase，
 //     blocked 桶对存量项的投影与 P2 完全一致）。
 //
@@ -25,19 +27,26 @@ import {
   readPaused,
 } from "./attempts.ts";
 import { readDeliveryRunnerConfig, DEFAULT_DELIVERY_RUNNER_CONFIG } from "./config.ts";
+import type { DeliveryCheckConfig } from "./config.ts";
 import { contentDigest } from "../delivery-types.ts";
+import type { DeliveryCandidate } from "../delivery-types.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
 import { readWorkspaceManifest } from "../../workspaces/service.ts";
 
-/** 投影角色（spec §1.2：执行槽位单槽位跨角色共享，角色由项所处阶段决定）。 */
-export type DeliveryRole = "designer" | "developer";
+/** 投影角色（spec §1.2：执行槽位单槽位跨角色共享，角色由项所处阶段决定；
+ *  Phase-4 §6：verifier 为第三角色——单槽位三角色共享）。 */
+export type DeliveryRole = "designer" | "developer" | "verifier";
 
 export type DesignerPoolReason =
   | "not-managed" | "automation-disabled" | "wrong-phase" | "active-claim"
   | "pending-interruption" | "automation-paused" | "failure-limit"
   | "terminal-status" | "archived"
   // developer 专属（spec §3）：设计未确认 / 空仓库范围 / 仓未登记或非 active。
-  | "design-unconfirmed" | "no-repo-scope" | "repo-not-registered";
+  | "design-unconfirmed" | "no-repo-scope" | "repo-not-registered"
+  // verifier 专属（spec 2026-10-24-phase-four §3）：未配置验证命令（引导人
+  // 配置或走人工验证）。空候选复用 no-repo-scope（候选即 verifier 的仓范围）、
+  // 仓候选外/未登记/removed 复用 repo-not-registered。
+  | "no-checks-configured";
 
 export interface PoolEntry {
   key: string;
@@ -53,7 +62,7 @@ export interface PoolEntry {
 }
 
 /** 纯投影的项输入（listDeliveryPool 从 WorkItemRecord 装配）。delivery
- * 只看「块存在与否」（managed 判定）与 designConfirmed 真值——
+ * 只看「块存在与否」（managed 判定）、designConfirmed 真值与 candidates——
  * protocolVersion 校验已在 parseWorkItem 的 delivery 解析路径完成。 */
 export interface DeliveryPoolItem {
   key: string;
@@ -66,7 +75,12 @@ export interface DeliveryPoolItem {
    *  designer 不看（P2 语义）。 */
   repositories: string[];
   requirementDigest: string;
-  delivery?: { protocolVersion: number; designConfirmed?: unknown } | null;
+  delivery?: {
+    protocolVersion: number;
+    designConfirmed?: unknown;
+    /** 提交的候选（Phase-4）——只有 verifier 谓词消费（仓范围 = 候选仓集合）。 */
+    candidates?: DeliveryCandidate[];
+  } | null;
 }
 
 export interface DeliveryPoolContext {
@@ -83,8 +97,13 @@ export interface DeliveryPoolContext {
   failureCountByKey: Map<string, number>;
   maxAttemptsPerInput: number;
   /** manifest 仓库登记表（repositoryId → active|removed），读取端从
-   *  readWorkspaceManifest 的 repositories[] 装配——只有 developer 谓词消费。 */
+   *  readWorkspaceManifest 的 repositories[] 装配——developer 与 verifier
+   *  谓词消费。 */
   registeredRepos: Map<string, "active" | "removed">;
+  /** 配置的验证命令（Phase-4 T1：config.verification.checks，读取端从配置
+   *  装配，claim.ts 复验同源）——只有 verifier 谓词消费；undefined / 空数组
+   *  = 未配置（no-checks-configured）。 */
+  checks?: DeliveryCheckConfig[];
 }
 
 /** 可领状态白名单（spec §5.1，T4 carried ruling）：只有 open 与 blocked(可解)
@@ -100,6 +119,9 @@ const DESIGNER_READY_PHASE = "intake";
  * 谓词投影，其余（含 developer 领取后的 implementation）按 designer 谓词
  * （P2 wrong-phase 语义不变）。 */
 const DEVELOPER_READY_PHASE = "ready_for_implementation";
+/** verifier 可领阶段（Phase-4 spec §3）——角色判定同款：处于该阶段的项按
+ *  verifier 谓词投影（claim 不改阶段，验证就是该阶段的活动）。 */
+const VERIFIER_READY_PHASE = "verification";
 
 /** 两角色共用的阻塞检查（运行时信号 + 状态白名单 + 归档）。 */
 function sharedReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): DesignerPoolReason[] {
@@ -143,21 +165,63 @@ function developerReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): Des
   return [...reasons, ...sharedReasons(item, ctx)];
 }
 
+/** verifier 谓词（Phase-4 spec §3，binding）：ready ⇔ managed ∧ enabled ∧
+ * （阶段由角色判定保证——只有 verification 的项按本谓词投影）∧ designConfirmed
+ * 真值 ∧ 候选非空 ∧ 配置 checks 非空 ∧ 每个 check 的 repositoryId（缺省=候选
+ * 首仓）在候选仓集合内且 manifest 登记 active ∧ 共用检查。空候选 →
+ * no-repo-scope（候选即 verifier 的仓范围，与 developer 空范围同因）；checks
+ * 未配置/为空 → no-checks-configured（引导人配置或走人工验证）。仓解析检查在
+ * 候选/检查齐备前无意义（缺省仓无从解析 / 空集恒空过）——同 developer 的
+ * if/elif 结构。 */
+function verifierReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): DesignerPoolReason[] {
+  const reasons: DesignerPoolReason[] = [];
+  if (!item.delivery) reasons.push("not-managed");
+  if (!ctx.enabled) reasons.push("automation-disabled");
+  if (!item.delivery?.designConfirmed) reasons.push("design-unconfirmed");
+  const candidates = item.delivery?.candidates ?? [];
+  const checks = ctx.checks ?? [];
+  if (candidates.length === 0) {
+    reasons.push("no-repo-scope");
+  } else if (checks.length === 0) {
+    reasons.push("no-checks-configured");
+  } else {
+    const candidateRepoIds = new Set(candidates.map((candidate) => candidate.repositoryId));
+    // 缺省 repositoryId = 候选首仓（spec §7）。
+    const fallbackRepositoryId = candidates[0].repositoryId;
+    const repoViolation = checks.some((check) => {
+      const repositoryId = check.repositoryId ?? fallbackRepositoryId;
+      return (
+        !candidateRepoIds.has(repositoryId) ||
+        ctx.registeredRepos.get(repositoryId) !== "active"
+      );
+    });
+    if (repoViolation) reasons.push("repo-not-registered");
+  }
+  return [...reasons, ...sharedReasons(item, ctx)];
+}
+
 /**
- * 双角色纯投影：每项按所处阶段选定角色（ready_for_implementation →
- * developer，其余 → designer）后套该角色谓词。所有命中原因按声明顺序累积
- * （供 UI 与日志），不短路——多项违例一次看全。输出按 P0→P3→key 升序
- * （未知优先级垫底）；角色不作 tiebreaker——同优先级跨角色按 key 交错。
+ * 三角色纯投影：每项按所处阶段选定角色（ready_for_implementation →
+ * developer，verification → verifier，其余 → designer）后套该角色谓词。所有
+ * 命中原因按声明顺序累积（供 UI 与日志），不短路——多项违例一次看全。输出按
+ * P0→P3→key 升序（未知优先级垫底）；角色不作 tiebreaker——同优先级跨角色按
+ * key 交错。
  */
 export function projectDeliveryPool(
   items: DeliveryPoolItem[],
   ctx: DeliveryPoolContext,
 ): PoolEntry[] {
   const entries: PoolEntry[] = items.map((item) => {
-    const role: DeliveryRole = item.phase === DEVELOPER_READY_PHASE ? "developer" : "designer";
+    const role: DeliveryRole = item.phase === DEVELOPER_READY_PHASE
+      ? "developer"
+      : item.phase === VERIFIER_READY_PHASE
+        ? "verifier"
+        : "designer";
     const reasons = role === "developer"
       ? developerReasons(item, ctx)
-      : designerReasons(item, ctx);
+      : role === "verifier"
+        ? verifierReasons(item, ctx)
+        : designerReasons(item, ctx);
     return {
       key: item.key,
       title: item.title,
@@ -180,8 +244,9 @@ export function projectDeliveryPool(
 // -------------------------------------------------------------------- read side
 
 /** manifest 仓库登记表（id → active|removed）。manifest 缺失/损坏 → 空表
- * （developer 项以 repo-not-registered 可见，designer 不受影响——池子读路径
- * 的既有 fs 容错习语；dispatcher 路径本就先经 assertAutomationCapable 复验）。 */
+ * （developer/verifier 项以 repo-not-registered 可见，designer 不受影响——池子
+ * 读路径的既有 fs 容错习语；dispatcher 路径本就先经 assertAutomationCapable
+ * 复验）。 */
 async function readRegisteredRepos(
   workspacePath: string,
 ): Promise<Map<string, "active" | "removed">> {
@@ -195,7 +260,7 @@ async function readRegisteredRepos(
 
 /**
  * 读取端：装配 ctx 后调用纯投影，按 ready/blocked 分桶（各自保持投影排序，
- * 两角色合并在同一队列）。详情读（README → digest + item 目录）只对 managed
+ * 三角色合并在同一队列）。详情读（README → digest + item 目录）只对 managed
  * 项做（未 managed 项的原因无需 digest，恒 ""）；fs 容错：目录/README/events
  * 缺失 → 空内容摘要，项仍被投影（缺项不静默消失）。
  */
@@ -269,6 +334,7 @@ export async function listDeliveryPool(
       failureCountByKey,
       maxAttemptsPerInput,
       registeredRepos,
+      checks: config?.verification?.checks,
     },
   );
   return {
