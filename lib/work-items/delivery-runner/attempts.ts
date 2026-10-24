@@ -35,12 +35,26 @@ import { contentDigest } from "../delivery-types.ts";
 import { WorkItemValidationError } from "../errors.ts";
 import { writeAtomic } from "../service.ts";
 import type { RoleWorktree } from "./worktrees.ts";
+import type { CheckEvidence } from "./checks.ts";
+
+/** Phase-4 T3（carried ruling #2）：claim 时冻结的检查配置快照——
+ *  submitVerifierResult 的完整性比对与 delivery_run_check 的配置查找都以它
+ *  为准（领取后配置变更不追溯，下轮生效）。repositoryId 在冻结时已解析
+ *  （缺省 = 候选首仓）。 */
+export interface ClaimCheckContext {
+  name: string;
+  /** 已解析的仓库 id（缺省值在 claimVerifierTask 内落为候选首仓）。 */
+  repositoryId: string;
+  command: string;
+  timeout_seconds?: number;
+}
 
 export interface ClaimState {
   attemptId: string;
   generation: number;
-  /** 领取角色（Phase-3 T3 泛化：developer 领取共用同一运行态文件）。 */
-  role: "designer" | "developer";
+  /** 领取角色（Phase-3 T3 泛化：developer 领取共用同一运行态文件；Phase-4 T3
+   *  增 verifier——verifier claim 不改阶段，claim 携候选 checkout 与证据仓）。 */
+  role: "designer" | "developer" | "verifier";
   sessionId: string;
   claimedAt: string;
   lastSeenAt: string;
@@ -50,22 +64,37 @@ export interface ClaimState {
   /** developer 领取时锁内自算的 design.md 摘要快照（T1 carried ruling：
    *  不从池取——池无此字段；designer claim 不写）。 */
   designDigest?: string;
-  /** developer 领取时预建的 worktree 集（prepareWorktrees 产物，T2）。 */
+  /** developer 领取时预建的 worktree 集（prepareWorktrees 产物，T2）；
+   *  verifier 领取时为候选 detached checkout 集（prepareVerifyCheckouts 产物）。 */
   worktrees?: RoleWorktree[];
+  /** verifier 领取时的候选集摘要快照（candidatesDigest——Phase-4 T3）：submit
+   *  侧字符串复验（候选被换 → 409）；designer/developer claim 不写。 */
+  candidateDigest?: string;
+  /** verifier 领取时冻结的检查配置快照（Phase-4 T3，carried ruling #2）：
+   *  [{name, repositoryId 已解析, command, timeout_seconds}]。 */
+  checkContexts?: ClaimCheckContext[];
+  /** verifier 的检查证据仓（Phase-4 T3）：delivery_run_check 服务端执行后经
+   *  recordCheckResult 累积（同名覆盖/新名追加），submit 整体取用——LLM 无
+   *  其他注入口。 */
+  checkResults?: CheckEvidence[];
   lastRequest?: { requestId: string; at: string };
 }
 
 export interface AttemptRecord {
   attemptId: string;
   generation: number;
-  /** 领取角色（Phase-3 T3 泛化——审计按角色如实记录）。 */
-  role: "designer" | "developer";
+  /** 领取角色（Phase-3 T3 泛化——审计按角色如实记录；Phase-4 T3 增 verifier）。 */
+  role: "designer" | "developer" | "verifier";
   sessionId: string;
   workspacePath: string;
   key: string;
   claimedAt: string;
   endedAt?: string;
   outcome?: "submitted" | "failed" | "interrupted";
+  /** verifier 提交的验证判定（Phase-4 T3）：verified = 全过推进 release_ready；
+   *  rework = 有失败走 M2 rework 路由。判定与执行成败（outcome）正交——
+   *  rework 是验证器完成任务后的合法判定，不消耗失败预算。 */
+  verificationOutcome?: "verified" | "rework";
   reason?: string;
   requirementDigest: string;
   needsAttention?: boolean;
@@ -74,6 +103,9 @@ export interface AttemptRecord {
   candidates?: Array<{ repositoryId: string; commit: string }>;
   /** developer 领取的 worktree 集（从 claim 拷贝入审计）。 */
   worktrees?: RoleWorktree[];
+  /** verifier 终局时从 claim 拷贝的全量检查证据（Phase-4 T3）——claim 已清，
+   *  rework 路径的证据（含 passed 条目）只在这里留痕。 */
+  checkResults?: CheckEvidence[];
 }
 
 export interface PausedInfo {
