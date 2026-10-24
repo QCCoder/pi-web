@@ -265,7 +265,7 @@ Key behavior:
   POST `/work-items` 响应 = detail 展开 + `importOutcome`，状态码 201 created / 200 existing*（旧脚本按 detail 字段读仍兼容）；
   extension `workspace_create_work_item` 取 `.detail` 附加 outcome；WorkspaceManager 创建流程把 existing 视为
   「已存在，未重复创建」提示（existing 打开既有项详情，existing_trashed 仅提示——回收站项路径不在活动布局，详情操作会 404）。
-- **标准交付流 / delivery flow（2026-10 M2，`lib/work-items/delivery-types.ts` + `delivery.ts`；动作面是人工的——Phase-2/3 在其上加了 designer（intake→design）与 developer（ready_for_implementation→implementation）两段自动执行，见下节「Delivery 自动执行」）**：
+- **标准交付流 / delivery flow（2026-10 M2，`lib/work-items/delivery-types.ts` + `delivery.ts`；动作面是人工的——Phase-2/3/4 在其上加了 designer（intake→design）、developer（ready_for_implementation→implementation）与 verifier（verification→release_ready/返工）三段自动执行，见下节「Delivery 自动执行」）**：
   创建表单勾选「标准交付流程」（`CreateWorkItemInput.enableDelivery`，HTTP 表单专用——LLM 工具不透传；缺省不勾）即给
   `item.yaml` 顶层播种 `delivery: { protocolVersion: 1, mode: "manual" }` 块（`parseDelivery` 逐字段校验；未知
   protocolVersion / 非 manual mode 是硬错误 = 配置错误，不静默降级）。块内子结构：`designConfirmed`（requirementDigest +
@@ -324,16 +324,22 @@ Key behavior:
   新工作区））。**中央管理整页** = `components/work-items/`：`WorkItemsPage`（页头 工作区选择器+列表|看板分段+＋新建 →
   Toolbar 筛选（活动|归档|回收站）→ `WorkItemsList`/`WorkItemsBoard`（七列看板，无拖拽跳阶段）→ `WorkItemDetailView`
   （概况/设计编辑/证据（确认/候选/验证/发布）/动作条 `WorkItemActionbar`/事件审计 `WorkItemEvents`）+ `WorkItemCreateForm`
-  （`enableDelivery` 复选框**缺省不勾**）。**交付自动执行区（Phase-2 T9；Phase-3 T5 增量）**：`WorkItemExecution.tsx`（managed 项专属，
-  挂在 DetailView 动作条下）：四态——活动 claim 卡（**role 徽标 designer/developer**/代数/心跳 + 查看会话[claim.sessionId→onOpenConversation] +
-  「停止执行」+ **claim.worktrees 列表**[每仓一条 `alias ?? repositoryId · 分支`——alias 由 GET delivery-execution 路由**读取时 manifest 联表富化**（展示元数据可改名、不落盘；无 alias/未登记回退 ULID id），完整检出路径进 title 提示])、`paused` 横幅（原因/连续失败计数 + 「恢复自动领取」）、`pendingInterruption` 横幅（「重新检查并恢复」）、
-  最近 attempts（末 5 新→旧，outcome 徽章 + **role 徽标** + needsAttention「待处理」标记 + **submitted 项的候选摘要**[内联串 `repo@commit 前 8 位`]）；busy 全按钮禁用防双击，动作结果
+  （`enableDelivery` 复选框**缺省不勾**）。**交付自动执行区（Phase-2 T9；Phase-3/Phase-4 T5 增量）**：`WorkItemExecution.tsx`（managed 项专属，
+  挂在 DetailView 动作条下）：四态——活动 claim 卡（**role 徽标 designer/developer/verifier 三角色**/代数/心跳 + 查看会话[claim.sessionId→onOpenConversation] +
+  「停止执行」+ **claim.worktrees 列表**[每仓一条 `alias ?? repositoryId · 分支`——alias 由 GET delivery-execution 路由**读取时 manifest 联表富化**（展示元数据可改名、不落盘；无 alias/未登记回退 ULID id），完整检出路径进 title 提示] + **verifier 的 claim.checkResults
+  证据行**[每条：outcome 徽章 通过/未通过/未验证 + 退出码（null=进程未跑完）+ 耗时 + 日志文件名——logRef 是相对工作项根的 POSIX 路径，basename 铺正文、全路径进 title]）、`paused` 横幅（原因/连续失败计数 + 「恢复自动领取」）、`pendingInterruption` 横幅（「重新检查并恢复」）、
+  最近 attempts（末 5 新→旧，outcome 徽章 + **role 徽标** + needsAttention「待处理」标记 + **submitted 项的候选摘要**[内联串 `repo@commit 前 8 位`] + **verifier 的
+  verificationOutcome 判定徽章**[已验证/需返工——rework 是合法判定不是执行失败] 与全量 checkResults 紧凑 chips[rework 路径的失败证据只随 attempt 留痕]）；busy 全按钮禁用防双击，动作结果
   `{ok}|{ok:false,error}` 出参 → 内联 role=alert（recover 409 的 pids 由 WorkItemsPage 拼进 error 文案）。执行状态由
   WorkItemsPage 拉取（GET `.../delivery-execution`，仅 `item.delivery` 存在的非回收站选中项拉；revision 变化 + 动作成功
   重拉，effect 带切项取消守卫）；三动作 = POST `.../delivery-execution/stop|recover`（manual:true）与
-  `/api/workspaces/[id]/delivery/resume`（body {key}），成功 → invalidate + 重拉。设置›工作区（WorkspaceManager）：
+  `/api/workspaces/[id]/delivery/resume`（body {key}），成功 → invalidate + 重拉。详情页 verification 证据块对 agent 登记的
+  checks 增显 evidence 摘要（命令 · 退出码 · 耗时 · 日志文件名，完整 logRef 进 title——人工 record-verification 无此字段，Phase-4 T5）。
+  设置›工作区（WorkspaceManager）：
   work-items+workflows 双开时显示「交付自动化」配置块（enabled 开关 + **designer/developer profile 文本框（T5 双行同形）** + 预算只读「失败上限 N 次 ·
-  执行上限 M 分钟」+ 保存 PUT `/delivery`——budget 与两角色既有 model 覆写原样回传保 round-trip；配置结构是
+  执行上限 M 分钟」+ **verification.checks 行编辑器（Phase-4 T5：name/仓库/命令/超时（秒）四列 + 行删除；整行空白丢弃、名称/命令只填其一报错拒存、
+  timeout 校验 1–3600；无有效行 = PUT 不带 verification 键 = 无配置；空清单有引导文案——verifier 领证按此清单执行，agent 只能触发不能自造）**
+  + 保存 PUT `/delivery`——budget 与两角色既有 model 覆写原样回传保 round-trip；配置结构是
   delivery-runner/config 的客户端镜像类型，不 import 服务端模块）。
   看板投影在 `work-item-phases.ts`（纯模块）：老子阶段（analysis/
   requirement_approval/plan_approval）投影进 design 列但**显示原始 phase 标签**（不谎报已进标准列）；老 `complete` 投影进
@@ -362,8 +368,9 @@ claim → 服务端 `runConfiguredCheck` 执行 + `recordCheckResult` 证据累�
 record-verification/rework 语义推进 release_ready 或返工）——**检查证据只能出自
 `delivery_run_check`（LLM 自述/bash 自跑不构成证据）**。合并角色池 + 按条目角色分派，
 三角色共享单槽位/工作区与同一失败预算。release-preparer 角色、多槽位并发、任务依赖图、
-worktree 自动清理均**未实现**（spec §2/§12 留后续阶段——worktree 由人手动清理，
-不合并不推送是合同纪律）。
+并行检查（checks 顺序执行）、验证环境预装（依赖安装由命令自身负责，如 `npm ci && npm test`）、
+worktree 自动清理均**未实现**（spec §2 留后续阶段——worktree 由人手动清理，
+不合并不推送是合同纪律）；rework↔重提乒乓无闸是已知阶段级观察（见「已知边角」）。
 
 - **配置 `.pi/delivery.yaml`**（`config.ts`；路由 `GET|PUT /api/workspaces/[id]/delivery`）：
   `{schemaVersion: 1, enabled, roles: { designer?: {profile?, model?}, developer?: {profile?, model?} }（Phase-3 T5 显式双字段，两键同规校验；旧单键文件照常解析；无 verifier 键——verifier 会话回落默认模型）, budget: {maxAttemptsPerInput, maxExecutionMinutes}, verification?: {checks: [{name, repositoryId?, command, timeout_seconds? 1–3600}]}}（Phase-4 T1：人维护的验证命令——agent 只能触发不能自造；repositoryId 缺省 = 候选首仓）}`，
@@ -432,7 +439,9 @@ worktree 自动清理均**未实现**（spec §2/§12 留后续阶段——workt
   checkContexts/checkResults 空仓；submit = 三凭据 + role 门 + candidateDigest 复验 + 阶段守卫 + **证据只从
   claim.checkResults 取**（按冻结快照逐名比对：缺名/unverified → Validation 零变化；有 failed → M2 rework 四清
   同构 + `delivery.rework_suggested` + 回 ready_for_implementation；全 passed → `delivery.verification`
-  （actor=agent，evidence 命令取自冻结快照）+ phase→release_ready）；fail = **phase 不动**（无阶段可归还，
+  （actor=agent，evidence 命令取自冻结快照）+ phase→release_ready）——**conversationId 自链接三角色齐**
+  （三角色 submit 均由 tools 透传 sessionId、锁内合并进 item.conversations——服务层不变式，verifier 是 Phase-4
+  fix round 修齐的）；fail = **phase 不动**（无阶段可归还，
   只归还 status）；`recordCheckResult` 无业务锁轻量（heartbeat 习语：claim.sessionId 匹配才写）。服务端检查
   执行器 `checks.ts` 的 `runConfiguredCheck`——在候选 checkout 内 spawnSync `/bin/sh`（timeout 缺省 600s，
   超时/ENOBUFS → unverified + exitCode null），日志尾部 32KiB/流写 `<logDir>/<safeName(name)>.log`、logRef
@@ -452,10 +461,11 @@ worktree 自动清理均**未实现**（spec §2/§12 留后续阶段——workt
 - **失败预算**：= **自最近 resume 起的尾部连续失败**（`countRecentFailures`：从最新往回数 outcome=failed ∧
   digest 匹配 ∧ 窗口内的记录，**遇第一个 submitted 即停**——成功提交重新起算；interrupted 不计也不断），
   **单工作项作用域**（fix-round 裁定：不跨项按 digest 聚合）且**跨角色共享**（Phase-3 §8：按 digest 计数不问
-  角色——designer 与 developer 的失败互相消耗同一预算，防两角色互刷次数绕上限）。同 digest 连续失败 ≥
+  角色——designer/developer/verifier 的失败互相消耗同一预算，防角色间互刷次数绕上限；verifier 的 rework
+  判定记 submitted 不算失败——见「已知边角」乒乓闸一条）。同 digest 连续失败 ≥
   maxAttemptsPerInput → writePaused + `delivery.automation_paused`，自动领取停等人显式 resume（resume 重置窗口）。
 - **角色授权（`role-grants.ts`）**：**globalThis 单例** Map（sessionId → RoleGrant——`role` 为 `DeliveryRole`
-  （designer|developer），Phase-3 泛化；HMR/jiti 双载共享同一张表——Map 分裂会让授予与校验落在两个登记簿、
+  （designer|developer|verifier 三值），Phase-3 泛化/Phase-4 增第三值；HMR/jiti 双载共享同一张表——Map 分裂会让授予与校验落在两个登记簿、
   身份门全瞎）。dispatcher 拉起会话时 `grantRole`、结束钩子 `revokeRole`；`setGrantToken` 只由工具回调把 claim
   服务一次性核发的 ownerToken（连同 attemptId/generation）补进**已有** grant（工具层不能自授身份）；
   `hasAnyActiveExecution`——**裸授权即占槽**（授予到领取的窗口不许起第二个会话双派发；不问角色——跨角色
@@ -499,7 +509,7 @@ worktree 自动清理均**未实现**（spec §2/§12 留后续阶段——workt
   inert，两角色共用）：读 `<workspace>/.pi/agents/<profile>.md` frontmatter 的 `model:` 字段（`provider/model`
   或裸 modelId，复用 `parseFrontmatter`；缺文件/无 model/名字非法/解析抛错 → 静默回落默认模型，至多日志；
   注入缝 `LaunchDeps.readProfileModel`，默认实现 `readDesignerProfileModel`）。**心跳** 20s 续约（interval
-  unref，两角色共用同一常量）；**结束钩子**（`wrapper.onDestroy`，先于开场 prompt 武装）：launch key 快路径 +
+  unref，三角色共用同一常量）；**结束钩子**（`wrapper.onDestroy`，先于开场 prompt 武装）：launch key 快路径 +
   **全活动项 claim 扫描兜底**（兜住违约领取——本会话 sessionId 名下每个未清 claim 都 recordInterruption）→
   revokeRole → 清 delivery 登记 → 停心跳（钩子/心跳/登记 role 无关——claim.sessionId 匹配，不问角色）；装配
   失败显式收尾 + destroy 后重抛。
@@ -533,7 +543,10 @@ worktree 自动清理均**未实现**（spec §2/§12 留后续阶段——workt
 - **已知边角（如实记录）**：workspace.disabled **不参与 dispatch**（dispatcher 只看 `available`——与 loop
   心跳先例一致：停用影响 UI 可见性，不停后台自动化）；delivery 的中断横幅/「重新检查并恢复」与 M1 loop
   面板同习语但**文件分离**（中断住 attempts 审计文件 ≠ `lib/loops/executions.ts`；recover 路由复用同一
-  `detectSurvivingRoundProcesses` 做只读探测）。
+  `detectSurvivingRoundProcesses` 做只读探测）；`runConfiguredCheck` 是 **spawnSync 同步执行**（分钟级长检查
+  阻塞宿主事件循环——600s 上限内 SSE/UI 会冻结，Phase-4 接口裁定知悉项，future 异步化）；**rework↔重提无
+  乒乓闸**（verifier rework 的 attempt 记 submitted 不耗失败预算，`countRecentFailures` 遇 submitted 即断——
+  同一项反复「提交坏候选→rework→再提交」不触预算暂停，Phase-4 阶段级观察，如需闸要 per-item rework 计数器）。
 
 ### Loop（pi-loop kit；`lib/session-host/loop-spawner.ts` + `packages/pi-loop/` + `kit/`）
 
@@ -767,8 +780,9 @@ strictly gitignored / tsc+eslint excluded / pruned by git-discovery.
                                          kit loop declaration + memory spine (D5 文件即声明)
       .pi/loop/{constraints.md, budget.md, pause-all}
                                          根级共享宪法 + 全局停机旗（原根级 loop-constraints/loop-budget/loop-pause-all）
-      .pi/delivery.yaml                   交付自动化配置（2026-10 Phase-2/3：enabled 缺省 false / roles
-                                         designer+developer 各自 profile+model / budget——见 Work Items 章
+      .pi/delivery.yaml                   交付自动化配置（2026-10 Phase-2/3/4：enabled 缺省 false / roles
+                                         designer+developer 各自 profile+model（无 verifier 键）/ budget /
+                                         verification.checks 人维护验证命令——见 Work Items 章
                                          「Delivery 自动执行」）
       .pi/agents/*.md                    subagent 项目 profile（平铺）；.pi/cache/ 可重建缓存
       <alias>/                           代码仓 / 知识库（根级目录，路径登记；各自独立 git）
@@ -879,11 +893,12 @@ lib/
     types.ts                WorkItemRecord / phases（七阶段 delivery 扩展 + 老子阶段）/ events (incl. optional `external` source ref) / WorkItemImportOutcome / CreateWorkItemInput.enableDelivery
     delivery-types.ts       DeliveryAction 11 个 + DeliveryMetadata（protocolVersion 1 / mode manual；designConfirmed/candidates/verification/releasePlan/release/lastRequest）+ contentDigest/candidatesDigest（sha256）+ parseDelivery（未知 protocolVersion/非 manual 硬错误）+ DELIVERY_ACTIONS 权威表
     delivery.ts             标准交付流（2026-10 M2）：planDeliveryTransition（纯，digest 注入）+ applyDeliveryAction（锁内 + requestId 幂等 + design.md 播种）+ readDesign/updateDesignContent（design.md 编辑 + 失效回退）；re-export legalDeliveryActions
-    delivery-runner/        交付自动执行（2026-10 Phase-2 designer 首角色 + Phase-3 developer 第二角色——详见 Work Items 章「Delivery 自动执行」节；verifier/release-preparer/多槽位/依赖图/worktree 自动清理未实现，跨角色共享单槽位/工作区）
-      config.ts             .pi/delivery.yaml 读写 + parseDeliveryRunnerConfig（roles 显式双字段 designer/developer 同规校验、enabled 缺省 false、budget 缺省 3/30、字段级 Validation）+ assertAutomationCapable（manifest 须含 work-items+workflows）
-      pool.ts               双角色池子（Phase-3 合并）：projectDeliveryPool 纯投影（角色由阶段决定：rfi→developer 其余→designer；designer 谓词 managed∧enabled∧intake；developer 另加 designConfirmed 真值∧仓库范围非空∧每仓登记且 active（reason no-repo-scope/design-unconfirmed/repo-not-registered）；共用 无claim∧无中断∧未暂停∧失败未达上限∧status∈{open,blocked} 白名单∧未归档；两角色合并队列 P0→P3→key）+ listDeliveryPool 读取端装配（运行时信号 + contentDigest + manifest 登记仓表）
-      worktrees.ts          developer 领取的 worktree 预建与候选核验（Phase-3 T2）：prepareWorktrees（分支 pi-delivery/<KEY>/gen<N>、仓旁 <repoRoot>-worktrees/ 目录、同代幂等复用、先整表登记复验、失败零状态已建不回滚）+ verifyCandidateCommits（rev-parse ^{commit} 核验，ref 非 40-hex 也接受）
-      attempts.ts           claim.json/automation-paused/failure-window（runtime/ advisory 运行态，claim 首写时幂等接进 .gitignore；宽松读）+ attempts/ 追加审计 + resolveInterruptions + countRecentFailures（自最近 resume 起的尾部连续失败，遇 submitted 断）+ ownerToken 只存 sha256（hashOwnerToken）
+    delivery-runner/        交付自动执行（2026-10 Phase-2 designer 首角色 + Phase-3 developer 第二角色 + Phase-4 verifier 第三角色——详见 Work Items 章「Delivery 自动执行」节；release-preparer/多槽位/依赖图/并行检查/验证环境预装/worktree 自动清理未实现，三角色跨角色共享单槽位/工作区与失败预算）
+      config.ts             .pi/delivery.yaml 读写 + parseDeliveryRunnerConfig（roles 显式双字段 designer/developer 同规校验、enabled 缺省 false、budget 缺省 3/30、字段级 Validation；Phase-4 增 verification.checks[]——{name, repositoryId?, command, timeout_seconds? 1–3600} 人维护验证命令，name/command 非空，空数组/缺键=无配置=verifier 不可领）+ assertAutomationCapable（manifest 须含 work-items+workflows）
+      pool.ts               三角色池子（Phase-3 合并双角色 / Phase-4 增 verifier）：projectDeliveryPool 纯投影（角色由阶段决定：rfi→developer、verification→verifier、其余→designer；designer 谓词 managed∧enabled∧intake；developer 另加 designConfirmed 真值∧仓库范围非空∧每仓登记且 active（reason no-repo-scope/design-unconfirmed/repo-not-registered）；verifier 另加 designConfirmed∧候选非空∧checks 非空（no-checks-configured）∧每 check repositoryId（缺省=候选首仓）∈候选仓且登记 active；共用 无claim∧无中断∧未暂停∧失败未达上限∧status∈{open,blocked} 白名单∧未归档；三角色合并队列 P0→P3→key）+ listDeliveryPool 读取端装配（运行时信号 + contentDigest + manifest 登记仓表）
+      worktrees.ts          developer 领取的 worktree 预建与候选核验（Phase-3 T2）：prepareWorktrees（分支 pi-delivery/<KEY>/gen<N>、仓旁 <repoRoot>-worktrees/ 目录、同代幂等复用、先整表登记复验、失败零状态已建不回滚）+ verifyCandidateCommits（rev-parse ^{commit} 核验，ref 非 40-hex 也接受）；Phase-4 T2 增 prepareVerifyCheckouts——verifier 领取的候选 detached checkout（pi-verify/<KEY>/gen<N> 仓旁目录，两步法 addWorktree+checkout --detach 候选 commit；同代幂等=目录在场仍 checkout 目标 commit（半建修复）；失败零状态不回滚、不自动清理）
+      checks.ts             服务端验证命令执行器（Phase-4 T2）：runConfiguredCheck——spawnSync 经 /bin/sh 在候选 checkout 内执行配置命令（timeout 缺省 600s；exit 0=passed / 非 0=failed（shell 127 缺命令同）/ spawn error（超时/ENOENT/ENOBUFS）=unverified+exitCode null）；日志 stdout/stderr 各尾部 32KiB 分节原子写 <logDir>/<safeCheckName(name)>.log，logRef=相对工作项根 POSIX 路径；CheckEvidence {name, exitCode, durationMs, logRef, outcome}——LLM 自述不构成证据的唯一正源
+      attempts.ts           claim.json/automation-paused/failure-window（runtime/ advisory 运行态，claim 首写时幂等接进 .gitignore；宽松读；Phase-4 verifier claim 另附 candidateDigest/checkContexts/checkResults 证据仓）+ attempts/ 追加审计（verifier submit 附 verificationOutcome+全量 checkResults）+ resolveInterruptions + countRecentFailures（自最近 resume 起的尾部连续失败，遇 submitted 断）+ ownerToken 只存 sha256（hashOwnerToken）
       claim.ts              领取事务（designer + developer + verifier 九函数共用骨架）：claimDesignerTask（intake→design + design.md 播种）/ claimDeveloperTask（worktree 预建先于状态落盘 + designDigest 快照，rfi→implementation）/ claimVerifierTask（Phase-4：候选 detached checkout 预建 + candidateDigest/checkContexts/checkResults 冻结，phase 不变）/ submitDesignerResult（等人 confirm）/ submitDeveloperResult（双 digest+designConfirmed+phase 门复验 + 候选核验 → M2 submit-verification 语义内联进 verification）/ submitVerifierResult（证据只取 claim.checkResults 按冻结快照逐名比对 → 全过 delivery.verification+release_ready / 有失败 rework 四清+rework_suggested）/ failDesignerTask|failDeveloperTask（回退守卫 design→intake / implementation→rfi）/ failVerifierTask（phase 不动）+ recordCheckResult（heartbeat 习语证据累积）+ heartbeatActiveClaim（20s 续约）+ recordInterruption + resumeAutomation
       role-grants.ts        globalThis 单例角色授权表（grantRole/revokeRole/roleGrantOf/setGrantToken——token 只进进程内 grant；hasAnyActiveExecution 裸授权即占槽）
       tools.ts              delivery_list_ready_tasks/claim/submit/fail/run_check 五工具（pi-delivery-runner extension；claim/submit/fail 按 grant.role 三路分派 designer/developer/verifier 服务，submit 扁平可选字段组（union/any-of schema 被 SDK 调用侧解析毁掉，禁用）服务端按角色校验（verifier 只需 key），claim 结果 developer/verifier 附 worktrees 清单 + verifier 附 checks 冻结清单；run_check（Phase-4 verifier 专属）：按冻结快照找配置 → 候选 checkout 服务端 runConfiguredCheck → recordCheckResult 累积（同名覆盖）；身份=ctx.sessionManager.getSessionId()+grant 核对，无 grant → denied 文本；凭证不进参数 schema；人工动作面刻意不做工具）
@@ -976,7 +991,7 @@ components/
   ConfigCenterPage.tsx      桌面配置整页族（2026-09 拆分）：设置/模型/插件&技能/Agents 四个独立中央区整页——hero 页头（accent 图标章+大标题+描述+meta+✕）+ 分区 pills（仅多分区页：设置=工作区/偏好，插件&技能=插件/技能），插件&技能页两个分区 = PluginsConfig/SkillsConfig `market` 布局（搜索+已安装卡片网格+添加区+详情弹窗）；整页打开时会话 tab 条隐藏（DesktopShell 条件渲染）
 
   FilesExplorerPanel.tsx   the「文件」面板体（桌面右栏钉死 tab + 移动端抽屉文件目的地页同体）— [ 文件 | 改动(N) ] toolbar + ⟳ + FileExplorer/ChangesPanel (cwd = workspace root); exports ExplorerSegmentedTabs; reveal switches its segmented back to 文件
-  WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant — 宿主：桌面右坞工作项 tab + 移动抽屉目的地页 work-items / 设置›工作区 workspaceSlot（右坞 S3；workItemSplit portal 机制已退役）; `split={{ inline: true }}` = 列表+详情并排单容器（设置›工作区的中央区页面，2026-09 搬家）; the settings detail carries the 基本信息 card — rename (PATCH name) + 暂时停用 toggle (PATCH disabled; disabled workspaces keep a settings-only「已停用」badge, the sole re-enable surface — 到达路径：桌面项目树树底暗淡行 ⚙ / 移动抽屉树底暗淡行 ⚙ / 零工作区态 HomeLanding ⊞ 暗淡行与 ⚙，均经 `requestWorkspaceSettings` → `selectWorkspaceRequest` 深链预选，2026-09 修复；**预选同时触发详情优先（detailFocus）：rail（全部工作区列表）收起、目标工作区详情独占 +「‹ 全部工作区」返回**（带工作区上下文的入口只看该工作区，不带上下文的底部设置入口仍落全局列表）；两 shell 在设置面关闭/离开时 `clearWorkspaceSettingsRequest` 防闪回)；the rail is drag-sortable (HTML5 DnD，同 SessionTabBar 模式：drop 到目标上=插到它前面，列表尾空区=移到末尾；一次拖放 = PATCH /api/workspaces 全量期望序)；设置详情含「交付自动化」配置区（Phase-2 T9 + Phase-3 T5 双角色：work-items+workflows 双开时显示 enabled 开关 + designer/developer profile 文本框（双行同形）+ 预算只读，GET|PUT /delivery，config:null 播种默认镜像——见 Work Items 章「Delivery 自动执行」）; remaining modal = home create-workspace wizard
+  WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant — 宿主：桌面右坞工作项 tab + 移动抽屉目的地页 work-items / 设置›工作区 workspaceSlot（右坞 S3；workItemSplit portal 机制已退役）; `split={{ inline: true }}` = 列表+详情并排单容器（设置›工作区的中央区页面，2026-09 搬家）; the settings detail carries the 基本信息 card — rename (PATCH name) + 暂时停用 toggle (PATCH disabled; disabled workspaces keep a settings-only「已停用」badge, the sole re-enable surface — 到达路径：桌面项目树树底暗淡行 ⚙ / 移动抽屉树底暗淡行 ⚙ / 零工作区态 HomeLanding ⊞ 暗淡行与 ⚙，均经 `requestWorkspaceSettings` → `selectWorkspaceRequest` 深链预选，2026-09 修复；**预选同时触发详情优先（detailFocus）：rail（全部工作区列表）收起、目标工作区详情独占 +「‹ 全部工作区」返回**（带工作区上下文的入口只看该工作区，不带上下文的底部设置入口仍落全局列表）；两 shell 在设置面关闭/离开时 `clearWorkspaceSettingsRequest` 防闪回)；the rail is drag-sortable (HTML5 DnD，同 SessionTabBar 模式：drop 到目标上=插到它前面，列表尾空区=移到末尾；一次拖放 = PATCH /api/workspaces 全量期望序)；设置详情含「交付自动化」配置区（Phase-2 T9 + Phase-3 T5 双角色 + Phase-4 T5 checks 编辑器：work-items+workflows 双开时显示 enabled 开关 + designer/developer profile 文本框（双行同形）+ 预算只读 + verification.checks 四列行编辑器（name/仓库/命令/超时（秒）+ 行删除，空清单有引导文案——verifier 领证按此清单执行，agent 只能触发不能自造），GET|PUT /delivery，config:null 播种默认镜像——见 Work Items 章「Delivery 自动执行」）; remaining modal = home create-workspace wizard
   work-items/               中央工作项管理整页组件族（2026-10 M2；宿主 = DesktopShell CenterPage kind"work-items" + MobileShell work-items 目的地页，同一本体）：WorkItemsPage（页骨架 + 深链消费 + 交付执行状态/三动作——Phase-2 T9）/ WorkItemsToolbar（活动|归档|回收站筛选 + 看板阶段筛选）/ WorkItemsList / WorkItemsBoard（七列，无拖拽）/ WorkItemRow / WorkItemDetailView（概况/设计/证据/动作/审计 + 自动执行区挂载）/ WorkItemActionbar（legalActionBarActions 投影，released 不渲染 cancel）/ WorkItemExecution（交付自动执行四态区，Phase-2 T9）/ WorkItemCreateForm（enableDelivery 缺省不勾）/ WorkItemEvents / WorkItemMeta；纯逻辑 = work-item-phases.ts（看板投影 + 标签，老 complete ≠ 已发布）+ work-item-queries.ts（筛选/排序）+ work-item-api.ts（HTTP 封装），均有 node:test
   WorkspaceOverview.tsx     workspace dashboard — the DESKTOP 家 tab landing (移动端不渲染——抽屉目的地页取代；更早的 WorkspaceHomeMenu 已随树抽屉重构退役)：quick actions, 活跃工作项 with 「立即跑一轮」B-button + Loop 绑定下拉, 仓库/知识库 rows, 「会话」区块（WorkspaceSessionList），Loops 摘要行（onOpenLoopsTab → 右坞 Loops rail 模块，必传）
   WorkspaceSessionList.tsx  本工作区会话列表（拉 /api/sessions 后前缀过滤、排除 subagent 子会话）：默认前 20 条 + 显示全部，行内删除（RecentSessionRow）；宿主 = 移动端工作区 tab「会话」子页（showHeader=false）+ WorkspaceOverview「会话」区块（桌面家 tab）
@@ -1047,7 +1062,7 @@ Pi stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolC
 Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[]`). For existing sessions, the active preset is inferred on mount via `get_tools` → `getPresetFromTools()`. When tools are fully disabled (`toolNames = []`), `lib/session-host/registry.ts` passes an empty tool allow-list and forces `agent.state.systemPrompt = ""` after startup/reload/resource discovery.
 
 ### Workspace capability registry is the source of truth
-`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered and — since 2026-10 Phase-2 — **meaningful**: it activates 交付自动化（delivery automation）——the `delivery_*` designer/developer tools mount is the work-items∧workflows conjunction in `extensions.ts`, `assertAutomationCapable` gates `.pi/delivery.yaml` writes and the dispatcher re-checks it per tick（see Work Items 章的「Delivery 自动执行」小节）. The former `overview` capability is RETIRED — the overview dashboard renders unconditionally; manifests still listing `overview` get it stripped on read, see the capability system section.)
+`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered and — since 2026-10 Phase-2 — **meaningful**: it activates 交付自动化（delivery automation）——the `delivery_*` 三角色（designer/developer/verifier）tools mount is the work-items∧workflows conjunction in `extensions.ts`, `assertAutomationCapable` gates `.pi/delivery.yaml` writes and the dispatcher re-checks it per tick（see Work Items 章的「Delivery 自动执行」小节）. The former `overview` capability is RETIRED — the overview dashboard renders unconditionally; manifests still listing `overview` get it stripped on read, see the capability system section.)
 
 ### Capabilities are required — no fallback path
 `WorkspaceManifest.capabilities` is non-optional. `parseWorkspaceManifest` throws on a manifest without it, and the deleted `effectiveCapabilities` helper is NOT to be reintroduced — read `manifest.capabilities` directly. (The one-shot v2 migration and its read-path strip are gone; a manifest still carrying retired values is config-invalid.)
