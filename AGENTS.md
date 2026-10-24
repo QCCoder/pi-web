@@ -137,7 +137,7 @@ sessions, explorer, work-items, repositories, knowledge, workflows
 
 - `manifest.capabilities` is required and always present (see "Workspace index v2" above). Read it directly; there is no derivation helper.
 - **`parseCapabilities()`** rejects anything not in `ALL_WORKSPACE_CAPABILITIES` (`WorkspaceValidationError` → **HTTP 400**). To add a toggleable module you must (1) add the value to `ALL_WORKSPACE_CAPABILITIES` *and* the `WorkspaceCapability` type, (2) add an extension factory, (3) add a config UI panel.
-- **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below).
+- **Extension factories** (`lib/workspaces/extensions.ts`, `WORKSPACE_EXTENSION_FACTORIES`) turn a capability into an LLM-callable tool extension: `work-items` → work-item tools, `work-items` ∧ `workflows`（合取——第二个 work-items 工厂条目在 build 内补 workflows 检查，Phase-2 交付自动化）→ `delivery_*` designer tools, `knowledge` → `kb_search` (opt-in ranked retrieval; coexists with always-on L0). **`subagent` is deliberately NOT registered here** (see Subagent below).
 - **Attachment point**: `buildWorkspaceExtensions(manifest, path)` filters factories by `manifest.capabilities`. `lib/session-host/registry.ts` (`startRpcSession`) always attaches the built-in subagent extension globally (`createSubagentExtension` — see Subagent below), then — when the session's cwd is inside a workspace — appends `buildWorkspaceExtensions(...)` and filters skills to `manifest.skills`.
 ### AGENTS.md auto-management (managed segments)
 
@@ -265,7 +265,7 @@ Key behavior:
   POST `/work-items` 响应 = detail 展开 + `importOutcome`，状态码 201 created / 200 existing*（旧脚本按 detail 字段读仍兼容）；
   extension `workspace_create_work_item` 取 `.detail` 附加 outcome；WorkspaceManager 创建流程把 existing 视为
   「已存在，未重复创建」提示（existing 打开既有项详情，existing_trashed 仅提示——回收站项路径不在活动布局，详情操作会 404）。
-- **标准交付流 / delivery flow（2026-10 M2，`lib/work-items/delivery-types.ts` + `delivery.ts`；人工模式，无自动化）**：
+- **标准交付流 / delivery flow（2026-10 M2，`lib/work-items/delivery-types.ts` + `delivery.ts`；动作面是人工的——Phase-2 在其上加了首段 intake→design 的 designer 自动执行，见下节「Delivery 自动执行」）**：
   创建表单勾选「标准交付流程」（`CreateWorkItemInput.enableDelivery`，HTTP 表单专用——LLM 工具不透传；缺省不勾）即给
   `item.yaml` 顶层播种 `delivery: { protocolVersion: 1, mode: "manual" }` 块（`parseDelivery` 逐字段校验；未知
   protocolVersion / 非 manual mode 是硬错误 = 配置错误，不静默降级）。块内子结构：`designConfirmed`（requirementDigest +
@@ -350,6 +350,96 @@ Key behavior:
 - **Archive cascade** (`lib/archive-cascade.ts`): archiving a work item tucks its conversations into the session
   archive **only if no other active work item references them**; restoring brings them back. Sessions are physically
   moved to a `.archived/` subdirectory (`lib/session-archive.ts`) so `SessionManager.listAll()` no longer sees them.
+
+### Delivery 自动执行（designer 首角色；`lib/work-items/delivery-runner/`，2026-10 Phase-2）
+
+Phase-2 在 M2 人工交付流之上加了**首个自动化角色 designer**（intake 需求 → design.md + 验收条件 → 等人
+confirm-design）。developer/verifier/release-preparer 角色、worktree 隔离、验证命令自动化、多槽位并发均
+**未实现**（spec §2/§12 留后续阶段）——现状 = 单角色 + 单槽位/工作区。
+
+- **配置 `.pi/delivery.yaml`**（`config.ts`；路由 `GET|PUT /api/workspaces/[id]/delivery`）：
+  `{schemaVersion: 1, enabled, roles.designer: {profile?, model?}, budget: {maxAttemptsPerInput, maxExecutionMinutes}}`，
+  budget 缺省 **3 次 / 30 分钟**、enabled **缺省 false**（文件缺失 = GET 返回 `{config: null}` = disabled）；
+  坏 YAML/坏结构 → Validation（HTTP 400）；PUT 写入前过 capability 门 `assertAutomationCapable`——manifest 须
+  同时含 **work-items + workflows**（`workflows` capability 自此激活自动执行含义：配置写入 + 工具挂载 +
+  dispatcher 每拍复验都吃这道门）。UI = 设置›工作区「交付自动化」配置区（WorkspaceManager，双 capability 开
+  时显示；`config:null` 播种默认镜像，budget 与 designer.model 原样回传——见「前端」条目）。
+- **池子（`pool.ts`）**：就绪任务不是存储实体——`projectDesignerPool` 是**纯投影**（零 fs，全部输入含每项
+  requirementDigest 由调用方传入，只比较/排序/分桶）；`listDesignerPool` 是读取端装配器（`listWorkItems` 活动
+  项 + 配置 + 每项运行时信号 claim/未确认中断/paused/失败计数 + `contentDigest(README)`）。就绪谓词：managed ∧
+  enabled ∧ phase===intake ∧ 无 claim ∧ 无未确认中断 ∧ 未 paused ∧ 尾部连续失败未达上限 ∧ **status ∈
+  {open, blocked}（白名单而非黑名单**——claim 事务写 in_progress 后即便 claim.json 未落盘也不再投影 ready，
+  双派发窗口两头堵死）∧ 未归档。输出 P0→P3→key 排序，原因累积不短路。
+- **运行态与审计（`attempts.ts`）**：`<item>/delivery/runtime/{claim.json, automation-paused.json,
+  failure-window.json}` 是 advisory 运行态（**claim 首写 runtime/ 时幂等接进工作区 .gitignore**；读路径宽松——
+  缺失/坏 JSON 一律按「无」）；`<item>/delivery/attempts/<attemptId>.json` 是追加式审计（含中断记录，永不删
+  除；resolveInterruptions 只清 needsAttention + 记诊断）。**ownerToken 只存 sha256 哈希**（`hashOwnerToken`）——
+  明文只在进程内 role grant 存活，永不落盘。claim/paused 走同步原子写（`writeAtomicSync` 镜像 service 习语），
+  attempts 异步追加（复用 `writeAtomic`）。
+- **领取事务（`claim.ts`）**：`claimDesignerTask` 全程 `withWorkspaceWriteLock`——幂等重放（claim.lastRequest
+  同 requestId → 现 grant、ownerToken 空串不重建）→ **事务内双检**（manifest capability + 配置 + 复用
+  `projectDesignerPool` 谓词——claim 与池子读同一套规则，永不漂移）→ design.md 播种（复用 M2 `DESIGN_SEED`，
+  缺失才播）→ claim.json（先于 item.yaml：崩溃窗口两头堵死）→ phase intake→design + status=in_progress +
+  `delivery.claimed` 事件 + workspace git commit（产物先落盘、状态后改）。`submitDesignerResult`：写 design.md
+  （正文 + 合成「## 验收条件」节）→ 清 claim → attempt submitted → status 回 **open**、phase 保持 design 等人
+  confirm-design（designer 不推进确认；人在领取窗口内抢先 confirm → Conflict 409，不让确认证据静默过期）；
+  `failDesignerTask`：blocked 可选（白名单内仍可领）→ phase 还回 intake + `delivery.attempt_failed`；凭证过期/
+  README 摘要变化 → Conflict。`heartbeatActiveClaim` 20s 轻量续约 lastSeenAt（不 bump revision/不产事件/不进
+  git）；`recordInterruption`（锁内清 claim + needsAttention attempt + `delivery.exec_interrupted`；不进
+  git——关停路径不 spawn git，events.jsonl 落盘即持久）；`resumeAutomation`（人显式恢复：清 paused + 写
+  failure-window（since=now）+ `delivery.resumed`；未暂停 → 400）。
+- **失败预算**：= **自最近 resume 起的尾部连续失败**（`countRecentFailures`：从最新往回数 outcome=failed ∧
+  digest 匹配 ∧ 窗口内的记录，**遇第一个 submitted 即停**——成功提交重新起算；interrupted 不计也不断），
+  **单工作项作用域**（fix-round 裁定：不跨项按 digest 聚合）。同 digest 连续失败 ≥ maxAttemptsPerInput →
+  writePaused + `delivery.automation_paused`，自动领取停等人显式 resume（resume 重置窗口）。
+- **角色授权（`role-grants.ts`）**：**globalThis 单例** Map（sessionId → RoleGrant；HMR/jiti 双载共享同一张表
+  ——Map 分裂会让授予与校验落在两个登记簿、身份门全瞎）。dispatcher 拉起会话时 `grantRole`、结束钩子
+  `revokeRole`；`setGrantToken` 只由工具回调把 claim 服务一次性核发的 ownerToken（连同 attemptId/generation）
+  补进**已有** grant（工具层不能自授身份）；`hasAnyActiveExecution`——**裸授权即占槽**（授予到领取的窗口
+  不许起第二个会话双派发）。
+- **LLM 工具（`tools.ts`，`createDeliveryRunnerExtension`，extension 名 `pi-delivery-runner`）**：四件
+  `delivery_list_ready_tasks / delivery_claim_task / delivery_submit_result / delivery_fail_task`。**身份 =
+  `ctx.sessionManager.getSessionId()` + `roleGrantOf` 核对**（无 grant / grant 属他工作区 → denied 结果文本，
+  非异常——cxin loop 轮/普通交互会话天然无角色身份，拿到拒绝）；凭证三元组（ownerToken/attemptId/
+  generation）全程住进程内 grant，**不进参数 schema、不进 LLM**；requestId 确定性（`claim:<sessionId>:<key>`
+  等）——传输层重试命中服务幂等重放分支。confirm-design / record-verification / release / block / unblock /
+  cancel / rework 等**人工/动作面刻意不做 LLM 工具**（住 M2 delivery 路由——确认与放行是人的手）。
+- **角色会话（`role-session.ts`，`launchDesignerSession`）**：两步创建序——`createSession` 不带 command →
+  **`grantRole`（先于 prompt）** → `markDeliveryExecutionActive` → `set_session_name`（`designer · <KEY>`）→
+  开场 prompt（fire-and-forget，不 await 轮结束）；开场合同（`DESIGNER_CONTRACT` 经 facade
+  `CreateSessionInput.appendSystemPrompt` 注入）**限定只领取指派项**；模型覆写 = `config.roles.designer.model`
+  （`CreateSessionInput.model` 透传 StartSessionOptions）。**心跳** 20s 续约（interval unref）；**结束钩子**
+  （`wrapper.onDestroy`，先于开场 prompt 武装）：launch key 快路径 + **全活动项 claim 扫描兜底**（兜住违约
+  领取——本会话 sessionId 名下每个未清 claim 都 recordInterruption）→ revokeRole → 清 delivery 登记 → 停
+  心跳；装配失败显式收尾 + destroy 后重抛。
+- **Dispatcher（`dispatcher.ts`，HostJob `delivery-dispatcher`）**：30s tick（首拍立即，timer unref），由
+  `ensureHostBooted` 装配为**第二个 HostJob**（**lazy import**——work-item 服务不进 resident bundle；
+  `PI_TEST_NO_BACKGROUND=1` 同豁免；关停 `stopBackgroundSafely` 双 stop）。每拍每可用工作区两件事：
+  ① **超时清道夫**——claim.claimedAt **起算**（lastSeenAt 只是续约不重置上限）超 maxExecutionMinutes →
+  probeSession 仍活则定向 destroy + recordInterruption("execution timeout")（记录幂等，与 destroy 触发的
+  结束钩子竞写安全）；会话已死（宿主重启遗留）→ 跳过 destroy 仍记录（否则陈旧 claim 经 activeExecution
+  永久占死槽位）。② **单槽位派发**——activeExecution（内存 role-grant ∪ claim 扫描）在场跳过；ready 池空
+  跳过；否则 launch 首条（fire-and-forget；launch 的 grantRole 即时占槽，同 tick 多余 ready 与下一拍都被
+  activeExecution 拦住）。
+- **路由（T8）**：`GET|PUT /api/workspaces/[id]/delivery`（配置）；`GET .../work-items/[key]/
+  delivery-execution`（四读拼装：claim[**剥 ownerTokenHash**] / attempts 末 5 新→旧 / paused /
+  pendingInterruption）；`POST .../delivery-execution/stop`（probeSession 活 → 定向 destroy →
+  recordInterruption("stopped by user")——中断门禁挡自动重领等人 recover；无 claim → 404）；`POST .../
+  delivery-execution/recover`（探测作用域 = **工作区根**——角色会话 cwd；`detectSurvivingRoundProcesses` 残留
+  进程 → 409 带 pids，manual 也不放行；干净 → resolveInterruptions + `delivery.exec_recovered`）；`POST
+  /api/workspaces/[id]/delivery/resume`（body `{key}`）。
+- **事件**：`delivery.claimed / submitted / attempt_failed / automation_paused / exec_interrupted /
+  exec_recovered / resumed` + `work_item.design_updated`（designer 写 design.md 对齐 M2 事件名）。
+- **挂载与泛化**：`buildWorkspaceExtensions` 第二个 `work-items` 工厂条目——build 内补
+  `manifest.capabilities.includes("workflows")` 合取门（单 capability 注册表表达不了合取；不满足返回
+  undefined 静默不挂载），挂载后工具运行时另有角色授权身份门。M1 的 ActiveRoundInfo **泛化**
+  `kind: "loop-round" | "delivery"` + `itemKey`（loop 调用方不写 kind，语义零变化；关停对 kind="delivery"
+  且仍在跑的执行写 claim 中断而非 loop 中断记录——`buildShutdownPlan` 双产物）；facade `CreateSessionInput`
+  增 `appendSystemPrompt` / `model` 透传（StartSessionOptions）。
+- **已知边角（如实记录）**：workspace.disabled **不参与 dispatch**（dispatcher 只看 `available`——与 loop
+  心跳先例一致：停用影响 UI 可见性，不停后台自动化）；delivery 的中断横幅/「重新检查并恢复」与 M1 loop
+  面板同习语但**文件分离**（中断住 attempts 审计文件 ≠ `lib/loops/executions.ts`；recover 路由复用同一
+  `detectSurvivingRoundProcesses` 做只读探测）。
 
 ### Loop（pi-loop kit；`lib/session-host/loop-spawner.ts` + `packages/pi-loop/` + `kit/`）
 
@@ -573,13 +663,18 @@ strictly gitignored / tsc+eslint excluded / pruned by git-discovery.
       AGENTS.md                          （永远在根：pi 从 cwd 根注入）
       .pi/workspace.yaml                 manifest（repositories[].path = 仓库相对路径）
       .pi/work-items/{requirements,bugs}/
-                                         work items: <KEY>-<slug>/{item.yaml, README.md, events.jsonl, attachments/[, delivery/artifacts/design.md]}
+                                         work items: <KEY>-<slug>/{item.yaml, README.md, events.jsonl, attachments/
+                                         [, delivery/artifacts/design.md][, delivery/attempts/*.json][, delivery/runtime/]}
+                                         （attempts = 追加审计；runtime/ = claim/paused/failure-window 运行态，
+                                         gitignored、advisory——Phase-2 交付自动化）
       .pi/trash/work-items/<KEY>-<ts>/   回收站（DELETE 移入；item.yaml 兼任外部源去重墓碑；restore-from-trash 恢复）
       .pi/skills/<pattern>/SKILL.md      项目技能合同（pi 原生发现 <cwd>/.pi/skills/；旧 .agents/skills/ 已迁移）
       .pi/loops/<name>/{LOOP.md, STATE.md, loop-ledger.json, .lastrun, .round.lock, [PAUSED], LEARN/}
                                          kit loop declaration + memory spine (D5 文件即声明)
       .pi/loop/{constraints.md, budget.md, pause-all}
                                          根级共享宪法 + 全局停机旗（原根级 loop-constraints/loop-budget/loop-pause-all）
+      .pi/delivery.yaml                   交付自动化配置（2026-10 Phase-2：enabled 缺省 false / designer
+                                         profile+model / budget——见 Work Items 章「Delivery 自动执行」）
       .pi/agents/*.md                    subagent 项目 profile（平铺）；.pi/cache/ 可重建缓存
       <alias>/                           代码仓 / 知识库（根级目录，路径登记；各自独立 git）
       docs/ scripts/ …                   人的内容
@@ -630,6 +725,10 @@ app/api/
   workspaces/[id]/work-items/[key]/delivery/[action]/route.ts  POST 标准交付流动作（body {expectedRevision, requestId, payload}；slug 门 = DELIVERY_ACTIONS 权威表；applyDeliveryAction 锁内 + requestId 幂等，replay 返回 replayed:true；400 Validation/404 NotFound|未播种 design.md/409 revision|锁忙）
   workspaces/[id]/work-items/[key]/design/route.ts   GET 设计文档（readDesign：未播种 404）| POST 编辑（updateDesignContent：失效回退 + revision bump）
   workspaces/[id]/work-items/[key]/restore-from-trash/route.ts  POST 从回收站恢复（restoreWorkItemFromTrashInRoot：key 被占 409 / 墓碑损坏 400 / 无命中 404）
+  workspaces/[id]/delivery/route.ts               GET|PUT 交付自动化配置 .pi/delivery.yaml（Phase-2；PUT 前 assertAutomationCapable 门 work-items+workflows；文件缺失 GET = {config:null} = disabled；坏 YAML/结构 → 400）
+  workspaces/[id]/delivery/resume/route.ts        POST 恢复自动领取（body {key}：清 automation-paused + 重置失败窗口 + delivery.resumed，actor=user；未暂停 → 400）
+  workspaces/[id]/work-items/[key]/delivery-execution/route.ts       GET 执行状态四读（claim[剥 ownerTokenHash] / attempts 末 5 新→旧 / paused / pendingInterruption；item 不存在 404）
+  workspaces/[id]/work-items/[key]/delivery-execution/stop|recover/route.ts  POST 停止执行（probeSession 活→定向 destroy→recordInterruption "stopped by user"，无 claim 404）| 重新检查并恢复（探测作用域=工作区根；残留进程 → 409 带 pids——manual 也不放行；干净 → resolveInterruptions + delivery.exec_recovered）
   workspaces/[id]/loops/route.ts                  GET kit loops 全量状态（collectStatus：frontmatter 摘要 + .lastrun/next-due/锁活性/paused + 附 additive interruptions[执行中断记录]，管理面全量；web spec §5.1；D5 文件即声明 — no capability）| POST 创建（initLoop 脚手架）
   workspaces/[id]/loops/[name]/route.ts           PATCH frontmatter 四字段（cron/timezone/level/max_minutes）round-trip — 正文 byte 保留（「人的手」，S5；纯逻辑 pi-loop/frontmatter.ts，tmp+rename 原子写）| DELETE 删除（锁活/绑定守卫）
   workspaces/[id]/loops/[name]/run/route.ts       POST 立即跑一轮（launchManualRound，可选 itemKey → 合同追加优先项；返回 sessionId 供 UI 打开轮会话 tab；facade 两步建会话）
@@ -664,12 +763,12 @@ lib/
   abort-race.ts             raceAbort (promise vs AbortSignal, with onLateSettle cleanup) + creationTimeoutSignal — bounds session CREATION everywhere a startRpcSession hang would pin a turn/run (interactive create, kit round)
   session-host/                       THE in-process session host (2026-10 M1 single-process): the Next.js Node.js server owns every AgentSession
     registry.ts            session registry (globalThis) + AgentSessionWrapper + startRpcSession + subagent controller（自 lib/daemon/rpc-manager.ts 迁入；attaches the global built-in subagent extension + wires SUBAGENT_CONTROLLER；routes 一律经 facade 消费，不直接 import 本模块）
-    facade.ts              typed in-process facade — createSession/sendCommand/probeSession/destroySession/autoNameSession/busyForCwd/reloadCwdSessions/liveSessions/runningStatus/getSubagentRunStatus/controlSubagent；SessionHostError(.status) owns error→HTTP mapping；live-first + cold-start-from-.jsonl revive（旧 daemon /v1/sessions 面的进程内移植）
+    facade.ts              typed in-process facade — createSession/sendCommand/probeSession/destroySession/autoNameSession/busyForCwd/reloadCwdSessions/liveSessions/runningStatus/getSubagentRunStatus/controlSubagent；SessionHostError(.status) owns error→HTTP mapping；live-first + cold-start-from-.jsonl revive（旧 daemon /v1/sessions 面的进程内移植）；CreateSessionInput 增 appendSystemPrompt/model 透传 StartSessionOptions（designer 角色会话用，Phase-2）
     sse.ts                 Web-stream SSE（serveSessionEventStream/serveRunningEventStream/openSessionEventStream）——ByteLengthQueuingStrategy + desiredSize<=0 的 drain-aware stall cap（SSE_STALL_BYTES_DEFAULT 1MB：慢客户端只看未排水字节，健康观看者总量再大也不切断）；connected 帧先行、30s 心跳注释、destroy 即断流、req.signal 只取消订阅不碰会话
     heartbeat.ts           stall classify/warn/kill 纯逻辑（warn 5min / kill 20min，env PI_SESSION_STALL_*_MS）
     jobs.ts                HostJob {id,start,stop} + HostJobRegistry —— 宿主后台 job 注册表（静态装配，无运行时发现）
     loop-spawner.ts        LoopKitSpawner（HostJob loop-kit-heartbeats, 30s tick）+ runKitRound/waitForRoundSettle/settleRoundBookkeeping（D9）；deps 全注入；恢复门禁（pendingInterruption——未确认中断记录在场不起轮）；轮登记（markActive/clearActive，关停据此写中断记录）；reaper 默认 NO-OP（共享宿主禁 cwd 收割——destroy 定向杀，残余孤儿交恢复期只读探测）
-    background.ts          ensureHostBooted（globalThis 单次装配：老 daemon 迁移守卫 → LoopKitSpawner + DeliveryDispatcher 并行懒加载链（Phase-2 T7 第二 HostJob，见 work-items/delivery-runner/dispatcher.ts）→ shutdown handlers；PI_TEST_NO_BACKGROUND=1 测试缝同豁免两个 job）+ markRoundActive/clearRoundMark/listActiveRounds + registerShutdownHandlers/buildShutdownPlan（关停序列：停新轮（stopBackgroundSafely 双 job）→ 快照 running → destroy 全部 → 写中断记录 → exit 0）
+    background.ts          ensureHostBooted（globalThis 单次装配：老 daemon 迁移守卫 → LoopKitSpawner + DeliveryDispatcher 并行懒加载链（Phase-2 T7 第二 HostJob，见 work-items/delivery-runner/dispatcher.ts）→ shutdown handlers；PI_TEST_NO_BACKGROUND=1 测试缝同豁免两个 job）+ markRoundActive/clearRoundMark/listActiveRounds（ActiveRoundInfo 泛化 kind: loop-round|delivery + itemKey——Phase-2；另 markDeliveryExecutionActive/clearDeliveryExecutionMark 对称原语）+ registerShutdownHandlers/buildShutdownPlan（关停序列：停新轮（stopBackgroundSafely 双 job）→ 快照 running → destroy 全部 → 写中断记录（loop 轮写 ExecutionRecord，kind=delivery 写 claim 中断——双产物）→ exit 0）
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
     service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments); **ensureDefaultWorkspace** — 初始化时补建默认「默认」工作区（name 默认 / slug default，最小能力集，见 Workspace Subsystem 章；幂等 + 墓碑 `.pi-default-deleted`，removeWorkspace 删默认时写，删后永不复活；目录在磁盘未注册 → importWorkspace 自愈重注册）; **withWorkspaceWriteLock** = 双层写锁（进程内 Promise 队列 × file-lock.ts 文件层，见 Work Items 章锁条目）
@@ -679,12 +778,21 @@ lib/
     kb-search/              opt-in L1 `kb_search` tool + pure-JS BM25 index (self-healing, cross-bundle)
       index.ts              ensureIndex() (mtime-incremental, .pi/cache rebuildable) + searchIndex() (Okapi BM25, CJK-aware tokenize)
       extension.ts          createKbSearchExtension() — `kb_search` InlineExtension (query/limit/filters), re-resolves active bundles per call
-    extensions.ts           WORKSPACE_EXTENSION_FACTORIES + buildWorkspaceExtensions (tool modules)
+    extensions.ts           WORKSPACE_EXTENSION_FACTORIES + buildWorkspaceExtensions (tool modules；第二个 work-items 条目 = delivery-runner 工厂——build 内补 workflows 合取门，Phase-2)
     id.ts                   ULID generator
   work-items/
     types.ts                WorkItemRecord / phases（七阶段 delivery 扩展 + 老子阶段）/ events (incl. optional `external` source ref) / WorkItemImportOutcome / CreateWorkItemInput.enableDelivery
     delivery-types.ts       DeliveryAction 11 个 + DeliveryMetadata（protocolVersion 1 / mode manual；designConfirmed/candidates/verification/releasePlan/release/lastRequest）+ contentDigest/candidatesDigest（sha256）+ parseDelivery（未知 protocolVersion/非 manual 硬错误）+ DELIVERY_ACTIONS 权威表
     delivery.ts             标准交付流（2026-10 M2）：planDeliveryTransition（纯，digest 注入）+ applyDeliveryAction（锁内 + requestId 幂等 + design.md 播种）+ readDesign/updateDesignContent（design.md 编辑 + 失效回退）；re-export legalDeliveryActions
+    delivery-runner/        交付自动执行（designer 首角色，2026-10 Phase-2——详见 Work Items 章「Delivery 自动执行」节；单角色单槽位，developer/verifier 等后续角色未实现）
+      config.ts             .pi/delivery.yaml 读写 + parseDeliveryRunnerConfig（enabled 缺省 false、budget 缺省 3/30、字段级 Validation）+ assertAutomationCapable（manifest 须含 work-items+workflows）
+      pool.ts               designer 池子：projectDesignerPool 纯投影（就绪谓词：managed∧enabled∧intake∧无claim∧无中断∧未暂停∧失败未达上限∧status∈{open,blocked} 白名单∧未归档；P0→P3→key）+ listDesignerPool 读取端装配（运行时信号 + contentDigest）
+      attempts.ts           claim.json/automation-paused/failure-window（runtime/ advisory 运行态，claim 首写时幂等接进 .gitignore；宽松读）+ attempts/ 追加审计 + resolveInterruptions + countRecentFailures（自最近 resume 起的尾部连续失败，遇 submitted 断）+ ownerToken 只存 sha256（hashOwnerToken）
+      claim.ts              claimDesignerTask（写锁事务：幂等 requestId + 谓词双检 + design.md 播种 + intake→design 流转）/ submitDesignerResult（design.md+验收条件→等人 confirm，status 回 open）/ failDesignerTask（blocked 可选；失败预算→paused）+ heartbeatActiveClaim（20s 续约）+ recordInterruption + resumeAutomation
+      role-grants.ts        globalThis 单例角色授权表（grantRole/revokeRole/roleGrantOf/setGrantToken——token 只进进程内 grant；hasAnyActiveExecution 裸授权即占槽）
+      tools.ts              delivery_list_ready_tasks/claim/submit/fail 四工具（pi-delivery-runner extension；身份=ctx.sessionManager.getSessionId()+grant 核对，无 grant → denied 文本；凭证不进参数 schema；人工动作面刻意不做工具）
+      role-session.ts       launchDesignerSession：两步创建（sessionId→grantRole 先于 prompt→登记→命名→开场合同 appendSystemPrompt 限定只领指派项）+ 20s 心跳 + 结束钩子（onDestroy：launch key 快路径 ∪ 全活动项 claim 扫描兜底 → recordInterruption → revoke/clear）
+      dispatcher.ts         DeliveryDispatcher（HostJob delivery-dispatcher，30s tick：超时清道夫[claim.claimedAt 起算超 maxExecutionMinutes → probe 活则定向 destroy + recordInterruption；死会话仍记录] + 单槽位派发[activeExecution = 内存 grant ∪ claim 扫描]）
     legal-actions.ts        legalDeliveryActions / legalActionBarActions 的 client-safe 家（纯类型导入，详情页动作条不拖 node:fs 进浏览器 bundle；delivery.ts re-export 保服务端消费面）
     errors.ts               错误类叶子模块（Validation/Conflict/NotFound）—— service/delivery-types/file-lock 共用，web.ts 的 instanceof→HTTP 映射要求同一 class 身份（service.ts re-export）
     service.ts              item.yaml + README.md + events.jsonl CRUD, revision locking, key reservation, import dedup (findExistingByExternal: active ∪ archived ∪ trash; createWorkItem 锁内查+建, returns { detail, importOutcome }), managed 门禁（PATCH phase/status 400）+ released 冻结 + 失效回退（updateWorkItemContent）, trash/restoreWorkItemFromTrashInRoot
@@ -772,7 +880,7 @@ components/
   ConfigCenterPage.tsx      桌面配置整页族（2026-09 拆分）：设置/模型/插件&技能/Agents 四个独立中央区整页——hero 页头（accent 图标章+大标题+描述+meta+✕）+ 分区 pills（仅多分区页：设置=工作区/偏好，插件&技能=插件/技能），插件&技能页两个分区 = PluginsConfig/SkillsConfig `market` 布局（搜索+已安装卡片网格+添加区+详情弹窗）；整页打开时会话 tab 条隐藏（DesktopShell 条件渲染）
 
   FilesExplorerPanel.tsx   the「文件」面板体（桌面右栏钉死 tab + 移动端抽屉文件目的地页同体）— [ 文件 | 改动(N) ] toolbar + ⟳ + FileExplorer/ChangesPanel (cwd = workspace root); exports ExplorerSegmentedTabs; reveal switches its segmented back to 文件
-  WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant — 宿主：桌面右坞工作项 tab + 移动抽屉目的地页 work-items / 设置›工作区 workspaceSlot（右坞 S3；workItemSplit portal 机制已退役）; `split={{ inline: true }}` = 列表+详情并排单容器（设置›工作区的中央区页面，2026-09 搬家）; the settings detail carries the 基本信息 card — rename (PATCH name) + 暂时停用 toggle (PATCH disabled; disabled workspaces keep a settings-only「已停用」badge, the sole re-enable surface — 到达路径：桌面项目树树底暗淡行 ⚙ / 移动抽屉树底暗淡行 ⚙ / 零工作区态 HomeLanding ⊞ 暗淡行与 ⚙，均经 `requestWorkspaceSettings` → `selectWorkspaceRequest` 深链预选，2026-09 修复；**预选同时触发详情优先（detailFocus）：rail（全部工作区列表）收起、目标工作区详情独占 +「‹ 全部工作区」返回**（带工作区上下文的入口只看该工作区，不带上下文的底部设置入口仍落全局列表）；两 shell 在设置面关闭/离开时 `clearWorkspaceSettingsRequest` 防闪回)；the rail is drag-sortable (HTML5 DnD，同 SessionTabBar 模式：drop 到目标上=插到它前面，列表尾空区=移到末尾；一次拖放 = PATCH /api/workspaces 全量期望序); remaining modal = home create-workspace wizard
+  WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant — 宿主：桌面右坞工作项 tab + 移动抽屉目的地页 work-items / 设置›工作区 workspaceSlot（右坞 S3；workItemSplit portal 机制已退役）; `split={{ inline: true }}` = 列表+详情并排单容器（设置›工作区的中央区页面，2026-09 搬家）; the settings detail carries the 基本信息 card — rename (PATCH name) + 暂时停用 toggle (PATCH disabled; disabled workspaces keep a settings-only「已停用」badge, the sole re-enable surface — 到达路径：桌面项目树树底暗淡行 ⚙ / 移动抽屉树底暗淡行 ⚙ / 零工作区态 HomeLanding ⊞ 暗淡行与 ⚙，均经 `requestWorkspaceSettings` → `selectWorkspaceRequest` 深链预选，2026-09 修复；**预选同时触发详情优先（detailFocus）：rail（全部工作区列表）收起、目标工作区详情独占 +「‹ 全部工作区」返回**（带工作区上下文的入口只看该工作区，不带上下文的底部设置入口仍落全局列表）；两 shell 在设置面关闭/离开时 `clearWorkspaceSettingsRequest` 防闪回)；the rail is drag-sortable (HTML5 DnD，同 SessionTabBar 模式：drop 到目标上=插到它前面，列表尾空区=移到末尾；一次拖放 = PATCH /api/workspaces 全量期望序)；设置详情含「交付自动化」配置区（Phase-2 T9：work-items+workflows 双开时显示 enabled 开关 + designer profile 文本框 + 预算只读，GET|PUT /delivery，config:null 播种默认镜像——见 Work Items 章「Delivery 自动执行」）; remaining modal = home create-workspace wizard
   work-items/               中央工作项管理整页组件族（2026-10 M2；宿主 = DesktopShell CenterPage kind"work-items" + MobileShell work-items 目的地页，同一本体）：WorkItemsPage（页骨架 + 深链消费 + 交付执行状态/三动作——Phase-2 T9）/ WorkItemsToolbar（活动|归档|回收站筛选 + 看板阶段筛选）/ WorkItemsList / WorkItemsBoard（七列，无拖拽）/ WorkItemRow / WorkItemDetailView（概况/设计/证据/动作/审计 + 自动执行区挂载）/ WorkItemActionbar（legalActionBarActions 投影，released 不渲染 cancel）/ WorkItemExecution（交付自动执行四态区，Phase-2 T9）/ WorkItemCreateForm（enableDelivery 缺省不勾）/ WorkItemEvents / WorkItemMeta；纯逻辑 = work-item-phases.ts（看板投影 + 标签，老 complete ≠ 已发布）+ work-item-queries.ts（筛选/排序）+ work-item-api.ts（HTTP 封装），均有 node:test
   WorkspaceOverview.tsx     workspace dashboard — the DESKTOP 家 tab landing (移动端不渲染——抽屉目的地页取代；更早的 WorkspaceHomeMenu 已随树抽屉重构退役)：quick actions, 活跃工作项 with 「立即跑一轮」B-button + Loop 绑定下拉, 仓库/知识库 rows, 「会话」区块（WorkspaceSessionList），Loops 摘要行（onOpenLoopsTab → 右坞 Loops rail 模块，必传）
   WorkspaceSessionList.tsx  本工作区会话列表（拉 /api/sessions 后前缀过滤、排除 subagent 子会话）：默认前 20 条 + 显示全部，行内删除（RecentSessionRow）；宿主 = 移动端工作区 tab「会话」子页（showHeader=false）+ WorkspaceOverview「会话」区块（桌面家 tab）
@@ -843,7 +951,7 @@ Pi stores toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolC
 Tool names are passed at session creation (`POST /api/agent/new` → `toolNames[]`). For existing sessions, the active preset is inferred on mount via `get_tools` → `getPresetFromTools()`. When tools are fully disabled (`toolNames = []`), `lib/session-host/registry.ts` passes an empty tool allow-list and forces `agent.state.systemPrompt = ""` after startup/reload/resource discovery.
 
 ### Workspace capability registry is the source of truth
-`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered but currently inert — no factory, no template. The former `overview` capability is RETIRED — the overview dashboard renders unconditionally; manifests still listing `overview` get it stripped on read, see the capability system section.)
+`ALL_WORKSPACE_CAPABILITIES` (`lib/workspaces/service.ts`) is **the** validation list. `parseCapabilities()` throws on any value not in it, so a capability missing from this array — e.g. `subagent`, or historically `knowledge` before it was registered — **cannot be persisted** (a `PATCH …/capabilities` with it returns **400 "Unknown capability"**). The `WorkspaceCapability` *type* union contains `subagent` anyway because the tool is global; treat the type as a superset, not the validatable set. (`workflows` is registered and — since 2026-10 Phase-2 — **meaningful**: it activates 交付自动化（delivery automation）——the `delivery_*` designer tools mount is the work-items∧workflows conjunction in `extensions.ts`, `assertAutomationCapable` gates `.pi/delivery.yaml` writes and the dispatcher re-checks it per tick（see Work Items 章的「Delivery 自动执行」小节）. The former `overview` capability is RETIRED — the overview dashboard renders unconditionally; manifests still listing `overview` get it stripped on read, see the capability system section.)
 
 ### Capabilities are required — no fallback path
 `WorkspaceManifest.capabilities` is non-optional. `parseWorkspaceManifest` throws on a manifest without it, and the deleted `effectiveCapabilities` helper is NOT to be reintroduced — read `manifest.capabilities` directly. (The one-shot v2 migration and its read-path strip are gone; a manifest still carrying retired values is config-invalid.)
