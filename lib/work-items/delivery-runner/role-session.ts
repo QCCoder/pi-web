@@ -95,7 +95,10 @@ const defaultResolveItem: NonNullable<LaunchDeps["resolveItem"]> = async (worksp
   return { path: detail.path, claim: readClaim(detail.path) };
 };
 
-const defaultScanClaims: NonNullable<LaunchDeps["scanClaims"]> = async (workspacePath) => {
+/** 工作区全部活动项的当前 claim 扫描：结束钩子兜底与 T7 dispatcher 清道夫
+ *  共用同一习语（listWorkItems → 逐项 readWorkItem → readClaim）；单项读失败
+ *  = claim null，fs 容错不阻塞扫描。 */
+export const scanActiveItemClaims: NonNullable<LaunchDeps["scanClaims"]> = async (workspacePath) => {
   const { items } = await listWorkItems(workspacePath);
   const entries: Array<{ key: string; claim: ClaimState | null }> = [];
   for (const item of items) {
@@ -133,7 +136,7 @@ export async function launchDesignerSession(opts: LaunchDesignerOptions): Promis
     markActive: opts.deps?.markActive ?? markDeliveryExecutionActive,
     clearActive: opts.deps?.clearActive ?? clearDeliveryExecutionMark,
     resolveItem: opts.deps?.resolveItem ?? defaultResolveItem,
-    scanClaims: opts.deps?.scanClaims ?? defaultScanClaims,
+    scanClaims: opts.deps?.scanClaims ?? scanActiveItemClaims,
     heartbeat: opts.deps?.heartbeat ?? heartbeatActiveClaim,
     record: opts.deps?.record ?? recordInterruption,
     now: opts.deps?.now ?? (() => new Date()),

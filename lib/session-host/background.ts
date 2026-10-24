@@ -3,7 +3,8 @@
  *  The Next.js Node.js server is now THE single session owner: at boot it
  *  (1) refuses to start when a legacy pi-daemon still owns sessions
  *  (first-deployment migration guard, spec §5.4),
- *  (2) starts the loop kit heartbeat spawner exactly once (globalThis-guarded
+ *  (2) starts the loop kit heartbeat spawner and the delivery dispatcher
+ *      (Phase-2 T7) exactly once each (globalThis-guarded
  *      — route cold-loading and dev hot reload must never create a second
  *      timer), and
  *  (3) installs shutdown handlers (stop-new-work → abort → record → exit,
@@ -201,18 +202,25 @@ export interface HostBootOptions {
 
 /** 模块级 spawner 停止引用 —— 关停钩子在 spawner 启动**之前**就注册（见
  *  ensureHostBooted），所以信号到来时 spawner 可能尚未启动 / 启动失败：
- * null 即安全 no-op。 */
+ *  null 即安全 no-op。DeliveryDispatcher 的停止引用（T7）同构存法。 */
 let stopLoopSpawner: (() => void) | null = null;
+let stopDeliveryDispatcher: (() => void) | null = null;
 
 /** 关停序列里的「停新轮」步骤，绝不能抛出信号处理器（那会吞掉后续的
- * running 快照 → destroy → 写中断记录）：spawner 未启动 = no-op，
- * stop() 抛错 = 记日志后照常走完关停。 */
+ *  running 快照 → destroy → 写中断记录）：任一 job 未启动 = no-op，
+ *  stop() 抛错 = 记日志后照常走完关停，且不挡住另一个 job 的停止。 */
 function stopBackgroundSafely(): void {
-  if (!stopLoopSpawner) return;
-  try {
-    stopLoopSpawner();
-  } catch (error) {
-    console.error("[pi-web] stopping loop spawner on shutdown failed:", error);
+  const jobs: Array<[string, (() => void) | null]> = [
+    ["loop spawner", stopLoopSpawner],
+    ["delivery dispatcher", stopDeliveryDispatcher],
+  ];
+  for (const [name, stop] of jobs) {
+    if (!stop) continue;
+    try {
+      stop();
+    } catch (error) {
+      console.error(`[pi-web] stopping ${name} on shutdown failed:`, error);
+    }
   }
 }
 
@@ -253,4 +261,21 @@ export function ensureHostBooted(options: HostBootOptions = {}): void {
     .catch((error) => {
       console.error("[pi-web] loop heartbeat spawner failed to start:", error);
     });
+  // Delivery dispatcher（Phase-2 T7）：与 loop spawner 同型的第二个 HostJob。
+  // 并行链（各自 catch——一个 job 启动失败不得拖住另一个）；懒加载习语同上
+  // ——work-item 服务不得进 resident bundle。PI_TEST_NO_BACKGROUND 同样豁免
+  // （且 dispatcher 无注入缝：测试模式下即便注入了 createSpawner 也不跑真派发，
+  // createSpawner 只服务 loop spawner 的测试场景）。
+  if (!testMode) {
+    void guard
+      .then(() => import("../work-items/delivery-runner/dispatcher.ts"))
+      .then(({ DeliveryDispatcher }) => {
+        const dispatcher = new DeliveryDispatcher();
+        dispatcher.start();
+        stopDeliveryDispatcher = () => dispatcher.stop();
+      })
+      .catch((error) => {
+        console.error("[pi-web] delivery dispatcher failed to start:", error);
+      });
+  }
 }

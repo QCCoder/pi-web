@@ -658,7 +658,7 @@ lib/
     heartbeat.ts           stall classify/warn/kill 纯逻辑（warn 5min / kill 20min，env PI_SESSION_STALL_*_MS）
     jobs.ts                HostJob {id,start,stop} + HostJobRegistry —— 宿主后台 job 注册表（静态装配，无运行时发现）
     loop-spawner.ts        LoopKitSpawner（HostJob loop-kit-heartbeats, 30s tick）+ runKitRound/waitForRoundSettle/settleRoundBookkeeping（D9）；deps 全注入；恢复门禁（pendingInterruption——未确认中断记录在场不起轮）；轮登记（markActive/clearActive，关停据此写中断记录）；reaper 默认 NO-OP（共享宿主禁 cwd 收割——destroy 定向杀，残余孤儿交恢复期只读探测）
-    background.ts          ensureHostBooted（globalThis 单次装配：老 daemon 迁移守卫 → LoopKitSpawner → shutdown handlers；PI_TEST_NO_BACKGROUND=1 测试缝）+ markRoundActive/clearRoundMark/listActiveRounds + registerShutdownHandlers/buildShutdownPlan（关停序列：停新轮 → 快照 running → destroy 全部 → 写中断记录 → exit 0）
+    background.ts          ensureHostBooted（globalThis 单次装配：老 daemon 迁移守卫 → LoopKitSpawner + DeliveryDispatcher 并行懒加载链（Phase-2 T7 第二 HostJob，见 work-items/delivery-runner/dispatcher.ts）→ shutdown handlers；PI_TEST_NO_BACKGROUND=1 测试缝同豁免两个 job）+ markRoundActive/clearRoundMark/listActiveRounds + registerShutdownHandlers/buildShutdownPlan（关停序列：停新轮（stopBackgroundSafely 双 job）→ 快照 running → destroy 全部 → 写中断记录 → exit 0）
   workspaces/
     types.ts                WorkspaceManifest / WorkspaceCapability / WorkspaceRepository / templates
     service.ts              manifest CRUD, capability validation (ALL_WORKSPACE_CAPABILITIES), repos, index, managed AGENTS.md (repositories + knowledge segments); **ensureDefaultWorkspace** — 初始化时补建默认「默认」工作区（name 默认 / slug default，最小能力集，见 Workspace Subsystem 章；幂等 + 墓碑 `.pi-default-deleted`，removeWorkspace 删默认时写，删后永不复活；目录在磁盘未注册 → importWorkspace 自愈重注册）; **withWorkspaceWriteLock** = 双层写锁（进程内 Promise 队列 × file-lock.ts 文件层，见 Work Items 章锁条目）
@@ -904,10 +904,12 @@ project-trust、session-archive、session-payload + SSR 预取、loop run/stop�
   **恢复门禁**：起轮前查 `listPendingExecutionRecords` —— 未确认中断记录在场则该 loop 不起新轮。**轮登记**：
   `markActive/clearActive` 写入 background 的 active-round 表，关停据此决定给哪些轮写中断记录。reaper 依赖默认
   **NO-OP**——共享宿主禁止按 cwd 收割（见下条 reaping 口径）；beat CLI 自带收割不受影响。
-- **`background.ts`** — `ensureHostBooted`（globalThis 单次装配：**老 daemon 迁移守卫** → LoopKitSpawner →
-  shutdown handlers；`PI_TEST_NO_BACKGROUND=1` 测试缝同时跳过守卫与默认 spawner）+ 轮登记原语
+- **`background.ts`** — `ensureHostBooted`（globalThis 单次装配：**老 daemon 迁移守卫** → LoopKitSpawner +
+  DeliveryDispatcher（Phase-2 T7 交付自动化心跳——并行懒加载链，各自 catch；见
+  `lib/work-items/delivery-runner/dispatcher.ts`）→
+  shutdown handlers；`PI_TEST_NO_BACKGROUND=1` 测试缝同时跳过守卫、默认 spawner 与 delivery dispatcher）+ 轮登记原语
   （`markRoundActive/clearRoundMark/listActiveRounds`）+ `registerShutdownHandlers`/`buildShutdownPlan`。
-  **关停序列**（SIGINT/SIGTERM）：停 spawner（不起新轮）→ 快照 running（必须在 destroy 前取——destroy 后
+  **关停序列**（SIGINT/SIGTERM）：停后台 job（stopBackgroundSafely——loop spawner 与 delivery dispatcher 双覆盖，任一未启动 no-op、抛错不挡另一个）→ 快照 running（必须在 destroy 前取——destroy 后
   isRunning 恒 false）→ destroy **全部** wrapper → 为仍在跑的轮写中断记录（写失败不吞销毁流程，单条只记日志）→
   exit 0。不承诺恢复内存中的模型调用现场，重启后按文件记录接续。**迁移守卫**：boot 时探测 `PI_DAEMON_URL`
   （默认 `127.0.0.1:30142`，该 env 仅此一处幸存）的 `/health`——健康且 `service === "pi-daemon"` 说明旧 daemon
