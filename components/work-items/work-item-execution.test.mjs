@@ -326,3 +326,200 @@ test("WorkspaceManager 配置区编辑 developer profile（与 designer 同形�
   assert.match(source, /deliveryConfig\.roles\.developer/);
   assert.match(source, /existingDeveloper/);
 });
+
+// --------------------------- Phase-4 T5: verifier 徽标 + 检查证据 + checks 配置编辑器
+
+const checkResult = (overrides = {}) => ({
+  name: "unit",
+  exitCode: 0,
+  durationMs: 840,
+  logRef: "delivery/artifacts/verification-logs/01JXECUTE0001/unit.log",
+  outcome: "passed",
+  ...overrides,
+});
+
+test("WorkItemExecution renders the verifier role badge on the claim (Phase-4 T5)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({ claim: claim({ role: "verifier" }) }),
+    })),
+  );
+  assert.match(html, /verifier/, "verifier role label rendered");
+  assert.match(html, /停止执行/, "claim card still complete");
+});
+
+test("WorkItemExecution renders claim checkResults rows（名称/outcome 徽章/exitCode/duration/日志名）", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        claim: claim({
+          role: "verifier",
+          checkContexts: [
+            { name: "unit", repositoryId: "01JXWT000000000000000000", command: "npm run test", timeout_seconds: 300 },
+            { name: "e2e", repositoryId: "01JXWT000000000000000000", command: "npm run e2e" },
+          ],
+          checkResults: [
+            checkResult(),
+            checkResult({ name: "e2e", exitCode: 1, durationMs: 15400, logRef: "delivery/artifacts/verification-logs/01JXECUTE0001/e2e.log", outcome: "failed" }),
+            checkResult({ name: "lint", exitCode: null, durationMs: 200, logRef: "delivery/artifacts/verification-logs/01JXECUTE0001/lint.log", outcome: "unverified" }),
+          ],
+        }),
+      }),
+    })),
+  );
+  // 名称与 outcome 徽章。
+  assert.match(html, /unit/, "check name rendered");
+  assert.match(html, /e2e/, "check name rendered");
+  assert.match(html, /通过/, "passed outcome badge");
+  assert.match(html, /未通过/, "failed outcome badge");
+  assert.match(html, /未验证/, "unverified outcome badge");
+  // exitCode：数字直陈；null（unverified——进程未跑完）显式占位，不显示 "null"。
+  assert.match(html, /退出码 0/, "exit code 0 shown");
+  assert.match(html, /退出码 1/, "exit code 1 shown");
+  assert.match(html, /退出码 —/, "null exit code gets an explicit placeholder");
+  assert.doesNotMatch(html, /退出码 null/, "raw null never leaks");
+  // duration：<1s 毫秒直陈，≥1s 秒一位小数。
+  assert.match(html, /840ms/, "sub-second duration in ms");
+  assert.match(html, /15\.4s/, "seconds duration with one decimal");
+  assert.match(html, /200ms/, "sub-second duration in ms (unverified row)");
+  // 日志文件名（basename）铺正文，完整 logRef 进 title。
+  assert.match(html, /unit\.log/, "log file name shown");
+  assert.match(html, /title="delivery\/artifacts\/verification-logs\/01JXECUTE0001\/unit\.log"/, "full logRef in title tooltip");
+  // 命令来源（checkContexts 按名联表）也进 title（命令打头，附仓库/超时）。
+  assert.match(html, /title="npm run test[^"]*"/, "frozen command from checkContexts surfaced via title");
+});
+
+test("WorkItemExecution renders attempt verificationOutcome 徽章 + rework 路径的失败证据", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        recentAttempts: [
+          attempt({
+            role: "verifier",
+            outcome: "submitted",
+            verificationOutcome: "verified",
+          }),
+          attempt({
+            role: "verifier",
+            outcome: "submitted",
+            verificationOutcome: "rework",
+            checkResults: [
+              checkResult({ name: "unit", exitCode: 2, outcome: "failed" }),
+              checkResult({ name: "e2e", exitCode: 0 }),
+            ],
+          }),
+        ],
+      }),
+    })),
+  );
+  assert.match(html, /已验证/, "verified outcome badge");
+  assert.match(html, /需返工/, "rework outcome badge");
+  // rework 路径的检查证据（attempt.checkResults——claim 已清，证据只在审计里）：
+  // 紧凑 chips（名称 + outcome），完整证据进 title。
+  assert.match(html, /unit 未通过/, "failed check chip");
+  assert.match(html, /e2e 通过/, "passed check chip");
+  assert.match(html, /title="[^"]*退出码 2[^"]*"/, "evidence details in chip title");
+});
+
+test("WorkItemDetailView renders verification checks evidence 摘要（命令+退出码）", async () => {
+  const managed = (deliveryOverrides = {}) => ({
+    schemaVersion: 1,
+    id: "01J0",
+    key: "REQ-0009",
+    revision: 3,
+    type: "requirement",
+    title: "示例需求",
+    status: "in_progress",
+    phase: "release_ready",
+    priority: "P2",
+    repositories: [],
+    tags: [],
+    conversations: [],
+    relatedItems: [],
+    designs: [],
+    plans: [],
+    delivery: {
+      protocolVersion: 1,
+      mode: "manual",
+      verification: {
+        at: "2026-10-24T03:00:00.000Z",
+        actor: "agent",
+        requirementDigest: "r".repeat(8),
+        candidateDigest: "c".repeat(8),
+        checks: [
+          {
+            name: "unit",
+            outcome: "passed",
+            evidence: {
+              command: "npm run test",
+              exitCode: 0,
+              durationMs: 5200,
+              logRef: "delivery/artifacts/verification-logs/01JXEC0000000009/unit.log",
+            },
+          },
+          {
+            name: "lint",
+            outcome: "unverified",
+            evidence: {
+              command: "npm run lint",
+              exitCode: null,
+              durationMs: 300,
+              logRef: "delivery/artifacts/verification-logs/01JXEC0000000009/lint.log",
+            },
+          },
+        ],
+        ...deliveryOverrides,
+      },
+    },
+    archivedAt: null,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  });
+  const { WorkItemDetailView } = await jiti.import("./WorkItemDetailView.tsx");
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemDetailView, {
+      workspaceId: "ws",
+      item: managed(),
+      repositories: [],
+      onOpenConversation: noop,
+    }),
+  );
+  assert.match(html, /验证记录/, "verification block header");
+  assert.match(html, /npm run test/, "evidence command shown");
+  assert.match(html, /npm run lint/, "evidence command shown");
+  assert.match(html, /退出码 0/, "exit code shown");
+  assert.match(html, /退出码 —/, "null exit code placeholder");
+  assert.match(html, /5\.2s/, "duration shown");
+  assert.match(html, /unit\.log/, "log file name shown");
+  assert.match(html, /title="delivery\/artifacts\/verification-logs\/01JXEC0000000009\/unit\.log"/, "full logRef in title");
+});
+
+test("WorkspaceManager 配置区 checks 编辑器：四列（name/repositoryId/command/timeout_seconds）+ 增删行 + 空态引导", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  // 草稿行 state + 客户端镜像形状（timeout_seconds）。
+  assert.match(source, /DeliveryCheckDraft/);
+  assert.match(source, /deliveryChecks/);
+  assert.match(source, /timeout_seconds/);
+  // 仓库列是 select：候选首仓（缺省）+ 在册仓可选。
+  assert.match(source, /候选首仓/);
+  // 增行 / 行删除。
+  assert.match(source, /添加验证命令/);
+  assert.match(source, /aria-label=\{`删除验证命令/, "per-row delete affordance (aria-labeled)");
+  // 空 checks 时的引导文案（不是死空白）。
+  assert.match(source, /尚未配置验证命令/);
+});
+
+test("WorkspaceManager checks 编辑器 round-trip：GET 播种 + PUT 带 verification 键（无有效行则省键）", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  // 草稿 helper 读 config.verification.checks（缺省空清单）；GET 播种与保存
+  // 回填都经同一 helper（两处调用）。
+  assert.match(source, /config\.verification\?\.checks \?\? \[\]/);
+  const seedCalls = source.match(/checksDraftFromConfig\(/g) ?? [];
+  assert.ok(seedCalls.length >= 2, "load seed + post-save re-seed both go through the draft helper");
+  // PUT 载荷：经 checksPayload 组装，空清单 → 键整体省略（= 无配置）。
+  assert.match(source, /checksPayload\(deliveryChecks\)/);
+  assert.match(source, /\.\.\.\(verification \? \{ verification \} : \{\}\)/);
+  // 行校验：名称与命令必填 + timeout 整数 1–3600。
+  assert.match(source, /名称与命令/);
+  assert.match(source, /1–3600 的整数/);
+});

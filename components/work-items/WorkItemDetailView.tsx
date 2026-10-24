@@ -16,6 +16,7 @@ import { WorkItemEvents } from "./WorkItemEvents";
 import {
   DeliveryExecutionState,
   ExecutionActionResult,
+  formatCheckDuration,
   WorkItemExecution,
 } from "./WorkItemExecution";
 import { SourceRefValue, WorkItemRepositoryChips } from "./WorkItemMeta";
@@ -154,6 +155,24 @@ function DeliveryEvidence({ item, repositories }: {
                 {OUTCOME_LABELS[check.outcome] ?? check.outcome}
               </span>
               <span style={{ color: "var(--text-muted)" }}>{check.name}</span>
+              {/* Phase-4 verifier 自动验证携带的服务端执行证据：命令 + 退出码 +
+                  耗时 + 日志文件名（人工 record-verification 无此字段）。exitCode
+                  null = 进程未跑完（超时/启动失败）；完整日志路径进 title。 */}
+              {check.evidence && (
+                <span
+                  title={check.evidence.logRef}
+                  style={{
+                    color: "var(--text-dim)",
+                    fontSize: 11,
+                    fontFamily: "var(--font-mono)",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {check.evidence.command} · 退出码 {check.evidence.exitCode ?? "—"} ·{" "}
+                  {formatCheckDuration(check.evidence.durationMs)} · 日志{" "}
+                  {check.evidence.logRef.split("/").pop() ?? check.evidence.logRef}
+                </span>
+              )}
               {check.note && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{check.note}</span>}
             </div>
           ))}

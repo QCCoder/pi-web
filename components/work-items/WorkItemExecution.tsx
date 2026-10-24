@@ -10,7 +10,10 @@ import { formatRelativeTime } from "@/lib/format-time";
  *  待处理标记）。Phase-3 T5：claim/attempts 带 role 徽标（designer/developer）；
  *  developer 的 claim 展示 worktree 集（alias ?? repositoryId · 分支——alias 由
  *  GET 路由读取时 manifest 联表富化，完整路径进 title），submit 的 attempt
- *  展示候选摘要（repo@commit 前 8 位）。
+ *  展示候选摘要（repo@commit 前 8 位）。Phase-4 T5：verifier 徽标；claim 的
+ *  checkResults 证据仓逐条展示（outcome 徽章/退出码/耗时/日志名，命令来源与
+ *  完整日志路径进 title）；attempt 的 verificationOutcome 判定徽章（已验证/
+ *  需返工）+ checkResults 紧凑 chips（rework 路径的失败证据）。
  *
  *  本组件是纯展示 + 动作转发：执行状态（GET delivery-execution）与三个动作
  *  （POST stop / recover / delivery-resume）都由 WorkItemsPage 持有并经
@@ -21,7 +24,7 @@ import { formatRelativeTime } from "@/lib/format-time";
 // —— UI 侧结构类型（delivery-runner/attempts.ts 的客户端镜像：该模块 import
 //    node:fs，不能进浏览器 bundle——WorkspaceManager 的 kitLoops 同款手法）。 ——
 
-export type ExecutionRole = "designer" | "developer";
+export type ExecutionRole = "designer" | "developer" | "verifier";
 
 /** RoleWorktree（delivery-runner/worktrees.ts）的客户端镜像：developer 领取
  *  时预建的 worktree——repoPath 是登记仓主路径，path 是 worktree 检出路径。
@@ -36,6 +39,28 @@ export interface ExecutionWorktree {
   alias?: string;
 }
 
+/** CheckEvidence（delivery-runner/checks.ts）的客户端镜像：服务端执行器产出、
+ *  delivery_run_check 后累积进 claim.checkResults（submit/fail 终局整体拷入
+ *  attempt 审计——rework 路径的失败证据只在 attempt 里留痕）。exitCode null =
+ *  进程未跑完（超时/启动失败），真实退出码不存在。 */
+export interface ExecutionCheckResult {
+  name: string;
+  exitCode: number | null;
+  durationMs: number;
+  /** 相对工作项根的 POSIX 日志路径（basename 铺正文，全路径进 title）。 */
+  logRef: string;
+  outcome: "passed" | "failed" | "unverified";
+}
+
+/** ClaimCheckContext 的客户端镜像：verifier 领取时冻结的检查配置快照
+ *  （repositoryId 已解析——缺省值在 claim 事务内落为候选首仓）。 */
+export interface ExecutionCheckContext {
+  name: string;
+  repositoryId: string;
+  command: string;
+  timeout_seconds?: number;
+}
+
 export interface ExecutionClaimSummary {
   attemptId: string;
   generation: number;
@@ -44,8 +69,13 @@ export interface ExecutionClaimSummary {
   claimedAt: string;
   lastSeenAt: string;
   requirementDigest: string;
-  /** developer 领取时预建的 worktree 集（designer claim 无此字段）。 */
+  /** developer 领取时预建的 worktree 集（designer claim 无此字段）；verifier
+   *  领取时为候选 detached checkout 集。 */
   worktrees?: ExecutionWorktree[];
+  /** verifier 领取时冻结的检查配置快照（Phase-4）。 */
+  checkContexts?: ExecutionCheckContext[];
+  /** verifier 的检查证据仓（Phase-4）——服务端执行器累积，LLM 无其他注入口。 */
+  checkResults?: ExecutionCheckResult[];
   lastRequest?: { requestId: string; at: string };
 }
 
@@ -57,12 +87,18 @@ export interface ExecutionAttemptSummary {
   claimedAt: string;
   endedAt?: string;
   outcome?: "submitted" | "failed" | "interrupted";
+  /** verifier 提交的验证判定（Phase-4）：verified = 全过推进待发布；rework =
+   *  有失败走返工——是验证器完成任务后的合法判定，不是执行失败。 */
+  verificationOutcome?: "verified" | "rework";
   reason?: string;
   requirementDigest: string;
   needsAttention?: boolean;
   /** developer submit 的候选集（designer attempt 无此字段）。 */
   candidates?: Array<{ repositoryId: string; commit: string }>;
   worktrees?: ExecutionWorktree[];
+  /** verifier 终局拷贝的全量检查证据（Phase-4）——claim 已清，rework 路径的
+   *  证据（含 passed 条目）只在这里留痕。 */
+  checkResults?: ExecutionCheckResult[];
 }
 
 export interface DeliveryExecutionState {
@@ -159,8 +195,89 @@ function OutcomeBadge({ outcome }: { outcome: ExecutionAttemptSummary["outcome"]
   );
 }
 
+// —— 检查证据（Phase-4 verifier）：详情页 verification 块与本执行区共用同一组
+//    标签/配色/格式化（DeliveryEvidence 既有中文标签对齐）。 ——
+
+/** 检查耗时：<1s 毫秒直陈，≥1s 秒一位小数（审计行短小，两种粒度足够）。 */
+export function formatCheckDuration(durationMs: number): string {
+  return durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
+}
+
+/** 日志文件名：logRef 是相对工作项根的 POSIX 路径，正文只铺 basename，全路径进 title。 */
+function logFileName(logRef: string): string {
+  return logRef.split("/").pop() ?? logRef;
+}
+
+const CHECK_OUTCOME_LABELS: Record<ExecutionCheckResult["outcome"], string> = {
+  passed: "通过",
+  failed: "未通过",
+  unverified: "未验证",
+};
+
+const CHECK_OUTCOME_TONES: Record<ExecutionCheckResult["outcome"], string> = {
+  passed: "#16a34a",
+  failed: "#dc2626",
+  unverified: "#b45309",
+};
+
+function CheckOutcomeBadge({ outcome }: { outcome: ExecutionCheckResult["outcome"] }) {
+  const tone = CHECK_OUTCOME_TONES[outcome];
+  return (
+    <span
+      style={{
+        padding: "1px 6px",
+        borderRadius: 5,
+        fontSize: 10.5,
+        fontWeight: 700,
+        color: tone,
+        background: `color-mix(in srgb, ${tone} 12%, var(--bg))`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {CHECK_OUTCOME_LABELS[outcome]}
+    </span>
+  );
+}
+
+const VERIFICATION_OUTCOME_LABELS: Record<NonNullable<ExecutionAttemptSummary["verificationOutcome"]>, string> = {
+  verified: "已验证",
+  rework: "需返工",
+};
+
+const VERIFICATION_OUTCOME_TONES: Record<NonNullable<ExecutionAttemptSummary["verificationOutcome"]>, string> = {
+  verified: "#16a34a",
+  rework: "#b45309",
+};
+
+/** verifier 提交的验证判定徽章：verified 绿 / rework 橙（rework 是合法判定，
+ *  与执行失败的红色 outcome 徽章语义区分）。 */
+function VerificationOutcomeBadge({ outcome }: { outcome: NonNullable<ExecutionAttemptSummary["verificationOutcome"]> }) {
+  const tone = VERIFICATION_OUTCOME_TONES[outcome];
+  return (
+    <span
+      style={{
+        padding: "1px 6px",
+        borderRadius: 5,
+        fontSize: 10.5,
+        fontWeight: 700,
+        color: tone,
+        background: `color-mix(in srgb, ${tone} 12%, var(--bg))`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {VERIFICATION_OUTCOME_LABELS[outcome]}
+    </span>
+  );
+}
+
+/** exitCode 文案：null = 进程未跑完（超时/启动失败），显式占位符——raw null
+ *  永不漏出。 */
+function exitCodeText(exitCode: number | null): string {
+  return `退出码 ${exitCode ?? "—"}`;
+}
+
 /** 领取角色徽标（Phase-3 T5：developer 角色上岗后需要一眼分辨谁在跑）。
- *  原文 designer/developer——与 .pi/delivery.yaml 的角色键一致，不翻译。 */
+ *  原文 designer/developer/verifier——与 .pi/delivery.yaml 的角色键一致，不翻译。 */
 function RoleBadge({ role }: { role: ExecutionRole }) {
   return (
     <span
@@ -292,6 +409,44 @@ export function WorkItemExecution({
               ))}
             </div>
           )}
+          {/* verifier 的检查证据仓（Phase-4）：claim.checkResults——服务端执行器
+              （delivery_run_check）累积，LLM 无其他注入口。每条 = outcome 徽章 +
+              名称 + 退出码 + 耗时 + 日志文件名；命令来源（checkContexts 按名联表
+              的冻结快照）进名称 title，完整日志路径进日志名 title。 */}
+          {claim.checkResults && claim.checkResults.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {claim.checkResults.map((check) => {
+                const context = (claim.checkContexts ?? []).find((entry) => entry.name === check.name);
+                const contextTitle = context
+                  ? [context.command, `仓库 ${context.repositoryId}`, context.timeout_seconds !== undefined ? `超时 ${context.timeout_seconds}s` : null]
+                    .filter(Boolean)
+                    .join(" · ")
+                  : undefined;
+                return (
+                  <div
+                    key={check.name}
+                    style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+                  >
+                    <CheckOutcomeBadge outcome={check.outcome} />
+                    <span title={contextTitle}>{check.name}</span>
+                    <span style={{ color: "var(--text-dim)" }}>{exitCodeText(check.exitCode)}</span>
+                    <span style={{ color: "var(--text-dim)" }}>{formatCheckDuration(check.durationMs)}</span>
+                    <span
+                      title={check.logRef}
+                      style={{
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 10.5,
+                        color: "var(--text-dim)",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {logFileName(check.logRef)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -369,6 +524,8 @@ export function WorkItemExecution({
             >
               <OutcomeBadge outcome={entry.outcome} />
               <RoleBadge role={entry.role} />
+              {/* verifier 提交的验证判定（Phase-4）：与 outcome（执行成败）正交。 */}
+              {entry.verificationOutcome && <VerificationOutcomeBadge outcome={entry.verificationOutcome} />}
               {entry.needsAttention && (
                 <span
                   style={{
@@ -389,6 +546,29 @@ export function WorkItemExecution({
               {entry.candidates && entry.candidates.length > 0 && (
                 <span style={{ color: "var(--text-dim)", overflowWrap: "anywhere" }}>
                   候选 {entry.candidates.map((candidate) => `${candidate.repositoryId}@${candidate.commit.slice(0, 8)}`).join(" · ")}
+                </span>
+              )}
+              {/* verifier 终局的检查证据（Phase-4，rework 路径的失败证据就在这里）：
+                  紧凑 chips（名称 + outcome），退出码/耗时/日志路径进 title——
+                  行内已有判定徽章与候选串，铺全量字段会挤爆。 */}
+              {entry.checkResults && entry.checkResults.length > 0 && (
+                <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 5 }}>
+                  {entry.checkResults.map((check) => (
+                    <span
+                      key={check.name}
+                      title={`${check.name} · ${exitCodeText(check.exitCode)} · ${formatCheckDuration(check.durationMs)} · ${check.logRef}`}
+                      style={{
+                        padding: "1px 6px",
+                        borderRadius: 5,
+                        fontSize: 10.5,
+                        color: CHECK_OUTCOME_TONES[check.outcome],
+                        background: `color-mix(in srgb, ${CHECK_OUTCOME_TONES[check.outcome]} 12%, var(--bg))`,
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {check.name} {CHECK_OUTCOME_LABELS[check.outcome]}
+                    </span>
+                  ))}
                 </span>
               )}
               {entry.reason && (

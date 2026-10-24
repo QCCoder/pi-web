@@ -46,12 +46,75 @@ interface DeliveryRoleConfigState {
   model?: { provider?: string; modelId: string };
 }
 
+/** DeliveryCheckConfig 的客户端镜像：verifier 的验证命令清单（Phase-4）——
+ *  人维护（本编辑器），agent 只能触发不能自造。 */
+interface DeliveryCheckConfigState {
+  name: string;
+  repositoryId?: string;
+  command: string;
+  timeout_seconds?: number;
+}
+
 interface DeliveryRunnerConfigState {
   schemaVersion: 1;
   enabled: boolean;
   /** 角色显式双字段（Phase-3 T5）：designer/developer 同形、各自可选。 */
   roles: { designer?: DeliveryRoleConfigState; developer?: DeliveryRoleConfigState };
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
+  /** 验证命令（Phase-4）：可选缺省 undefined = 无配置（verifier 池按空清单
+   *  处理）；空数组合法、等同无配置。 */
+  verification?: { checks: DeliveryCheckConfigState[] };
+}
+
+/** checks 编辑器的草稿行：可选字段用空串表达「缺省」，保存时剥键（round-trip
+ *  与服务端 parseCheck 的条件展开同形）。 */
+interface DeliveryCheckDraft {
+  name: string;
+  /** "" = 候选首仓（缺省——claim 事务内解析，不落配置）。 */
+  repositoryId: string;
+  command: string;
+  /** "" = 服务端缺省 600s。 */
+  timeout: string;
+}
+
+/** 配置 → 草稿行（GET 播种与保存回填共用）：可选字段缺省映射为空串。 */
+function checksDraftFromConfig(config: DeliveryRunnerConfigState): DeliveryCheckDraft[] {
+  return (config.verification?.checks ?? []).map((check) => ({
+    name: check.name,
+    repositoryId: check.repositoryId ?? "",
+    command: check.command,
+    timeout: check.timeout_seconds === undefined ? "" : String(check.timeout_seconds),
+  }));
+}
+
+/** checks 草稿 → PUT 载荷：整行空白丢弃；名称/命令只填其一 → 报错拒存（半行
+ *  会被服务端 400 打回，提前在 UI 拦）；timeout 非空时必须是 1–3600 的整数
+ *  （config.ts parseTimeoutSeconds 同规）。无有效行 → checks 缺省 = 键整体
+ *  省略（PUT 不带 verification = 无配置）。 */
+function checksPayload(
+  drafts: DeliveryCheckDraft[],
+): { checks?: Array<{ name: string; repositoryId?: string; command: string; timeout_seconds?: number }> } | { error: string } {
+  const checks: Array<{ name: string; repositoryId?: string; command: string; timeout_seconds?: number }> = [];
+  for (const [index, draft] of drafts.entries()) {
+    const name = draft.name.trim();
+    const command = draft.command.trim();
+    const repositoryId = draft.repositoryId.trim();
+    const timeout = draft.timeout.trim();
+    if (!name && !command && !repositoryId && !timeout) continue; // 空行丢弃
+    if (!name || !command) {
+      return { error: `验证命令第 ${index + 1} 行：名称与命令必填。` };
+    }
+    if (timeout && (!/^\d+$/.test(timeout) || Number(timeout) < 1 || Number(timeout) > 3600)) {
+      return { error: `验证命令第 ${index + 1} 行：timeout_seconds 必须是 1–3600 的整数（秒）。` };
+    }
+    checks.push({
+      name,
+      ...(repositoryId ? { repositoryId } : {}),
+      command,
+      ...(timeout ? { timeout_seconds: Number(timeout) } : {}),
+    });
+  }
+  return checks.length > 0 ? { checks } : {};
 }
 
 /** 服务端 DEFAULT_DELIVERY_RUNNER_CONFIG 的客户端镜像：GET /delivery 返回
@@ -317,16 +380,17 @@ export function WorkspaceManager({
   const hasKitLoops = kitLoops.some((loop) => !loop.paused);
   // 「立即跑一轮」多 active loop 时的手动选择（未绑定且无唯一默认时出现）。
   const [runLoopPick, setRunLoopPick] = useState("");
-  // 交付自动化配置（Phase-2 Task 9；Phase-3 T5 增 developer 行）：`.pi/
-  // delivery.yaml` 的 GET/PUT——仅 work-items+workflows 双开的 workspaces 可见
-  // （PUT 的服务端门同款）。配置结构是 delivery-runner/config.ts
-  // DeliveryRunnerConfig 的客户端镜像（该模块 import node:fs，不能进浏览器
-  // bundle——kitLoops 同款手法）。UI 只编辑 enabled + designer/developer
-  // profile；budget 只读展示（改配置走文件）。
+  // 交付自动化配置（Phase-2 Task 9；Phase-3 T5 增 developer 行；Phase-4 T5 增
+  //  verification.checks 编辑器）：`.pi/delivery.yaml` 的 GET/PUT——仅
+  //  work-items+workflows 双开的 workspaces 可见（PUT 的服务端门同款）。配置
+  //  结构是 delivery-runner/config.ts DeliveryRunnerConfig 的客户端镜像（该
+  //  模块 import node:fs，不能进浏览器 bundle——kitLoops 同款手法）。UI 编辑
+  //  enabled + designer/developer profile + 验证命令清单；budget 只读展示。
   const [deliveryConfig, setDeliveryConfig] = useState<DeliveryRunnerConfigState | null>(null);
   const [deliveryEnabled, setDeliveryEnabled] = useState(false);
   const [deliveryDesignerProfile, setDeliveryDesignerProfile] = useState("");
   const [deliveryDeveloperProfile, setDeliveryDeveloperProfile] = useState("");
+  const [deliveryChecks, setDeliveryChecks] = useState<DeliveryCheckDraft[]>([]);
   const [deliverySaving, setDeliverySaving] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [deliverySaved, setDeliverySaved] = useState(false);
@@ -526,6 +590,7 @@ export function WorkspaceManager({
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId || !deliveryAutomationCapable) {
       setDeliveryConfig(null);
+      setDeliveryChecks([]);
       setDeliveryError(null);
       setDeliverySaved(false);
       return;
@@ -557,6 +622,7 @@ export function WorkspaceManager({
         setDeliveryEnabled(config.enabled);
         setDeliveryDesignerProfile(config.roles.designer?.profile ?? "");
         setDeliveryDeveloperProfile(config.roles.developer?.profile ?? "");
+        setDeliveryChecks(checksDraftFromConfig(config));
       })
       .catch(() => {
         if (!cancelled) setDeliveryError("交付自动化配置加载失败");
@@ -771,15 +837,24 @@ export function WorkspaceManager({
     }
   }, [loadWorkspaces, selectedWorkspace, skillDraft]);
 
-  /** 保存交付自动化配置（Phase-2 Task 9；T5 增 developer）：PUT /delivery 全量
-   *  config——UI 只编辑 enabled + designer/developer profile，budget 与既有
-   *  model 覆写原样回传（round-trip 保真）。成功以响应回填（服务端 parse 后
-   *  的规范化值），「已保存」内联提示；失败（含 capability 门 400）走块内错误提示。 */
+  /** 保存交付自动化配置（Phase-2 Task 9；T5 增 developer；Phase-4 T5 增
+   *  verification.checks）：PUT /delivery 全量 config——UI 编辑 enabled +
+   *  designer/developer profile + 验证命令清单，budget 与既有 model 覆写原样
+   *  回传（round-trip 保真）。checks 草稿行内校验（名称/命令必填、timeout
+   *  整数 1–3600）失败 → 块内错误提示且不发 PUT。成功以响应回填（服务端
+   *  parse 后的规范化值），「已保存」内联提示；失败（含 capability 门 400）
+   *  走块内错误提示。 */
   const saveDeliveryConfig = useCallback(async () => {
     if (!selectedWorkspaceId || !deliveryConfig) return;
-    setDeliverySaving(true);
     setDeliveryError(null);
     setDeliverySaved(false);
+    const checksResult = checksPayload(deliveryChecks);
+    if ("error" in checksResult) {
+      setDeliveryError(checksResult.error);
+      return;
+    }
+    const verification = checksResult.checks !== undefined ? { checks: checksResult.checks } : undefined;
+    setDeliverySaving(true);
     try {
       // 角色 round-trip 习语（designer/developer 同款）：profile 草稿 + 既有
       // model 覆写合并；两者皆空 → 该角色键整体剥掉（不写空对象）。
@@ -809,6 +884,7 @@ export function WorkspaceManager({
               ...(developer ? { developer } : {}),
             },
             budget: deliveryConfig.budget,
+            ...(verification ? { verification } : {}),
           }),
         }),
       );
@@ -816,13 +892,14 @@ export function WorkspaceManager({
       setDeliveryEnabled(data.config.enabled);
       setDeliveryDesignerProfile(data.config.roles.designer?.profile ?? "");
       setDeliveryDeveloperProfile(data.config.roles.developer?.profile ?? "");
+      setDeliveryChecks(checksDraftFromConfig(data.config));
       setDeliverySaved(true);
     } catch (saveDeliveryError) {
       setDeliveryError(saveDeliveryError instanceof Error ? saveDeliveryError.message : String(saveDeliveryError));
     } finally {
       setDeliverySaving(false);
     }
-  }, [deliveryConfig, deliveryDesignerProfile, deliveryDeveloperProfile, deliveryEnabled, selectedWorkspaceId]);
+  }, [deliveryChecks, deliveryConfig, deliveryDesignerProfile, deliveryDeveloperProfile, deliveryEnabled, selectedWorkspaceId]);
 
   const saveWorkspaceName = useCallback(async () => {
     if (!selectedWorkspace) return;
@@ -2223,7 +2300,7 @@ export function WorkspaceManager({
                                   />
                                   <span className="workspace-rail-meta">
                                     {deliveryEnabled
-                                      ? "开启：满足领取条件的工作项由 designer/developer 角色自动领取执行"
+                                      ? "开启：满足领取条件的工作项由 designer/developer/verifier 角色自动领取执行"
                                       : "关闭：标准交付流程仅人工推进"}
                                   </span>
                                 </div>
@@ -2253,6 +2330,130 @@ export function WorkspaceManager({
                                     }}
                                   />
                                 </label>
+                              </div>
+                              {/* 验证命令清单（Phase-4 T5）：verifier 自动验证按此执行并
+                                  留存证据——agent 只能触发，不能自造命令。四列
+                                  name/仓库/命令/超时（秒）+ 行删除；空清单 = 无配置
+                                  （verifier 池按空处理）。保存前 checksPayload 行内
+                                  校验（名称/命令必填、timeout 整数 1–3600）。 */}
+                              <div className="workspace-field" style={{ marginTop: 6 }}>
+                                <span>验证命令（verifier）</span>
+                                {deliveryChecks.length === 0 && (
+                                  <span className="workspace-rail-meta">
+                                    尚未配置验证命令——开启后 verifier 领取验证时将按此清单在候选上执行命令并留存证据（agent 只能触发，不能自造命令）；空清单即不执行任何检查。
+                                  </span>
+                                )}
+                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                  {deliveryChecks.map((check, index) => (
+                                    <div
+                                      key={index}
+                                      style={{
+                                        display: "flex",
+                                        gap: 8,
+                                        flexWrap: "wrap",
+                                        alignItems: "flex-end",
+                                        border: "1px solid var(--border)",
+                                        borderRadius: 8,
+                                        padding: "8px 10px",
+                                      }}
+                                    >
+                                      <label className="workspace-field" style={{ flex: "1 1 110px" }}>
+                                        <span>名称</span>
+                                        <input
+                                          value={check.name}
+                                          disabled={deliverySaving}
+                                          placeholder="unit"
+                                          onChange={(event) => {
+                                            setDeliveryChecks((current) => current.map((row, rowIndex) =>
+                                              rowIndex === index ? { ...row, name: event.target.value } : row,
+                                            ));
+                                            setDeliverySaved(false);
+                                          }}
+                                        />
+                                      </label>
+                                      <label className="workspace-field" style={{ flex: "1 1 150px" }}>
+                                        <span>仓库</span>
+                                        <select
+                                          value={check.repositoryId}
+                                          disabled={deliverySaving}
+                                          onChange={(event) => {
+                                            setDeliveryChecks((current) => current.map((row, rowIndex) =>
+                                              rowIndex === index ? { ...row, repositoryId: event.target.value } : row,
+                                            ));
+                                            setDeliverySaved(false);
+                                          }}
+                                        >
+                                          <option value="">候选首仓（缺省）</option>
+                                          {repositories
+                                            .filter((repository) => repository.status === "active")
+                                            .map((repository) => (
+                                              <option key={repository.id} value={repository.id}>
+                                                {repository.alias}
+                                              </option>
+                                            ))}
+                                        </select>
+                                      </label>
+                                      <label className="workspace-field" style={{ flex: "2 1 220px" }}>
+                                        <span>命令</span>
+                                        <input
+                                          value={check.command}
+                                          disabled={deliverySaving}
+                                          placeholder="npm test"
+                                          style={{ fontFamily: "var(--font-mono)" }}
+                                          onChange={(event) => {
+                                            setDeliveryChecks((current) => current.map((row, rowIndex) =>
+                                              rowIndex === index ? { ...row, command: event.target.value } : row,
+                                            ));
+                                            setDeliverySaved(false);
+                                          }}
+                                        />
+                                      </label>
+                                      <label className="workspace-field" style={{ flex: "0 1 92px" }}>
+                                        <span>超时（秒）</span>
+                                        <input
+                                          value={check.timeout}
+                                          disabled={deliverySaving}
+                                          placeholder="600"
+                                          inputMode="numeric"
+                                          onChange={(event) => {
+                                            setDeliveryChecks((current) => current.map((row, rowIndex) =>
+                                              rowIndex === index ? { ...row, timeout: event.target.value } : row,
+                                            ));
+                                            setDeliverySaved(false);
+                                          }}
+                                        />
+                                      </label>
+                                      <button
+                                        type="button"
+                                        className="workspace-action"
+                                        aria-label={`删除验证命令 ${index + 1}`}
+                                        disabled={deliverySaving}
+                                        onClick={() => {
+                                          setDeliveryChecks((current) => current.filter((_, rowIndex) => rowIndex !== index));
+                                          setDeliverySaved(false);
+                                        }}
+                                      >
+                                        删除
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div>
+                                  <button
+                                    type="button"
+                                    className="workspace-action"
+                                    disabled={deliverySaving}
+                                    onClick={() => {
+                                      setDeliveryChecks((current) => [
+                                        ...current,
+                                        { name: "", repositoryId: "", command: "", timeout: "" },
+                                      ]);
+                                      setDeliverySaved(false);
+                                    }}
+                                  >
+                                    + 添加验证命令
+                                  </button>
+                                </div>
                               </div>
                               <div className="workspace-rail-meta" style={{ marginTop: 6 }}>
                                 预算（只读，.pi/delivery.yaml）：失败上限 {deliveryConfig.budget.maxAttemptsPerInput} 次 · 执行上限 {deliveryConfig.budget.maxExecutionMinutes} 分钟
