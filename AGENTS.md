@@ -416,7 +416,11 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
   零状态（claim 保留给 recordInterruption 清——恢复路径不经 requireActiveClaim，不受守卫影响），终态不被复活**。
   `heartbeatActiveClaim` 20s 轻量续约 lastSeenAt（不 bump revision/不产
   事件/不进 git）；`recordInterruption`（锁内清 claim + needsAttention attempt[role 随 claim 流动] +
-  `delivery.exec_interrupted`；不进 git——关停路径不 spawn git，events.jsonl 落盘即持久）；`resumeAutomation`
+  `delivery.exec_interrupted`；**状态归还（final-fix，runtime-proven）：claim 借走的 status=in_progress 复位
+  open + claim 推进的阶段退回可领阶段（designer design→intake / developer implementation→rfi，守卫同
+  fail——人窗口内改过阶段/状态不回滚；终态 cancelled/done 的 item.yaml 整个不动），否则 recover 后项被池
+  白名单 + wrong-phase 双重排除、dispatcher 永不重派**；不进 git——关停路径不 spawn git，events.jsonl
+  落盘即持久）；`resumeAutomation`
   （人显式恢复：清 paused + 写 failure-window（since=now）+ `delivery.resumed`；未暂停 → 400）。
 - **失败预算**：= **自最近 resume 起的尾部连续失败**（`countRecentFailures`：从最新往回数 outcome=failed ∧
   digest 匹配 ∧ 窗口内的记录，**遇第一个 submitted 即停**——成功提交重新起算；interrupted 不计也不断），

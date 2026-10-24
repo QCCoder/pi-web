@@ -62,7 +62,7 @@ import {
   serializeWorkItem,
   writeAtomic,
 } from "../service.ts";
-import type { WorkItemDetail, WorkItemRecord } from "../types.ts";
+import type { WorkItemDetail, WorkItemPhase, WorkItemRecord } from "../types.ts";
 import {
   clearClaim,
   clearPaused,
@@ -918,10 +918,20 @@ export async function heartbeatActiveClaim(
 
 /** 关停/停止路径的中断记录（锁内）：claim.sessionId 匹配才记——清 claim、
  *  写 needsAttention 的 interrupted attempt（5.1 的中断门禁据此挡住新领取，
- *  人经「重新检查并恢复」解除）、追加 delivery.exec_interrupted 事件。
- *  claim 已清（幂等）或不匹配 → no-op。不进 workspace git：中断写发生在
- *  宿主关停序列（M1 先例——loop 中断记录纯文件写，不在关停路径上 spawn git）；
- *  events.jsonl 落盘即持久，下一次 workspace 提交自然收编。 */
+ *  人经「重新检查并恢复」解除）、归还领取借走的状态、追加
+ *  delivery.exec_interrupted 事件。claim 已清（幂等）或不匹配 → no-op。
+ *  不进 workspace git：中断写发生在宿主关停序列（M1 先例——loop 中断记录
+ *  纯文件写，不在关停路径上 spawn git）；events.jsonl 落盘即持久，下一次
+ *  workspace 提交自然收编。
+ *
+ *  状态归还（Phase-3 final fix，runtime-proven）：claim 事务写下的
+ *  status=in_progress 复位 open（池白名单 {open, blocked} 否则把恢复后的项
+ *  永久排除）+ claim 推进的阶段退回可领阶段（designer design→intake /
+ *  developer implementation→ready_for_implementation）——仅复位 status 不退
+ *  阶段不够：design/implementation 停留照样 wrong-phase，recover 后 dispatcher
+ *  仍永不重派。守卫与 fail 同款（人若在领取窗口内推进/回退过阶段或写过状态，
+ *  人的状态不回滚）；终态（cancelled/done）人已接管一切——item.yaml 整个
+ *  不动，只清 claim + 审计（「不复活终态」，7e50f529 哲学）。 */
 export async function recordInterruption(
   workspacePath: string,
   key: string,
@@ -951,12 +961,40 @@ export async function recordInterruption(
       requirementDigest: claim.requirementDigest,
       needsAttention: true,
     });
+    // 状态归还（同一锁窗，见函数头）；item.yaml 有实际变化才写 + bump revision。
+    let itemWrite: WorkItemRecord | null = null;
+    const giveBack: {
+      status?: { from: string; to: string };
+      phase?: { from: string; to: string };
+    } = {};
+    if (current.item.status !== "cancelled" && current.item.status !== "done") {
+      const next: WorkItemRecord = structuredClone(current.item);
+      if (next.status === "in_progress") {
+        giveBack.status = { from: "in_progress", to: "open" };
+        next.status = "open";
+      }
+      const phaseBack: { from: WorkItemPhase; to: WorkItemPhase } =
+        claim.role === "designer"
+          ? { from: "design", to: "intake" }
+          : { from: "implementation", to: "ready_for_implementation" };
+      if (next.phase === phaseBack.from) {
+        giveBack.phase = phaseBack;
+        next.phase = phaseBack.to;
+      }
+      if (giveBack.status !== undefined || giveBack.phase !== undefined) {
+        next.revision += 1;
+        next.updatedAt = now.toISOString();
+        await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+        itemWrite = next;
+      }
+    }
     await appendEvent(
       itemPath,
       eventFor("delivery.exec_interrupted", "system", undefined, {
         reason,
         attemptId: claim.attemptId,
         generation: claim.generation,
+        ...(itemWrite !== null ? { ...giveBack, revision: itemWrite.revision } : {}),
       }),
     );
   });
