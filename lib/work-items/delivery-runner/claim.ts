@@ -959,6 +959,10 @@ export interface VerifierSubmitInput {
   generation: number;
   ownerToken: string;
   notes?: string;
+  /** 会话自链接（fix round 1）：带 conversationId 的动作把会话挂入
+   *  item.conversations（与 designer/developer submit 同一服务层不变式——
+   *  详情「关联会话」由此可达），并随 delivery.submitted 事件携带。 */
+  conversationId?: string;
 }
 
 export interface VerifierFailInput {
@@ -1255,10 +1259,15 @@ export async function submitVerifierResult(input: VerifierSubmitInput): Promise<
 
     next.revision += 1;
     next.updatedAt = now.toISOString();
+    // 会话自链接（fix round 1，designer submit 同款）：带 conversationId 的
+    // 提交把会话挂入 conversations。
+    if (input.conversationId && !next.conversations.includes(input.conversationId)) {
+      next.conversations = [...next.conversations, input.conversationId];
+    }
     await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
     await appendEvent(
       itemPath,
-      eventFor(eventType, "agent", undefined, {
+      eventFor(eventType, "agent", input.conversationId, {
         ...eventData,
         attemptId: claim.attemptId,
         generation: claim.generation,

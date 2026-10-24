@@ -439,6 +439,9 @@ export function createDeliveryRunnerExtension(
                 generation: credentials.generation,
                 ownerToken: credentials.ownerToken,
                 ...(typeof raw.notes === "string" ? { notes: raw.notes } : {}),
+                // 会话自链接（fix round 1）：与 designer/developer submit 同款
+                // 透传——服务端把会话挂入 item.conversations。
+                conversationId: sessionId,
               });
               resetToBareGrant(sessionId, gate);
               const verified = detail.item.phase === "release_ready";
