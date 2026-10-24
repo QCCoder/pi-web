@@ -432,7 +432,9 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
 - **LLM 工具（`tools.ts`，`createDeliveryRunnerExtension`，extension 名 `pi-delivery-runner`）**：四件
   `delivery_list_ready_tasks / delivery_claim_task / delivery_submit_result / delivery_fail_task`（list 列两角色
   合并池、每条带 role；Phase-3 T4 起 claim/submit/fail 按 `grant.role` 分派 designer/developer 对应服务；submit
-  参数是**联合形状**（designer: design_markdown+acceptance_criteria | developer: candidates+notes），**服务端按
+  参数是**扁平可选字段组**——key 必填 + design_markdown/acceptance_criteria（designer）与
+  candidates/notes（developer）全可选；**禁止 union/any-of 形参数 schema**（2026-10-24 Phase-3 smoke 实测：联合
+  schema 在该 pi SDK 的调用侧解析不工作，真 LLM 会话参数全落 `{}` 被 schema 校验全拒，测试钉死不回潮），**服务端按
   grant.role 校验形状**，错形状 → validation 结果文本不进服务）。**身份 = `ctx.sessionManager.getSessionId()` +
   `roleGrantOf` 核对**（无 grant / grant 属他工作区 → denied 结果文本，非异常——cxin loop 轮/普通交互会话天然
   无角色身份，拿到拒绝）；凭证三元组（ownerToken/attemptId/generation）全程住进程内 grant，**不进参数
@@ -839,7 +841,7 @@ lib/
       attempts.ts           claim.json/automation-paused/failure-window（runtime/ advisory 运行态，claim 首写时幂等接进 .gitignore；宽松读）+ attempts/ 追加审计 + resolveInterruptions + countRecentFailures（自最近 resume 起的尾部连续失败，遇 submitted 断）+ ownerToken 只存 sha256（hashOwnerToken）
       claim.ts              领取事务（designer + developer 六函数共用骨架）：claimDesignerTask（intake→design + design.md 播种）/ claimDeveloperTask（worktree 预建先于状态落盘 + designDigest 快照，rfi→implementation）/ submitDesignerResult（等人 confirm）/ submitDeveloperResult（双 digest+designConfirmed+phase 门复验 + 候选核验 → M2 submit-verification 语义内联进 verification）/ failDesignerTask|failDeveloperTask（回退守卫 design→intake / implementation→rfi；失败预算跨角色共享→paused）+ heartbeatActiveClaim（20s 续约）+ recordInterruption + resumeAutomation
       role-grants.ts        globalThis 单例角色授权表（grantRole/revokeRole/roleGrantOf/setGrantToken——token 只进进程内 grant；hasAnyActiveExecution 裸授权即占槽）
-      tools.ts              delivery_list_ready_tasks/claim/submit/fail 四工具（pi-delivery-runner extension；claim/submit/fail 按 grant.role 分派 designer/developer 服务，submit 联合形状服务端按角色校验，claim 结果 developer 附 worktrees 清单；身份=ctx.sessionManager.getSessionId()+grant 核对，无 grant → denied 文本；凭证不进参数 schema；人工动作面刻意不做工具）
+      tools.ts              delivery_list_ready_tasks/claim/submit/fail 四工具（pi-delivery-runner extension；claim/submit/fail 按 grant.role 分派 designer/developer 服务，submit 扁平可选字段组（union/any-of schema 被 SDK 调用侧解析毁掉，禁用）服务端按角色校验，claim 结果 developer 附 worktrees 清单；身份=ctx.sessionManager.getSessionId()+grant 核对，无 grant → denied 文本；凭证不进参数 schema；人工动作面刻意不做工具）
       role-session.ts       launchRoleSession/buildRoleContract（Phase-3 T4 泛化双角色；designer 合同逐字节保留，developer 合同 = 只在 claim 返回的 worktree 内改码/不合并不推送/提交 candidates/验证由人）：两步创建（sessionId→grantRole 先于 prompt→登记→命名 `${role} · KEY`→开场合同 appendSystemPrompt 限定只领指派项）+ 20s 心跳 + 结束钩子（onDestroy：launch key 快路径 ∪ 全活动项 claim 扫描兜底 → recordInterruption → revoke/clear）
       dispatcher.ts         DeliveryDispatcher（HostJob delivery-dispatcher，30s tick：超时清道夫[claim.claimedAt 起算超 maxExecutionMinutes → probe 活则定向 destroy + recordInterruption；死会话仍记录；role 无关] + 单槽位派发[activeExecution = 内存 grant ∪ claim 扫描，跨角色共享；合并队列取首、按 entry.role 起 launchRoleSession]）
     legal-actions.ts        legalDeliveryActions / legalActionBarActions 的 client-safe 家（纯类型导入，详情页动作条不拖 node:fs 进浏览器 bundle；delivery.ts re-export 保服务端消费面）

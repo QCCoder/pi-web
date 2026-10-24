@@ -1,8 +1,10 @@
 // Phase-2 Task 5: designer 角色领取工具（spec 2026-10-24-phase-two §5.3）。
 // Phase-3 Task 4: 双角色分派（spec 2026-10-24-phase-three §6）——claim/submit/
-// fail 按 grant.role 调 designer/developer 对应服务；submit 参数联合
-// （designer: design_markdown+acceptance_criteria | developer: candidates+notes），
-// 服务端按 grant.role 校验形状（错形状 → validation 文本，不进服务）。
+// fail 按 grant.role 调 designer/developer 对应服务；submit 参数是扁平可选
+// 字段组（designer: design_markdown+acceptance_criteria | developer:
+// candidates+notes——2026-10-24 smoke ruling：联合（any-of）形参数 schema 在
+// 该 pi SDK 的调用侧解析不工作，永不回潮），服务端按 grant.role 校验形状
+// （错形状 → validation 文本，不进服务）。
 // 挂载在 buildWorkspaceExtensions（capabilities 含 work-items ∧ workflows，
 // extensions.ts），只对被 dispatcher 授予角色（designer | developer）的会话可用：
 // execute 第一步经 roleGrantOf(sessionId) 验身份——无 grant / grant 属他
@@ -245,11 +247,12 @@ export function createDeliveryRunnerExtension(
         name: "delivery_submit_result",
         label: "Submit Delivery Result",
         description:
-          "Submit the result for the claimed task, in the shape YOUR role requires. "
-          + "designer: design_markdown (full design body) + acceptance_criteria "
-          + "(checkable, at least one) — writes design.md and returns the item to "
-          + "awaiting-human-confirmation. developer: candidates (one "
-          + "{repositoryId, commit} per repository, commits on your worktree "
+          "Submit the result for the claimed task, providing the field group YOUR "
+          + "role requires (all fields are listed here; provide only your role's "
+          + "group). designer: design_markdown (full design body) + "
+          + "acceptance_criteria (checkable, at least one) — writes design.md and "
+          + "returns the item to awaiting-human-confirmation. developer: candidates "
+          + "(one {repositoryId, commit} per repository, commits on your worktree "
           + "branches) + optional notes (change summary / self-test) — submits the "
           + "implementation candidates and moves the item to verification. "
           + "Credentials are held server-side. After submitting, end the turn: "
@@ -260,45 +263,44 @@ export function createDeliveryRunnerExtension(
           "A conflict result means the input changed or a human already advanced the item — follow its guidance (release via delivery_fail_task) and end.",
         ],
         promptSnippet: "Submit the claimed task's result (design or candidates) and wait for the human's move",
-        parameters: Type.Union([
-          Type.Object({
-            key: Type.String({ description: "Human key of the claimed task" }),
-            design_markdown: Type.String({
-              description: "(designer) Full design document body in Markdown (验收条件 section is appended automatically)",
-            }),
-            acceptance_criteria: Type.Array(Type.String(), {
-              minItems: 1,
-              description: "(designer) Checkable acceptance criteria; at least one is required",
-            }),
-          }),
-          Type.Object({
-            key: Type.String({ description: "Human key of the claimed task" }),
-            candidates: Type.Array(
-              Type.Object({
-                repositoryId: Type.String({
-                  description: "(developer) Repository id from your claim's worktree list",
-                }),
-                commit: Type.String({
-                  description: "(developer) Commit sha on the worktree branch (one per repository)",
-                }),
+        // 参数扁平可选字段组（2026-10-24 Phase-3 smoke ruling）：联合
+        // （designer 形 | developer 形）schema 在该 pi SDK 版本的调用侧解析
+        // 不工作（真 LLM 会话参数全落 {}，schema 校验全拒）。单个对象 +
+        // 可选字段；提供哪一组由角色决定，形状权威在服务端按 grant.role
+        // 校验（见 execute 内）。
+        parameters: Type.Object({
+          key: Type.String({ description: "Human key of the claimed task" }),
+          design_markdown: Type.Optional(Type.String({
+            description: "(designer) Full design document body in Markdown (验收条件 section is appended automatically)",
+          })),
+          acceptance_criteria: Type.Optional(Type.Array(Type.String(), {
+            description: "(designer) Checkable acceptance criteria; at least one is required",
+          })),
+          candidates: Type.Optional(Type.Array(
+            Type.Object({
+              repositoryId: Type.String({
+                description: "(developer) Repository id from your claim's worktree list",
               }),
-              {
-                minItems: 1,
-                description: "(developer) Candidate commits; at least one is required",
-              },
-            ),
-            notes: Type.Optional(Type.String({
-              description: "(developer) Change summary and self-test notes",
-            })),
-          }),
-        ]),
+              commit: Type.String({
+                description: "(developer) Commit sha on the worktree branch (one per repository)",
+              }),
+            }),
+            {
+              description: "(developer) Candidate commits; at least one is required",
+            },
+          )),
+          notes: Type.Optional(Type.String({
+            description: "(developer) Change summary and self-test notes",
+          })),
+        }),
         execute: async (_callId, params, _signal, _update, ctx) => {
           const sessionId = ctx.sessionManager.getSessionId();
           const gate = requireRoleGrant(sessionId, workspacePath);
           if (typeof gate === "string") return denied(gate);
           const credentials = claimCredentialsOf(gate);
           if (credentials === null) return denied(NO_CLAIM_CREDENTIALS);
-          // 形状按 grant.role 校验（schema 联合是提示，服务端校验是权威）：
+          // 形状按 grant.role 校验（schema 扁平可选字段是提示，服务端校验是
+          // 权威——union schema 在该 pi SDK 的调用侧解析不工作，见参数注释）：
           // 错形状 → validation 文本，不进服务。
           const raw = params as Record<string, unknown>;
           if (gate.role === "developer") {
