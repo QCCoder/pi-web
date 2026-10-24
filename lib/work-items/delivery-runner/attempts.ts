@@ -53,8 +53,10 @@ export interface ClaimState {
   attemptId: string;
   generation: number;
   /** 领取角色（Phase-3 T3 泛化：developer 领取共用同一运行态文件；Phase-4 T3
-   *  增 verifier——verifier claim 不改阶段，claim 携候选 checkout 与证据仓）。 */
-  role: "designer" | "developer" | "verifier";
+   *  增 verifier——verifier claim 不改阶段，claim 携候选 checkout 与证据仓；
+   *  Phase-5 T1 增 release-preparer——纯文档角色，claim 携 candidateDigest
+   *  快照、无 worktrees/checkContexts/checkResults）。 */
+  role: "designer" | "developer" | "verifier" | "release-preparer";
   sessionId: string;
   claimedAt: string;
   lastSeenAt: string;
@@ -83,8 +85,9 @@ export interface ClaimState {
 export interface AttemptRecord {
   attemptId: string;
   generation: number;
-  /** 领取角色（Phase-3 T3 泛化——审计按角色如实记录；Phase-4 T3 增 verifier）。 */
-  role: "designer" | "developer" | "verifier";
+  /** 领取角色（Phase-3 T3 泛化——审计按角色如实记录；Phase-4 T3 增 verifier；
+   *  Phase-5 T1 增 release-preparer）。 */
+  role: "designer" | "developer" | "verifier" | "release-preparer";
   sessionId: string;
   workspacePath: string;
   key: string;
@@ -106,6 +109,10 @@ export interface AttemptRecord {
   /** verifier 终局时从 claim 拷贝的全量检查证据（Phase-4 T3）——claim 已清，
    *  rework 路径的证据（含 passed 条目）只在这里留痕。 */
   checkResults?: CheckEvidence[];
+  /** release-preparer 提交的发布材料（Phase-5 T1）：从 submit 输入拷贝入审计
+   *  （notes 必填 / rollback 可选——M2 prepare-release 形状；item 侧同构
+   *  写入 delivery.releasePlan，claim 清后材料在此留痕）。 */
+  releasePlan?: { notes: string; rollback?: string };
 }
 
 export interface PausedInfo {

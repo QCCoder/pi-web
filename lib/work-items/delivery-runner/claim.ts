@@ -61,6 +61,21 @@
 //     status）。
 //   - recordCheckResult：无业务锁轻量（heartbeat 习语）——claim.sessionId 匹配
 //     才写，同名覆盖/新名追加，原子写回。
+//
+// Phase-5 Task 1（release-preparer 三函数，spec 2026-10-25-phase-five §2）：
+// 与 designer/developer/verifier 共用同一套重放/并发/复验骨架。差异面：
+//   - claim：**无环境预建**（纯文档角色——跳过 prepareXxx，零 git 操作）；
+//     phase 不变（release_ready 就是准备材料的阶段）、status in_progress；
+//     claim.json 只带 role + candidateDigest 快照（同 verifier 先例——submit
+//     侧字符串复验候选未被换）。
+//   - submit：requireActiveClaim 三凭据 + role 门 + candidateDigest 复验（候选
+//     被换 → 409）+ 阶段守卫（人在窗口内 record-release → 409，冻结基线不得
+//     覆写）+ verification 仍在场（材料必须由验证证据支撑——块被清 → 409）→
+//     delivery.releasePlan = {notes, rollback?}（M2 prepare-release 语义的
+//     actor=agent 变体：只写材料，phase 保持 release_ready 等人 record-release，
+//     不触发布、不写 release 块）+ status→open。
+//   - fail：release-preparer claim 不改阶段——无阶段可归还（release_ready→
+//     release_ready 零变化，只归还 status，verifier 同款）。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -202,15 +217,17 @@ async function ensureRuntimeGitignore(workspacePath: string): Promise<void> {
  *  摘要复验 P2 起无条件常开（那本身就是期望值比对），加开关只会是死代码。 */
 interface ActiveClaimExpectations {
   /** 活动 claim 必须由该角色持有（角色间不得互释对方的 claim——verifier 的
-   *  submit/fail 不得释放 designer/developer 的 claim，反之亦然）。 */
-  expectedRole?: "designer" | "developer" | "verifier";
+   *  submit/fail 不得释放 designer/developer 的 claim，反之亦然；Phase-5 起
+   *  release-preparer 同门——四角色凭证互不通用）。 */
+  expectedRole?: "designer" | "developer" | "verifier" | "release-preparer";
   /** true = designDigest 复验：claim 领取时的 design.md 摘要快照必须仍等于
    *  锁内重算的当前 design.md contentDigest（developer submit 专用——
    *  designer claim 无该字段）。 */
   expectedDesignDigest?: boolean;
-  /** true = candidateDigest 复验（verifier 专用，Phase-4 T3）：claim 领取时的
-   *  候选集摘要快照（字符串）必须仍等于当前候选集的 candidatesDigest——
-   *  人在领取窗口内 rework 清候选 / 换候选重提交都会漂移 → 409 释放重领。 */
+  /** true = candidateDigest 复验（verifier 与 release-preparer 用，Phase-4 T3 /
+   *  Phase-5 T1）：claim 领取时的候选集摘要快照（字符串）必须仍等于当前候选集
+   *  的 candidatesDigest——人在领取窗口内 rework 清候选 / 换候选重提交都会漂移
+   *  → 409 释放重领。 */
   expectedCandidateDigest?: boolean;
 }
 
@@ -1408,6 +1425,315 @@ export async function recordCheckResult(
   return true;
 }
 
+// ------------------------------------------- release-preparer (Phase-5 T1)
+
+export interface ReleasePreparerClaimInput {
+  workspacePath: string;
+  key: string;
+  sessionId: string;
+  requestId: string;
+}
+
+export interface ReleasePreparerSubmitInput {
+  workspacePath: string;
+  key: string;
+  attemptId: string;
+  generation: number;
+  ownerToken: string;
+  /** 发布说明（M2 prepare-release 形状：notes 必填）。 */
+  releaseNotes: string;
+  /** 回滚办法（可选——空白视同未提供，键省略）。 */
+  rollbackNotes?: string;
+  /** 会话自链接（designer 先例）：带 conversationId 的提交把会话挂入
+   *  item.conversations，并随 delivery.submitted 事件携带。 */
+  conversationId?: string;
+}
+
+export interface ReleasePreparerFailInput {
+  workspacePath: string;
+  key: string;
+  attemptId: string;
+  generation: number;
+  ownerToken: string;
+  reason: string;
+  blocked?: boolean;
+}
+
+/**
+ * Release-preparer 领取事务（verifier 同骨架去掉环境预建）：幂等重放 →
+ * capability/配置/谓词双检（poolRecheck，release-preparer 角色）→ **无环境
+ * 预建**（纯文档角色——零 git 操作，无 worktree/checkout 可失败）→ claim.json
+ * （role release-preparer + candidateDigest 快照，同 verifier 先例）→
+ * **phase 不变**（release_ready 就是准备材料的阶段）+ status=in_progress +
+ * delivery.claimed 事件。
+ */
+export async function claimReleasePreparerTask(
+  input: ReleasePreparerClaimInput,
+): Promise<{ grant: ClaimGrant; replayed: boolean }> {
+  const requestId = requireText(input.requestId, "requestId");
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const current = await readWorkItem(input.workspacePath, input.key);
+    const itemPath = current.path;
+
+    // 幂等重放（同 designer/developer/verifier 契约）：claim.lastRequest 命中
+    // 同 requestId → 现 grant（ownerToken 空串——明文无法重建；不 bump 不追加）。
+    const existingClaim = readClaim(itemPath);
+    if (existingClaim?.lastRequest?.requestId === requestId) {
+      return {
+        grant: {
+          attemptId: existingClaim.attemptId,
+          generation: existingClaim.generation,
+          ownerToken: "",
+          key: input.key,
+          item: current,
+        },
+        replayed: true,
+      };
+    }
+    if (existingClaim !== null) {
+      throw new WorkItemConflictError(
+        `item ${input.key} already has an active claim (attempt ${existingClaim.attemptId}, session ${existingClaim.sessionId})`,
+      );
+    }
+
+    const manifest = await readWorkspaceManifest(input.workspacePath);
+    assertAutomationCapable(manifest);
+    const { entry, attempts, requirementDigest } = await poolRecheck(
+      input.workspacePath, manifest, current,
+    );
+    // 角色由阶段决定（池子投影）：非 release_ready 的项按各自角色谓词投影——
+    // 须同时 ready 且投影为 release-preparer。
+    if (!entry.ready || entry.role !== "release-preparer") {
+      const detail = entry.ready
+        ? `item is ready for the ${entry.role} role, not release-preparer (phase ${current.item.phase})`
+        : entry.reasons.join(", ");
+      throw new WorkItemValidationError(
+        `delivery claim preconditions failed: ${detail}`,
+      );
+    }
+
+    const generation = attempts.reduce((max, attempt) => Math.max(max, attempt.generation), 0) + 1;
+    const attemptId = createUlid();
+    const ownerToken = randomUUID();
+    const now = new Date();
+
+    // 候选集摘要快照（锁内自算——claim 谓词已保证与 verification.candidateDigest
+    // 一致；snapshot 后候选被换由 submit 侧复验拦下）。纯文档角色：无
+    // prepareXxx——claim.json 之前没有可失败的环境步骤。
+    const candidates = current.item.delivery?.candidates ?? [];
+    const candidateDigest = candidatesDigest(candidates);
+
+    await ensureRuntimeGitignore(input.workspacePath);
+    writeClaim(itemPath, {
+      attemptId,
+      generation,
+      role: "release-preparer",
+      sessionId: input.sessionId,
+      claimedAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      requirementDigest,
+      ownerTokenHash: hashOwnerToken(ownerToken),
+      candidateDigest,
+      lastRequest: { requestId, at: now.toISOString() },
+    });
+
+    // 状态后改：phase 不变（release_ready）、status=in_progress + revision+1。
+    const next: WorkItemRecord = structuredClone(current.item);
+    next.status = "in_progress";
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.claimed", "agent", undefined, {
+        phase: { from: current.item.phase, to: next.phase },
+        generation,
+        attemptId,
+        candidateDigest,
+        revision: next.revision,
+      }),
+    );
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery claim ${input.key}`);
+    return {
+      grant: {
+        attemptId,
+        generation,
+        ownerToken,
+        key: input.key,
+        item: await readWorkItem(input.workspacePath, input.key),
+      },
+      replayed: false,
+    };
+  });
+}
+
+/**
+ * Release-preparer 提交（M2 prepare-release 语义的 actor=agent 变体）：
+ * requireActiveClaim 三凭据 + role 门 + candidateDigest 复验（候选在领取后被换
+ * → 409 释放重领）+ 阶段守卫（人在窗口内 record-release → 409——released
+ * 冻结基线不得被迟到会话覆写）+ verification 仍在场（块被清 → 材料失去验证
+ * 依据 → 409）。之后写 delivery.releasePlan = {notes, rollback?}——**phase
+ * 保持 release_ready 等人 record-release**（只准备材料：不写 release 块、不
+ * 触发布执行——record-release 与实际发布永远是人做的）+ status→open。
+ */
+export async function submitReleasePreparerResult(
+  input: ReleasePreparerSubmitInput,
+): Promise<WorkItemDetail> {
+  const releaseNotes = requireText(input.releaseNotes, "release_notes");
+  const rollbackNotes = input.rollbackNotes !== undefined && input.rollbackNotes !== null
+    ? input.rollbackNotes.trim()
+    : "";
+
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const { detail: current, claim } = await requireActiveClaim(
+      input.workspacePath,
+      input.key,
+      input,
+      { expectedRole: "release-preparer", expectedCandidateDigest: true },
+    );
+    if (current.item.phase !== "release_ready") {
+      throw new WorkItemConflictError(
+        `claim is stale — the item phase is now ${current.item.phase} (expected release_ready)`,
+      );
+    }
+    const delivery = current.item.delivery;
+    // 领取窗口内 verification 被清（rework 四清式，候选恰好没动）→ 材料必须由
+    // 验证证据支撑——迟到提交不得基于失效输入落材料（developer submit 同款
+    // 守卫；候选漂移已被上面的 candidateDigest 复验拦下）。
+    if (delivery?.verification === undefined) {
+      throw new WorkItemConflictError(
+        "input changed since claim — release via fail and re-claim",
+      );
+    }
+
+    const itemPath = current.path;
+    const now = new Date();
+    const releasePlan: { notes: string; rollback?: string } = {
+      notes: releaseNotes,
+      ...(rollbackNotes ? { rollback: rollbackNotes } : {}),
+    };
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    next.delivery = { ...delivery, releasePlan };
+    next.status = "open";
+    // 会话自链接（服务层不变式，designer 先例）：带 conversationId 的提交把
+    // 会话挂入 conversations。
+    if (input.conversationId && !next.conversations.includes(input.conversationId)) {
+      next.conversations = [...next.conversations, input.conversationId];
+    }
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.submitted", "agent", input.conversationId, {
+        outcome: "release-plan",
+        notes: releaseNotes,
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        revision: next.revision,
+      }),
+    );
+
+    clearClaim(itemPath);
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: "release-preparer",
+      sessionId: claim.sessionId,
+      workspacePath: input.workspacePath,
+      key: input.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "submitted",
+      requirementDigest: claim.requirementDigest,
+      releasePlan,
+    });
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery submit ${input.key}`);
+    return readWorkItem(input.workspacePath, input.key);
+  });
+}
+
+/**
+ * Release-preparer 失败（环境/依赖问题 → blocked；designer/developer/verifier
+ * fail 同骨架）：清 claim → attempt failed（role release-preparer，纯文档角色
+ * 无 worktrees/checkResults 可入审计）→ **phase 不动**（release-preparer claim
+ * 不改阶段，release_ready→release_ready 零变化——无阶段可归还，verifier 同款）
+ * → 失败预算（按 digest 跨角色共享）。blocked 是给人看的环境/依赖标志
+ * （白名单内仍可领）。
+ */
+export async function failReleasePreparerTask(
+  input: ReleasePreparerFailInput,
+): Promise<WorkItemDetail> {
+  const reason = requireText(input.reason, "reason");
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const { detail: current, claim } = await requireActiveClaim(
+      input.workspacePath,
+      input.key,
+      input,
+      { expectedRole: "release-preparer" },
+    );
+    const itemPath = current.path;
+    const now = new Date();
+
+    clearClaim(itemPath);
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: "release-preparer",
+      sessionId: claim.sessionId,
+      workspacePath: input.workspacePath,
+      key: input.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "failed",
+      reason,
+      requirementDigest: claim.requirementDigest,
+    });
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    // 失败即归还 status；phase 从不动（claim 本就不改阶段——人若中途推进/回退
+    // 过阶段，更不得回滚）。
+    next.status = input.blocked === true ? "blocked" : "open";
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.attempt_failed", "agent", undefined, {
+        reason,
+        blocked: input.blocked === true,
+        role: "release-preparer",
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        revision: next.revision,
+      }),
+    );
+
+    // 失败预算跨角色共享（spec §8——四角色同一预算，防互刷绕上限）。
+    const maxAttemptsPerInput = await maxAttemptsFor(input.workspacePath);
+    const failedCount = await countRecentFailures(itemPath, claim.requirementDigest);
+    if (failedCount >= maxAttemptsPerInput) {
+      writePaused(itemPath, {
+        at: now.toISOString(),
+        reason: `consecutive failures (${failedCount} since last resume)`,
+        count: failedCount,
+      });
+      await appendEvent(
+        itemPath,
+        eventFor("delivery.automation_paused", "agent", undefined, {
+          count: failedCount,
+          maxAttemptsPerInput,
+          attemptId: claim.attemptId,
+          revision: next.revision,
+        }),
+      );
+    }
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery fail ${input.key}`);
+    return readWorkItem(input.workspacePath, input.key);
+  });
+}
+
 // --------------------------------------------------------------- heartbeat
 
 /** 轻量续约（无业务锁）：claim.sessionId 匹配 → 原子写回 lastSeenAt
@@ -1489,8 +1815,9 @@ export async function recordInterruption(
           ? { from: "design", to: "intake" }
           : claim.role === "developer"
             ? { from: "implementation", to: "ready_for_implementation" }
-            // verifier（Phase-4）：claim 不改阶段（verification→verification 零
-            // 变化）——无阶段可归还，只归还 status。
+            // verifier（Phase-4）与 release-preparer（Phase-5 T1）：claim 不改
+            // 阶段（verification/release_ready 各自 from=to 零变化）——无阶段可
+            // 归还，只归还 status。
             : null;
       if (phaseBack !== null && next.phase === phaseBack.from) {
         giveBack.phase = phaseBack;

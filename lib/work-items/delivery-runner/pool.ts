@@ -1,13 +1,17 @@
 // Phase-3 Task 1: 双角色 TaskPool 投影（designer P2 + developer 谓词，spec
 // 2026-10-24-phase-three §3/§1.2）；Phase-4 T1 增第三角色 verifier（spec
-// 2026-10-24-phase-four §3：verification 阶段谓词）。就绪任务不是存储实体——
+// 2026-10-24-phase-four §3：verification 阶段谓词）；Phase-5 T1 增第四角色
+// release-preparer（spec 2026-10-25-phase-five §2：release_ready 阶段谓词——
+// 纯文档角色，材料准备就是该阶段的活动）。就绪任务不是存储实体——
 // 每次查询从文件状态推导。本模块分两层：
 //
 //   projectDeliveryPool —— 纯投影：零 fs，全部输入（含每项预计算的
 //     requirementDigest、manifest 仓库登记表与配置验证命令 checks）由调用方
-//     传入；只比较、只排序、只分桶标记。角色由项所处阶段决定（spec §1.2 +
-//     phase-four §6）：ready_for_implementation → developer（§3 谓词），
-//     verification → verifier（phase-four §3 谓词），其余 → designer——
+//     传入；只比较，只排序，只分桶标记。角色由项所处阶段决定（spec §1.2 +
+//     phase-four §6 + phase-five §2）：ready_for_implementation → developer
+//     （§3 谓词），verification → verifier（phase-four §3 谓词），
+//     release_ready → release-preparer（phase-five §2 谓词——verification
+//     通过记录在场且 candidateDigest 与当前候选集一致），其余 → designer——
 //     designer 谓词保持 P2 行为逐字节不变（非 intake 阶段照旧 wrong-phase，
 //     blocked 桶对存量项的投影与 P2 完全一致）。
 //
@@ -28,14 +32,15 @@ import {
 } from "./attempts.ts";
 import { readDeliveryRunnerConfig, DEFAULT_DELIVERY_RUNNER_CONFIG } from "./config.ts";
 import type { DeliveryCheckConfig } from "./config.ts";
-import { contentDigest } from "../delivery-types.ts";
+import { candidatesDigest, contentDigest } from "../delivery-types.ts";
 import type { DeliveryCandidate } from "../delivery-types.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
 import { readWorkspaceManifest } from "../../workspaces/service.ts";
 
 /** 投影角色（spec §1.2：执行槽位单槽位跨角色共享，角色由项所处阶段决定；
- *  Phase-4 §6：verifier 为第三角色——单槽位三角色共享）。 */
-export type DeliveryRole = "designer" | "developer" | "verifier";
+ *  Phase-4 §6：verifier 为第三角色——单槽位三角色共享；Phase-5 §2：
+ *  release-preparer 为第四角色——纯文档角色，同一单槽位与失败预算）。 */
+export type DeliveryRole = "designer" | "developer" | "verifier" | "release-preparer";
 
 export type DesignerPoolReason =
   | "not-managed" | "automation-disabled" | "wrong-phase" | "active-claim"
@@ -46,7 +51,12 @@ export type DesignerPoolReason =
   // verifier 专属（spec 2026-10-24-phase-four §3）：未配置验证命令（引导人
   // 配置或走人工验证）。空候选复用 no-repo-scope（候选即 verifier 的仓范围）、
   // 仓候选外/未登记/removed 复用 repo-not-registered。
-  | "no-checks-configured";
+  | "no-checks-configured"
+  // release-preparer 专属（spec 2026-10-25-phase-five §2）：验证通过记录缺失
+  //（release_ready 但无人/verifier 登记过验证——材料必须由验证证据支撑）/
+  // 候选被换（verification.candidateDigest 与当前候选集摘要不匹配——旧验证
+  // 下的材料不许准备，人须重走验证）。
+  | "verification-missing" | "stale-verification";
 
 export interface PoolEntry {
   key: string;
@@ -78,8 +88,13 @@ export interface DeliveryPoolItem {
   delivery?: {
     protocolVersion: number;
     designConfirmed?: unknown;
-    /** 提交的候选（Phase-4）——只有 verifier 谓词消费（仓范围 = 候选仓集合）。 */
+    /** 提交的候选（Phase-4 verifier 消费仓范围；Phase-5 release-preparer
+     *  消费 candidatesDigest 比对——候选被换即 stale）。 */
     candidates?: DeliveryCandidate[];
+    /** 验证通过记录（Phase-5）——只有 release-preparer 谓词消费；纯函数只读
+     *  candidateDigest（结构子集即可，读取端透传完整
+     *  DeliveryVerificationRecord）。 */
+    verification?: { candidateDigest: string };
   } | null;
 }
 
@@ -122,6 +137,10 @@ const DEVELOPER_READY_PHASE = "ready_for_implementation";
 /** verifier 可领阶段（Phase-4 spec §3）——角色判定同款：处于该阶段的项按
  *  verifier 谓词投影（claim 不改阶段，验证就是该阶段的活动）。 */
 const VERIFIER_READY_PHASE = "verification";
+/** release-preparer 可领阶段（Phase-5 spec §2）——角色判定同款：处于该阶段的
+ *  项按 release-preparer 谓词投影（claim 不改阶段，准备发布材料就是该阶段的
+ *  活动；released 等更后阶段照旧 designer wrong-phase）。 */
+const RELEASE_PREPARER_READY_PHASE = "release_ready";
 
 /** 两角色共用的阻塞检查（运行时信号 + 状态白名单 + 归档）。 */
 function sharedReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): DesignerPoolReason[] {
@@ -200,12 +219,32 @@ function verifierReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): Desi
   return [...reasons, ...sharedReasons(item, ctx)];
 }
 
+/** release-preparer 谓词（Phase-5 spec §2，binding）：ready ⇔ managed ∧
+ *  enabled ∧（阶段由角色判定保证——只有 release_ready 的项按本谓词投影）∧
+ *  verification 通过记录存在 ∧ verification.candidateDigest ===
+ *  candidatesDigest(当前候选集)（候选未被换——旧验证下的材料不许准备，人须
+ *  重走验证）∧ 共用检查。纯文档角色：不消费 registeredRepos / checks。
+ *  candidatesDigest 从 delivery-types 引入（纯摘要，零 fs）；候选被清
+ *  （rework 四清式）时摘要与记录不匹配，同样落 stale-verification。 */
+function releasePreparerReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): DesignerPoolReason[] {
+  const reasons: DesignerPoolReason[] = [];
+  if (!item.delivery) reasons.push("not-managed");
+  if (!ctx.enabled) reasons.push("automation-disabled");
+  const verification = item.delivery?.verification;
+  if (verification === undefined) {
+    reasons.push("verification-missing");
+  } else if (verification.candidateDigest !== candidatesDigest(item.delivery?.candidates ?? [])) {
+    reasons.push("stale-verification");
+  }
+  return [...reasons, ...sharedReasons(item, ctx)];
+}
+
 /**
- * 三角色纯投影：每项按所处阶段选定角色（ready_for_implementation →
- * developer，verification → verifier，其余 → designer）后套该角色谓词。所有
- * 命中原因按声明顺序累积（供 UI 与日志），不短路——多项违例一次看全。输出按
- * P0→P3→key 升序（未知优先级垫底）；角色不作 tiebreaker——同优先级跨角色按
- * key 交错。
+ * 四角色纯投影：每项按所处阶段选定角色（ready_for_implementation →
+ * developer，verification → verifier，release_ready → release-preparer，
+ * 其余 → designer）后套该角色谓词。所有命中原因按声明顺序累积（供 UI 与
+ * 日志），不短路——多项违例一次看全。输出按 P0→P3→key 升序（未知优先级
+ * 垫底）；角色不作 tiebreaker——同优先级跨角色按 key 交错。
  */
 export function projectDeliveryPool(
   items: DeliveryPoolItem[],
@@ -216,12 +255,16 @@ export function projectDeliveryPool(
       ? "developer"
       : item.phase === VERIFIER_READY_PHASE
         ? "verifier"
-        : "designer";
+        : item.phase === RELEASE_PREPARER_READY_PHASE
+          ? "release-preparer"
+          : "designer";
     const reasons = role === "developer"
       ? developerReasons(item, ctx)
       : role === "verifier"
         ? verifierReasons(item, ctx)
-        : designerReasons(item, ctx);
+        : role === "release-preparer"
+          ? releasePreparerReasons(item, ctx)
+          : designerReasons(item, ctx);
     return {
       key: item.key,
       title: item.title,
@@ -260,7 +303,7 @@ async function readRegisteredRepos(
 
 /**
  * 读取端：装配 ctx 后调用纯投影，按 ready/blocked 分桶（各自保持投影排序，
- * 三角色合并在同一队列）。详情读（README → digest + item 目录）只对 managed
+ * 四角色合并在同一队列）。详情读（README → digest + item 目录）只对 managed
  * 项做（未 managed 项的原因无需 digest，恒 ""）；fs 容错：目录/README/events
  * 缺失 → 空内容摘要，项仍被投影（缺项不静默消失）。
  */
