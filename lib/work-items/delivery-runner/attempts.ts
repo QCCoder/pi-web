@@ -34,24 +34,32 @@ import { createUlid } from "../../workspaces/id.ts";
 import { contentDigest } from "../delivery-types.ts";
 import { WorkItemValidationError } from "../errors.ts";
 import { writeAtomic } from "../service.ts";
+import type { RoleWorktree } from "./worktrees.ts";
 
 export interface ClaimState {
   attemptId: string;
   generation: number;
-  role: "designer";
+  /** 领取角色（Phase-3 T3 泛化：developer 领取共用同一运行态文件）。 */
+  role: "designer" | "developer";
   sessionId: string;
   claimedAt: string;
   lastSeenAt: string;
   requirementDigest: string;
   /** sha256 hex——明文 token 只存在于进程内 role grant，永不落盘。 */
   ownerTokenHash: string;
+  /** developer 领取时锁内自算的 design.md 摘要快照（T1 carried ruling：
+   *  不从池取——池无此字段；designer claim 不写）。 */
+  designDigest?: string;
+  /** developer 领取时预建的 worktree 集（prepareWorktrees 产物，T2）。 */
+  worktrees?: RoleWorktree[];
   lastRequest?: { requestId: string; at: string };
 }
 
 export interface AttemptRecord {
   attemptId: string;
   generation: number;
-  role: "designer";
+  /** 领取角色（Phase-3 T3 泛化——审计按角色如实记录）。 */
+  role: "designer" | "developer";
   sessionId: string;
   workspacePath: string;
   key: string;
@@ -62,6 +70,10 @@ export interface AttemptRecord {
   requirementDigest: string;
   needsAttention?: boolean;
   diagnostic?: { checkedAt?: string; actor?: string };
+  /** developer submit 的候选集（从 claim 拷贝入审计）。 */
+  candidates?: Array<{ repositoryId: string; commit: string }>;
+  /** developer 领取的 worktree 集（从 claim 拷贝入审计）。 */
+  worktrees?: RoleWorktree[];
 }
 
 export interface PausedInfo {

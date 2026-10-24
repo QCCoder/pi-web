@@ -25,6 +25,20 @@
 //     静默过期。
 //   - item.yaml 的 delivery.lastRequest 是 M2 动作幂等指纹（action 枚举不
 //     含 claim）——claim 的幂等指纹存 claim.json 的 lastRequest（T3 契约）。
+//
+// Phase-3 Task 3（developer 三函数）：claimDeveloperTask / submitDeveloperResult /
+// failDeveloperTask 与 designer 共用同一套重放/并发/复验骨架（poolRecheck 装配
+// 两角色同源，永不漂移）。差异面：
+//   - claim：prepareWorktrees 在任何状态落盘【之前】（P2 语义——失败=零状态，
+//     已建孤儿 worktree 无害）；designDigest 锁内自算快照（T1 carried ruling）；
+//     phase ready_for_implementation→implementation。
+//   - submit：M2 submit-verification 语义同构内联（不调 applyDeliveryAction——
+//     其自取 withWorkspaceWriteLock 不可重入，designer design.md 直写同款先例）；
+//     候选核验走 verifyCandidateCommits（范围仓=领取时预建的 worktree 集）；
+//     双 digest 复验 + designConfirmed 真值 + 阶段未被人推进，任一漂移 →
+//     Conflict（迟到会话不得基于被改过的输入提交，也不得覆写新状态）。
+//   - fail：回退守卫仅当仍停 implementation（人的中途动作改了阶段不回滚）；
+//     失败预算按 digest 跨角色共享（countRecentFailures 天然跨角色，无需改）。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -34,6 +48,7 @@ import {
   withWorkspaceWriteLock,
 } from "../../workspaces/service.ts";
 import { createUlid } from "../../workspaces/id.ts";
+import type { WorkspaceManifest } from "../../workspaces/types.ts";
 import { DESIGN_SEED } from "../delivery.ts";
 import { contentDigest } from "../delivery-types.ts";
 import {
@@ -61,6 +76,7 @@ import {
   writeClaim,
   writeFailureWindow,
   writePaused,
+  type AttemptRecord,
   type ClaimState,
 } from "./attempts.ts";
 import {
@@ -68,7 +84,8 @@ import {
   DEFAULT_DELIVERY_RUNNER_CONFIG,
   readDeliveryRunnerConfig,
 } from "./config.ts";
-import { projectDeliveryPool, type DeliveryPoolContext } from "./pool.ts";
+import { projectDeliveryPool, type DeliveryPoolContext, type PoolEntry } from "./pool.ts";
+import { prepareWorktrees, verifyCandidateCommits } from "./worktrees.ts";
 
 export interface ClaimGrant {
   attemptId: string;
@@ -155,6 +172,19 @@ async function ensureRuntimeGitignore(workspacePath: string): Promise<void> {
 
 // -------------------------------------------------------- shared verification
 
+/** developer 版附加校验（T3）：requireActiveClaim 可选参——designer 调用方
+ *  不传即 P2 语义零变化。expectedRequirementDigest 无对应开关：README 侧的
+ *  摘要复验 P2 起无条件常开（那本身就是期望值比对），加开关只会是死代码。 */
+interface ActiveClaimExpectations {
+  /** 活动 claim 必须由该角色持有（developer 的 submit/fail 不得跨角色释放
+   *  designer 的 claim，反之亦然）。 */
+  expectedRole?: "designer" | "developer";
+  /** true = designDigest 复验：claim 领取时的 design.md 摘要快照必须仍等于
+   *  锁内重算的当前 design.md contentDigest（developer submit 专用——
+   *  designer claim 无该字段）。 */
+  expectedDesignDigest?: boolean;
+}
+
 /** submit/fail 共用的锁内校验：claim 存在 ∧ attemptId/generation/ownerToken
  *  匹配 ∧ requirementDigest 与领取时一致（README 被人改过 → 409 要求重领）。
  *  凭证/状态过期一律 Conflict——迟到会话不得改动新代状态。 */
@@ -162,11 +192,17 @@ async function requireActiveClaim(
   workspacePath: string,
   key: string,
   credentials: { attemptId: string; generation: number; ownerToken: string },
+  expectations?: ActiveClaimExpectations,
 ): Promise<{ detail: WorkItemDetail; claim: ClaimState }> {
   const detail = await readWorkItem(workspacePath, key);
   const claim = readClaim(detail.path);
   if (claim === null) {
     throw new WorkItemConflictError(`no active claim on ${key} — claim it first`);
+  }
+  if (expectations?.expectedRole !== undefined && claim.role !== expectations.expectedRole) {
+    throw new WorkItemConflictError(
+      `claim on ${key} is held by the ${claim.role} role — these credentials cannot release it`,
+    );
   }
   if (claim.attemptId !== credentials.attemptId || claim.generation !== credentials.generation) {
     throw new WorkItemConflictError(
@@ -182,7 +218,64 @@ async function requireActiveClaim(
       "requirement changed since the claim (digest mismatch) — re-claim the item",
     );
   }
+  if (expectations?.expectedDesignDigest === true) {
+    const designContent = await readDesignFile(designPathFor(detail.path));
+    if (claim.designDigest !== contentDigest(designContent ?? "")) {
+      throw new WorkItemConflictError(
+        "input changed since claim — release via fail and re-claim",
+      );
+    }
+  }
   return { detail, claim };
+}
+
+/** 领取事务的池子复验装配（designer/developer 共用，T3 抽出——两角色的
+ *  事务内双检读同一套规则，永不漂移）。活动 claim 已由调用方先行处理
+ *  （Conflict/replay），此处 activeClaims 恒为空集。 */
+async function poolRecheck(
+  workspacePath: string,
+  manifest: Pick<WorkspaceManifest, "repositories">,
+  current: WorkItemDetail,
+): Promise<{ entry: PoolEntry; attempts: AttemptRecord[]; requirementDigest: string }> {
+  const config = await readDeliveryRunnerConfig(workspacePath);
+  const maxAttemptsPerInput = config?.budget.maxAttemptsPerInput
+    ?? DEFAULT_DELIVERY_RUNNER_CONFIG.budget.maxAttemptsPerInput;
+  const requirementDigest = contentDigest(current.content);
+  const attempts = await listAttempts(current.path);
+  // fix-round 裁定 #1/#2：预算 = 单项自最近 resume 以来的尾随连续失败
+  // （与 pool 读取端同一 helper，口径由构造保证一致）。
+  const failureCountByKey = new Map<string, number>([
+    [current.item.key, await countRecentFailures(current.path, requirementDigest, maxAttemptsPerInput)],
+  ]);
+  const ctx: DeliveryPoolContext = {
+    enabled: config?.enabled ?? false,
+    // 活动 claim 已在调用方以 Conflict/replay 处理，此处必为空集。
+    activeClaims: new Set(),
+    pendingInterruptions: (await listPendingInterruptions(current.path)).length > 0
+      ? new Set([current.item.key])
+      : new Set<string>(),
+    paused: readPaused(current.path) !== null ? new Set([current.item.key]) : new Set<string>(),
+    failureCountByKey,
+    maxAttemptsPerInput,
+    // designer 复验不消费仓库登记表（developer 谓词专属）；manifest 已由
+    // 调用方读过，按项内数据装配保持与池子读取端同源。
+    registeredRepos: new Map(manifest.repositories.map((repo) => [repo.id, repo.status])),
+  };
+  const [entry] = projectDeliveryPool(
+    [{
+      key: current.item.key,
+      title: current.item.title,
+      priority: current.item.priority,
+      status: current.item.status,
+      phase: current.item.phase,
+      archivedAt: current.item.archivedAt,
+      repositories: current.item.repositories,
+      requirementDigest,
+      delivery: current.item.delivery ?? null,
+    }],
+    ctx,
+  );
+  return { entry, attempts, requirementDigest };
 }
 
 async function maxAttemptsFor(workspacePath: string): Promise<number> {
@@ -230,46 +323,11 @@ export async function claimDesignerTask(
     }
 
     // 事务内双检（spec §5.2 step 1）：capability（manifest）→ 配置 → 纯投影
-    // 谓词逐条复验（复用 projectDeliveryPool——claim 与池子读同一套规则）。
+    // 谓词逐条复验（poolRecheck——designer/developer 共用同一装配）。
     const manifest = await readWorkspaceManifest(input.workspacePath);
     assertAutomationCapable(manifest);
-    const config = await readDeliveryRunnerConfig(input.workspacePath);
-    const maxAttemptsPerInput = config?.budget.maxAttemptsPerInput
-      ?? DEFAULT_DELIVERY_RUNNER_CONFIG.budget.maxAttemptsPerInput;
-    const requirementDigest = contentDigest(current.content);
-    const attempts = await listAttempts(itemPath);
-    // fix-round 裁定 #1/#2：预算 = 单项自最近 resume 以来的尾随连续失败
-    // （与 pool 读取端同一 helper，口径由构造保证一致）。
-    const failureCountByKey = new Map<string, number>([
-      [input.key, await countRecentFailures(itemPath, requirementDigest, maxAttemptsPerInput)],
-    ]);
-    const ctx: DeliveryPoolContext = {
-      enabled: config?.enabled ?? false,
-      // 活动 claim 已在上方以 Conflict 处理，此处必为空集。
-      activeClaims: new Set(),
-      pendingInterruptions: (await listPendingInterruptions(itemPath)).length > 0
-        ? new Set([input.key])
-        : new Set<string>(),
-      paused: readPaused(itemPath) !== null ? new Set([input.key]) : new Set<string>(),
-      failureCountByKey,
-      maxAttemptsPerInput,
-      // designer 复验不消费仓库登记表（developer 谓词专属）；manifest 已在
-      // 上方读过，按项内数据装配保持与池子读取端同源。
-      registeredRepos: new Map(manifest.repositories.map((repo) => [repo.id, repo.status])),
-    };
-    const [entry] = projectDeliveryPool(
-      [{
-        key: current.item.key,
-        title: current.item.title,
-        priority: current.item.priority,
-        status: current.item.status,
-        phase: current.item.phase,
-        archivedAt: current.item.archivedAt,
-        repositories: current.item.repositories,
-        requirementDigest,
-        delivery: current.item.delivery ?? null,
-      }],
-      ctx,
+    const { entry, attempts, requirementDigest } = await poolRecheck(
+      input.workspacePath, manifest, current,
     );
     // 角色由阶段决定：rfi 项可能投影为 developer-ready，但本事务是 designer
     // 领取——须同时是 designer 角色且 ready（designer 谓词对非 intake 阶段
@@ -504,6 +562,331 @@ export async function failDesignerTask(input: FailInput): Promise<WorkItemDetail
   });
 }
 
+// -------------------------------------------------- developer (Phase-3 T3)
+
+export interface DeveloperClaimInput {
+  workspacePath: string;
+  key: string;
+  sessionId: string;
+  requestId: string;
+}
+
+export interface DeveloperSubmitInput {
+  workspacePath: string;
+  key: string;
+  attemptId: string;
+  generation: number;
+  ownerToken: string;
+  candidates: Array<{ repositoryId: string; commit: string }>;
+  notes?: string;
+  conversationId?: string;
+}
+
+export interface DeveloperFailInput {
+  workspacePath: string;
+  key: string;
+  attemptId: string;
+  generation: number;
+  ownerToken: string;
+  reason: string;
+  blocked?: boolean;
+}
+
+/**
+ * Developer 领取事务（designer 同骨架）：幂等重放 → capability/配置/谓词
+ * 双检（poolRecheck，developer 角色）→ worktree 预建（**在任何状态落盘之前**
+ * ——失败=零状态，已建孤儿无害）→ designDigest 锁内快照 → claim.json →
+ * phase ready_for_implementation→implementation + status=in_progress +
+ * delivery.claimed 事件（data 带 worktrees）。
+ */
+export async function claimDeveloperTask(
+  input: DeveloperClaimInput,
+): Promise<{ grant: ClaimGrant; replayed: boolean }> {
+  const requestId = requireText(input.requestId, "requestId");
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const current = await readWorkItem(input.workspacePath, input.key);
+    const itemPath = current.path;
+
+    // 幂等重放（同 designer 契约）：claim.lastRequest 命中同 requestId → 现
+    // grant（ownerToken 空串——明文无法重建；不 bump 不追加）。
+    const existingClaim = readClaim(itemPath);
+    if (existingClaim?.lastRequest?.requestId === requestId) {
+      return {
+        grant: {
+          attemptId: existingClaim.attemptId,
+          generation: existingClaim.generation,
+          ownerToken: "",
+          key: input.key,
+          item: current,
+        },
+        replayed: true,
+      };
+    }
+    if (existingClaim !== null) {
+      throw new WorkItemConflictError(
+        `item ${input.key} already has an active claim (attempt ${existingClaim.attemptId}, session ${existingClaim.sessionId})`,
+      );
+    }
+
+    const manifest = await readWorkspaceManifest(input.workspacePath);
+    assertAutomationCapable(manifest);
+    const { entry, attempts, requirementDigest } = await poolRecheck(
+      input.workspacePath, manifest, current,
+    );
+    // 角色由阶段决定（池子投影）：intake 项对 developer 是 wrong-phase——
+    // 须同时 ready 且投影为 developer。
+    if (!entry.ready || entry.role !== "developer") {
+      const detail = entry.ready
+        ? `item is ready for the ${entry.role} role, not developer (phase ${current.item.phase})`
+        : entry.reasons.join(", ");
+      throw new WorkItemValidationError(
+        `delivery claim preconditions failed: ${detail}`,
+      );
+    }
+
+    const generation = attempts.reduce((max, attempt) => Math.max(max, attempt.generation), 0) + 1;
+    const attemptId = createUlid();
+    const ownerToken = randomUUID();
+    const now = new Date();
+
+    // worktree 预建在写任何状态之前（P2 语义）：任一仓失败整体抛——claim/
+    // gitignore/item.yaml/事件全未写（零状态）；已建的 worktree 不回滚
+    // （孤儿无害——下代领取用新分支，不与旧代冲突）。
+    const worktrees = await prepareWorktrees(
+      input.workspacePath,
+      { key: current.item.key, repositories: current.item.repositories },
+      generation,
+    );
+
+    // designDigest 锁内自算快照（T1 carried ruling）：绑定当前 design.md 字节，
+    // 不从池取（池无此字段）；缺失按空串（与 submit 侧对称）。
+    const designContent = await readDesignFile(designPathFor(itemPath));
+    const designDigest = contentDigest(designContent ?? "");
+
+    await ensureRuntimeGitignore(input.workspacePath);
+    writeClaim(itemPath, {
+      attemptId,
+      generation,
+      role: "developer",
+      sessionId: input.sessionId,
+      claimedAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      requirementDigest,
+      ownerTokenHash: hashOwnerToken(ownerToken),
+      designDigest,
+      worktrees,
+      lastRequest: { requestId, at: now.toISOString() },
+    });
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    next.phase = "implementation";
+    next.status = "in_progress";
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.claimed", "agent", undefined, {
+        phase: { from: current.item.phase, to: next.phase },
+        generation,
+        attemptId,
+        worktrees,
+        revision: next.revision,
+      }),
+    );
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery claim ${input.key}`);
+    return {
+      grant: {
+        attemptId,
+        generation,
+        ownerToken,
+        key: input.key,
+        item: await readWorkItem(input.workspacePath, input.key),
+      },
+      replayed: false,
+    };
+  });
+}
+
+/**
+ * Developer 提交：requireActiveClaim 三凭据 + role 匹配 + 双 digest 复验
+ * （requirementDigest ∧ designDigest）+ designConfirmed 仍真值 + 项仍在
+ * implementation（人推进过阶段 → 迟到提交不得覆写新状态）——任一漂移 →
+ * Conflict。候选经 verifyCandidateCommits 核验（范围仓 = 领取时预建的
+ * worktree 集；候选是既有 commit，无新产物要先落盘）。之后按 M2
+ * submit-verification 语义【同构内联】推进（不调 applyDeliveryAction——其
+ * 自取 withWorkspaceWriteLock 不可重入，designer design.md 直写同款先例）：
+ * candidates 写入、verification 清空、phase→verification、status→open。
+ */
+export async function submitDeveloperResult(input: DeveloperSubmitInput): Promise<WorkItemDetail> {
+  if (!Array.isArray(input.candidates) || input.candidates.length === 0) {
+    throw new WorkItemValidationError(
+      "candidates must contain at least one candidate ({ repositoryId, commit })",
+    );
+  }
+  const candidates = input.candidates.map((candidate, index) => ({
+    repositoryId: requireText(candidate?.repositoryId, `candidates[${index}].repositoryId`),
+    commit: requireText(candidate?.commit, `candidates[${index}].commit`),
+  }));
+  const notes = input.notes === undefined || input.notes === null
+    ? undefined
+    : requireText(input.notes, "notes");
+
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const { detail: current, claim } = await requireActiveClaim(
+      input.workspacePath,
+      input.key,
+      input,
+      { expectedRole: "developer", expectedDesignDigest: true },
+    );
+    const delivery = current.item.delivery;
+    if (delivery?.designConfirmed === undefined) {
+      throw new WorkItemConflictError(
+        "input changed since claim — release via fail and re-claim",
+      );
+    }
+    if (current.item.phase !== "implementation") {
+      throw new WorkItemConflictError(
+        `claim is stale — the item phase is now ${current.item.phase} (expected implementation)`,
+      );
+    }
+
+    // 候选核验（同步 spawnSync 锁内纯读——计划裁定可接受）：范围仓 = 领取时
+    // 预建的 worktree 集；commit 可为任何可解析 ref（rev-parse 语义，不强校验
+    // 40-hex），提交时原样存储与展示。
+    const repoPaths = new Map(
+      (claim.worktrees ?? []).map((worktree) => [worktree.repositoryId, worktree.repoPath]),
+    );
+    verifyCandidateCommits(repoPaths, candidates);
+
+    const itemPath = current.path;
+    const now = new Date();
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    // 既有 verification 通过记录不得存活新提交（M2 submit-verification 同款）。
+    next.delivery = { ...delivery, candidates, verification: undefined };
+    next.phase = "verification";
+    next.status = "open";
+    // 会话自链接（服务层不变式）：带 conversationId 的动作把会话挂入 conversations。
+    if (input.conversationId && !next.conversations.includes(input.conversationId)) {
+      next.conversations = [...next.conversations, input.conversationId];
+    }
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.submitted", "agent", input.conversationId, {
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        candidates,
+        ...(notes !== undefined ? { notes } : {}),
+        revision: next.revision,
+      }),
+    );
+
+    clearClaim(itemPath);
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: "developer",
+      sessionId: claim.sessionId,
+      workspacePath: input.workspacePath,
+      key: input.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "submitted",
+      requirementDigest: claim.requirementDigest,
+      candidates,
+      worktrees: claim.worktrees,
+    });
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery submit ${input.key}`);
+    return readWorkItem(input.workspacePath, input.key);
+  });
+}
+
+/**
+ * Developer 失败（designer fail 同骨架）：清 claim → attempt failed（role
+ * developer，worktrees 随 claim 入审计）→ 回退守卫（仅当仍停 implementation
+ * 时回 ready_for_implementation——人在领取窗口内推进/回退过阶段则不回滚）→
+ * 失败预算（按 digest 跨角色共享）→ commit。blocked 是给人看的环境/依赖
+ * 标志（白名单内仍可领）。
+ */
+export async function failDeveloperTask(input: DeveloperFailInput): Promise<WorkItemDetail> {
+  const reason = requireText(input.reason, "reason");
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const { detail: current, claim } = await requireActiveClaim(
+      input.workspacePath,
+      input.key,
+      input,
+      { expectedRole: "developer" },
+    );
+    const itemPath = current.path;
+    const now = new Date();
+
+    clearClaim(itemPath);
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: "developer",
+      sessionId: claim.sessionId,
+      workspacePath: input.workspacePath,
+      key: input.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "failed",
+      reason,
+      requirementDigest: claim.requirementDigest,
+      worktrees: claim.worktrees,
+    });
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    // 失败即归还：developer 让出 claim 带来的 implementation 阶段——仅当仍
+    // 停在该阶段（designer 的 design→intake 守卫同款写法：人若中途动作改了
+    // 阶段，不回滚人的状态）。
+    if (next.phase === "implementation") next.phase = "ready_for_implementation";
+    next.status = input.blocked === true ? "blocked" : "open";
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.attempt_failed", "agent", undefined, {
+        reason,
+        blocked: input.blocked === true,
+        role: "developer",
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        revision: next.revision,
+      }),
+    );
+
+    // 失败预算跨角色共享（spec §8）：countRecentFailures 按 digest 计数天然
+    // 跨角色——designer 与 developer 的失败互相消耗同一预算，防两角色互刷
+    // 次数绕上限。
+    const maxAttemptsPerInput = await maxAttemptsFor(input.workspacePath);
+    const failedCount = await countRecentFailures(itemPath, claim.requirementDigest);
+    if (failedCount >= maxAttemptsPerInput) {
+      writePaused(itemPath, {
+        at: now.toISOString(),
+        reason: `consecutive failures (${failedCount} since last resume)`,
+        count: failedCount,
+      });
+      await appendEvent(
+        itemPath,
+        eventFor("delivery.automation_paused", "agent", undefined, {
+          count: failedCount,
+          maxAttemptsPerInput,
+          attemptId: claim.attemptId,
+          revision: next.revision,
+        }),
+      );
+    }
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery fail ${input.key}`);
+    return readWorkItem(input.workspacePath, input.key);
+  });
+}
+
 // --------------------------------------------------------------- heartbeat
 
 /** 轻量续约（无业务锁）：claim.sessionId 匹配 → 原子写回 lastSeenAt
@@ -545,7 +928,9 @@ export async function recordInterruption(
     await writeAttempt({
       attemptId: claim.attemptId,
       generation: claim.generation,
-      role: "designer",
+      // role 随 ClaimState 流动（T3 泛化）：designer/developer 领取的中断
+      // 按各自角色入审计。
+      role: claim.role,
       sessionId: claim.sessionId,
       workspacePath,
       key,
