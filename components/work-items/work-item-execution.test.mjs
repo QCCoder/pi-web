@@ -185,10 +185,12 @@ test("WorkItemsPage posts the three execution actions to the right routes", () =
   // stop
   assert.match(source, /delivery-execution\/stop/);
   assert.match(source, /onStopExecution/);
-  // recover：manual 确认 + 409 pids 内联
+  // recover：manual 确认 + 409 → 服务端 error（已含 pid 清单）原样内联，
+  // 客户端不再重复拼接 pidsSuffix（fix round 1：双拼文案）。
   assert.match(source, /delivery-execution\/recover/);
   assert.match(source, /manual: true/);
-  assert.match(source, /pids/);
+  assert.match(source, /body\.error/);
+  assert.doesNotMatch(source, /pids\.join/);
   // resume automation：key 走 body
   assert.match(source, /\/delivery\/resume/);
   assert.match(source, /onResumeAutomation/);
@@ -211,4 +213,21 @@ test("WorkspaceManager config block loads via GET /delivery and saves via PUT (�
   assert.match(source, /designer/);
   assert.match(source, /失败上限/);
   assert.match(source, /执行上限/);
+});
+
+test("GET /delivery {config:null} seeds the default mirror, not an error (fix round 1: 死 UI)", () => {
+  // Task 1 契约：.pi/delivery.yaml 缺失 → 200 + {config:null} = 默认 disabled。
+  // 表单必须按默认镜像播种（enabled:false / roles:{} / 预算 3/30），否则刚开齐
+  // capabilities 的工作区永远无法从 UI 启用自动化（配置块变死 UI）。
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  const seed = source.match(/data\.config \?\? (DEFAULT_DELIVERY_RUNNER_CONFIG)/);
+  assert.ok(seed, "config:null falls back to the default mirror constant");
+  const mirror = source.match(/const DEFAULT_DELIVERY_RUNNER_CONFIG[^=]*=[\s\S]*?};/);
+  assert.ok(mirror, "default mirror constant defined");
+  assert.match(mirror[0], /enabled: false/);
+  assert.match(mirror[0], /roles: \{\}/);
+  assert.match(mirror[0], /maxAttemptsPerInput: 3/);
+  assert.match(mirror[0], /maxExecutionMinutes: 30/);
+  // 错误分支只来自非 2xx / 网络失败——config:null 不再设 deliveryError。
+  assert.doesNotMatch(source, /data\.error \?\? "交付自动化配置加载失败"/);
 });

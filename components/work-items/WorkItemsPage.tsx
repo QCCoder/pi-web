@@ -448,7 +448,7 @@ export function WorkItemsPage({
   }, [executionItemKey, fetchExecutionState, invalidate, workspaceId]);
 
   /** 重新检查并恢复（POST delivery-execution/recover，manual）：409 = 探测到
-   *  残留命令进程——服务端 {error, pids}，映射成内联提示（pids 随文展示）。 */
+   *  残留命令进程——服务端 error 已含 pid 清单，原样映射成内联提示。 */
   const recoverExecution = useCallback(async (): Promise<ExecutionActionResult> => {
     if (!executionItemKey) return { ok: false, error: "没有待恢复的执行中断" };
     setExecutionBusy(true);
@@ -462,11 +462,10 @@ export function WorkItemsPage({
         },
       );
       if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as { error?: string; pids?: number[] };
-        const pidsSuffix = Array.isArray(body.pids) && body.pids.length > 0
-          ? `（pid: ${body.pids.join(", ")}）`
-          : "";
-        return { ok: false, error: `${body.error ?? `恢复被拒绝（HTTP ${response.status}）`}${pidsSuffix}` };
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        // 服务端 409 的 error 已自带残留进程清单（「检测到 N 个…（pid: …）」）
+        // ——客户端原样内联展示，不重复拼接 pid 后缀。
+        return { ok: false, error: body.error ?? `恢复被拒绝（HTTP ${response.status}）` };
       }
       invalidate();
       setExecution(await fetchExecutionState(executionItemKey));

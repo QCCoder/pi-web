@@ -48,6 +48,17 @@ interface DeliveryRunnerConfigState {
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
 }
 
+/** 服务端 DEFAULT_DELIVERY_RUNNER_CONFIG 的客户端镜像：GET /delivery 返回
+ *  200 + {config:null}（Task 1 契约：.pi/delivery.yaml 缺失 = 默认 disabled）
+ *  时按此播种表单——不是错误，否则刚开齐 capabilities 的工作区永远无法从
+ *  UI 启用自动化。 */
+const DEFAULT_DELIVERY_RUNNER_CONFIG: DeliveryRunnerConfigState = {
+  schemaVersion: 1,
+  enabled: false,
+  roles: {},
+  budget: { maxAttemptsPerInput: 3, maxExecutionMinutes: 30 },
+};
+
 type ManagerSection = "workspaces" | "work-items";
 
 /** 列表行路径缩短（2026-09 反馈收敛）：保留末尾 3 段 + 省略号，完整路径在
@@ -522,14 +533,13 @@ export function WorkspaceManager({
       })
       .then((data) => {
         if (cancelled) return;
-        if (data.config) {
-          setDeliveryConfig(data.config);
-          setDeliveryEnabled(data.config.enabled);
-          setDeliveryDesignerProfile(data.config.roles.designer?.profile ?? "");
-        } else {
-          setDeliveryConfig(null);
-          setDeliveryError(data.error ?? "交付自动化配置加载失败");
-        }
+        // 200 + {config:null} 是 Task 1 的明确契约（.pi/delivery.yaml 缺失 =
+        // 默认 disabled），按默认镜像播种表单；错误分支只来自非 2xx（上面
+        // 的 fallback）或网络失败（catch）——config:null 不设 deliveryError。
+        const config = data.config ?? DEFAULT_DELIVERY_RUNNER_CONFIG;
+        setDeliveryConfig(config);
+        setDeliveryEnabled(config.enabled);
+        setDeliveryDesignerProfile(config.roles.designer?.profile ?? "");
       })
       .catch(() => {
         if (!cancelled) setDeliveryError("交付自动化配置加载失败");
