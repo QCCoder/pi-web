@@ -15,6 +15,10 @@ import { WorkItemsToolbar } from "./WorkItemsToolbar";
 import { WorkItemsList } from "./WorkItemsList";
 import { WorkItemsBoard } from "./WorkItemsBoard";
 import { WorkItemDetailView } from "./WorkItemDetailView";
+import {
+  DeliveryExecutionState,
+  ExecutionActionResult,
+} from "./WorkItemExecution";
 import { WorkItemCreateForm, type WorkItemCreateFormValues } from "./WorkItemCreateForm";
 import { responseJson, uploadWorkItemAttachments } from "./work-item-api";
 import {
@@ -226,6 +230,11 @@ export function WorkItemsPage({
   const [createError, setCreateError] = useState<string | null>(null);
   // 详情草稿态（概况/正文/设计编辑）——切项/切工作区前 confirm（spec §6.1）。
   const detailDirtyRef = useRef(false);
+  // 交付自动执行状态（Phase-2 Task 9）：仅 managed 项拉取（GET
+  // delivery-execution），与详情刷新并行——revision 变化（动作成功 →
+  // invalidate → 快照新 revision）一并重拉；动作成功后再显式补拉一次。
+  const [execution, setExecution] = useState<DeliveryExecutionState | null>(null);
+  const [executionBusy, setExecutionBusy] = useState(false);
 
   // 视图偏好 + 筛选按工作区持久化；换工作区时重读（FilesExplorerPanel 的
   // pi-explorer-tab 同款挂载后 hydrate 语义，避免 SSR/水合不一致）。
@@ -381,6 +390,116 @@ export function WorkItemsPage({
   );
   const selectedIsTrashed = selectedItem != null && !allItems.some((item) => item.key === selectedItem.key);
 
+  // —— 交付自动执行（Phase-2 Task 9）：仅 managed 项（item.delivery 存在）拉取
+  //    GET delivery-execution；与详情刷新并行——选中项 revision 变化（任一
+  //    mutation 成功 → invalidate → 快照新 revision）一并重拉；三个动作成功
+  //    后显式补拉。非 managed / 回收站项不拉不显（setExecution(null)）。 ——
+  const executionItemKey = selectedItem && !selectedIsTrashed && selectedItem.delivery
+    ? selectedItem.key
+    : null;
+
+  const fetchExecutionState = useCallback(async (key: string): Promise<DeliveryExecutionState | null> => {
+    try {
+      return await responseJson<DeliveryExecutionState>(
+        await fetch(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/work-items/${encodeURIComponent(key)}/delivery-execution`,
+        ),
+      );
+    } catch {
+      // runtime/ 是 advisory 运行态——读失败按「无」处理，不打断详情面板。
+      return null;
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!executionItemKey) {
+      setExecution(null);
+      return;
+    }
+    // 取消守卫：切项时在飞旧响应不得覆盖新选中项的执行状态。
+    let cancelled = false;
+    void fetchExecutionState(executionItemKey).then((state) => {
+      if (!cancelled) setExecution(state);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [executionItemKey, selectedItem?.revision, fetchExecutionState]);
+
+  /** 停止执行（POST delivery-execution/stop）：定向杀角色会话 + 记中断。 */
+  const stopExecution = useCallback(async (): Promise<ExecutionActionResult> => {
+    if (!executionItemKey) return { ok: false, error: "当前没有可停止的执行" };
+    setExecutionBusy(true);
+    try {
+      await responseJson(
+        await fetch(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/work-items/${encodeURIComponent(executionItemKey)}/delivery-execution/stop`,
+          { method: "POST" },
+        ),
+      );
+      invalidate();
+      setExecution(await fetchExecutionState(executionItemKey));
+      return { ok: true };
+    } catch (stopError) {
+      return { ok: false, error: stopError instanceof Error ? stopError.message : String(stopError) };
+    } finally {
+      setExecutionBusy(false);
+    }
+  }, [executionItemKey, fetchExecutionState, invalidate, workspaceId]);
+
+  /** 重新检查并恢复（POST delivery-execution/recover，manual）：409 = 探测到
+   *  残留命令进程——服务端 {error, pids}，映射成内联提示（pids 随文展示）。 */
+  const recoverExecution = useCallback(async (): Promise<ExecutionActionResult> => {
+    if (!executionItemKey) return { ok: false, error: "没有待恢复的执行中断" };
+    setExecutionBusy(true);
+    try {
+      const response = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/work-items/${encodeURIComponent(executionItemKey)}/delivery-execution/recover`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ manual: true }),
+        },
+      );
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string; pids?: number[] };
+        const pidsSuffix = Array.isArray(body.pids) && body.pids.length > 0
+          ? `（pid: ${body.pids.join(", ")}）`
+          : "";
+        return { ok: false, error: `${body.error ?? `恢复被拒绝（HTTP ${response.status}）`}${pidsSuffix}` };
+      }
+      invalidate();
+      setExecution(await fetchExecutionState(executionItemKey));
+      return { ok: true };
+    } catch (recoverError) {
+      return { ok: false, error: recoverError instanceof Error ? recoverError.message : String(recoverError) };
+    } finally {
+      setExecutionBusy(false);
+    }
+  }, [executionItemKey, fetchExecutionState, invalidate, workspaceId]);
+
+  /** 恢复自动领取（POST /delivery/resume {key}）：清暂停标记 + 重置失败窗口。 */
+  const resumeAutomation = useCallback(async (): Promise<ExecutionActionResult> => {
+    if (!executionItemKey) return { ok: false, error: "当前没有暂停的自动领取" };
+    setExecutionBusy(true);
+    try {
+      await responseJson(
+        await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/delivery/resume`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: executionItemKey }),
+        }),
+      );
+      invalidate();
+      setExecution(await fetchExecutionState(executionItemKey));
+      return { ok: true };
+    } catch (resumeError) {
+      return { ok: false, error: resumeError instanceof Error ? resumeError.message : String(resumeError) };
+    } finally {
+      setExecutionBusy(false);
+    }
+  }, [executionItemKey, fetchExecutionState, invalidate, workspaceId]);
+
   const viewButton = (value: WorkItemsView, label: string) => (
     <button
       key={value}
@@ -479,8 +598,13 @@ export function WorkItemsPage({
             item={selectedItem}
             repositories={workspace?.repositories ?? []}
             trashed={selectedIsTrashed}
+            execution={execution}
+            executionBusy={executionBusy}
             onOpenConversation={onOpenConversation}
             onOpenLoopsRecovery={onOpenLoopsRecovery}
+            onStopExecution={stopExecution}
+            onRecoverExecution={recoverExecution}
+            onResumeAutomation={resumeAutomation}
             onChanged={invalidate}
             onClose={() => {
               setSelectedKey(null);

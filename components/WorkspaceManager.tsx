@@ -39,6 +39,15 @@ interface RepositoryListResponse {
   repositories: WorkspaceRepositoryState[];
 }
 
+/** 交付自动化配置的客户端结构镜像（lib/work-items/delivery-runner/config.ts
+ *  的 DeliveryRunnerConfig——该模块是服务端 fs/yaml 层，不能进浏览器 bundle）。 */
+interface DeliveryRunnerConfigState {
+  schemaVersion: 1;
+  enabled: boolean;
+  roles: { designer?: { profile?: string; model?: { provider?: string; modelId: string } } };
+  budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
+}
+
 type ManagerSection = "workspaces" | "work-items";
 
 /** 列表行路径缩短（2026-09 反馈收敛）：保留末尾 3 段 + 省略号，完整路径在
@@ -291,10 +300,29 @@ export function WorkspaceManager({
   const hasKitLoops = kitLoops.some((loop) => !loop.paused);
   // 「立即跑一轮」多 active loop 时的手动选择（未绑定且无唯一默认时出现）。
   const [runLoopPick, setRunLoopPick] = useState("");
+  // 交付自动化配置（Phase-2 Task 9）：`.pi/delivery.yaml` 的 GET/PUT——仅
+  // work-items+workflows 双开的 workspaces 可见（PUT 的服务端门同款）。配置
+  // 结构是 delivery-runner/config.ts DeliveryRunnerConfig 的客户端镜像（该
+  // 模块 import node:fs，不能进浏览器 bundle——kitLoops 同款手法）。UI 只编
+  // 辑 enabled + designer profile；budget 只读展示（改配置走文件）。
+  const [deliveryConfig, setDeliveryConfig] = useState<DeliveryRunnerConfigState | null>(null);
+  const [deliveryEnabled, setDeliveryEnabled] = useState(false);
+  const [deliveryDesignerProfile, setDeliveryDesignerProfile] = useState("");
+  const [deliverySaving, setDeliverySaving] = useState(false);
+  const [deliveryError, setDeliveryError] = useState<string | null>(null);
+  const [deliverySaved, setDeliverySaved] = useState(false);
 
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
   ) ?? null;
+
+  // 交付自动化配置块门控：work-items + workflows 双开（服务端 PUT 同款门，
+  // spec Phase-2 Task 1；单开任一都不显示配置块）。
+  const deliveryAutomationCapable = Boolean(
+    selectedWorkspace
+      && selectedWorkspace.capabilities.includes("work-items")
+      && selectedWorkspace.capabilities.includes("workflows"),
+  );
 
   // 改名草稿跟随选中工作区（切换/保存后刷新都同步）。
   useEffect(() => {
@@ -471,6 +499,45 @@ export function WorkspaceManager({
       cancelled = true;
     };
   }, [embedded, open, selectedWorkspaceId]);
+
+  // 交付自动化配置加载（Phase-2 Task 9）：GET /delivery → 播种 enabled /
+  // designer profile 草稿（budget 只读不进草稿）。门控 = 面板打开 + 双
+  // capability；切换工作区/门控失效即清空。运行态 advisory——加载失败只降
+  // 级为块内提示，不打断设置页其它分区。
+  useEffect(() => {
+    if ((!open && !embedded) || !selectedWorkspaceId || !deliveryAutomationCapable) {
+      setDeliveryConfig(null);
+      setDeliveryError(null);
+      setDeliverySaved(false);
+      return;
+    }
+    let cancelled = false;
+    setDeliveryError(null);
+    setDeliverySaved(false);
+    void fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery`)
+      .then(async (response) => {
+        const fallback = { error: `HTTP ${response.status}` };
+        if (!response.ok) return fallback as { config?: DeliveryRunnerConfigState; error?: string };
+        return (await response.json()) as { config?: DeliveryRunnerConfigState; error?: string };
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (data.config) {
+          setDeliveryConfig(data.config);
+          setDeliveryEnabled(data.config.enabled);
+          setDeliveryDesignerProfile(data.config.roles.designer?.profile ?? "");
+        } else {
+          setDeliveryConfig(null);
+          setDeliveryError(data.error ?? "交付自动化配置加载失败");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDeliveryError("交付自动化配置加载失败");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deliveryAutomationCapable, embedded, open, selectedWorkspaceId]);
 
   useEffect(() => {
     if ((!open && !embedded) || !createWorkItemRequest) return;
@@ -676,6 +743,48 @@ export function WorkspaceManager({
       setSaving(false);
     }
   }, [loadWorkspaces, selectedWorkspace, skillDraft]);
+
+  /** 保存交付自动化配置（Phase-2 Task 9）：PUT /delivery 全量 config——UI 只
+   *  编辑 enabled + designer profile，budget 与既有 designer model 覆写原样
+   *  回传（round-trip 保真）。成功以响应回填（服务端 parse 后的规范化值），
+   *  「已保存」内联提示；失败（含 capability 门 400）走块内错误提示。 */
+  const saveDeliveryConfig = useCallback(async () => {
+    if (!selectedWorkspaceId || !deliveryConfig) return;
+    setDeliverySaving(true);
+    setDeliveryError(null);
+    setDeliverySaved(false);
+    try {
+      const profile = deliveryDesignerProfile.trim();
+      const existingDesigner = deliveryConfig.roles.designer;
+      const data = await responseJson<{ config: DeliveryRunnerConfigState }>(
+        await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            schemaVersion: 1,
+            enabled: deliveryEnabled,
+            roles: profile || existingDesigner?.model
+              ? {
+                designer: {
+                  ...(profile ? { profile } : {}),
+                  ...(existingDesigner?.model ? { model: existingDesigner.model } : {}),
+                },
+              }
+              : {},
+            budget: deliveryConfig.budget,
+          }),
+        }),
+      );
+      setDeliveryConfig(data.config);
+      setDeliveryEnabled(data.config.enabled);
+      setDeliveryDesignerProfile(data.config.roles.designer?.profile ?? "");
+      setDeliverySaved(true);
+    } catch (saveDeliveryError) {
+      setDeliveryError(saveDeliveryError instanceof Error ? saveDeliveryError.message : String(saveDeliveryError));
+    } finally {
+      setDeliverySaving(false);
+    }
+  }, [deliveryConfig, deliveryDesignerProfile, deliveryEnabled, selectedWorkspaceId]);
 
   const saveWorkspaceName = useCallback(async () => {
     if (!selectedWorkspace) return;
@@ -2051,6 +2160,82 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
+                    {/* 交付自动化配置（Phase-2 Task 9）：work-items+workflows 双开
+                        才显示（服务端 PUT 同款门）。enabled 开关 + designer
+                        profile 文本 + 预算只读展示 + 保存（PUT /delivery）。 */}
+                    {deliveryAutomationCapable && selectedWorkspace && (
+                      <section className="workspace-settings-section" data-section="delivery-automation">
+                        <div className="repository-section-header">
+                          <h3>交付自动化</h3>
+                        </div>
+                        <div className="workspace-summary-card">
+                          {deliveryConfig ? (
+                            <>
+                              <div className="workspace-field">
+                                <span>自动执行</span>
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", minHeight: 32 }}>
+                                  <CapabilityToggle
+                                    enabled={deliveryEnabled}
+                                    loading={deliverySaving}
+                                    onToggle={(next) => {
+                                      setDeliveryEnabled(next);
+                                      setDeliverySaved(false);
+                                    }}
+                                  />
+                                  <span className="workspace-rail-meta">
+                                    {deliveryEnabled
+                                      ? "开启：满足领取条件的设计阶段工作项由 designer 角色自动领取执行"
+                                      : "关闭：标准交付流程仅人工推进"}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="workspace-form-grid">
+                                <label className="workspace-field">
+                                  <span>Designer Profile</span>
+                                  <input
+                                    value={deliveryDesignerProfile}
+                                    disabled={deliverySaving}
+                                    placeholder="subagent profile 名（可选，缺省用内置角色）"
+                                    onChange={(event) => {
+                                      setDeliveryDesignerProfile(event.target.value);
+                                      setDeliverySaved(false);
+                                    }}
+                                  />
+                                </label>
+                              </div>
+                              <div className="workspace-rail-meta" style={{ marginTop: 6 }}>
+                                预算（只读，.pi/delivery.yaml）：失败上限 {deliveryConfig.budget.maxAttemptsPerInput} 次 · 执行上限 {deliveryConfig.budget.maxExecutionMinutes} 分钟
+                              </div>
+                              {deliveryError && (
+                                <div
+                                  role="alert"
+                                  className="workspace-rail-meta"
+                                  style={{ marginTop: 6, color: "#dc2626" }}
+                                >
+                                  {deliveryError}
+                                </div>
+                              )}
+                              <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "flex-end", marginTop: 10 }}>
+                                {deliverySaved && (
+                                  <span className="workspace-rail-meta" role="status">已保存</span>
+                                )}
+                                <button
+                                  className="workspace-action"
+                                  disabled={deliverySaving}
+                                  onClick={() => void saveDeliveryConfig()}
+                                >
+                                  {deliverySaving ? "保存中…" : "保存"}
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="workspace-rail-meta">
+                              {deliveryError ?? "加载交付自动化配置…"}
+                            </div>
+                          )}
+                        </div>
+                      </section>
+                    )}
                     {selectedWorkspace.capabilities.includes("repositories") && (
                     <section className="repository-section">
                       <div className="repository-section-header">

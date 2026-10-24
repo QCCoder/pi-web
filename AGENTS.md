@@ -324,7 +324,18 @@ Key behavior:
   新工作区））。**中央管理整页** = `components/work-items/`：`WorkItemsPage`（页头 工作区选择器+列表|看板分段+＋新建 →
   Toolbar 筛选（活动|归档|回收站）→ `WorkItemsList`/`WorkItemsBoard`（七列看板，无拖拽跳阶段）→ `WorkItemDetailView`
   （概况/设计编辑/证据（确认/候选/验证/发布）/动作条 `WorkItemActionbar`/事件审计 `WorkItemEvents`）+ `WorkItemCreateForm`
-  （`enableDelivery` 复选框**缺省不勾**）。看板投影在 `work-item-phases.ts`（纯模块）：老子阶段（analysis/
+  （`enableDelivery` 复选框**缺省不勾**）。**交付自动执行区（Phase-2 T9）**：`WorkItemExecution.tsx`（managed 项专属，
+  挂在 DetailView 动作条下）：四态——活动 claim 卡（role/代数/心跳 + 查看会话[claim.sessionId→onOpenConversation] +
+  「停止执行」）、`paused` 横幅（原因/连续失败计数 + 「恢复自动领取」）、`pendingInterruption` 横幅（「重新检查并恢复」）、
+  最近 attempts（末 5 新→旧，outcome 徽章 + needsAttention「待处理」标记）；busy 全按钮禁用防双击，动作结果
+  `{ok}|{ok:false,error}` 出参 → 内联 role=alert（recover 409 的 pids 由 WorkItemsPage 拼进 error 文案）。执行状态由
+  WorkItemsPage 拉取（GET `.../delivery-execution`，仅 `item.delivery` 存在的非回收站选中项拉；revision 变化 + 动作成功
+  重拉，effect 带切项取消守卫）；三动作 = POST `.../delivery-execution/stop|recover`（manual:true）与
+  `/api/workspaces/[id]/delivery/resume`（body {key}），成功 → invalidate + 重拉。设置›工作区（WorkspaceManager）：
+  work-items+workflows 双开时显示「交付自动化」配置块（enabled 开关 + designer profile 文本框 + 预算只读「失败上限 N 次 ·
+  执行上限 M 分钟」+ 保存 PUT `/delivery`——budget 与 designer.model 原样回传保 round-trip；配置结构是
+  delivery-runner/config 的客户端镜像类型，不 import 服务端模块）。
+  看板投影在 `work-item-phases.ts`（纯模块）：老子阶段（analysis/
   requirement_approval/plan_approval）投影进 design 列但**显示原始 phase 标签**（不谎报已进标准列）；老 `complete` 投影进
   released 列但经 `isHistoricalComplete` 收进「历史已完成」折叠组——**不推断已发布**（「旧 complete ≠ 已发布」）。筛选/排序
   纯逻辑在 `work-item-queries.ts`，HTTP 封装在 `work-item-api.ts`。**深链**：`?workspace=<id>&page=work-items[&item=<key>]`
@@ -762,7 +773,7 @@ components/
 
   FilesExplorerPanel.tsx   the「文件」面板体（桌面右栏钉死 tab + 移动端抽屉文件目的地页同体）— [ 文件 | 改动(N) ] toolbar + ⟳ + FileExplorer/ChangesPanel (cwd = workspace root); exports ExplorerSegmentedTabs; reveal switches its segmented back to 文件
   WorkspaceManager.tsx      workspace create/import + settings (`embedded` in-panel, `panel` narrow single-column variant — 宿主：桌面右坞工作项 tab + 移动抽屉目的地页 work-items / 设置›工作区 workspaceSlot（右坞 S3；workItemSplit portal 机制已退役）; `split={{ inline: true }}` = 列表+详情并排单容器（设置›工作区的中央区页面，2026-09 搬家）; the settings detail carries the 基本信息 card — rename (PATCH name) + 暂时停用 toggle (PATCH disabled; disabled workspaces keep a settings-only「已停用」badge, the sole re-enable surface — 到达路径：桌面项目树树底暗淡行 ⚙ / 移动抽屉树底暗淡行 ⚙ / 零工作区态 HomeLanding ⊞ 暗淡行与 ⚙，均经 `requestWorkspaceSettings` → `selectWorkspaceRequest` 深链预选，2026-09 修复；**预选同时触发详情优先（detailFocus）：rail（全部工作区列表）收起、目标工作区详情独占 +「‹ 全部工作区」返回**（带工作区上下文的入口只看该工作区，不带上下文的底部设置入口仍落全局列表）；两 shell 在设置面关闭/离开时 `clearWorkspaceSettingsRequest` 防闪回)；the rail is drag-sortable (HTML5 DnD，同 SessionTabBar 模式：drop 到目标上=插到它前面，列表尾空区=移到末尾；一次拖放 = PATCH /api/workspaces 全量期望序); remaining modal = home create-workspace wizard
-  work-items/               中央工作项管理整页组件族（2026-10 M2；宿主 = DesktopShell CenterPage kind"work-items" + MobileShell work-items 目的地页，同一本体）：WorkItemsPage（页骨架 + 深链消费）/ WorkItemsToolbar（活动|归档|回收站筛选 + 看板阶段筛选）/ WorkItemsList / WorkItemsBoard（七列，无拖拽）/ WorkItemRow / WorkItemDetailView（概况/设计/证据/动作/审计）+ WorkItemActionbar（legalActionBarActions 投影，released 不渲染 cancel）/ WorkItemCreateForm（enableDelivery 缺省不勾）/ WorkItemEvents / WorkItemMeta；纯逻辑 = work-item-phases.ts（看板投影 + 标签，老 complete ≠ 已发布）+ work-item-queries.ts（筛选/排序）+ work-item-api.ts（HTTP 封装），均有 node:test
+  work-items/               中央工作项管理整页组件族（2026-10 M2；宿主 = DesktopShell CenterPage kind"work-items" + MobileShell work-items 目的地页，同一本体）：WorkItemsPage（页骨架 + 深链消费 + 交付执行状态/三动作——Phase-2 T9）/ WorkItemsToolbar（活动|归档|回收站筛选 + 看板阶段筛选）/ WorkItemsList / WorkItemsBoard（七列，无拖拽）/ WorkItemRow / WorkItemDetailView（概况/设计/证据/动作/审计 + 自动执行区挂载）/ WorkItemActionbar（legalActionBarActions 投影，released 不渲染 cancel）/ WorkItemExecution（交付自动执行四态区，Phase-2 T9）/ WorkItemCreateForm（enableDelivery 缺省不勾）/ WorkItemEvents / WorkItemMeta；纯逻辑 = work-item-phases.ts（看板投影 + 标签，老 complete ≠ 已发布）+ work-item-queries.ts（筛选/排序）+ work-item-api.ts（HTTP 封装），均有 node:test
   WorkspaceOverview.tsx     workspace dashboard — the DESKTOP 家 tab landing (移动端不渲染——抽屉目的地页取代；更早的 WorkspaceHomeMenu 已随树抽屉重构退役)：quick actions, 活跃工作项 with 「立即跑一轮」B-button + Loop 绑定下拉, 仓库/知识库 rows, 「会话」区块（WorkspaceSessionList），Loops 摘要行（onOpenLoopsTab → 右坞 Loops rail 模块，必传）
   WorkspaceSessionList.tsx  本工作区会话列表（拉 /api/sessions 后前缀过滤、排除 subagent 子会话）：默认前 20 条 + 显示全部，行内删除（RecentSessionRow）；宿主 = 移动端工作区 tab「会话」子页（showHeader=false）+ WorkspaceOverview「会话」区块（桌面家 tab）
   SessionTabBar.tsx          the SESSION tab strip（桌面 only；2026-09 树抽屉重构后移动端不再渲染，切会话走抽屉树，组件保留给桌面）：会话/占位/家 tab chips（运行呼吸点/未看完成点 + 拖拽排序）+ ＋新会话（无活动 tab 时隐藏；**sticky right——tab 多到溢出时吸附在条的最右不被滚走**，scrollPaddingRight 让活跃 chip 不被＋盖住）；**「首页」 chip 已删除（桌面 `showHomeTab={false}`，prop 默认 true 仅为兼容）**；⊞工作区选择器已删除（桌面走项目树；picker/WorkspaceIcon/色点板已从组件移除）+ tab 右键菜单（关闭/关闭其他/关闭左侧/关闭右侧——目标集合 contextCloseTargetIds，批量关闭走 useAppShellState.closeTabs：合并草稿确认只弹一次、运行中 tab 照常摘除不终止会话；菜单定位复用 computeMenuLayout + portal 遮罩，Escape/滚轮/拖拽关闭）；无 isMobile 分支

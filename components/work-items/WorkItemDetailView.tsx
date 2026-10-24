@@ -13,6 +13,11 @@ import { responseJson, uploadWorkItemAttachments, WorkItemRequestError } from ".
 import { WorkItemActionbar } from "./WorkItemActionbar";
 import { WorkItemAttachmentPicker } from "./WorkItemCreateForm";
 import { WorkItemEvents } from "./WorkItemEvents";
+import {
+  DeliveryExecutionState,
+  ExecutionActionResult,
+  WorkItemExecution,
+} from "./WorkItemExecution";
 import { SourceRefValue, WorkItemRepositoryChips } from "./WorkItemMeta";
 import { PHASE_LABELS, STATUS_LABELS, TYPE_LABELS } from "./work-item-phases";
 
@@ -192,8 +197,13 @@ export function WorkItemDetailView({
   item,
   repositories,
   trashed = false,
+  execution = null,
+  executionBusy = false,
   onOpenConversation,
   onOpenLoopsRecovery,
+  onStopExecution,
+  onRecoverExecution,
+  onResumeAutomation,
   onChanged,
   onClose,
   onRestored,
@@ -205,9 +215,20 @@ export function WorkItemDetailView({
   repositories: WorkspaceRepository[];
   /** 回收站范围选中：只读概况 + 恢复入口，不拉取详情（路径在 .pi/trash 下）。 */
   trashed?: boolean;
+  /** 交付自动执行状态（Phase-2 Task 9）：宿主 WorkItemsPage 拉取（仅 managed
+   *  项），经本视图转投 WorkItemExecution；null = 未拉/拉取中。 */
+  execution?: DeliveryExecutionState | null;
+  /** 执行动作进行中（宿主持有）——busy 期间禁用全部执行按钮。 */
+  executionBusy?: boolean;
   onOpenConversation: (sessionId: string) => void;
   /** 执行中断（spec §5.4）：绑定的 loop 有未确认中断记录 → 「去处理」跳 Loops 面板。 */
   onOpenLoopsRecovery?: () => void;
+  /** 交付执行三动作（宿主 POST 对应路由后刷新执行状态 + 快照）：停止执行。 */
+  onStopExecution?: () => Promise<ExecutionActionResult>;
+  /** 交付执行三动作：重新检查并恢复（409 pids → {ok:false,error} 内联提示）。 */
+  onRecoverExecution?: () => Promise<ExecutionActionResult>;
+  /** 交付执行三动作：恢复自动领取（清暂停标记 + 重置失败窗口）。 */
+  onResumeAutomation?: () => Promise<ExecutionActionResult>;
   /** 任一 mutation 成功（或 409 后）→ 宿主 invalidate()；快照新 revision 触发详情重取。 */
   onChanged?: () => void;
   /** 清除选中（× / 移入回收站后）。 */
@@ -773,6 +794,21 @@ export function WorkItemDetailView({
         onChanged={onChanged}
         onError={setActionError}
       />
+
+      {/* 交付自动执行区（Phase-2 Task 9）：managed 项专属——非 managed 不挂载
+          （宿主也不会为其拉取执行状态）。 */}
+      {item.delivery?.protocolVersion === 1 && (
+        <Section title="自动执行">
+          <WorkItemExecution
+            execution={execution}
+            busy={executionBusy}
+            onStop={onStopExecution ?? (() => Promise.resolve({ ok: false, error: "停止执行不可用" }))}
+            onRecover={onRecoverExecution ?? (() => Promise.resolve({ ok: false, error: "恢复不可用" }))}
+            onResumeAutomation={onResumeAutomation ?? (() => Promise.resolve({ ok: false, error: "恢复自动领取不可用" }))}
+            onOpenConversation={onOpenConversation}
+          />
+        </Section>
+      )}
 
       {/* 验收条件与设计（managed 项）：design.md 查看/编辑。 */}
       {item.delivery?.protocolVersion === 1 && (
