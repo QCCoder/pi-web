@@ -64,7 +64,11 @@ export interface DesignerPoolContext {
   maxAttemptsPerInput: number;
 }
 
-const TERMINAL_STATUSES: readonly string[] = ["cancelled", "done"];
+/** Designer 可领状态白名单（spec §5.1，T4 carried ruling）：只有 open 与
+ *  blocked(可解) 可领。白名单而非黑名单——claim 事务写 status=in_progress
+ *  后即使 claim.json 尚未落盘就崩溃，项也不再投影 ready（双派发窗口消除）；
+ *  in_progress/done/cancelled 一律不可领。 */
+const CLAIMABLE_STATUSES: readonly string[] = ["open", "blocked"];
 const PRIORITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
 const UNKNOWN_PRIORITY_RANK = PRIORITY_RANK.P3 + 1;
 
@@ -74,9 +78,9 @@ const READY_PHASE = "intake";
 /**
  * 纯投影谓词（spec §5.1）：ready ⇔ managed ∧ enabled ∧ phase==="intake" ∧
  * !activeClaim ∧ !pendingInterruption ∧ !paused ∧ failedCount(digest) < max ∧
- * status 非 cancelled/done ∧ 未归档。所有命中原因按 DesignerPoolReason 声明
- * 顺序累积（供 UI 与日志），不短路——多项违例一次看全。输出按
- * P0→P3→key 升序（未知优先级垫底）。
+ * status ∈ {open, blocked}（白名单）∧ 未归档。所有命中原因按
+ * DesignerPoolReason 声明顺序累积（供 UI 与日志），不短路——多项违例一次
+ * 看全。输出按 P0→P3→key 升序（未知优先级垫底）。
  */
 export function projectDesignerPool(
   items: DesignerPoolItem[],
@@ -93,7 +97,7 @@ export function projectDesignerPool(
     if ((ctx.failedCountByDigest.get(item.requirementDigest) ?? 0) >= ctx.maxAttemptsPerInput) {
       reasons.push("failure-limit");
     }
-    if (TERMINAL_STATUSES.includes(item.status)) reasons.push("terminal-status");
+    if (!CLAIMABLE_STATUSES.includes(item.status)) reasons.push("terminal-status");
     if (item.archivedAt !== null) reasons.push("archived");
     return {
       key: item.key,

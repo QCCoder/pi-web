@@ -105,7 +105,9 @@ const RELEASED_ALLOWED_ACTIONS: ReadonlySet<DeliveryAction> = new Set([
   "cancel",
 ]);
 
-const DESIGN_SEED = (title: string): string =>
+/** design.md 播种模板（M2 start-design 与 Phase-2 领取事务共用同一串——
+ *  claim.ts 的 designer 播种不得与人工动作路径漂移出两个模板）。 */
+export const DESIGN_SEED = (title: string): string =>
   `# 设计：${title}\n\n## 方案\n\n## 验收条件\n- [ ] \n`;
 
 function requireText(value: unknown, field: string): string {
