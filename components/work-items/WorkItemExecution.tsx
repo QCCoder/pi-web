@@ -14,6 +14,9 @@ import { formatRelativeTime } from "@/lib/format-time";
  *  checkResults 证据仓逐条展示（outcome 徽章/退出码/耗时/日志名，命令来源与
  *  完整日志路径进 title）；attempt 的 verificationOutcome 判定徽章（已验证/
  *  需返工）+ checkResults 紧凑 chips（rework 路径的失败证据）。
+ *  Phase-5 T2：release-preparer 徽标（RoleBadge 按 role 原文渲染，零映射表）
+ *  + attempt 的 releasePlan 摘要（notes 首行截断 + rollback 有无标记，完整
+ *  notes/rollback 进 title——发布材料的审计留痕在 attempt.releasePlan）。
  *
  *  本组件是纯展示 + 动作转发：执行状态（GET delivery-execution）与三个动作
  *  （POST stop / recover / delivery-resume）都由 WorkItemsPage 持有并经
@@ -24,7 +27,7 @@ import { formatRelativeTime } from "@/lib/format-time";
 // —— UI 侧结构类型（delivery-runner/attempts.ts 的客户端镜像：该模块 import
 //    node:fs，不能进浏览器 bundle——WorkspaceManager 的 kitLoops 同款手法）。 ——
 
-export type ExecutionRole = "designer" | "developer" | "verifier";
+export type ExecutionRole = "designer" | "developer" | "verifier" | "release-preparer";
 
 /** RoleWorktree（delivery-runner/worktrees.ts）的客户端镜像：developer 领取
  *  时预建的 worktree——repoPath 是登记仓主路径，path 是 worktree 检出路径。
@@ -99,6 +102,10 @@ export interface ExecutionAttemptSummary {
   /** verifier 终局拷贝的全量检查证据（Phase-4）——claim 已清，rework 路径的
    *  证据（含 passed 条目）只在这里留痕。 */
   checkResults?: ExecutionCheckResult[];
+  /** release-preparer 提交的发布材料（Phase-5）——submit 写入
+   *  delivery.releasePlan 的同构拷贝（M2 prepare-release 形状：notes 必填 /
+   *  rollback 可选）。 */
+  releasePlan?: { notes: string; rollback?: string };
 }
 
 export interface DeliveryExecutionState {
@@ -274,6 +281,24 @@ function VerificationOutcomeBadge({ outcome }: { outcome: NonNullable<ExecutionA
  *  永不漏出。 */
 function exitCodeText(exitCode: number | null): string {
   return `退出码 ${exitCode ?? "—"}`;
+}
+
+// —— 发布材料摘要（Phase-5 release-preparer）：attempt 行内联一行——notes 首行
+//    截断 + rollback 有无标记；完整 notes/rollback 进 title（审计细节在
+//    attempts 文件里，行内不铺全文）。 ——
+
+/** notes 首行（跳过空行；>40 字符截断加省略号）——多行发布说明的行内摘要。 */
+function releaseNotesFirstLine(notes: string): string {
+  const firstLine = (notes.split("\n").find((line) => line.trim() !== "") ?? "").trim();
+  return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine;
+}
+
+/** title 提示：完整发布说明 + 回滚步骤（或显式缺省占位）。 */
+function releasePlanTitle(releasePlan: { notes: string; rollback?: string }): string {
+  return [
+    `发布说明：${releasePlan.notes}`,
+    releasePlan.rollback ? `回滚步骤：${releasePlan.rollback}` : "未附回滚步骤",
+  ].join("\n");
 }
 
 /** 领取角色徽标（Phase-3 T5：developer 角色上岗后需要一眼分辨谁在跑）。
@@ -546,6 +571,17 @@ export function WorkItemExecution({
               {entry.candidates && entry.candidates.length > 0 && (
                 <span style={{ color: "var(--text-dim)", overflowWrap: "anywhere" }}>
                   候选 {entry.candidates.map((candidate) => `${candidate.repositoryId}@${candidate.commit.slice(0, 8)}`).join(" · ")}
+                </span>
+              )}
+              {/* release-preparer submit 的发布材料摘要（Phase-5 T2）：notes 首行
+                  截断 + rollback 有无标记；完整 notes/rollback 进 title。 */}
+              {entry.releasePlan && (
+                <span
+                  title={releasePlanTitle(entry.releasePlan)}
+                  style={{ color: "var(--text-dim)", overflowWrap: "anywhere" }}
+                >
+                  发布材料 {releaseNotesFirstLine(entry.releasePlan.notes)}
+                  {entry.releasePlan.rollback ? " · 含回滚" : " · 未附回滚"}
                 </span>
               )}
               {/* verifier 终局的检查证据（Phase-4，rework 路径的失败证据就在这里）：

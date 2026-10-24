@@ -6,6 +6,10 @@
 // Phase-4 Task 4: 第三角色 verifier 合同（spec 2026-10-24-phase-four §6）——
 // 检查只经 delivery_run_check 触发（bash 替代命令不作证据）/ 验证环境只读
 // （发现问题走 rework 反馈，不自行修复）/ 不合并不推送 / submit 只需 key。
+// Phase-5 Task 2: 第四角色 release-preparer 合同（spec 2026-10-25-phase-five
+// §3）——纯文档角色：只读（不发布/不登记发布/不合并推送/不改代码与 release
+// 块），材料由验证证据支撑不虚构验证结论，submit 只写 releasePlan 等人
+// record-release；会话命名/结束钩子/心跳/登记 role 无关（泛化链路自动覆盖）。
 //
 // dispatcher 判定该起角色会话时调 launchRoleSession：两步创建序
 // （sessionId 到手 → grantRole → delivery 执行登记 → 命名 → 开场 prompt），
@@ -113,8 +117,28 @@ const verifierContract = (task: { key: string; title: string }): string => `# ve
 ## 结束条件
 以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
 
+/** release-preparer 开场合同（Phase-5 Task 2，spec §3）：职责 / 硬规则 / 结束
+ *  条件。纯文档角色——材料 = 需求 README + 已确认设计（design.md）+ 候选提交
+ *  + 验证证据（delivery.verification），全部在领取返回/工作项内可读；产出只写
+ *  delivery.releasePlan（submit 服务端写，会话自身零落盘动作）。 */
+const releasePreparerContract = (task: { key: string; title: string }): string => `# release-preparer 角色合同（${task.key}）
+
+## 职责
+基于工作项 ${task.key}（${task.title}）已确认的设计、候选提交与验证证据，起草发布材料：变更摘要（做了什么/为什么）、影响面（波及的模块与行为）、验证结论引用（引用 delivery.verification 里实际登记的检查与结果）、回滚步骤建议，经 delivery_submit_result 提交（release_notes 必填、rollback_notes 可选）。
+
+## 硬规则
+1. 先 delivery_list_ready_tasks 看池子，再 delivery_claim_task 领取成功后才动手——领取失败/冲突不得绕过或强写。本轮只领取工作项 ${task.key}；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项。
+2. 全程只读：不发布、不登记发布（record-release 与实际发布是人做的）、不合并不推送；不改代码、不写 delivery.release 块——你的产出只有提交的发布材料。
+3. 材料必须由验证证据支撑：验证结论只能引用 delivery.verification 实际登记的检查与结果，不虚构、不推断未跑过的检查；证据不足以支撑发布说明时不要编造。
+4. 材料写好后用 delivery_submit_result 提交（release_notes 必填，rollback_notes 可选——回滚步骤建议），提交即结束本轮——发布与登记发布由人完成。
+5. 阻塞（验证证据缺失、材料无法支撑）用 delivery_fail_task 说明原因后结束；环境/依赖类阻塞带 blocked=true。
+
+## 结束条件
+以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
+
 /** 角色开场合同：designer = 现行文本（逐字节）；developer = worktree 隔离合同；
- *  verifier = 服务端检查执行合同（Phase-4 T4）。 */
+ *  verifier = 服务端检查执行合同（Phase-4 T4）；release-preparer = 纯文档
+ *  发布材料合同（Phase-5 T2）。 */
 export function buildRoleContract(
   role: DeliveryRole,
   task: { key: string; title: string },
@@ -124,7 +148,9 @@ export function buildRoleContract(
     ? developerContract(task, claim)
     : role === "verifier"
       ? verifierContract(task)
-      : DESIGNER_CONTRACT(task);
+      : role === "release-preparer"
+        ? releasePreparerContract(task)
+        : DESIGNER_CONTRACT(task);
 }
 
 /** 开场指令：列出池子 → 领取指派项（唯一目标，不领其他项）→ 工作 → 提交。 */
@@ -145,6 +171,15 @@ function openingPromptFor(role: DeliveryRole, task: { key: string; title: string
       `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
       "3. 对领取返回的 checks 清单逐项调用 delivery_run_check（不要用 bash 自跑替代命令——自述结果不构成证据）；",
       "4. 全部检查跑完后用 delivery_submit_result 提交（只需 key，可选 notes——检查结果服务端自取）即结束本轮；环境问题 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
+    ].join("\n");
+  }
+  if (role === "release-preparer") {
+    return [
+      "你是本工作区的交付 release-preparer 会话，请开始本轮工作：",
+      "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
+      `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
+      "3. 通读全部相关材料：需求 README、已确认设计（design.md）、候选提交与验证证据（delivery.verification 的检查与结果），全程只读；",
+      "4. 基于验证证据起草发布材料（变更摘要/影响面/验证结论引用 + 回滚步骤建议），用 delivery_submit_result 提交（release_notes 必填，rollback_notes 可选）即结束本轮——发布与登记发布由人完成；无法推进时 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
     ].join("\n");
   }
   return [

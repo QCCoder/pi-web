@@ -12,11 +12,17 @@
 // 配置按 claim.checkContexts 冻结快照查找、在候选 detached checkout 内执行
 // runConfiguredCheck → recordCheckResult 累积——LLM 自述/bash 自跑不构成证据，
 // 同名重跑覆盖）。
+// Phase-5 Task 2: 第四角色 release-preparer（spec 2026-10-25-phase-five §3）
+// ——claim/submit/fail 增第四路分派（纯文档角色：claim 不做环境预建，领取结果
+// 无 worktrees/checks）；submit 增第四形状 release_notes（必填）+
+// rollback_notes（可选）——服务端写 delivery.releasePlan，phase 保持
+// release_ready 等人 record-release；工具面仍恰五件。
 // 挂载在 buildWorkspaceExtensions（capabilities 含 work-items ∧ workflows，
-// extensions.ts），只对被 dispatcher 授予角色（designer | developer | verifier）
-// 的会话可用：execute 第一步经 roleGrantOf(sessionId) 验身份——无 grant / grant
-// 属他工作区 → 400 文本（不抛异常）；凭证（ownerToken/attemptId/generation）
-// 全程住在进程内 role grant（role-grants.ts），绝不出现在参数 schema。
+// extensions.ts），只对被 dispatcher 授予角色（designer | developer | verifier |
+// release-preparer）的会话可用：execute 第一步经 roleGrantOf(sessionId) 验身份
+// ——无 grant / grant 属他工作区 → 400 文本（不抛异常）；凭证
+//（ownerToken/attemptId/generation）全程住在进程内 role grant（role-grants.ts），
+// 绝不出现在参数 schema。
 //
 // 工具面五件：list / claim / submit / fail / run_check。confirm-design、
 // record-verification、release、block、unblock、cancel 等人工/动作面住在
@@ -34,13 +40,16 @@ import { listWorkItems, readWorkItem } from "../service.ts";
 import {
   claimDesignerTask,
   claimDeveloperTask,
+  claimReleasePreparerTask,
   claimVerifierTask,
   failDesignerTask,
   failDeveloperTask,
+  failReleasePreparerTask,
   failVerifierTask,
   recordCheckResult,
   submitDesignerResult,
   submitDeveloperResult,
+  submitReleasePreparerResult,
   submitVerifierResult,
 } from "./claim.ts";
 import { listDeliveryPool } from "./pool.ts";
@@ -54,13 +63,15 @@ import {
 } from "./role-grants.ts";
 
 /** submit 冲突的释放引导（T4 carried ruling——释放走 fail，claim 仍活须让出，
- *  然后结束）；designer/developer/verifier 各自的漂移语义。 */
+ *  然后结束）；designer/developer/verifier/release-preparer 各自的漂移语义。 */
 const RELEASE_VIA_FAIL_GUIDANCE_DESIGNER =
   "设计已由人确认/输入已变化，请调用 delivery_fail_task 释放本次领取后结束";
 const RELEASE_VIA_FAIL_GUIDANCE_DEVELOPER =
   "输入已变化/设计已推进，请调用 delivery_fail_task 释放本次领取后结束";
 const RELEASE_VIA_FAIL_GUIDANCE_VERIFIER =
   "候选已变化/阶段已推进，请调用 delivery_fail_task 释放本次领取后结束";
+const RELEASE_VIA_FAIL_GUIDANCE_RELEASE_PREPARER =
+  "候选或验证记录已变化/发布已由人推进，请调用 delivery_fail_task 释放本次领取后结束";
 
 function result(value: unknown) {
   return {
@@ -77,7 +88,7 @@ function denied(message: string) {
 function requireRoleGrant(sessionId: string, workspacePath: string): RoleGrant | string {
   const grant = roleGrantOf(sessionId);
   if (grant === null) {
-    return "非角色执行会话（not a role execution session）：本会话未被授予交付执行角色（designer/developer），delivery_* 工具不可用";
+    return "非角色执行会话（not a role execution session）：本会话未被授予交付执行角色（designer/developer/verifier/release-preparer），delivery_* 工具不可用";
   }
   if (grant.workspacePath !== workspacePath) {
     return `非角色执行会话（not a role execution session）：本会话的角色授权属于另一个工作区（${grant.workspacePath}），与当前挂载的工作区不符`;
@@ -175,13 +186,15 @@ export function createDeliveryRunnerExtension(
         name: "delivery_list_ready_tasks",
         label: "List Ready Delivery Tasks",
         description:
-          "List the delivery task pool of this workspace, all three roles (designer: "
+          "List the delivery task pool of this workspace, all four roles (designer: "
           + "intake→design; developer: ready_for_implementation→implementation; "
           + "verifier: verification — runs the configured checks on candidate "
-          + "commits): ready tasks (claimable now, merged queue sorted P0→P3 then "
-          + "key, each entry carrying its role) and blocked tasks with per-item "
-          + "reasons and role. No parameters.",
-        promptSnippet: "List ready/blocked delivery tasks (designer + developer + verifier) for this workspace",
+          + "commits; release-preparer: release_ready — drafts the release notes "
+          + "and rollback plan from the verified evidence): ready tasks "
+          + "(claimable now, merged queue sorted P0→P3 then key, each entry "
+          + "carrying its role) and blocked tasks with per-item reasons and role. "
+          + "No parameters.",
+        promptSnippet: "List ready/blocked delivery tasks (designer + developer + verifier + release-preparer) for this workspace",
         parameters: Type.Object({}),
         execute: async (_callId, _params, _signal, _update, ctx) => {
           const sessionId = ctx.sessionManager.getSessionId();
@@ -219,13 +232,14 @@ export function createDeliveryRunnerExtension(
           + "contract assigns (designer: intake→design, seeds design.md; developer: "
           + "ready_for_implementation→implementation, prepares isolated worktrees; "
           + "verifier: verification, prepares detached candidate checkouts and freezes "
-          + "the check list). Returns the input pack: requirement README, repository "
-          + "list, the design.md path, and — for the developer role — the worktree list "
-          + "(path+branch per repository; the ONLY places you may write code) / — for "
-          + "the verifier role — the candidate checkout list plus the frozen check "
-          + "list (the ONLY checks you may run, each via delivery_run_check by name). "
-          + "Idempotent: retrying the same key in the same session replays the "
-          + "original grant.",
+          + "the check list; release-preparer: release_ready, no environment at all — "
+          + "a pure documentation claim). Returns the input pack: requirement README, "
+          + "repository list, the design.md path, and — for the developer role — the "
+          + "worktree list (path+branch per repository; the ONLY places you may write "
+          + "code) / — for the verifier role — the candidate checkout list plus the "
+          + "frozen check list (the ONLY checks you may run, each via "
+          + "delivery_run_check by name). Idempotent: retrying the same key in the "
+          + "same session replays the original grant.",
         promptGuidelines: [
           "Pick from delivery_list_ready_tasks' ready list, respecting your role contract — claim exactly the assigned task.",
           "Retry of a timed-out claim is safe — the same claim is replayed, no second transaction.",
@@ -254,12 +268,19 @@ export function createDeliveryRunnerExtension(
                   sessionId,
                   requestId: `claim:${sessionId}:${params.key}`,
                 })
-                : await claimDesignerTask({
-                  workspacePath,
-                  key: params.key,
-                  sessionId,
-                  requestId: `claim:${sessionId}:${params.key}`,
-                });
+                : gate.role === "release-preparer"
+                  ? await claimReleasePreparerTask({
+                    workspacePath,
+                    key: params.key,
+                    sessionId,
+                    requestId: `claim:${sessionId}:${params.key}`,
+                  })
+                  : await claimDesignerTask({
+                    workspacePath,
+                    key: params.key,
+                    sessionId,
+                    requestId: `claim:${sessionId}:${params.key}`,
+                  });
             const { grant, replayed } = claimed;
             // 明文 ownerToken 只在首次核发；重放为空串 → 不覆写已存凭证。
             let note: string | undefined;
@@ -271,7 +292,10 @@ export function createDeliveryRunnerExtension(
             // developer/verifier 专属产物（claim.json 随领取落盘——重放同样在场）：
             // worktree 清单（developer = 隔离代码工作区 / verifier = 候选 detached
             // checkout）；verifier 另附 checks 冻结清单（run_check 的名字来源）。
-            const claimState = gate.role === "designer" ? null : readClaim(grant.item.path);
+            // release-preparer 纯文档角色：无 worktrees/checks 键。
+            const claimState = gate.role === "developer" || gate.role === "verifier"
+              ? readClaim(grant.item.path)
+              : null;
             return result({
               ok: true,
               replayed,
@@ -284,7 +308,7 @@ export function createDeliveryRunnerExtension(
               repositories: grant.item.item.repositories,
               requirementReadme: grant.item.content,
               designDocPath: join(grant.item.path, "delivery", "artifacts", "design.md"),
-              ...(gate.role !== "designer"
+              ...(gate.role === "developer" || gate.role === "verifier"
                 ? { worktrees: claimState?.worktrees ?? [] }
                 : {}),
               ...(gate.role === "verifier"
@@ -317,16 +341,21 @@ export function createDeliveryRunnerExtension(
           + "implementation candidates and moves the item to verification. "
           + "verifier: {key} only (+ optional notes) — verifier 无需传检查结果，"
           + "全部由 delivery_run_check 记录（服务端自 claim 的检查证据仓取用，"
-          + "参数里没有任何检查字段）。Credentials are held server-side. After "
-          + "submitting, end the turn: confirmation, verification and release are "
-          + "the human's moves.",
+          + "参数里没有任何检查字段）。release-preparer: release_notes (the "
+          + "release notes body — change summary / impact / verification "
+          + "conclusions, grounded in the verified evidence) + optional "
+          + "rollback_notes (rollback steps) — drafts delivery.releasePlan; the "
+          + "item stays release_ready awaiting the HUMAN record-release. "
+          + "Credentials are held server-side. After submitting, end the turn: "
+          + "confirmation, verification and release are the human's moves.",
         promptGuidelines: [
           "designer: write the full design into design_markdown; list concrete, checkable acceptance_criteria (at least one).",
           "developer: commit your work on the worktree branches, then submit one candidate {repositoryId, commit} per repository plus notes.",
           "verifier: run every configured check via delivery_run_check first, then submit with key (+optional notes) — check results are taken from the server-side records, never from parameters.",
+          "release-preparer: draft release_notes grounded in the verified evidence (never invent verification conclusions) plus optional rollback_notes, then submit — recording the release (record-release) is the human's move.",
           "A conflict result means the input changed or a human already advanced the item — follow its guidance (release via delivery_fail_task) and end.",
         ],
-        promptSnippet: "Submit the claimed task's result (design or candidates) and wait for the human's move",
+        promptSnippet: "Submit the claimed task's result (design, candidates, or release notes) and wait for the human's move",
         // 参数扁平可选字段组（2026-10-24 Phase-3 smoke ruling）：联合
         // （designer 形 | developer 形）schema 在该 pi SDK 版本的调用侧解析
         // 不工作（真 LLM 会话参数全落 {}，schema 校验全拒）。单个对象 +
@@ -355,6 +384,12 @@ export function createDeliveryRunnerExtension(
           )),
           notes: Type.Optional(Type.String({
             description: "(developer/verifier) Change summary / self-test / verification notes",
+          })),
+          release_notes: Type.Optional(Type.String({
+            description: "(release-preparer) Release notes body — change summary / impact / verification conclusions grounded in the verified evidence; required",
+          })),
+          rollback_notes: Type.Optional(Type.String({
+            description: "(release-preparer) Rollback steps; optional",
           })),
         }),
         execute: async (_callId, params, _signal, _update, ctx) => {
@@ -392,6 +427,22 @@ export function createDeliveryRunnerExtension(
                 message:
                   "verifier 提交只需 key（可选 notes）——检查结果由服务端从 delivery_run_check 的记录取用，"
                   + "不要传 design_markdown/acceptance_criteria/candidates（它们是其他角色的形状）",
+              });
+            }
+          } else if (gate.role === "release-preparer") {
+            // release-preparer 形状（Phase-5 T2）：release_notes 必填（M2
+            // prepare-release 形状），rollback_notes 可选；错形状 → validation
+            // 文本，不进服务。
+            if (typeof raw.release_notes !== "string" || raw.release_notes.trim() === "") {
+              return result({
+                ok: false,
+                error: "validation",
+                message:
+                  "release-preparer 提交需要 release_notes（发布说明正文——变更摘要/影响面/验证结论引用），rollback_notes 可选（回滚步骤）"
+                  + (raw.design_markdown !== undefined || raw.acceptance_criteria !== undefined
+                    || raw.candidates !== undefined
+                    ? "——design_markdown/acceptance_criteria/candidates 是其他角色的形状"
+                    : ""),
               });
             }
           } else {
@@ -453,6 +504,32 @@ export function createDeliveryRunnerExtension(
                 item: itemSummary(detail.item),
               });
             }
+            if (gate.role === "release-preparer") {
+              // release-preparer 提交：服务端写 delivery.releasePlan（M2
+              // prepare-release 语义的 actor=agent 变体），phase 保持
+              // release_ready 等人 record-release（登记发布是人的动作——
+              // release 块永不自动写）。
+              const detail = await submitReleasePreparerResult({
+                workspacePath,
+                key: raw.key as string,
+                attemptId: credentials.attemptId,
+                generation: credentials.generation,
+                ownerToken: credentials.ownerToken,
+                releaseNotes: raw.release_notes as string,
+                ...(typeof raw.rollback_notes === "string"
+                  ? { rollbackNotes: raw.rollback_notes }
+                  : {}),
+                // 会话自链接（四角色同款）：服务端把会话挂入 item.conversations。
+                conversationId: sessionId,
+              });
+              resetToBareGrant(sessionId, gate);
+              return result({
+                ok: true,
+                message:
+                  `发布材料已提交（releasePlan 写入 ${raw.key}），等待人工登记发布（record-release 是人的动作）——本轮到此结束，不要继续推进阶段`,
+                item: itemSummary(detail.item),
+              });
+            }
             const detail = await submitDesignerResult({
               workspacePath,
               key: raw.key as string,
@@ -479,7 +556,9 @@ export function createDeliveryRunnerExtension(
                   ? RELEASE_VIA_FAIL_GUIDANCE_DEVELOPER
                   : gate.role === "verifier"
                     ? RELEASE_VIA_FAIL_GUIDANCE_VERIFIER
-                    : RELEASE_VIA_FAIL_GUIDANCE_DESIGNER
+                    : gate.role === "release-preparer"
+                      ? RELEASE_VIA_FAIL_GUIDANCE_RELEASE_PREPARER
+                      : RELEASE_VIA_FAIL_GUIDANCE_DESIGNER
               : undefined;
             return errorResult(error, guidance);
           }
@@ -491,10 +570,11 @@ export function createDeliveryRunnerExtension(
         label: "Fail / Release Delivery Task",
         description:
           "Report failure and release the claimed task in your role (designer: design→intake; "
-          + "developer: implementation→ready_for_implementation; verifier: releases the "
-          + "claim, phase untouched; blocked=true marks the item blocked — still "
-          + "claimable once unblocked). Also used to release a claim invalidated "
-          + "by a human action, per the submit tool's conflict guidance. Credentials are server-held.",
+          + "developer: implementation→ready_for_implementation; verifier and "
+          + "release-preparer: release the claim, phase untouched; blocked=true "
+          + "marks the item blocked — still claimable once unblocked). Also used "
+          + "to release a claim invalidated by a human action, per the submit "
+          + "tool's conflict guidance. Credentials are server-held.",
         promptGuidelines: [
           "Give the real reason in reason; set blocked=true only for external/environmental blockers.",
           "After releasing, end the turn — do not immediately re-claim the same item.",
@@ -527,7 +607,9 @@ export function createDeliveryRunnerExtension(
               ? await failDeveloperTask(failInput)
               : gate.role === "verifier"
                 ? await failVerifierTask(failInput)
-                : await failDesignerTask(failInput);
+                : gate.role === "release-preparer"
+                  ? await failReleasePreparerTask(failInput)
+                  : await failDesignerTask(failInput);
             resetToBareGrant(sessionId, gate);
             return result({
               ok: true,

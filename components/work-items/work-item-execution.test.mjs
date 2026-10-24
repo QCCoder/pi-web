@@ -523,3 +523,65 @@ test("WorkspaceManager checks 编辑器 round-trip：GET 播种 + PUT 带 verifi
   assert.match(source, /名称与命令/);
   assert.match(source, /1–3600 的整数/);
 });
+
+// --------------------- Phase-5 T2: release-preparer 徽标 + releasePlan 摘要
+
+test("WorkItemExecution renders the release-preparer role badge on the claim (Phase-5 T2)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({ claim: claim({ role: "release-preparer" }) }),
+    })),
+  );
+  assert.match(html, /release-preparer/, "release-preparer role label rendered");
+  assert.match(html, /停止执行/, "claim card still complete");
+});
+
+test("WorkItemExecution renders submitted attempt releasePlan 摘要（notes 首行 + rollback 有无标记）", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        recentAttempts: [
+          attempt({
+            role: "release-preparer",
+            outcome: "submitted",
+            releasePlan: {
+              notes: "本次发布新增登录页与鉴权中间件。\n影响面：会话链路。\n验证：build 通过。",
+              rollback: "回滚：revert 发布分支并重发上一版本镜像。",
+            },
+          }),
+          attempt({
+            attemptId: "01JC",
+            role: "release-preparer",
+            sessionId: "sess-c",
+            outcome: "submitted",
+            releasePlan: { notes: "小版本修复。" },
+          }),
+        ],
+      }),
+    })),
+  );
+  // notes 首行铺正文（多行只取首行），完整 notes+rollback 进 title。
+  assert.match(html, /发布材料/, "releasePlan summary label rendered");
+  assert.match(
+    html,
+    /发布材料 本次发布新增登录页与鉴权中间件。 · 含回滚/,
+    "row body carries ONLY the first line + rollback marker (later lines stay in the title)",
+  );
+  assert.match(html, /发布材料 小版本修复。 · 未附回滚/, "rollback-absent marker on the second attempt");
+  assert.match(html, /含回滚/, "rollback-present marker");
+  assert.match(html, /未附回滚/, "rollback-absent marker");
+  assert.match(html, /title="[^"]*影响面：会话链路。[^"]*"/, "full notes surfaced via title tooltip");
+  assert.match(html, /title="[^"]*revert 发布分支[^"]*"/, "full rollback surfaced via title tooltip");
+});
+
+test("WorkItemExecution attempt 行不带 releasePlan 时零渲染（非 release-preparer 提交不受影响）", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        recentAttempts: [attempt({ role: "designer", outcome: "submitted" })],
+      }),
+    })),
+  );
+  assert.doesNotMatch(html, /发布材料/, "no releasePlan summary without a releasePlan");
+  assert.doesNotMatch(html, /含回滚|未附回滚/);
+});

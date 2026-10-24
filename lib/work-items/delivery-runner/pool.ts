@@ -2,7 +2,8 @@
 // 2026-10-24-phase-three §3/§1.2）；Phase-4 T1 增第三角色 verifier（spec
 // 2026-10-24-phase-four §3：verification 阶段谓词）；Phase-5 T1 增第四角色
 // release-preparer（spec 2026-10-25-phase-five §2：release_ready 阶段谓词——
-// 纯文档角色，材料准备就是该阶段的活动）。就绪任务不是存储实体——
+// 纯文档角色，材料准备就是该阶段的活动；T2 增循环闸 carried ruling #1：
+// releasePlan 已在场即不再自动重派）。就绪任务不是存储实体——
 // 每次查询从文件状态推导。本模块分两层：
 //
 //   projectDeliveryPool —— 纯投影：零 fs，全部输入（含每项预计算的
@@ -56,7 +57,13 @@ export type DesignerPoolReason =
   //（release_ready 但无人/verifier 登记过验证——材料必须由验证证据支撑）/
   // 候选被换（verification.candidateDigest 与当前候选集摘要不匹配——旧验证
   // 下的材料不许准备，人须重走验证）。
-  | "verification-missing" | "stale-verification";
+  | "verification-missing" | "stale-verification"
+  // release-preparer 循环闸（Phase-5 T2，T1 review carried ruling #1——spec 级
+  // 缺口修复）：releasePlan 已在场（前轮自动准备或人工 prepare-release 写入）
+  // ——已准备过的项不再自动重派；人重新起草走人工 prepare-release 路由。无此
+  // 闸，自动准备 → submit 写 releasePlan → 池子仍 ready → 下一拍再领再写，
+  // 循环刷 attempt。
+  | "release-plan-exists";
 
 export interface PoolEntry {
   key: string;
@@ -95,6 +102,10 @@ export interface DeliveryPoolItem {
      *  candidateDigest（结构子集即可，读取端透传完整
      *  DeliveryVerificationRecord）。 */
     verification?: { candidateDigest: string };
+    /** 发布材料（Phase-5 T2 循环闸）——只有 release-preparer 谓词消费，只看
+     *  在场与否（在场 → release-plan-exists，已准备过的项不再自动重派；读取
+     *  端透传完整 DeliveryReleasePlan，纯投影不读内容）。 */
+    releasePlan?: unknown;
   } | null;
 }
 
@@ -219,13 +230,15 @@ function verifierReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): Desi
   return [...reasons, ...sharedReasons(item, ctx)];
 }
 
-/** release-preparer 谓词（Phase-5 spec §2，binding）：ready ⇔ managed ∧
- *  enabled ∧（阶段由角色判定保证——只有 release_ready 的项按本谓词投影）∧
- *  verification 通过记录存在 ∧ verification.candidateDigest ===
- *  candidatesDigest(当前候选集)（候选未被换——旧验证下的材料不许准备，人须
- *  重走验证）∧ 共用检查。纯文档角色：不消费 registeredRepos / checks。
- *  candidatesDigest 从 delivery-types 引入（纯摘要，零 fs）；候选被清
- *  （rework 四清式）时摘要与记录不匹配，同样落 stale-verification。 */
+/** release-preparer 谓词（Phase-5 spec §2，binding；T2 增循环闸 carried
+ *  ruling #1）：ready ⇔ managed ∧ enabled ∧（阶段由角色判定保证——只有
+ *  release_ready 的项按本谓词投影）∧ verification 通过记录存在 ∧
+ *  verification.candidateDigest === candidatesDigest(当前候选集)（候选未被换
+ *  ——旧验证下的材料不许准备，人须重走验证）∧ **releasePlan 未在场**（已
+ *  准备过的项不再自动重派——人重新起草走人工 prepare-release 路由）∧ 共用
+ *  检查。纯文档角色：不消费 registeredRepos / checks。candidatesDigest 从
+ *  delivery-types 引入（纯摘要，零 fs）；候选被清（rework 四清式）时摘要与
+ *  记录不匹配，同样落 stale-verification。 */
 function releasePreparerReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): DesignerPoolReason[] {
   const reasons: DesignerPoolReason[] = [];
   if (!item.delivery) reasons.push("not-managed");
@@ -235,6 +248,9 @@ function releasePreparerReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext
     reasons.push("verification-missing");
   } else if (verification.candidateDigest !== candidatesDigest(item.delivery?.candidates ?? [])) {
     reasons.push("stale-verification");
+  }
+  if (item.delivery?.releasePlan !== undefined) {
+    reasons.push("release-plan-exists");
   }
   return [...reasons, ...sharedReasons(item, ctx)];
 }
