@@ -324,16 +324,16 @@ Key behavior:
   新工作区））。**中央管理整页** = `components/work-items/`：`WorkItemsPage`（页头 工作区选择器+列表|看板分段+＋新建 →
   Toolbar 筛选（活动|归档|回收站）→ `WorkItemsList`/`WorkItemsBoard`（七列看板，无拖拽跳阶段）→ `WorkItemDetailView`
   （概况/设计编辑/证据（确认/候选/验证/发布）/动作条 `WorkItemActionbar`/事件审计 `WorkItemEvents`）+ `WorkItemCreateForm`
-  （`enableDelivery` 复选框**缺省不勾**）。**交付自动执行区（Phase-2 T9）**：`WorkItemExecution.tsx`（managed 项专属，
-  挂在 DetailView 动作条下）：四态——活动 claim 卡（role/代数/心跳 + 查看会话[claim.sessionId→onOpenConversation] +
-  「停止执行」）、`paused` 横幅（原因/连续失败计数 + 「恢复自动领取」）、`pendingInterruption` 横幅（「重新检查并恢复」）、
-  最近 attempts（末 5 新→旧，outcome 徽章 + needsAttention「待处理」标记）；busy 全按钮禁用防双击，动作结果
+  （`enableDelivery` 复选框**缺省不勾**）。**交付自动执行区（Phase-2 T9；Phase-3 T5 增量）**：`WorkItemExecution.tsx`（managed 项专属，
+  挂在 DetailView 动作条下）：四态——活动 claim 卡（**role 徽标 designer/developer**/代数/心跳 + 查看会话[claim.sessionId→onOpenConversation] +
+  「停止执行」+ **claim.worktrees 列表**[每仓一条 `repositoryId · 分支`，完整检出路径进 title 提示])、`paused` 横幅（原因/连续失败计数 + 「恢复自动领取」）、`pendingInterruption` 横幅（「重新检查并恢复」）、
+  最近 attempts（末 5 新→旧，outcome 徽章 + **role 徽标** + needsAttention「待处理」标记 + **submitted 项的候选摘要**[内联串 `repo@commit 前 8 位`]）；busy 全按钮禁用防双击，动作结果
   `{ok}|{ok:false,error}` 出参 → 内联 role=alert（recover 409 的 pids 由 WorkItemsPage 拼进 error 文案）。执行状态由
   WorkItemsPage 拉取（GET `.../delivery-execution`，仅 `item.delivery` 存在的非回收站选中项拉；revision 变化 + 动作成功
   重拉，effect 带切项取消守卫）；三动作 = POST `.../delivery-execution/stop|recover`（manual:true）与
   `/api/workspaces/[id]/delivery/resume`（body {key}），成功 → invalidate + 重拉。设置›工作区（WorkspaceManager）：
-  work-items+workflows 双开时显示「交付自动化」配置块（enabled 开关 + designer profile 文本框 + 预算只读「失败上限 N 次 ·
-  执行上限 M 分钟」+ 保存 PUT `/delivery`——budget 与 designer.model 原样回传保 round-trip；配置结构是
+  work-items+workflows 双开时显示「交付自动化」配置块（enabled 开关 + **designer/developer profile 文本框（T5 双行同形）** + 预算只读「失败上限 N 次 ·
+  执行上限 M 分钟」+ 保存 PUT `/delivery`——budget 与两角色既有 model 覆写原样回传保 round-trip；配置结构是
   delivery-runner/config 的客户端镜像类型，不 import 服务端模块）。
   看板投影在 `work-item-phases.ts`（纯模块）：老子阶段（analysis/
   requirement_approval/plan_approval）投影进 design 列但**显示原始 phase 标签**（不谎报已进标准列）；老 `complete` 投影进
@@ -353,12 +353,15 @@ Key behavior:
 
 ### Delivery 自动执行（designer 首角色；`lib/work-items/delivery-runner/`，2026-10 Phase-2）
 
-Phase-2 在 M2 人工交付流之上加了**首个自动化角色 designer**（intake 需求 → design.md + 验收条件 → 等人
-confirm-design）。developer/verifier/release-preparer 角色、worktree 隔离、验证命令自动化、多槽位并发均
-**未实现**（spec §2/§12 留后续阶段）——现状 = 单角色 + 单槽位/工作区。
+Phase-2 落了**首个自动化角色 designer**（intake 需求 → design.md + 验收条件 → 等人
+confirm-design）；Phase-3（2026-10）**第二个角色 developer 上岗**（ready_for_implementation
+领取 → `prepareWorktrees` 每仓 worktree 隔离 → 候选 commit 提交进 verification 等人
+record-verification；合并角色池 + 按条目角色分派，跨角色共享单槽位/工作区）。
+verifier/release-preparer 角色、验证命令自动化、多槽位并发均**未实现**（spec §2/§12
+留后续阶段）。
 
 - **配置 `.pi/delivery.yaml`**（`config.ts`；路由 `GET|PUT /api/workspaces/[id]/delivery`）：
-  `{schemaVersion: 1, enabled, roles.designer: {profile?, model?}, budget: {maxAttemptsPerInput, maxExecutionMinutes}}`，
+  `{schemaVersion: 1, enabled, roles: { designer?: {profile?, model?}, developer?: {profile?, model?} }（Phase-3 T5 显式双字段，两键同规校验；旧单键文件照常解析）, budget: {maxAttemptsPerInput, maxExecutionMinutes}}`，
   budget 缺省 **3 次 / 30 分钟**、enabled **缺省 false**（文件缺失 = GET 返回 `{config: null}` = disabled）；
   坏 YAML/坏结构 → Validation（HTTP 400）；PUT 写入前过 capability 门 `assertAutomationCapable`——manifest 须
   同时含 **work-items + workflows**（`workflows` capability 自此激活自动执行含义：配置写入 + 工具挂载 +
@@ -407,8 +410,9 @@ confirm-design）。developer/verifier/release-preparer 角色、worktree 隔离
 - **角色会话（`role-session.ts`，`launchDesignerSession`）**：两步创建序——`createSession` 不带 command →
   **`grantRole`（先于 prompt）** → `markDeliveryExecutionActive` → `set_session_name`（`designer · <KEY>`）→
   开场 prompt（fire-and-forget，不 await 轮结束）；开场合同（`DESIGNER_CONTRACT` 经 facade
-  `CreateSessionInput.appendSystemPrompt` 注入）**限定只领取指派项**；模型覆写 = `config.roles.designer.model`
-  （`CreateSessionInput.model` 透传 StartSessionOptions）；model 缺省而 `roles.designer.profile` 在场时**从工作区
+  `CreateSessionInput.appendSystemPrompt` 注入）**限定只领取指派项**；模型覆写按角色取 = `config.roles[role].model`
+  （roles 显式双字段 designer/developer——T5；`CreateSessionInput.model` 透传 StartSessionOptions）；model 缺省而
+  `roles[role].profile` 在场时**从工作区
   subagent profile 解析模型**（final review fix——profile 字段曾 inert）：读 `<workspace>/.pi/agents/<profile>.md`
   frontmatter 的 `model:` 字段（`provider/model` 或裸 modelId，复用 `parseFrontmatter`；缺文件/无 model/名字非法/
   解析抛错 → 静默回落默认模型，至多日志；注入缝 `LaunchDeps.readProfileModel`，默认实现
@@ -788,8 +792,8 @@ lib/
     types.ts                WorkItemRecord / phases（七阶段 delivery 扩展 + 老子阶段）/ events (incl. optional `external` source ref) / WorkItemImportOutcome / CreateWorkItemInput.enableDelivery
     delivery-types.ts       DeliveryAction 11 个 + DeliveryMetadata（protocolVersion 1 / mode manual；designConfirmed/candidates/verification/releasePlan/release/lastRequest）+ contentDigest/candidatesDigest（sha256）+ parseDelivery（未知 protocolVersion/非 manual 硬错误）+ DELIVERY_ACTIONS 权威表
     delivery.ts             标准交付流（2026-10 M2）：planDeliveryTransition（纯，digest 注入）+ applyDeliveryAction（锁内 + requestId 幂等 + design.md 播种）+ readDesign/updateDesignContent（design.md 编辑 + 失效回退）；re-export legalDeliveryActions
-    delivery-runner/        交付自动执行（designer 首角色，2026-10 Phase-2——详见 Work Items 章「Delivery 自动执行」节；单角色单槽位，developer/verifier 等后续角色未实现）
-      config.ts             .pi/delivery.yaml 读写 + parseDeliveryRunnerConfig（enabled 缺省 false、budget 缺省 3/30、字段级 Validation）+ assertAutomationCapable（manifest 须含 work-items+workflows）
+    delivery-runner/        交付自动执行（2026-10 Phase-2 designer 首角色 + Phase-3 developer 第二角色——详见 Work Items 章「Delivery 自动执行」节；verifier/release-preparer 等后续角色未实现，跨角色共享单槽位/工作区）
+      config.ts             .pi/delivery.yaml 读写 + parseDeliveryRunnerConfig（roles 显式双字段 designer/developer 同规校验、enabled 缺省 false、budget 缺省 3/30、字段级 Validation）+ assertAutomationCapable（manifest 须含 work-items+workflows）
       pool.ts               designer 池子：projectDesignerPool 纯投影（就绪谓词：managed∧enabled∧intake∧无claim∧无中断∧未暂停∧失败未达上限∧status∈{open,blocked} 白名单∧未归档；P0→P3→key）+ listDesignerPool 读取端装配（运行时信号 + contentDigest）
       attempts.ts           claim.json/automation-paused/failure-window（runtime/ advisory 运行态，claim 首写时幂等接进 .gitignore；宽松读）+ attempts/ 追加审计 + resolveInterruptions + countRecentFailures（自最近 resume 起的尾部连续失败，遇 submitted 断）+ ownerToken 只存 sha256（hashOwnerToken）
       claim.ts              claimDesignerTask（写锁事务：幂等 requestId + 谓词双检 + design.md 播种 + intake→design 流转）/ submitDesignerResult（design.md+验收条件→等人 confirm，status 回 open）/ failDesignerTask（blocked 可选；失败预算→paused）+ heartbeatActiveClaim（20s 续约）+ recordInterruption + resumeAutomation

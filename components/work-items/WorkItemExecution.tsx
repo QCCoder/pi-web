@@ -7,7 +7,9 @@ import { formatRelativeTime } from "@/lib/format-time";
  *  四态呈现：活动 claim（角色会话链接 + 停止执行）/ 自动领取暂停横幅
  *  （原因 + 连续失败计数 + 恢复自动领取）/ 未确认执行中断横幅（重新检查并
  *  恢复）/ 最近 attempts 列表（末 5 条新→旧，outcome 徽章 + needsAttention
- *  待处理标记）。
+ *  待处理标记）。Phase-3 T5：claim/attempts 带 role 徽标（designer/developer）；
+ *  developer 的 claim 展示 worktree 集（repositoryId · 分支，完整路径进
+ *  title），submit 的 attempt 展示候选摘要（repo@commit 前 8 位）。
  *
  *  本组件是纯展示 + 动作转发：执行状态（GET delivery-execution）与三个动作
  *  （POST stop / recover / delivery-resume）都由 WorkItemsPage 持有并经
@@ -18,21 +20,34 @@ import { formatRelativeTime } from "@/lib/format-time";
 // —— UI 侧结构类型（delivery-runner/attempts.ts 的客户端镜像：该模块 import
 //    node:fs，不能进浏览器 bundle——WorkspaceManager 的 kitLoops 同款手法）。 ——
 
+export type ExecutionRole = "designer" | "developer";
+
+/** RoleWorktree（delivery-runner/worktrees.ts）的客户端镜像：developer 领取
+ *  时预建的 worktree——repoPath 是登记仓主路径，path 是 worktree 检出路径。 */
+export interface ExecutionWorktree {
+  repositoryId: string;
+  repoPath: string;
+  path: string;
+  branch: string;
+}
+
 export interface ExecutionClaimSummary {
   attemptId: string;
   generation: number;
-  role: "designer";
+  role: ExecutionRole;
   sessionId: string;
   claimedAt: string;
   lastSeenAt: string;
   requirementDigest: string;
+  /** developer 领取时预建的 worktree 集（designer claim 无此字段）。 */
+  worktrees?: ExecutionWorktree[];
   lastRequest?: { requestId: string; at: string };
 }
 
 export interface ExecutionAttemptSummary {
   attemptId: string;
   generation: number;
-  role: "designer";
+  role: ExecutionRole;
   sessionId: string;
   claimedAt: string;
   endedAt?: string;
@@ -40,6 +55,9 @@ export interface ExecutionAttemptSummary {
   reason?: string;
   requirementDigest: string;
   needsAttention?: boolean;
+  /** developer submit 的候选集（designer attempt 无此字段）。 */
+  candidates?: Array<{ repositoryId: string; commit: string }>;
+  worktrees?: ExecutionWorktree[];
 }
 
 export interface DeliveryExecutionState {
@@ -136,6 +154,26 @@ function OutcomeBadge({ outcome }: { outcome: ExecutionAttemptSummary["outcome"]
   );
 }
 
+/** 领取角色徽标（Phase-3 T5：developer 角色上岗后需要一眼分辨谁在跑）。
+ *  原文 designer/developer——与 .pi/delivery.yaml 的角色键一致，不翻译。 */
+function RoleBadge({ role }: { role: ExecutionRole }) {
+  return (
+    <span
+      style={{
+        padding: "1px 6px",
+        borderRadius: 5,
+        fontSize: 10.5,
+        fontWeight: 700,
+        color: "var(--text-dim)",
+        background: "var(--bg-hover)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {role}
+    </span>
+  );
+}
+
 export function WorkItemExecution({
   execution,
   busy,
@@ -202,7 +240,7 @@ export function WorkItemExecution({
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <strong style={{ fontSize: 11, color: "var(--text-dim)" }}>执行中</strong>
-            <span style={{ color: "var(--text-muted)" }}>{claim.role}</span>
+            <RoleBadge role={claim.role} />
             <span style={{ color: "var(--text-dim)" }}>第 {claim.generation} 代</span>
             <span style={{ flex: 1 }} />
             <button
@@ -226,6 +264,29 @@ export function WorkItemExecution({
               查看会话
             </button>
           </div>
+          {/* developer 领取的 worktree 集（designer claim 无）：每仓一条执行
+              分支。path 太长不铺正文——repositoryId + 分支名成行，完整检出
+              路径进 title 提示。 */}
+          {claim.worktrees && claim.worktrees.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {claim.worktrees.map((worktree) => (
+                <span
+                  key={`${worktree.repositoryId}:${worktree.branch}`}
+                  title={worktree.path}
+                  style={{
+                    padding: "1px 6px",
+                    borderRadius: 5,
+                    fontSize: 10.5,
+                    color: "var(--text-dim)",
+                    background: "var(--bg-hover)",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {worktree.repositoryId} · {worktree.branch}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -302,6 +363,7 @@ export function WorkItemExecution({
               }}
             >
               <OutcomeBadge outcome={entry.outcome} />
+              <RoleBadge role={entry.role} />
               {entry.needsAttention && (
                 <span
                   style={{
@@ -317,6 +379,13 @@ export function WorkItemExecution({
                 </span>
               )}
               <span>第 {entry.generation} 代 · {formatRelativeTime(entry.claimedAt)}</span>
+              {/* developer submit 的候选摘要（Phase-3 T5）：`repo@commit 前 8 位`
+                  内联串——完整 sha 不铺正文（审计细节在 attempts 文件里）。 */}
+              {entry.candidates && entry.candidates.length > 0 && (
+                <span style={{ color: "var(--text-dim)", overflowWrap: "anywhere" }}>
+                  候选 {entry.candidates.map((candidate) => `${candidate.repositoryId}@${candidate.commit.slice(0, 8)}`).join(" · ")}
+                </span>
+              )}
               {entry.reason && (
                 <span style={{ color: "var(--text-dim)", overflowWrap: "anywhere" }}>{entry.reason}</span>
               )}

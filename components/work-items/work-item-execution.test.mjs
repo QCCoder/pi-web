@@ -248,3 +248,70 @@ test("GET /delivery error guard runs BEFORE the default-mirror fallback (fix rou
   assert.ok(guardIndex < fallbackIndex, "guard ordered BEFORE the fallback");
   assert.match(handler[0], /setDeliveryError\(String\(data\.error\)\)/);
 });
+
+// ----------------------------------- Phase-3 T5: developer role + worktrees/candidates
+
+test("WorkItemExecution renders the developer role badge on the claim (Phase-3 T5)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({ claim: claim({ role: "developer" }) }),
+    })),
+  );
+  assert.match(html, /developer/, "developer role label rendered");
+  assert.match(html, /停止执行/, "claim card still complete");
+});
+
+test("WorkItemExecution renders claim worktrees (repositoryId + branch, path 只进 title)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        claim: claim({
+          role: "developer",
+          worktrees: [
+            {
+              repositoryId: "repo-alpha",
+              repoPath: "/ws/repositories/repo-alpha",
+              path: "/ws/repositories/repo-alpha-worktrees/pi-delivery-REQ-0001-gen3",
+              branch: "pi-delivery/REQ-0001/gen3",
+            },
+          ],
+        }),
+      }),
+    })),
+  );
+  assert.match(html, /repo-alpha/, "repositoryId shown");
+  assert.match(html, /pi-delivery\/REQ-0001\/gen3/, "branch shown");
+  // 长 path 不直接铺正文——作为 title 提示挂在条目上。
+  assert.match(html, /title="[^"]*repo-alpha-worktrees/, "worktree path surfaced via title tooltip");
+});
+
+test("WorkItemExecution renders submitted attempt candidates summary (repo@commit 前 8 位)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        recentAttempts: [
+          attempt({
+            role: "developer",
+            outcome: "submitted",
+            candidates: [{ repositoryId: "repo-alpha", commit: "abcd1234567890ef" }],
+          }),
+        ],
+      }),
+    })),
+  );
+  assert.match(html, /repo-alpha@abcd1234/, "repo@commit8 summary rendered");
+  assert.doesNotMatch(html, /repo-alpha@abcd1234567890ef/, "full commit sha not dumped");
+});
+
+test("WorkspaceManager 配置区编辑 developer profile（与 designer 同形，round-trip 保真）", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  // developer 同形行：独立草稿 state + 表单行。
+  assert.match(source, /deliveryDeveloperProfile/);
+  assert.match(source, /Developer Profile/);
+  // GET 播种与保存回填都读 roles.developer.profile。
+  const seedMatches = source.match(/roles\.developer\?\.profile \?\? ""/g) ?? [];
+  assert.ok(seedMatches.length >= 2, "load seed + post-save re-seed both read roles.developer.profile");
+  // PUT round-trip：保留既有 developer model 覆写（designer 同款习语）。
+  assert.match(source, /deliveryConfig\.roles\.developer/);
+  assert.match(source, /existingDeveloper/);
+});

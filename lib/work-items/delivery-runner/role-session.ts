@@ -258,11 +258,10 @@ export async function launchRoleSession(opts: LaunchRoleOptions): Promise<string
     now: opts.deps?.now ?? (() => new Date()),
   };
   const { workspacePath, task, role } = opts;
-  // 模型覆写按 role 取（roles 形状 T5 落显式双字段；现行 {designer?} 对
-  // Partial<Record<DeliveryRole, …>> 结构兼容——developer 键在解析落地前恒
-  // undefined，即回落默认模型）：显式 config model 优先；缺省而 profile 在场
-  // 时从工作区 subagent profile frontmatter 解析（缺文件/无 model/解析失败 →
-  // 静默回落默认，至多日志）。
+  // 模型覆写按 role 取（roles 已是显式双字段——T5 落地，designer/developer
+  // 各自可选，未配置的角色读 undefined 即回落默认模型）：显式 config model
+  // 优先；缺省而 profile 在场时从工作区 subagent profile frontmatter 解析
+  // （缺文件/无 model/解析失败 → 静默回落默认，至多日志）。
   const roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>> | undefined = opts.config?.roles;
   const roleConfig = roles?.[role];
   let model = roleConfig?.model;

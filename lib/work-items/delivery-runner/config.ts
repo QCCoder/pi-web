@@ -1,5 +1,6 @@
 // Phase-2 Task 1: 工作区交付自动化配置 `.pi/delivery.yaml`。
-// 声明式配置：enabled 总开关 + designer 角色的 profile/model 覆写 + 预算帽。
+// 声明式配置：enabled 总开关 + 角色（designer/developer，Phase-3 T5 显式
+// 双字段）的 profile/model 覆写 + 预算帽。
 // 纯 fs/yaml 层——capability 门（assertAutomationCapable）由路由层在写入前
 // 调用；后续任务（runner/claimer）消费本模块读取配置。
 import { readFile } from "node:fs/promises";
@@ -16,7 +17,9 @@ export interface DeliveryRoleConfig {
 export interface DeliveryRunnerConfig {
   schemaVersion: 1;
   enabled: boolean;
-  roles: { designer?: DeliveryRoleConfig };
+  /** 角色配置显式双字段（Phase-3 T5）：designer 与 developer 同形、各自可选；
+   *  旧文件只有 designer 键照常解析，developer 读作缺省（undefined）。 */
+  roles: { designer?: DeliveryRoleConfig; developer?: DeliveryRoleConfig };
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
 }
 
@@ -108,6 +111,9 @@ export function parseDeliveryRunnerConfig(value: unknown): DeliveryRunnerConfig 
     roles: {
       ...(rolesRecord.designer !== undefined
         ? { designer: parseRole(rolesRecord.designer, "roles.designer") }
+        : {}),
+      ...(rolesRecord.developer !== undefined
+        ? { developer: parseRole(rolesRecord.developer, "roles.developer") }
         : {}),
     },
     budget: parseBudget(record.budget),

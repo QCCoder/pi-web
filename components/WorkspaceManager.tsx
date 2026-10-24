@@ -41,10 +41,16 @@ interface RepositoryListResponse {
 
 /** 交付自动化配置的客户端结构镜像（lib/work-items/delivery-runner/config.ts
  *  的 DeliveryRunnerConfig——该模块是服务端 fs/yaml 层，不能进浏览器 bundle）。 */
+interface DeliveryRoleConfigState {
+  profile?: string;
+  model?: { provider?: string; modelId: string };
+}
+
 interface DeliveryRunnerConfigState {
   schemaVersion: 1;
   enabled: boolean;
-  roles: { designer?: { profile?: string; model?: { provider?: string; modelId: string } } };
+  /** 角色显式双字段（Phase-3 T5）：designer/developer 同形、各自可选。 */
+  roles: { designer?: DeliveryRoleConfigState; developer?: DeliveryRoleConfigState };
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
 }
 
@@ -311,14 +317,16 @@ export function WorkspaceManager({
   const hasKitLoops = kitLoops.some((loop) => !loop.paused);
   // 「立即跑一轮」多 active loop 时的手动选择（未绑定且无唯一默认时出现）。
   const [runLoopPick, setRunLoopPick] = useState("");
-  // 交付自动化配置（Phase-2 Task 9）：`.pi/delivery.yaml` 的 GET/PUT——仅
-  // work-items+workflows 双开的 workspaces 可见（PUT 的服务端门同款）。配置
-  // 结构是 delivery-runner/config.ts DeliveryRunnerConfig 的客户端镜像（该
-  // 模块 import node:fs，不能进浏览器 bundle——kitLoops 同款手法）。UI 只编
-  // 辑 enabled + designer profile；budget 只读展示（改配置走文件）。
+  // 交付自动化配置（Phase-2 Task 9；Phase-3 T5 增 developer 行）：`.pi/
+  // delivery.yaml` 的 GET/PUT——仅 work-items+workflows 双开的 workspaces 可见
+  // （PUT 的服务端门同款）。配置结构是 delivery-runner/config.ts
+  // DeliveryRunnerConfig 的客户端镜像（该模块 import node:fs，不能进浏览器
+  // bundle——kitLoops 同款手法）。UI 只编辑 enabled + designer/developer
+  // profile；budget 只读展示（改配置走文件）。
   const [deliveryConfig, setDeliveryConfig] = useState<DeliveryRunnerConfigState | null>(null);
   const [deliveryEnabled, setDeliveryEnabled] = useState(false);
   const [deliveryDesignerProfile, setDeliveryDesignerProfile] = useState("");
+  const [deliveryDeveloperProfile, setDeliveryDeveloperProfile] = useState("");
   const [deliverySaving, setDeliverySaving] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [deliverySaved, setDeliverySaved] = useState(false);
@@ -512,8 +520,8 @@ export function WorkspaceManager({
   }, [embedded, open, selectedWorkspaceId]);
 
   // 交付自动化配置加载（Phase-2 Task 9）：GET /delivery → 播种 enabled /
-  // designer profile 草稿（budget 只读不进草稿）。门控 = 面板打开 + 双
-  // capability；切换工作区/门控失效即清空。运行态 advisory——加载失败只降
+  // designer·developer profile 草稿（budget 只读不进草稿）。门控 = 面板打开 +
+  // 双 capability；切换工作区/门控失效即清空。运行态 advisory——加载失败只降
   // 级为块内提示，不打断设置页其它分区。
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId || !deliveryAutomationCapable) {
@@ -548,6 +556,7 @@ export function WorkspaceManager({
         setDeliveryConfig(config);
         setDeliveryEnabled(config.enabled);
         setDeliveryDesignerProfile(config.roles.designer?.profile ?? "");
+        setDeliveryDeveloperProfile(config.roles.developer?.profile ?? "");
       })
       .catch(() => {
         if (!cancelled) setDeliveryError("交付自动化配置加载失败");
@@ -762,18 +771,32 @@ export function WorkspaceManager({
     }
   }, [loadWorkspaces, selectedWorkspace, skillDraft]);
 
-  /** 保存交付自动化配置（Phase-2 Task 9）：PUT /delivery 全量 config——UI 只
-   *  编辑 enabled + designer profile，budget 与既有 designer model 覆写原样
-   *  回传（round-trip 保真）。成功以响应回填（服务端 parse 后的规范化值），
-   *  「已保存」内联提示；失败（含 capability 门 400）走块内错误提示。 */
+  /** 保存交付自动化配置（Phase-2 Task 9；T5 增 developer）：PUT /delivery 全量
+   *  config——UI 只编辑 enabled + designer/developer profile，budget 与既有
+   *  model 覆写原样回传（round-trip 保真）。成功以响应回填（服务端 parse 后
+   *  的规范化值），「已保存」内联提示；失败（含 capability 门 400）走块内错误提示。 */
   const saveDeliveryConfig = useCallback(async () => {
     if (!selectedWorkspaceId || !deliveryConfig) return;
     setDeliverySaving(true);
     setDeliveryError(null);
     setDeliverySaved(false);
     try {
-      const profile = deliveryDesignerProfile.trim();
+      // 角色 round-trip 习语（designer/developer 同款）：profile 草稿 + 既有
+      // model 覆写合并；两者皆空 → 该角色键整体剥掉（不写空对象）。
+      const rolePayload = (
+        profile: string,
+        existing?: DeliveryRoleConfigState,
+      ): DeliveryRoleConfigState | undefined =>
+        (profile || existing?.model)
+          ? {
+            ...(profile ? { profile } : {}),
+            ...(existing?.model ? { model: existing.model } : {}),
+          }
+          : undefined;
       const existingDesigner = deliveryConfig.roles.designer;
+      const existingDeveloper = deliveryConfig.roles.developer;
+      const designer = rolePayload(deliveryDesignerProfile.trim(), existingDesigner);
+      const developer = rolePayload(deliveryDeveloperProfile.trim(), existingDeveloper);
       const data = await responseJson<{ config: DeliveryRunnerConfigState }>(
         await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery`, {
           method: "PUT",
@@ -781,14 +804,10 @@ export function WorkspaceManager({
           body: JSON.stringify({
             schemaVersion: 1,
             enabled: deliveryEnabled,
-            roles: profile || existingDesigner?.model
-              ? {
-                designer: {
-                  ...(profile ? { profile } : {}),
-                  ...(existingDesigner?.model ? { model: existingDesigner.model } : {}),
-                },
-              }
-              : {},
+            roles: {
+              ...(designer ? { designer } : {}),
+              ...(developer ? { developer } : {}),
+            },
             budget: deliveryConfig.budget,
           }),
         }),
@@ -796,13 +815,14 @@ export function WorkspaceManager({
       setDeliveryConfig(data.config);
       setDeliveryEnabled(data.config.enabled);
       setDeliveryDesignerProfile(data.config.roles.designer?.profile ?? "");
+      setDeliveryDeveloperProfile(data.config.roles.developer?.profile ?? "");
       setDeliverySaved(true);
     } catch (saveDeliveryError) {
       setDeliveryError(saveDeliveryError instanceof Error ? saveDeliveryError.message : String(saveDeliveryError));
     } finally {
       setDeliverySaving(false);
     }
-  }, [deliveryConfig, deliveryDesignerProfile, deliveryEnabled, selectedWorkspaceId]);
+  }, [deliveryConfig, deliveryDesignerProfile, deliveryDeveloperProfile, deliveryEnabled, selectedWorkspaceId]);
 
   const saveWorkspaceName = useCallback(async () => {
     if (!selectedWorkspace) return;
@@ -2178,9 +2198,10 @@ export function WorkspaceManager({
                         )}
                       </div>
                     </section>
-                    {/* 交付自动化配置（Phase-2 Task 9）：work-items+workflows 双开
-                        才显示（服务端 PUT 同款门）。enabled 开关 + designer
-                        profile 文本 + 预算只读展示 + 保存（PUT /delivery）。 */}
+                    {/* 交付自动化配置（Phase-2 Task 9；T5 增 developer 行）：
+                        work-items+workflows 双开才显示（服务端 PUT 同款门）。
+                        enabled 开关 + designer/developer profile 文本 + 预算
+                        只读展示 + 保存（PUT /delivery）。 */}
                     {deliveryAutomationCapable && selectedWorkspace && (
                       <section className="workspace-settings-section" data-section="delivery-automation">
                         <div className="repository-section-header">
@@ -2202,7 +2223,7 @@ export function WorkspaceManager({
                                   />
                                   <span className="workspace-rail-meta">
                                     {deliveryEnabled
-                                      ? "开启：满足领取条件的设计阶段工作项由 designer 角色自动领取执行"
+                                      ? "开启：满足领取条件的工作项由 designer/developer 角色自动领取执行"
                                       : "关闭：标准交付流程仅人工推进"}
                                   </span>
                                 </div>
@@ -2216,6 +2237,18 @@ export function WorkspaceManager({
                                     placeholder="subagent profile 名（可选；未配置模型时从 .pi/agents/<名>.md 解析 model 覆写）"
                                     onChange={(event) => {
                                       setDeliveryDesignerProfile(event.target.value);
+                                      setDeliverySaved(false);
+                                    }}
+                                  />
+                                </label>
+                                <label className="workspace-field">
+                                  <span>Developer Profile</span>
+                                  <input
+                                    value={deliveryDeveloperProfile}
+                                    disabled={deliverySaving}
+                                    placeholder="subagent profile 名（可选；未配置模型时从 .pi/agents/<名>.md 解析 model 覆写）"
+                                    onChange={(event) => {
+                                      setDeliveryDeveloperProfile(event.target.value);
                                       setDeliverySaved(false);
                                     }}
                                   />
