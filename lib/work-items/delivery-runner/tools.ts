@@ -22,7 +22,7 @@ import {
   failDesignerTask,
   submitDesignerResult,
 } from "./claim.ts";
-import { listDesignerPool } from "./pool.ts";
+import { listDeliveryPool } from "./pool.ts";
 import {
   grantRole,
   roleGrantOf,
@@ -131,13 +131,14 @@ export function createDeliveryRunnerExtension(
           const gate = requireRoleGrant(sessionId, workspacePath);
           if (typeof gate === "string") return denied(gate);
           try {
-            const pool = await listDesignerPool(workspacePath);
+            const pool = await listDeliveryPool(workspacePath);
             return result({
               ok: true,
               ready: pool.ready.map((entry) => ({
                 key: entry.key,
                 title: entry.title,
                 priority: entry.priority,
+                role: entry.role,
               })),
               blocked: pool.blocked.map((entry) => ({
                 key: entry.key,

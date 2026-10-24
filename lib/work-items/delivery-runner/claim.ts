@@ -5,7 +5,7 @@
 // 服务函数收 workspacePath（T4 裁定——与 T2 读取端一致的测试缝；路由层做
 // id→path 转换）。事务内双检：Dispatcher 的池子发现只是提示，领取才是权威
 // ——capability（manifest 复验 assertAutomationCapable）+ 配置 + 纯投影谓词
-// （复用 projectDesignerPool，claim 与池子永不漂移）逐条复验后才流转。
+// （复用 projectDeliveryPool，claim 与池子永不漂移）逐条复验后才流转。
 //
 // 写入顺序（崩溃窗口语义）：
 //   产物先落盘、状态后改——design.md 播种 → runtime/ gitignore 接线 →
@@ -68,7 +68,7 @@ import {
   DEFAULT_DELIVERY_RUNNER_CONFIG,
   readDeliveryRunnerConfig,
 } from "./config.ts";
-import { projectDesignerPool, type DesignerPoolContext } from "./pool.ts";
+import { projectDeliveryPool, type DeliveryPoolContext } from "./pool.ts";
 
 export interface ClaimGrant {
   attemptId: string;
@@ -230,7 +230,7 @@ export async function claimDesignerTask(
     }
 
     // 事务内双检（spec §5.2 step 1）：capability（manifest）→ 配置 → 纯投影
-    // 谓词逐条复验（复用 projectDesignerPool——claim 与池子读同一套规则）。
+    // 谓词逐条复验（复用 projectDeliveryPool——claim 与池子读同一套规则）。
     const manifest = await readWorkspaceManifest(input.workspacePath);
     assertAutomationCapable(manifest);
     const config = await readDeliveryRunnerConfig(input.workspacePath);
@@ -243,7 +243,7 @@ export async function claimDesignerTask(
     const failureCountByKey = new Map<string, number>([
       [input.key, await countRecentFailures(itemPath, requirementDigest, maxAttemptsPerInput)],
     ]);
-    const ctx: DesignerPoolContext = {
+    const ctx: DeliveryPoolContext = {
       enabled: config?.enabled ?? false,
       // 活动 claim 已在上方以 Conflict 处理，此处必为空集。
       activeClaims: new Set(),
@@ -253,8 +253,11 @@ export async function claimDesignerTask(
       paused: readPaused(itemPath) !== null ? new Set([input.key]) : new Set<string>(),
       failureCountByKey,
       maxAttemptsPerInput,
+      // designer 复验不消费仓库登记表（developer 谓词专属）；manifest 已在
+      // 上方读过，按项内数据装配保持与池子读取端同源。
+      registeredRepos: new Map(manifest.repositories.map((repo) => [repo.id, repo.status])),
     };
-    const [entry] = projectDesignerPool(
+    const [entry] = projectDeliveryPool(
       [{
         key: current.item.key,
         title: current.item.title,
@@ -262,14 +265,21 @@ export async function claimDesignerTask(
         status: current.item.status,
         phase: current.item.phase,
         archivedAt: current.item.archivedAt,
+        repositories: current.item.repositories,
         requirementDigest,
         delivery: current.item.delivery ?? null,
       }],
       ctx,
     );
-    if (!entry.ready) {
+    // 角色由阶段决定：rfi 项可能投影为 developer-ready，但本事务是 designer
+    // 领取——须同时是 designer 角色且 ready（designer 谓词对非 intake 阶段
+    // 照旧 wrong-phase，语义与 P2 一致）。
+    if (!entry.ready || entry.role !== "designer") {
+      const detail = entry.ready
+        ? `item is ready for the developer role, not designer (phase ${current.item.phase})`
+        : entry.reasons.join(", ");
       throw new WorkItemValidationError(
-        `delivery claim preconditions failed: ${entry.reasons.join(", ")}`,
+        `delivery claim preconditions failed: ${detail}`,
       );
     }
 

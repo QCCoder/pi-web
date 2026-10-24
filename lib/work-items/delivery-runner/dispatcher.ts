@@ -22,7 +22,7 @@ import type { HostJob } from "../../session-host/jobs.ts";
 import { destroySession, probeSession } from "../../session-host/facade.ts";
 import { discoverWorkspaces, readWorkspaceManifest } from "../../workspaces/service.ts";
 import { assertAutomationCapable, readDeliveryRunnerConfig, type DeliveryRunnerConfig } from "./config.ts";
-import { listDesignerPool } from "./pool.ts";
+import { listDeliveryPool } from "./pool.ts";
 import { hasAnyActiveExecution } from "./role-grants.ts";
 import { launchDesignerSession, scanActiveItemClaims } from "./role-session.ts";
 import { recordInterruption } from "./claim.ts";
@@ -35,7 +35,7 @@ export interface DispatcherDeps {
    *  work-items/workflows 抛 → 该 workspace 整分支跳过）。 */
   readManifest?: typeof readWorkspaceManifest;
   readConfig?: typeof readDeliveryRunnerConfig;
-  pool?: typeof listDesignerPool;
+  pool?: typeof listDeliveryPool;
   launch?: typeof launchDesignerSession;
   /** 单槽位互斥（默认 hasAnyActiveExecution ∪ claim 扫描：内存登记或持久
    *  claim 任一在场都占槽——授予到领取的窗口与宿主重启后的陈旧 claim 都不
@@ -60,7 +60,7 @@ export class DeliveryDispatcher implements HostJob {
       discover: deps.discover ?? discoverWorkspaces,
       readManifest: deps.readManifest ?? readWorkspaceManifest,
       readConfig: deps.readConfig ?? readDeliveryRunnerConfig,
-      pool: deps.pool ?? listDesignerPool,
+      pool: deps.pool ?? listDeliveryPool,
       launch: deps.launch ?? launchDesignerSession,
       activeExecution:
         deps.activeExecution
