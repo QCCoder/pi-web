@@ -533,9 +533,17 @@ export function WorkspaceManager({
       })
       .then((data) => {
         if (cancelled) return;
-        // 200 + {config:null} 是 Task 1 的明确契约（.pi/delivery.yaml 缺失 =
-        // 默认 disabled），按默认镜像播种表单；错误分支只来自非 2xx（上面
-        // 的 fallback）或网络失败（catch）——config:null 不设 deliveryError。
+        // 非 2xx（上面的 fallback 携带 {error:"HTTP <status>"}；服务端错误体
+        // 也可能带 error，如 .pi/delivery.yaml 损坏 → 400）必须走错误分支——
+        // 静默播种默认表单会让随后的保存把默认值 PUT 覆盖到真实/损坏的配置上。
+        // 同时清 deliveryConfig，防止沿用上一工作区的旧配置误写到当前 id。
+        if (data.error) {
+          setDeliveryConfig(null);
+          setDeliveryError(String(data.error));
+          return;
+        }
+        // 干净 200 + {config:null} 是 Task 1 的明确契约（.pi/delivery.yaml
+        // 缺失 = 默认 disabled），按默认镜像播种表单——config:null 不是错误。
         const config = data.config ?? DEFAULT_DELIVERY_RUNNER_CONFIG;
         setDeliveryConfig(config);
         setDeliveryEnabled(config.enabled);

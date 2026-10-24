@@ -231,3 +231,20 @@ test("GET /delivery {config:null} seeds the default mirror, not an error (fix ro
   // 错误分支只来自非 2xx / 网络失败——config:null 不再设 deliveryError。
   assert.doesNotMatch(source, /data\.error \?\? "交付自动化配置加载失败"/);
 });
+
+test("GET /delivery error guard runs BEFORE the default-mirror fallback (fix round 2: 非 2xx 不静默播种)", () => {
+  // 非 2xx（fallback 携带 {error:"HTTP <status>"}）必须命中 data.error 守卫
+  // 并 return——先走 ?? DEFAULT 会把 404/400/500 静默吞成默认表单，随后的
+  // 保存就会用默认值覆盖真实/损坏的 .pi/delivery.yaml。
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  const handler = source.match(
+    /\.then\(\(data\) => \{[\s\S]*?data\.config \?\? DEFAULT_DELIVERY_RUNNER_CONFIG[\s\S]*?\}\)/,
+  );
+  assert.ok(handler, "GET .then handler with default fallback found");
+  const guardIndex = handler[0].indexOf("if (data.error)");
+  const fallbackIndex = handler[0].indexOf("data.config ?? DEFAULT_DELIVERY_RUNNER_CONFIG");
+  assert.ok(guardIndex !== -1, "data.error guard present in handler");
+  assert.ok(fallbackIndex !== -1, "default fallback present in handler");
+  assert.ok(guardIndex < fallbackIndex, "guard ordered BEFORE the fallback");
+  assert.match(handler[0], /setDeliveryError\(String\(data\.error\)\)/);
+});
