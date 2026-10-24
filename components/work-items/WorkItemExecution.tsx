@@ -8,8 +8,9 @@ import { formatRelativeTime } from "@/lib/format-time";
  *  （原因 + 连续失败计数 + 恢复自动领取）/ 未确认执行中断横幅（重新检查并
  *  恢复）/ 最近 attempts 列表（末 5 条新→旧，outcome 徽章 + needsAttention
  *  待处理标记）。Phase-3 T5：claim/attempts 带 role 徽标（designer/developer）；
- *  developer 的 claim 展示 worktree 集（repositoryId · 分支，完整路径进
- *  title），submit 的 attempt 展示候选摘要（repo@commit 前 8 位）。
+ *  developer 的 claim 展示 worktree 集（alias ?? repositoryId · 分支——alias 由
+ *  GET 路由读取时 manifest 联表富化，完整路径进 title），submit 的 attempt
+ *  展示候选摘要（repo@commit 前 8 位）。
  *
  *  本组件是纯展示 + 动作转发：执行状态（GET delivery-execution）与三个动作
  *  （POST stop / recover / delivery-resume）都由 WorkItemsPage 持有并经
@@ -23,12 +24,16 @@ import { formatRelativeTime } from "@/lib/format-time";
 export type ExecutionRole = "designer" | "developer";
 
 /** RoleWorktree（delivery-runner/worktrees.ts）的客户端镜像：developer 领取
- *  时预建的 worktree——repoPath 是登记仓主路径，path 是 worktree 检出路径。 */
+ *  时预建的 worktree——repoPath 是登记仓主路径，path 是 worktree 检出路径。
+ *  alias 不在落盘事实里：GET delivery-execution 读取时用 manifest 联表富化
+ *  （fix round 1——展示元数据可改名，读取时联表永远新鲜）。 */
 export interface ExecutionWorktree {
   repositoryId: string;
   repoPath: string;
   path: string;
   branch: string;
+  /** manifest 联表富化的展示别名；无 alias/未登记 → 字段缺省，回退 repositoryId。 */
+  alias?: string;
 }
 
 export interface ExecutionClaimSummary {
@@ -265,8 +270,8 @@ export function WorkItemExecution({
             </button>
           </div>
           {/* developer 领取的 worktree 集（designer claim 无）：每仓一条执行
-              分支。path 太长不铺正文——repositoryId + 分支名成行，完整检出
-              路径进 title 提示。 */}
+              分支。alias 优先（GET 路由读取时 manifest 联表富化）、无 alias
+              回退 repositoryId；path 太长不铺正文，完整检出路径进 title。 */}
           {claim.worktrees && claim.worktrees.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {claim.worktrees.map((worktree) => (
@@ -282,7 +287,7 @@ export function WorkItemExecution({
                     overflowWrap: "anywhere",
                   }}
                 >
-                  {worktree.repositoryId} · {worktree.branch}
+                  {worktree.alias ?? worktree.repositoryId} · {worktree.branch}
                 </span>
               ))}
             </div>

@@ -261,7 +261,7 @@ test("WorkItemExecution renders the developer role badge on the claim (Phase-3 T
   assert.match(html, /停止执行/, "claim card still complete");
 });
 
-test("WorkItemExecution renders claim worktrees (repositoryId + branch, path 只进 title)", () => {
+test("WorkItemExecution renders claim worktrees alias-first（ULID 回退）+ branch, path 只进 title", () => {
   const html = renderToStaticMarkup(
     React.createElement(WorkItemExecution, props({
       execution: execution({
@@ -269,9 +269,18 @@ test("WorkItemExecution renders claim worktrees (repositoryId + branch, path 只
           role: "developer",
           worktrees: [
             {
-              repositoryId: "repo-alpha",
-              repoPath: "/ws/repositories/repo-alpha",
-              path: "/ws/repositories/repo-alpha-worktrees/pi-delivery-REQ-0001-gen3",
+              // fix round 1：alias 由 GET 路由读取时 manifest 联表富化——
+              // 有 alias 显示 alias（ULID 不出现），无 alias 回退 repositoryId。
+              repositoryId: "01JXWT000000000000000000",
+              repoPath: "/ws/repositories/cargo-web",
+              path: "/ws/repositories/cargo-web-worktrees/pi-delivery-REQ-0001-gen3",
+              branch: "pi-delivery/REQ-0001/gen3",
+              alias: "cargo-web",
+            },
+            {
+              repositoryId: "01JXWT111111111111111111",
+              repoPath: "/ws/repositories/legacy",
+              path: "/ws/repositories/legacy-worktrees/pi-delivery-REQ-0001-gen3",
               branch: "pi-delivery/REQ-0001/gen3",
             },
           ],
@@ -279,10 +288,12 @@ test("WorkItemExecution renders claim worktrees (repositoryId + branch, path 只
       }),
     })),
   );
-  assert.match(html, /repo-alpha/, "repositoryId shown");
+  assert.match(html, /cargo-web/, "alias shown when present");
+  assert.doesNotMatch(html, /01JXWT000000000000000000/, "ULID hidden behind alias");
+  assert.match(html, /01JXWT111111111111111111/, "repositoryId fallback when no alias");
   assert.match(html, /pi-delivery\/REQ-0001\/gen3/, "branch shown");
   // 长 path 不直接铺正文——作为 title 提示挂在条目上。
-  assert.match(html, /title="[^"]*repo-alpha-worktrees/, "worktree path surfaced via title tooltip");
+  assert.match(html, /title="[^"]*cargo-web-worktrees/, "worktree path surfaced via title tooltip");
 });
 
 test("WorkItemExecution renders submitted attempt candidates summary (repo@commit 前 8 位)", () => {

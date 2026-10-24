@@ -326,7 +326,7 @@ Key behavior:
   （概况/设计编辑/证据（确认/候选/验证/发布）/动作条 `WorkItemActionbar`/事件审计 `WorkItemEvents`）+ `WorkItemCreateForm`
   （`enableDelivery` 复选框**缺省不勾**）。**交付自动执行区（Phase-2 T9；Phase-3 T5 增量）**：`WorkItemExecution.tsx`（managed 项专属，
   挂在 DetailView 动作条下）：四态——活动 claim 卡（**role 徽标 designer/developer**/代数/心跳 + 查看会话[claim.sessionId→onOpenConversation] +
-  「停止执行」+ **claim.worktrees 列表**[每仓一条 `repositoryId · 分支`，完整检出路径进 title 提示])、`paused` 横幅（原因/连续失败计数 + 「恢复自动领取」）、`pendingInterruption` 横幅（「重新检查并恢复」）、
+  「停止执行」+ **claim.worktrees 列表**[每仓一条 `alias ?? repositoryId · 分支`——alias 由 GET delivery-execution 路由**读取时 manifest 联表富化**（展示元数据可改名、不落盘；无 alias/未登记回退 ULID id），完整检出路径进 title 提示])、`paused` 横幅（原因/连续失败计数 + 「恢复自动领取」）、`pendingInterruption` 横幅（「重新检查并恢复」）、
   最近 attempts（末 5 新→旧，outcome 徽章 + **role 徽标** + needsAttention「待处理」标记 + **submitted 项的候选摘要**[内联串 `repo@commit 前 8 位`]）；busy 全按钮禁用防双击，动作结果
   `{ok}|{ok:false,error}` 出参 → 内联 role=alert（recover 409 的 pids 由 WorkItemsPage 拼进 error 文案）。执行状态由
   WorkItemsPage 拉取（GET `.../delivery-execution`，仅 `item.delivery` 存在的非回收站选中项拉；revision 变化 + 动作成功
