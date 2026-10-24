@@ -18,10 +18,17 @@ import { getAllRpcSessions } from "./registry.ts";
 import type { ExecutionRecord } from "../loops/executions.ts";
 
 export interface ActiveRoundInfo {
-  loopName: string;
+  /** loop 名（kind="loop-round" 时有意义；M1 调用方照旧必填）。 */
+  loopName?: string;
   workspacePath: string;
-  dir: string;
+  /** loop 目录（kind="loop-round" 时有意义）。 */
+  dir?: string;
   startedAt: number;
+  /** 登记种类：缺省 = loop-round（M1 loop 调用方不写 kind，语义零变化）；
+   *  "delivery" = Phase-2 角色执行（designer 会话，配 itemKey）。 */
+  kind?: "loop-round" | "delivery";
+  /** kind="delivery" 时的工作项 key（claim.recordInterruption 用）。 */
+  itemKey?: string;
 }
 
 interface HostGlobals {
@@ -46,15 +53,50 @@ export function listActiveRounds(): Array<{ sessionId: string } & ActiveRoundInf
   return Array.from(g.__piActiveRounds?.entries() ?? []).map(([sessionId, info]) => ({ sessionId, ...info }));
 }
 
+// ------------------------------------------------- delivery 执行登记（T6 泛化）
+//
+// Phase-2 designer 角色执行复用同一张登记表：关停序列一次消费两类登记——loop 轮
+// 照旧写 loop 中断记录（M1 语义零变化），delivery 执行改写 claim 中断（claim.
+// recordInterruption，恢复门禁的 5.1 中断记录）。复用而不另开一张表：关停的
+// running 快照 → destroy 全量 → 记录链对两类登记是同一段代码路径。
+
+/** 登记 delivery 角色执行（designer 会话在场期间挂，结束钩子/关停收尾清）。 */
+export function markDeliveryExecutionActive(
+  sessionId: string,
+  info: { workspacePath: string; itemKey: string; startedAt?: number },
+): void {
+  markRoundActive(sessionId, {
+    workspacePath: info.workspacePath,
+    startedAt: info.startedAt ?? Date.now(),
+    kind: "delivery",
+    itemKey: info.itemKey,
+  });
+}
+
+/** delivery 执行登记的清除（语义 = clearRoundMark，命名对称保留给 role-session）。 */
+export function clearDeliveryExecutionMark(sessionId: string): void {
+  clearRoundMark(sessionId);
+}
+
 // ----------------------------------------------------------------------------
 // Graceful shutdown (spec §5.4): stop-new-work → abort → record → exit
 // ----------------------------------------------------------------------------
+
+export interface DeliveryInterruptionPlan {
+  workspacePath: string;
+  itemKey: string;
+  sessionId: string;
+}
 
 export interface ShutdownPlan {
   /** 中断记录：仅为关停时仍在 running set 里的轮写（idle 的登记只是陈旧标记）。 */
   records: ExecutionRecord[];
   /** 计划销毁的轮会话 id（全部登记轮，含 idle）。 */
   destroySessionIds: string[];
+  /** delivery 角色执行（kind="delivery"）关停时仍在跑 → 写 claim 中断（恢复
+   *  门禁据此挡住新领取，直到人「重新检查并恢复」）。与 records 同口径：仅
+   *  running 的登记才写。 */
+  deliveryInterruptions: DeliveryInterruptionPlan[];
 }
 
 /** shutdown 内联逻辑的可测纯函数抽取：给定轮登记快照与 running 会话 id 集，
@@ -66,12 +108,13 @@ export function buildShutdownPlan(
 ): ShutdownPlan {
   const runningBySession = new Set(runningIds);
   const records: ExecutionRecord[] = active
-    .filter((round) => runningBySession.has(round.sessionId))
+    .filter((round) => round.kind !== "delivery" && runningBySession.has(round.sessionId))
     .map((round) => ({
       schemaVersion: 1 as const,
       runId: round.sessionId,
       kind: "loop-round" as const,
-      loopName: round.loopName,
+      // loop 登记永远带 loopName（M1 调用方契约）；delivery 不进这条分支。
+      loopName: round.loopName ?? "",
       sessionId: round.sessionId,
       workspacePath: round.workspacePath,
       host: { pid: process.pid, hostname: hostname() },
@@ -80,7 +123,17 @@ export function buildShutdownPlan(
       stopResult: "interrupted-on-shutdown" as const,
       needsAttention: true,
     }));
-  return { records, destroySessionIds: active.map((round) => round.sessionId) };
+  const deliveryInterruptions: DeliveryInterruptionPlan[] = [];
+  for (const round of active) {
+    if (round.kind !== "delivery" || round.itemKey === undefined) continue;
+    if (!runningBySession.has(round.sessionId)) continue;
+    deliveryInterruptions.push({
+      workspacePath: round.workspacePath,
+      itemKey: round.itemKey,
+      sessionId: round.sessionId,
+    });
+  }
+  return { records, destroySessionIds: active.map((round) => round.sessionId), deliveryInterruptions };
 }
 
 /** 宿主关停（spec §5.4）：先停新轮（spawner.stop），再中止全部活跃 wrapper
@@ -95,14 +148,26 @@ export function registerShutdownHandlers(stopBackground: () => void): void {
     stopBackground();
     // running 快照必须在 destroy 之前取（destroy 之后 isRunning 恒 false）。
     const runningIds = getAllRpcSessions().filter((s) => s.isRunning()).map((s) => s.sessionId);
-    const { records } = buildShutdownPlan(listActiveRounds(), runningIds);
+    const { records, deliveryInterruptions } = buildShutdownPlan(listActiveRounds(), runningIds);
     for (const session of getAllRpcSessions()) session.destroy();
-    // 记录写失败不得吞掉销毁流程 —— 单条失败只记日志，最终仍 exit。
-    void Promise.all(records.map((record) =>
-      import("../loops/executions.ts").then((mod) => mod.writeExecutionRecord(record)).catch((error) => {
-        console.error("[pi-web] write execution record failed:", error);
-      }),
-    )).finally(() => process.exit(0));
+    // 记录写失败不得吞掉销毁流程 —— 单条失败只记日志，最终仍 exit。delivery 执行
+    // 的角色会话在 destroy 扫过时自身的结束钩子（role-session.ts）也会竞写 claim
+    // 中断——recordInterruption 以 claim.sessionId 匹配幂等，先到者清 claim，后到
+    // 者 no-op，两条路径不冲突。
+    void Promise.all([
+      ...records.map((record) =>
+        import("../loops/executions.ts").then((mod) => mod.writeExecutionRecord(record)).catch((error) => {
+          console.error("[pi-web] write execution record failed:", error);
+        }),
+      ),
+      ...deliveryInterruptions.map((plan) =>
+        import("../work-items/delivery-runner/claim.ts")
+          .then((mod) => mod.recordInterruption(plan.workspacePath, plan.itemKey, plan.sessionId, "host shutdown"))
+          .catch((error) => {
+            console.error("[pi-web] delivery interruption record failed:", error);
+          }),
+      ),
+    ]).finally(() => process.exit(0));
   };
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));

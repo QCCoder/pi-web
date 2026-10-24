@@ -18,6 +18,7 @@ import {
   startRpcSession,
   steerSubagent,
   type LiveRpcSessionInfo,
+  type StartSessionOptions,
 } from "./registry.ts";
 import type { StalledSessionInfo } from "./heartbeat.ts";
 import { resolveSessionPath } from "../session-reader.ts";
@@ -39,6 +40,12 @@ export interface CreateSessionInput {
   toolNames?: string[];
   thinkingLevel?: string;
   command?: { type: string; [key: string]: unknown };
+  /** 追加进会话系统提示（透传 StartSessionOptions.appendSystemPrompt）——
+   *  role session（delivery-runner/role-session.ts）的开场合同走这里。 */
+  appendSystemPrompt?: string;
+  /** 创建时显式模型（透传 StartSessionOptions.model），优先于已保存/默认模型。
+   *  与顶层 provider/modelId 的 set_model 流并存——那是交互会话的模型选择器路径。 */
+  model?: { provider?: string; modelId: string };
 }
 
 export interface CreateSessionResult {
@@ -54,7 +61,15 @@ export async function createSession(input: CreateSessionInput): Promise<CreateSe
   // One-time key so startRpcSession's start-lock never coalesces two
   // concurrent creates onto one session (mirrors the old daemon route).
   const tempKey = `__new__${randomUUID()}`;
-  const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, input.toolNames);
+  // appendSystemPrompt / model 透传 StartSessionOptions（role session 建会话用）。
+  const startOptions: StartSessionOptions | undefined =
+    input.appendSystemPrompt || input.model
+      ? {
+          ...(input.appendSystemPrompt ? { appendSystemPrompt: input.appendSystemPrompt } : {}),
+          ...(input.model ? { model: input.model } : {}),
+        }
+      : undefined;
+  const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, input.toolNames, startOptions);
   if (input.provider && input.modelId) {
     await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
   }
