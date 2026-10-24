@@ -13,13 +13,14 @@
 //      （Phase-3 T4：developer claim 同样适用——claimedAt 起算不变，
 //      recordInterruption 已随 ClaimState.role 泛化）。
 //
-//   ② 单槽位派发（Phase-3 T4：合并队列取首、按条目角色分派）：activeExecution
-//      （内存 role-grant 登记表 ∪ claim 扫描——跨角色共享单槽位）在场 → 跳过；
-//      池子 ready 空 → 跳过；否则按 ready[0].role 起 launchRoleSession
-//      （fire-and-forget，catch 记日志——launch 的 grantRole 即时占槽，同 tick
-//      内多余 ready 与下一拍都被 activeExecution 拦住，无双派发窗口）。角色由
-//      条目所处阶段决定（pool 投影），dispatcher 只透传——消除 T1 的过渡窗口
-//      （developer-ready 项不再被当 designer 起会话后领取即拒）。
+//   ② 单槽位派发（Phase-3 T4：合并队列取首、按条目角色分派；Phase-4 T4：
+//      verifier 为第三角色经同一分派——零机制变化，role 由池子投影自带）：
+//      activeExecution（内存 role-grant 登记表 ∪ claim 扫描——跨角色共享单槽位）
+//      在场 → 跳过；池子 ready 空 → 跳过；否则按 ready[0].role 起
+//      launchRoleSession（fire-and-forget，catch 记日志——launch 的 grantRole
+//      即时占槽，同 tick 内多余 ready 与下一拍都被 activeExecution 拦住，无双
+//      派发窗口）。角色由条目所处阶段决定（pool 投影），dispatcher 只透传——
+//      消除 T1 的过渡窗口（developer-ready 项不再被当 designer 起会话后领取即拒）。
 //
 // 装配在 background.ts（guard 链后的第二个 HostJob，懒加载——work-item 服务
 // 不进 resident bundle）；关停序列 stopBackgroundSafely 同时停两个 job。

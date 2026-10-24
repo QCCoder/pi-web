@@ -3,6 +3,9 @@
 // 2026-10-24-phase-three §6）——designer 合同/路径逐字节保留（buildRoleContract
 // ("designer") 即 DESIGNER_CONTRACT 原文）；developer 合同按 spec §6 新写
 // （worktree 唯一代码工作区 / 不合并不推送 / 候选提交 / 验证由人）。
+// Phase-4 Task 4: 第三角色 verifier 合同（spec 2026-10-24-phase-four §6）——
+// 检查只经 delivery_run_check 触发（bash 替代命令不作证据）/ 验证环境只读
+// （发现问题走 rework 反馈，不自行修复）/ 不合并不推送 / submit 只需 key。
 //
 // dispatcher 判定该起角色会话时调 launchRoleSession：两步创建序
 // （sessionId 到手 → grantRole → delivery 执行登记 → 命名 → 开场 prompt），
@@ -90,13 +93,38 @@ ${worktreeList}
 以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
 };
 
-/** 角色开场合同：designer = 现行文本（逐字节）；developer = worktree 隔离合同。 */
+/** verifier 开场合同（Phase-4 Task 4，spec §6）：职责 / 硬规则 / 结束条件。
+ *  检查清单与候选 checkout 来自 claim（领取事务冻结的 checkContexts + 预建
+ *  checkout）；launch 时领取未发生——清单以 delivery_claim_task 返回为准
+ *  （不虚构名字/路径）。 */
+const verifierContract = (task: { key: string; title: string }): string => `# verifier 角色合同（${task.key}）
+
+## 职责
+对工作项 ${task.key}（${task.title}）的候选实现执行验证：触发全部配置的验证检查（delivery_run_check）并提交验证结论（全部通过 → 放行等人工 release；有失败 → 返工反馈）。
+
+## 硬规则
+1. 先 delivery_list_ready_tasks 看池子，再 delivery_claim_task 领取成功后才动手——领取失败/冲突不得绕过或强写。本轮只领取工作项 ${task.key}；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项。
+2. 检查只通过 delivery_run_check 触发——不要自己用 bash 跑替代命令（其结果不作证据）；对领取返回的 checks 清单逐项运行（同名重跑覆盖；unverified 是环境问题，处理后重跑）。
+3. 全部检查跑完后用 delivery_submit_result 提交（verifier 只需 key，可选 notes——检查结果由服务端从 delivery_run_check 的记录取用），提交即结束本轮。
+4. 验证环境只读：候选 checkout 与主工作区一律只读——发现实现问题走提交后的 rework 反馈，不自行修复代码。
+5. 不合并不推送——候选合并与发布由人做。
+6. 环境/依赖问题（命令无法执行、依赖缺失）用 delivery_fail_task 说明原因后结束；环境/依赖类阻塞带 blocked=true。
+
+## 结束条件
+以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
+
+/** 角色开场合同：designer = 现行文本（逐字节）；developer = worktree 隔离合同；
+ *  verifier = 服务端检查执行合同（Phase-4 T4）。 */
 export function buildRoleContract(
   role: DeliveryRole,
   task: { key: string; title: string },
   claim?: { worktrees?: RoleWorktree[] },
 ): string {
-  return role === "developer" ? developerContract(task, claim) : DESIGNER_CONTRACT(task);
+  return role === "developer"
+    ? developerContract(task, claim)
+    : role === "verifier"
+      ? verifierContract(task)
+      : DESIGNER_CONTRACT(task);
 }
 
 /** 开场指令：列出池子 → 领取指派项（唯一目标，不领其他项）→ 工作 → 提交。 */
@@ -108,6 +136,15 @@ function openingPromptFor(role: DeliveryRole, task: { key: string; title: string
       `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
       "3. 依据领取返回的已确认设计（design.md）与 worktree 清单，在对应 worktree 分支上实现并自测；",
       "4. 在 worktree 分支 commit 后用 delivery_submit_result 提交 candidates（每仓 commit sha）与 notes 即结束本轮；无法推进时 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
+    ].join("\n");
+  }
+  if (role === "verifier") {
+    return [
+      "你是本工作区的交付 verifier 会话，请开始本轮工作：",
+      "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
+      `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
+      "3. 对领取返回的 checks 清单逐项调用 delivery_run_check（不要用 bash 自跑替代命令——自述结果不构成证据）；",
+      "4. 全部检查跑完后用 delivery_submit_result 提交（只需 key，可选 notes——检查结果服务端自取）即结束本轮；环境问题 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
     ].join("\n");
   }
   return [

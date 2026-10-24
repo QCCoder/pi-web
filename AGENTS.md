@@ -351,49 +351,65 @@ Key behavior:
   archive **only if no other active work item references them**; restoring brings them back. Sessions are physically
   moved to a `.archived/` subdirectory (`lib/session-archive.ts`) so `SessionManager.listAll()` no longer sees them.
 
-### Delivery 自动执行（designer + developer 双角色；`lib/work-items/delivery-runner/`，2026-10 Phase-2 → Phase-3）
+### Delivery 自动执行（designer + developer + verifier 三角色；`lib/work-items/delivery-runner/`，2026-10 Phase-2 → Phase-3 → Phase-4）
 
 Phase-2 落了**首个自动化角色 designer**（intake 需求 → design.md + 验收条件 → 等人
 confirm-design）；Phase-3（2026-10）**第二个角色 developer 上岗**（ready_for_implementation
 领取 → `prepareWorktrees` 每仓 worktree 隔离 → 候选 commit 提交进 verification 等人
-record-verification；合并角色池 + 按条目角色分派，跨角色共享单槽位/工作区）。
-verifier/release-preparer 角色、验证命令自动化、多槽位并发、任务依赖图、worktree 自动清理均
-**未实现**（spec §2/§12 留后续阶段——worktree 由人手动清理，不合并不推送是合同纪律）。
+record-verification）；Phase-4（2026-10）**第三角色 verifier 上岗**（verification 领取 →
+`prepareVerifyCheckouts` 候选 detached checkout + `verification.checks` 配置冻结快照进
+claim → 服务端 `runConfiguredCheck` 执行 + `recordCheckResult` 证据累积 → submit 按 M2
+record-verification/rework 语义推进 release_ready 或返工）——**检查证据只能出自
+`delivery_run_check`（LLM 自述/bash 自跑不构成证据）**。合并角色池 + 按条目角色分派，
+三角色共享单槽位/工作区与同一失败预算。release-preparer 角色、多槽位并发、任务依赖图、
+worktree 自动清理均**未实现**（spec §2/§12 留后续阶段——worktree 由人手动清理，
+不合并不推送是合同纪律）。
 
 - **配置 `.pi/delivery.yaml`**（`config.ts`；路由 `GET|PUT /api/workspaces/[id]/delivery`）：
-  `{schemaVersion: 1, enabled, roles: { designer?: {profile?, model?}, developer?: {profile?, model?} }（Phase-3 T5 显式双字段，两键同规校验；旧单键文件照常解析）, budget: {maxAttemptsPerInput, maxExecutionMinutes}}`，
+  `{schemaVersion: 1, enabled, roles: { designer?: {profile?, model?}, developer?: {profile?, model?} }（Phase-3 T5 显式双字段，两键同规校验；旧单键文件照常解析；无 verifier 键——verifier 会话回落默认模型）, budget: {maxAttemptsPerInput, maxExecutionMinutes}, verification?: {checks: [{name, repositoryId?, command, timeout_seconds? 1–3600}]}}（Phase-4 T1：人维护的验证命令——agent 只能触发不能自造；repositoryId 缺省 = 候选首仓）}`，
   budget 缺省 **3 次 / 30 分钟**、enabled **缺省 false**（文件缺失 = GET 返回 `{config: null}` = disabled）；
   坏 YAML/坏结构 → Validation（HTTP 400）；PUT 写入前过 capability 门 `assertAutomationCapable`——manifest 须
   同时含 **work-items + workflows**（`workflows` capability 自此激活自动执行含义：配置写入 + 工具挂载 +
   dispatcher 每拍复验都吃这道门）。UI = 设置›工作区「交付自动化」配置区（WorkspaceManager，双 capability 开
   时显示；`config:null` 播种默认镜像，budget 与两角色既有 model 覆写原样回传——见「前端」条目）。
-- **池子（`pool.ts`，Phase-3 合并双角色）**：就绪任务不是存储实体——`projectDeliveryPool` 是**纯投影**
-  （零 fs，全部输入含每项 requirementDigest 与 manifest 仓库登记表由调用方传入，只比较/排序/分桶）；
+- **池子（`pool.ts`，Phase-3 合并双角色 / Phase-4 增 verifier 第三角色）**：就绪任务不是存储实体——
+  `projectDeliveryPool` 是**纯投影**
+  （零 fs，全部输入含每项 requirementDigest 与 manifest 仓库登记表由调用方传入，只比较/排序/只分桶）；
   `listDeliveryPool` 是读取端装配器（`listWorkItems` 活动项 + 配置 + 每项运行时信号 claim/未确认中断/
   paused/失败计数 + `contentDigest(README)` + 登记仓表）。**角色由项所处阶段决定**（`DeliveryRole`）：
-  `ready_for_implementation` → developer，其余 → designer——designer 谓词 P2 行为逐字节不变
-  （phase===intake，非 intake 照旧 wrong-phase）。共用检查（两角色同）：无 claim ∧ 无未确认中断 ∧ 未 paused
+  `ready_for_implementation` → developer，`verification` → verifier，其余 → designer——designer 谓词
+  P2 行为逐字节不变（phase===intake，非 intake 照旧 wrong-phase）。共用检查（三角色同）：无 claim ∧ 无未确认中断 ∧ 未 paused
   ∧ 尾部连续失败未达上限 ∧ **status ∈ {open, blocked}（白名单而非黑名单**——claim 事务写 in_progress 后
   即便 claim.json 未落盘也不再投影 ready，双派发窗口两头堵死）∧ 未归档；developer 谓词另加 **designConfirmed
   真值 ∧ 仓库范围非空 ∧ 范围内每仓已登记且 active**（新 reason：`design-unconfirmed` / `no-repo-scope` /
-  `repo-not-registered`；manifest 缺失/损坏 → 空登记表，developer 项以 repo-not-registered 可见、designer 不受影响）。
-  输出**两角色合并同一队列** P0→P3→key 排序（角色不作 tiebreaker），每条目带 role，原因累积不短路。
-- **worktree 预建与候选核验（`worktrees.ts`，Phase-3 T2）**：`prepareWorktrees`——项仓库范围内每**登记且
+  `repo-not-registered`；manifest 缺失/损坏 → 空登记表，developer 项以 repo-not-registered 可见、designer 项不受影响）；
+  verifier 谓词（Phase-4 §3）另加 **designConfirmed 真值 ∧ 候选非空 ∧ checks 非空（`no-checks-configured`）
+  ∧ 每 check 的 repositoryId（缺省=候选首仓）在候选仓集合内且登记 active**。输出**三角色合并同一队列**
+  P0→P3→key 排序（角色不作 tiebreaker），每条目带 role，原因累积不短路。
+- **worktree 预建与候选核验（`worktrees.ts`，Phase-3 T2；Phase-4 T2 增候选 checkout）**：`prepareWorktrees`——项仓库范围内每**登记且
   active** 的仓建一个 git worktree（复用 `lib/worktree.ts` 的 `addWorktree`：分支 `pi-delivery/<KEY>/gen<N>`，
   目录在仓旁 `<repoRoot>-worktrees/<sanitized branch>`）；先整表解析登记（未登记/removed 建任何 worktree 之前
   拒绝），再逐仓建/复用；**幂等 = 同 generation 复用既有 worktree**（`listWorktrees` 按分支找现 path）；
   任一仓失败整体抛、**已建的不回滚**——孤儿 worktree 无害（下代领取用新分支，不与旧代冲突）。
   `verifyCandidateCommits`——每候选 `git rev-parse --verify <commit>^{commit}` 核验（repoPaths 必须含该
   repositoryId；ref 非 40-hex 也接受——rev-parse 语义，提交时原样存储展示）；同步 spawnSync（锁内纯读，毫秒级）。
+  `prepareVerifyCheckouts`（Phase-4 T2，verifier claim 前置）——每候选仓一个 detached checkout：两步法
+  `addWorktree(repoPath, pi-verify/<KEY>/gen<N>)`（分支仅作目录名载体）→ `git checkout --detach <候选 commit>`；
+  幂等 = 同 gen 目录在场则跳过创建但**仍 checkout 目标 commit**（修复半建残留；预检用确定性 existsSync——
+  detached 后 porcelain 不报分支）；失败零状态已建不回滚（generation 单调）。
 - **运行态与审计（`attempts.ts`）**：`<item>/delivery/runtime/{claim.json, automation-paused.json,
-  failure-window.json}` 是 advisory 运行态（claim.json 带 `role`（designer|developer）；developer 领取另附
-  `designDigest`（锁内自算的 design.md 摘要快照）与 `worktrees`（prepareWorktrees 产物清单）；**claim 首写
+  failure-window.json}` 是 advisory 运行态（claim.json 带 `role`（designer|developer|verifier）；developer 领取另附
+  `designDigest`（锁内自算的 design.md 摘要快照）与 `worktrees`（prepareWorktrees 产物清单）；verifier 领取另附
+  `candidateDigest`（候选集摘要快照）+ `worktrees`（候选 detached checkout 清单）+ `checkContexts`（领取时冻结的
+  检查配置快照 [{name, repositoryId 已解析, command, timeout_seconds}]——配置变更不追溯）+ `checkResults`
+  （证据仓：`recordCheckResult` 累积，同名覆盖/新名追加——LLM 无注入口）；**claim 首写
   runtime/ 时幂等接进工作区 .gitignore**；读路径宽松——缺失/坏 JSON 一律按「无」）；`<item>/delivery/attempts/
-  <attemptId>.json` 是追加式审计（含中断记录与 role，developer 的 submit/fail 附 candidates/worktrees；永不删
+  <attemptId>.json` 是追加式审计（含中断记录与 role，developer 的 submit/fail 附 candidates/worktrees；verifier 的
+  submit 附 verificationOutcome（verified|rework）与全量 checkResults；永不删
   除；resolveInterruptions 只清 needsAttention + 记诊断）。**ownerToken 只存 sha256 哈希**（`hashOwnerToken`）——
   明文只在进程内 role grant 存活，永不落盘。claim/paused 走同步原子写（`writeAtomicSync` 镜像 service 习语），
   attempts 异步追加（复用 `writeAtomic`）。
-- **领取事务（`claim.ts`，designer 三函数 P2 + developer 三函数 Phase-3 T3 共用同一套重放/并发/复验骨架）**：
+- **领取事务（`claim.ts`，designer 三函数 P2 + developer 三函数 Phase-3 T3 + verifier 三函数 Phase-4 T3 共用同一套重放/并发/复验骨架）**：
   `claimDesignerTask` / `claimDeveloperTask` 全程 `withWorkspaceWriteLock`——幂等重放（claim.lastRequest 同
   requestId → 现 grant、ownerToken 空串不重建）→ **事务内双检**（manifest capability + 配置 + 复用
   `projectDeliveryPool` 谓词且要求投影角色与本事务一致——claim 与池子读同一套规则，永不漂移）。designer：
@@ -411,7 +427,18 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
   verification 清空、phase→verification、status→open；候选是既有 commit，无新产物落盘）。`failDesignerTask`
   /`failDeveloperTask`：blocked 可选（白名单内仍可领）→ **回退守卫**（designer 仅 design→intake、developer 仅
   implementation→ready_for_implementation——人中途动作改了阶段则不回滚人的状态）+ `delivery.attempt_failed`；
-  凭证过期/README 摘要变化 → Conflict；**四个 submit/fail 共用的 `requireActiveClaim` 另有一道 cancelled 守卫
+  verifier 三函数（Phase-4 T3，spec §5）：claim = 候选 detached checkout（`prepareVerifyCheckouts`）预建在
+  **任何状态落盘之前** + **phase 不变**（verification 就是验证活动的阶段）+ claim 冻结 candidateDigest/
+  checkContexts/checkResults 空仓；submit = 三凭据 + role 门 + candidateDigest 复验 + 阶段守卫 + **证据只从
+  claim.checkResults 取**（按冻结快照逐名比对：缺名/unverified → Validation 零变化；有 failed → M2 rework 四清
+  同构 + `delivery.rework_suggested` + 回 ready_for_implementation；全 passed → `delivery.verification`
+  （actor=agent，evidence 命令取自冻结快照）+ phase→release_ready）；fail = **phase 不动**（无阶段可归还，
+  只归还 status）；`recordCheckResult` 无业务锁轻量（heartbeat 习语：claim.sessionId 匹配才写）。服务端检查
+  执行器 `checks.ts` 的 `runConfiguredCheck`——在候选 checkout 内 spawnSync `/bin/sh`（timeout 缺省 600s，
+  超时/ENOBUFS → unverified + exitCode null），日志尾部 32KiB/流写 `<logDir>/<safeName(name)>.log`、logRef
+  相对工作项根；**logDir 传 spec §7 布局 `<item>/delivery/artifacts/verification-logs/<attemptId>/`**（tools.ts
+  的 run_check）。
+  凭证过期/README 摘要变化 → Conflict；**全部 submit/fail 共用的 `requireActiveClaim` 另有一道 cancelled 守卫
   （final-review 修复）：人在领取窗口内 cancel（M2 cancel 只写 status=cancelled）→ 迟到 submit/fail 一律 409
   零状态（claim 保留给 recordInterruption 清——恢复路径不经 requireActiveClaim，不受守卫影响），终态不被复活**。
   `heartbeatActiveClaim` 20s 轻量续约 lastSeenAt（不 bump revision/不产
@@ -433,18 +460,26 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
   服务一次性核发的 ownerToken（连同 attemptId/generation）补进**已有** grant（工具层不能自授身份）；
   `hasAnyActiveExecution`——**裸授权即占槽**（授予到领取的窗口不许起第二个会话双派发；不问角色——跨角色
   单槽位天然成立）。
-- **LLM 工具（`tools.ts`，`createDeliveryRunnerExtension`，extension 名 `pi-delivery-runner`）**：四件
-  `delivery_list_ready_tasks / delivery_claim_task / delivery_submit_result / delivery_fail_task`（list 列两角色
-  合并池、每条带 role；Phase-3 T4 起 claim/submit/fail 按 `grant.role` 分派 designer/developer 对应服务；submit
-  参数是**扁平可选字段组**——key 必填 + design_markdown/acceptance_criteria（designer）与
-  candidates/notes（developer）全可选；**禁止 union/any-of 形参数 schema**（2026-10-24 Phase-3 smoke 实测：联合
+- **LLM 工具（`tools.ts`，`createDeliveryRunnerExtension`，extension 名 `pi-delivery-runner`）**：五件
+  `delivery_list_ready_tasks / delivery_claim_task / delivery_submit_result / delivery_fail_task /
+  delivery_run_check`（list 列三角色合并池、每条带 role；Phase-3 T4 起 claim/submit/fail 按 `grant.role` 分派
+  designer/developer 对应服务，Phase-4 T4 增 verifier 三路分派；submit 参数是**扁平可选字段组**——key 必填 +
+  design_markdown/acceptance_criteria（designer）、candidates/notes（developer）与 notes（**verifier——只需 key，
+  检查结果服务端自 claim.checkResults 取，参数里没有任何检查字段**）全可选；**禁止 union/any-of 形参数
+  schema**（2026-10-24 Phase-3 smoke 实测：联合
   schema 在该 pi SDK 的调用侧解析不工作，真 LLM 会话参数全落 `{}` 被 schema 校验全拒，测试钉死不回潮），**服务端按
-  grant.role 校验形状**，错形状 → validation 结果文本不进服务）。**身份 = `ctx.sessionManager.getSessionId()` +
+  grant.role 校验形状**，错形状 → validation 结果文本不进服务）。**`delivery_run_check({name})`（Phase-4 T4，
+  verifier 专属——他角色 → denied 文本非异常）**：按 name 在 claim.checkContexts（冻结快照）找配置 → 对应仓的
+  候选 checkout（claim.worktrees 按 repositoryId 匹配）→ 服务端 `runConfiguredCheck`（spawnSync 在业务锁外）→
+  `recordCheckResult` 累积进 claim.checkResults（**同名覆盖 = 幂等重试**）→ 返回 {name, outcome, exitCode,
+  durationMs, logRef}；item 定位 = 本会话名下 verifier claim 扫描（结束钩子兜底同习语）；未知名 → validation
+  文本带可用名单。**身份 = `ctx.sessionManager.getSessionId()` +
   `roleGrantOf` 核对**（无 grant / grant 属他工作区 → denied 结果文本，非异常——cxin loop 轮/普通交互会话天然
   无角色身份，拿到拒绝）；凭证三元组（ownerToken/attemptId/generation）全程住进程内 grant，**不进参数
-  schema、不进 LLM**；claim 工具结果**developer 专属附 worktrees 清单**（claim.json 随领取落盘，重放同样
-  在场——开场合同不写死路径、以它为准）；requestId 确定性（`claim:<sessionId>:<key>` 等）——传输层重试命中
-  服务幂等重放分支；submit/fail 成功后 grant 重置回裸授权（过期凭证不得复用）。confirm-design /
+  schema、不进 LLM**；claim 工具结果 **developer/verifier 附 worktrees 清单**（claim.json 随领取落盘，重放同样
+  在场——开场合同不写死路径、以它为准；verifier 另附 checks 冻结清单——run_check 的名字来源）；requestId 确定性
+  （`claim:<sessionId>:<key>` 等）——传输层重试命中服务幂等重放分支；submit/fail 成功后 grant 重置回裸授权
+  （过期凭证不得复用）。confirm-design /
   record-verification / release / block / unblock / cancel / rework 等**人工/动作面刻意不做 LLM 工具**
   （住 M2 delivery 路由——确认与放行是人的手）。
 - **角色会话（`role-session.ts`，Phase-3 T4 泛化 `launchRoleSession` / `buildRoleContract`）**：两步创建序——
@@ -453,9 +488,13 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
   `buildRoleContract(role, …)` 产出、走 facade `CreateSessionInput.appendSystemPrompt` 注入，**限定只领取指派项**
   ——designer = `DESIGNER_CONTRACT` 原文（逐字节保留）；developer 合同（Phase-3 新写）：**只在 claim 返回的
   worktree 清单内改代码**（主工作区与其它目录只读）、**不合并不推送**（合并到主分支由人做）、完成后提交
-  candidates（每仓 commit sha）+ notes、**验证结论由人给**（无验证登记动作）——launch 时领取未发生，合同不
+  candidates（每仓 commit sha）+ notes、**验证结论由人给**（无验证登记动作）；verifier 合同（Phase-4 新写）：
+  **检查只经 delivery_run_check 触发（不要自己用 bash 跑替代命令——其结果不作证据）**、对领取返回的 checks
+  清单逐项跑完后 submit（只需 key）、**验证环境只读**（发现问题走 rework 反馈，不自行修复代码）、
+  **不合并不推送**、环境问题 fail(blocked)——launch 时领取未发生，合同不
   写死路径、指向 `delivery_claim_task` 返回的清单。模型覆写按角色取 = `config.roles[role].model`（roles 显式
-  双字段 designer/developer——T5；`CreateSessionInput.model` 透传 StartSessionOptions）；model 缺省而
+  双字段 designer/developer——T5；无 verifier 键，verifier 会话回落默认模型；`CreateSessionInput.model` 透传
+  StartSessionOptions）；model 缺省而
   `roles[role].profile` 在场时**从工作区 subagent profile 解析模型**（final review fix——profile 字段曾
   inert，两角色共用）：读 `<workspace>/.pi/agents/<profile>.md` frontmatter 的 `model:` 字段（`provider/model`
   或裸 modelId，复用 `parseFrontmatter`；缺文件/无 model/名字非法/解析抛错 → 静默回落默认模型，至多日志；
@@ -470,10 +509,11 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
   ① **超时清道夫**——claim.claimedAt **起算**（lastSeenAt 只是续约不重置上限）超 maxExecutionMinutes →
   probeSession 仍活则定向 destroy + recordInterruption("execution timeout")（记录幂等，与 destroy 触发的
   结束钩子竞写安全）；会话已死（宿主重启遗留）→ 跳过 destroy 仍记录（否则陈旧 claim 经 activeExecution
-  永久占死槽位；清道夫 role 无关——claimedAt 起算不变，developer claim 同样适用）。② **单槽位派发（跨角色
+  永久占死槽位；清道夫 role 无关——claimedAt 起算不变，developer/verifier claim 同样适用）。② **单槽位派发（跨角色
   共享）**——activeExecution（内存 role-grant ∪ claim 扫描，不问角色）在场跳过；ready 池空跳过；否则取**合并
   队列首条**并按 `entry.role` 起 `launchRoleSession`（fire-and-forget；角色由池子投影自带、dispatcher 只透传
-  ——消除过渡窗口误派发；launch 的 grantRole 即时占槽，同 tick 多余 ready 与下一拍都被 activeExecution 拦住）。
+  ——消除过渡窗口误派发；Phase-4：verifier 为第三角色经同一分派，零机制变化；launch 的 grantRole 即时占槽，
+  同 tick 多余 ready 与下一拍都被 activeExecution 拦住）。
 - **路由（T8）**：`GET|PUT /api/workspaces/[id]/delivery`（配置）；`GET .../work-items/[key]/
   delivery-execution`（四读拼装：claim[**剥 ownerTokenHash**] / attempts 末 5 新→旧 / paused /
   pendingInterruption）；`POST .../delivery-execution/stop`（probeSession 活 → 定向 destroy →
@@ -482,7 +522,8 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
   进程 → 409 带 pids，manual 也不放行；干净 → resolveInterruptions + `delivery.exec_recovered`）；`POST
   /api/workspaces/[id]/delivery/resume`（body `{key}`）。
 - **事件**：`delivery.claimed / submitted / attempt_failed / automation_paused / exec_interrupted /
-  exec_recovered / resumed` + `work_item.design_updated`（designer 写 design.md 对齐 M2 事件名）。
+  exec_recovered / resumed / rework_suggested` + `work_item.design_updated`（designer 写 design.md 对齐 M2 事件名；
+  verifier 全过 submit 复用 `delivery.submitted`（data.outcome=verified），有失败走 `delivery.rework_suggested`）。
 - **挂载与泛化**：`buildWorkspaceExtensions` 第二个 `work-items` 工厂条目——build 内补
   `manifest.capabilities.includes("workflows")` 合取门（单 capability 注册表表达不了合取；不满足返回
   undefined 静默不挂载），挂载后工具运行时另有角色授权身份门。M1 的 ActiveRoundInfo **泛化**
@@ -843,10 +884,10 @@ lib/
       pool.ts               双角色池子（Phase-3 合并）：projectDeliveryPool 纯投影（角色由阶段决定：rfi→developer 其余→designer；designer 谓词 managed∧enabled∧intake；developer 另加 designConfirmed 真值∧仓库范围非空∧每仓登记且 active（reason no-repo-scope/design-unconfirmed/repo-not-registered）；共用 无claim∧无中断∧未暂停∧失败未达上限∧status∈{open,blocked} 白名单∧未归档；两角色合并队列 P0→P3→key）+ listDeliveryPool 读取端装配（运行时信号 + contentDigest + manifest 登记仓表）
       worktrees.ts          developer 领取的 worktree 预建与候选核验（Phase-3 T2）：prepareWorktrees（分支 pi-delivery/<KEY>/gen<N>、仓旁 <repoRoot>-worktrees/ 目录、同代幂等复用、先整表登记复验、失败零状态已建不回滚）+ verifyCandidateCommits（rev-parse ^{commit} 核验，ref 非 40-hex 也接受）
       attempts.ts           claim.json/automation-paused/failure-window（runtime/ advisory 运行态，claim 首写时幂等接进 .gitignore；宽松读）+ attempts/ 追加审计 + resolveInterruptions + countRecentFailures（自最近 resume 起的尾部连续失败，遇 submitted 断）+ ownerToken 只存 sha256（hashOwnerToken）
-      claim.ts              领取事务（designer + developer 六函数共用骨架）：claimDesignerTask（intake→design + design.md 播种）/ claimDeveloperTask（worktree 预建先于状态落盘 + designDigest 快照，rfi→implementation）/ submitDesignerResult（等人 confirm）/ submitDeveloperResult（双 digest+designConfirmed+phase 门复验 + 候选核验 → M2 submit-verification 语义内联进 verification）/ failDesignerTask|failDeveloperTask（回退守卫 design→intake / implementation→rfi；失败预算跨角色共享→paused）+ heartbeatActiveClaim（20s 续约）+ recordInterruption + resumeAutomation
+      claim.ts              领取事务（designer + developer + verifier 九函数共用骨架）：claimDesignerTask（intake→design + design.md 播种）/ claimDeveloperTask（worktree 预建先于状态落盘 + designDigest 快照，rfi→implementation）/ claimVerifierTask（Phase-4：候选 detached checkout 预建 + candidateDigest/checkContexts/checkResults 冻结，phase 不变）/ submitDesignerResult（等人 confirm）/ submitDeveloperResult（双 digest+designConfirmed+phase 门复验 + 候选核验 → M2 submit-verification 语义内联进 verification）/ submitVerifierResult（证据只取 claim.checkResults 按冻结快照逐名比对 → 全过 delivery.verification+release_ready / 有失败 rework 四清+rework_suggested）/ failDesignerTask|failDeveloperTask（回退守卫 design→intake / implementation→rfi）/ failVerifierTask（phase 不动）+ recordCheckResult（heartbeat 习语证据累积）+ heartbeatActiveClaim（20s 续约）+ recordInterruption + resumeAutomation
       role-grants.ts        globalThis 单例角色授权表（grantRole/revokeRole/roleGrantOf/setGrantToken——token 只进进程内 grant；hasAnyActiveExecution 裸授权即占槽）
-      tools.ts              delivery_list_ready_tasks/claim/submit/fail 四工具（pi-delivery-runner extension；claim/submit/fail 按 grant.role 分派 designer/developer 服务，submit 扁平可选字段组（union/any-of schema 被 SDK 调用侧解析毁掉，禁用）服务端按角色校验，claim 结果 developer 附 worktrees 清单；身份=ctx.sessionManager.getSessionId()+grant 核对，无 grant → denied 文本；凭证不进参数 schema；人工动作面刻意不做工具）
-      role-session.ts       launchRoleSession/buildRoleContract（Phase-3 T4 泛化双角色；designer 合同逐字节保留，developer 合同 = 只在 claim 返回的 worktree 内改码/不合并不推送/提交 candidates/验证由人）：两步创建（sessionId→grantRole 先于 prompt→登记→命名 `${role} · KEY`→开场合同 appendSystemPrompt 限定只领指派项）+ 20s 心跳 + 结束钩子（onDestroy：launch key 快路径 ∪ 全活动项 claim 扫描兜底 → recordInterruption → revoke/clear）
+      tools.ts              delivery_list_ready_tasks/claim/submit/fail/run_check 五工具（pi-delivery-runner extension；claim/submit/fail 按 grant.role 三路分派 designer/developer/verifier 服务，submit 扁平可选字段组（union/any-of schema 被 SDK 调用侧解析毁掉，禁用）服务端按角色校验（verifier 只需 key），claim 结果 developer/verifier 附 worktrees 清单 + verifier 附 checks 冻结清单；run_check（Phase-4 verifier 专属）：按冻结快照找配置 → 候选 checkout 服务端 runConfiguredCheck → recordCheckResult 累积（同名覆盖）；身份=ctx.sessionManager.getSessionId()+grant 核对，无 grant → denied 文本；凭证不进参数 schema；人工动作面刻意不做工具）
+      role-session.ts       launchRoleSession/buildRoleContract（Phase-3 T4 泛化双角色、Phase-4 T4 增 verifier 合同；designer 合同逐字节保留，developer 合同 = 只在 claim 返回的 worktree 内改码/不合并不推送/提交 candidates/验证由人，verifier 合同 = 检查只经 delivery_run_check（bash 替代不作证据）/验证环境只读不自行修复/不合并不推送/submit 只需 key）：两步创建（sessionId→grantRole 先于 prompt→登记→命名 `${role} · KEY`→开场合同 appendSystemPrompt 限定只领指派项）+ 20s 心跳 + 结束钩子（onDestroy：launch key 快路径 ∪ 全活动项 claim 扫描兜底 → recordInterruption → revoke/clear）
       dispatcher.ts         DeliveryDispatcher（HostJob delivery-dispatcher，30s tick：超时清道夫[claim.claimedAt 起算超 maxExecutionMinutes → probe 活则定向 destroy + recordInterruption；死会话仍记录；role 无关] + 单槽位派发[activeExecution = 内存 grant ∪ claim 扫描，跨角色共享；合并队列取首、按 entry.role 起 launchRoleSession]）
     legal-actions.ts        legalDeliveryActions / legalActionBarActions 的 client-safe 家（纯类型导入，详情页动作条不拖 node:fs 进浏览器 bundle；delivery.ts re-export 保服务端消费面）
     errors.ts               错误类叶子模块（Validation/Conflict/NotFound）—— service/delivery-types/file-lock 共用，web.ts 的 instanceof→HTTP 映射要求同一 class 身份（service.ts re-export）
