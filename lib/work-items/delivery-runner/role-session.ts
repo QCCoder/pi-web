@@ -1,17 +1,23 @@
 // Phase-2 Task 6: designer 角色会话装配（spec 2026-10-24-phase-two §5.4）。
+// Phase-3 Task 4: 泛化为双角色 launchRoleSession/buildRoleContract（spec
+// 2026-10-24-phase-three §6）——designer 合同/路径逐字节保留（buildRoleContract
+// ("designer") 即 DESIGNER_CONTRACT 原文）；developer 合同按 spec §6 新写
+// （worktree 唯一代码工作区 / 不合并不推送 / 候选提交 / 验证由人）。
 //
-// dispatcher（T7）判定该起 designer 时调 launchDesignerSession：两步创建序
+// dispatcher 判定该起角色会话时调 launchRoleSession：两步创建序
 // （sessionId 到手 → grantRole → delivery 执行登记 → 命名 → 开场 prompt），
 // 会话本身 fire-and-forget——不 await 轮结束，结束钩子（wrapper onDestroy）+
 // 心跳续约兜底。开场合同（appendSystemPrompt）约束职责与硬规则；模型覆写来自
-// Task 1 的 `.pi/delivery.yaml`（config.roles.designer.model，缺省时若配置了
-// profile 则从 `.pi/agents/<profile>.md` frontmatter 解析 model 字段）。
+// `.pi/delivery.yaml`（config.roles[role].model，缺省时若配置了 profile 则从
+// `.pi/agents/<profile>.md` frontmatter 解析 model 字段；roles.developer 的
+// 配置解析由 T5 落地，消费侧已按 role 取）。
 //
 // 结束钩子（onDestroy）：记录本会话遗留的所有未清 claim → revokeRole → 清
 // delivery 执行登记 → 停心跳。领取集 = launch key 快路径 + 全活动项扫描兜底
 // （fix-round 1 裁定：开场合同限定「只领取指派项」，扫描兜住违约领取——对每个
 // claim.sessionId 匹配的项 recordInterruption，服务幂等，先到者清 claim）。
 // claim 已清 / 他人会话 / 二次触发都只做无条件的 revoke/clear，不动记录。
+// 结束钩子/心跳/登记 role 无关（claim.sessionId 匹配，不问角色）。
 //
 // 心跳：20s 一拍续约 claim.lastSeenAt（heartbeatActiveClaim——sessionId 匹配
 // 才写，不 bump revision、不产生事件、不进 git），interval unref 且随会话结束
@@ -31,9 +37,12 @@ import { heartbeatActiveClaim, recordInterruption } from "./claim.ts";
 import { readClaim, type ClaimState } from "./attempts.ts";
 import { grantRole, revokeRole } from "./role-grants.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
-import type { DeliveryRunnerConfig } from "./config.ts";
+import type { DeliveryRunnerConfig, DeliveryRoleConfig } from "./config.ts";
+import type { DeliveryRole } from "./pool.ts";
+import type { RoleWorktree } from "./worktrees.ts";
 
-/** designer 开场合同：职责 / 硬规则 / 结束条件（随 appendSystemPrompt 注入）。 */
+/** designer 开场合同：职责 / 硬规则 / 结束条件（随 appendSystemPrompt 注入）。
+ *  Phase-3 T4 起经 buildRoleContract("designer", …) 产出——文本逐字节保留。 */
 export const DESIGNER_CONTRACT = (task: { key: string; title: string }) => `# designer 角色合同（${task.key}）
 
 ## 职责
@@ -49,8 +58,58 @@ export const DESIGNER_CONTRACT = (task: { key: string; title: string }) => `# de
 ## 结束条件
 以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
 
+/** developer 开场合同（spec §6）：职责 / 硬规则 / 结束条件。worktree 清单来自
+ *  claim（领取事务预建）；launch 时领取未发生——清单以 delivery_claim_task
+ *  返回为准（不虚构路径）。 */
+const developerContract = (
+  task: { key: string; title: string },
+  claim?: { worktrees?: RoleWorktree[] },
+): string => {
+  const worktrees = claim?.worktrees ?? [];
+  const worktreeList = worktrees.length > 0
+    ? worktrees
+      .map((worktree) => `   - ${worktree.path}（分支 ${worktree.branch}，仓库 ${worktree.repositoryId}）`)
+      .join("\n")
+    : "   - （领取时核发——以 delivery_claim_task 返回的 worktrees 清单为准，逐项 path+branch）";
+  return `# developer 角色合同（${task.key}）
+
+## 职责
+按工作项 ${task.key}（${task.title}）已确认的设计与验收条件完成实现：在指定的 worktree 中编码与自测，提交候选 commit。
+
+## 硬规则
+1. 先 delivery_list_ready_tasks 看池子，再 delivery_claim_task 领取成功后才动手——领取失败/冲突不得绕过或强写。本轮只领取工作项 ${task.key}；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项。
+2. 代码只改以下 worktree（逐项 path+branch）：
+${worktreeList}
+   主工作区与其它目录一律只读。
+3. 分支纪律按工作区 AGENTS/git 规则：只在 worktree 的草稿分支上工作，不合并不推送——合并到主分支由人做。
+4. 完成后在 worktree 分支上 commit，用 delivery_submit_result 提交 candidates（每仓一个 commit sha）与 notes（变更说明/自测情况）。
+5. 阻塞（需求不可实现、环境/依赖问题）时用 delivery_fail_task 说明原因后结束；环境/依赖类阻塞带 blocked=true。
+6. 验证结论由人给出，你没有验证登记动作。
+
+## 结束条件
+以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
+};
+
+/** 角色开场合同：designer = 现行文本（逐字节）；developer = worktree 隔离合同。 */
+export function buildRoleContract(
+  role: DeliveryRole,
+  task: { key: string; title: string },
+  claim?: { worktrees?: RoleWorktree[] },
+): string {
+  return role === "developer" ? developerContract(task, claim) : DESIGNER_CONTRACT(task);
+}
+
 /** 开场指令：列出池子 → 领取指派项（唯一目标，不领其他项）→ 工作 → 提交。 */
-function designerOpeningPrompt(task: { key: string; title: string }): string {
+function openingPromptFor(role: DeliveryRole, task: { key: string; title: string }): string {
+  if (role === "developer") {
+    return [
+      "你是本工作区的交付 developer 会话，请开始本轮工作：",
+      "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
+      `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
+      "3. 依据领取返回的已确认设计（design.md）与 worktree 清单，在对应 worktree 分支上实现并自测；",
+      "4. 在 worktree 分支 commit 后用 delivery_submit_result 提交 candidates（每仓 commit sha）与 notes 即结束本轮；无法推进时 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
+    ].join("\n");
+  }
   return [
     "你是本工作区的交付 designer 会话，请开始本轮工作：",
     "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
@@ -60,7 +119,7 @@ function designerOpeningPrompt(task: { key: string; title: string }): string {
   ].join("\n");
 }
 
-/** claim 心跳周期（spec §5.2 轻量续约）。 */
+/** claim 心跳周期（spec §5.2 轻量续约；两角色共用）。 */
 export const DESIGNER_HEARTBEAT_INTERVAL_MS = 20_000;
 
 export interface LaunchDeps {
@@ -84,8 +143,9 @@ export interface LaunchDeps {
   scanClaims?: (workspacePath: string) => Promise<Array<{ key: string; claim: ClaimState | null }>>;
   heartbeat?: typeof heartbeatActiveClaim;
   record?: typeof recordInterruption;
-  /** 解析工作区 subagent profile 的模型覆写（config.roles.designer.model 缺省而
-   *  profile 在场时的模型来源，final review fix）。返回 undefined = 无覆写。 */
+  /** 解析工作区 subagent profile 的模型覆写（config.roles[role].model 缺省而
+   *  profile 在场时的模型来源，final review fix——两角色共用）。返回 undefined
+   *  = 无覆写。 */
   readProfileModel?: (
     workspacePath: string,
     profile: string,
@@ -160,20 +220,27 @@ export const scanActiveItemClaims: NonNullable<LaunchDeps["scanClaims"]> = async
   return entries;
 };
 
-export interface LaunchDesignerOptions {
+export interface LaunchRoleOptions {
   workspaceId: string;
   workspacePath: string;
+  /** 本次拉起的角色（池条目所处阶段决定——dispatcher 透传 entry.role）。 */
+  role: DeliveryRole;
   task: { key: string; title: string };
+  /** 领取上下文（launch 时领取尚未发生 → 空对象；worktree 清单以领取返回为准，
+   *  合同相应指向 delivery_claim_task 的返回）。 */
+  claim: { worktrees?: RoleWorktree[] };
   config: DeliveryRunnerConfig;
   deps?: LaunchDeps;
 }
 
 /**
- * 拉起一个 designer 角色会话并返回 sessionId（不 await 轮结束）。
+ * 拉起一个角色会话（designer | developer）并返回 sessionId（不 await 轮结束）。
  * 两步创建序：createSession 不带 command → grantRole → markDeliveryExecutionActive
- * → set_session_name → prompt；任何装配失败都会收尾（revoke/clear/destroy）后重抛。
+ * → set_session_name（`${role} · ${key}`）→ prompt；任何装配失败都会收尾
+ * （revoke/clear/destroy）后重抛。结束钩子/心跳/登记 role 无关（claim.sessionId
+ * 匹配，不问角色）。
  */
-export async function launchDesignerSession(opts: LaunchDesignerOptions): Promise<string> {
+export async function launchRoleSession(opts: LaunchRoleOptions): Promise<string> {
   const d = {
     createSession: opts.deps?.createSession ?? createSession,
     sendCommand: opts.deps?.sendCommand ?? sendCommand,
@@ -190,16 +257,20 @@ export async function launchDesignerSession(opts: LaunchDesignerOptions): Promis
     readProfileModel: opts.deps?.readProfileModel ?? readDesignerProfileModel,
     now: opts.deps?.now ?? (() => new Date()),
   };
-  const { workspacePath, task } = opts;
-  // 模型覆写：显式 config model 优先；缺省而 profile 在场时从工作区 subagent
-  // profile frontmatter 解析（缺文件/无 model/解析失败 → 静默回落默认，至多日志）。
-  const designer = opts.config?.roles?.designer;
-  let model = designer?.model;
-  if (model === undefined && designer?.profile) {
+  const { workspacePath, task, role } = opts;
+  // 模型覆写按 role 取（roles 形状 T5 落显式双字段；现行 {designer?} 对
+  // Partial<Record<DeliveryRole, …>> 结构兼容——developer 键在解析落地前恒
+  // undefined，即回落默认模型）：显式 config model 优先；缺省而 profile 在场
+  // 时从工作区 subagent profile frontmatter 解析（缺文件/无 model/解析失败 →
+  // 静默回落默认，至多日志）。
+  const roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>> | undefined = opts.config?.roles;
+  const roleConfig = roles?.[role];
+  let model = roleConfig?.model;
+  if (model === undefined && roleConfig?.profile) {
     try {
-      model = (await d.readProfileModel(workspacePath, designer.profile)) ?? undefined;
+      model = (await d.readProfileModel(workspacePath, roleConfig.profile)) ?? undefined;
     } catch (error) {
-      console.error(`[delivery-runner] designer profile model resolution failed (${designer.profile}):`, error);
+      console.error(`[delivery-runner] ${role} profile model resolution failed (${roleConfig.profile}):`, error);
     }
   }
 
@@ -207,7 +278,7 @@ export async function launchDesignerSession(opts: LaunchDesignerOptions): Promis
   //    appendSystemPrompt，模型覆写走 StartSessionOptions.model。
   const created = await d.createSession({
     cwd: workspacePath,
-    appendSystemPrompt: DESIGNER_CONTRACT(task),
+    appendSystemPrompt: buildRoleContract(role, task, opts.claim),
     ...(model ? { model } : {}),
   });
   const sessionId = created.sessionId;
@@ -253,11 +324,11 @@ export async function launchDesignerSession(opts: LaunchDesignerOptions): Promis
 
   try {
     // 2. 角色授权（delivery_* 工具的身份门）。
-    d.grantRole(sessionId, { role: "designer", workspacePath });
+    d.grantRole(sessionId, { role, workspacePath });
     // 3. delivery 执行登记（宿主关停据此写 claim 中断）。
     d.markActive(sessionId, { workspacePath, itemKey: task.key });
     // 4. 命名（省略代次——generation 此刻未知，领取后才产生）。
-    await d.sendCommand(sessionId, { type: "set_session_name", name: `designer · ${task.key}` });
+    await d.sendCommand(sessionId, { type: "set_session_name", name: `${role} · ${task.key}` });
   } catch (error) {
     // 装配失败：结束钩子可能尚未武装，显式收尾后销毁已建会话再抛。
     await handleEnd().catch(() => {});
@@ -288,7 +359,7 @@ export async function launchDesignerSession(opts: LaunchDesignerOptions): Promis
 
   // 5. 开场指令。send 只等受理（fire-and-forget），轮结束由结束钩子兜底。
   try {
-    await d.sendCommand(sessionId, { type: "prompt", message: designerOpeningPrompt(task) });
+    await d.sendCommand(sessionId, { type: "prompt", message: openingPromptFor(role, task) });
   } catch (error) {
     await handleEnd().catch(() => {});
     d.destroySession(sessionId);

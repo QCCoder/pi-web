@@ -9,12 +9,17 @@
 //      → probeSession 仍活 → 定向 destroySession → recordInterruption(
 //      "execution timeout")。记录幂等（destroy 触发的结束钩子也会竞写，先到者
 //      清 claim 后到者 no-op）；会话已死（宿主重启遗留）→ 跳过 destroy 仍记录
-//      ——否则陈旧 claim 会经 activeExecution 永久占死单槽位。
+//      ——否则陈旧 claim 会经 activeExecution 永久占死单槽位。清道夫 role 无关
+//      （Phase-3 T4：developer claim 同样适用——claimedAt 起算不变，
+//      recordInterruption 已随 ClaimState.role 泛化）。
 //
-//   ② 单槽位派发：activeExecution（内存 role-grant 登记表 ∪ claim 扫描）在场
-//      → 跳过；池子 ready 空 → 跳过；否则 launch 首条（fire-and-forget，catch
-//      记日志——launch 的 grantRole 即时占槽，同 tick 内多余 ready 与下一拍都
-//      被 activeExecution 拦住，无双派发窗口）。
+//   ② 单槽位派发（Phase-3 T4：合并队列取首、按条目角色分派）：activeExecution
+//      （内存 role-grant 登记表 ∪ claim 扫描——跨角色共享单槽位）在场 → 跳过；
+//      池子 ready 空 → 跳过；否则按 ready[0].role 起 launchRoleSession
+//      （fire-and-forget，catch 记日志——launch 的 grantRole 即时占槽，同 tick
+//      内多余 ready 与下一拍都被 activeExecution 拦住，无双派发窗口）。角色由
+//      条目所处阶段决定（pool 投影），dispatcher 只透传——消除 T1 的过渡窗口
+//      （developer-ready 项不再被当 designer 起会话后领取即拒）。
 //
 // 装配在 background.ts（guard 链后的第二个 HostJob，懒加载——work-item 服务
 // 不进 resident bundle）；关停序列 stopBackgroundSafely 同时停两个 job。
@@ -24,7 +29,7 @@ import { discoverWorkspaces, readWorkspaceManifest } from "../../workspaces/serv
 import { assertAutomationCapable, readDeliveryRunnerConfig, type DeliveryRunnerConfig } from "./config.ts";
 import { listDeliveryPool } from "./pool.ts";
 import { hasAnyActiveExecution } from "./role-grants.ts";
-import { launchDesignerSession, scanActiveItemClaims } from "./role-session.ts";
+import { launchRoleSession, scanActiveItemClaims } from "./role-session.ts";
 import { recordInterruption } from "./claim.ts";
 
 const DISPATCHER_TICK_MS = 30_000;
@@ -36,10 +41,10 @@ export interface DispatcherDeps {
   readManifest?: typeof readWorkspaceManifest;
   readConfig?: typeof readDeliveryRunnerConfig;
   pool?: typeof listDeliveryPool;
-  launch?: typeof launchDesignerSession;
+  launch?: typeof launchRoleSession;
   /** 单槽位互斥（默认 hasAnyActiveExecution ∪ claim 扫描：内存登记或持久
-   *  claim 任一在场都占槽——授予到领取的窗口与宿主重启后的陈旧 claim 都不
-   *  允许双派发；后者由超时清道夫到时限后释放）。 */
+   *  claim 任一在场都占槽——跨角色共享；授予到领取的窗口与宿主重启后的陈旧
+   *  claim 都不允许双派发；后者由超时清道夫到时限后释放）。 */
   activeExecution?: (workspacePath: string) => boolean | Promise<boolean>;
   /** 活动领取扫描（清道夫数据源；默认 role-session 结束钩子同一扫描习语）。 */
   scanClaims?: typeof scanActiveItemClaims;
@@ -61,7 +66,7 @@ export class DeliveryDispatcher implements HostJob {
       readManifest: deps.readManifest ?? readWorkspaceManifest,
       readConfig: deps.readConfig ?? readDeliveryRunnerConfig,
       pool: deps.pool ?? listDeliveryPool,
-      launch: deps.launch ?? launchDesignerSession,
+      launch: deps.launch ?? launchRoleSession,
       activeExecution:
         deps.activeExecution
         ?? (async (workspacePath: string) => {
@@ -145,16 +150,21 @@ export class DeliveryDispatcher implements HostJob {
     if (await Promise.resolve(this.deps.activeExecution(workspace.path))) return;
     const { ready } = await this.deps.pool(workspace.path);
     if (ready.length === 0) return;
-    const task = ready[0];
-    // fire-and-forget：只领首条（单槽位互斥由 activeExecution 承担）；失败记
-    // 日志不进 tick——下一拍池子复评自然重试（失败预算在 claim/fail 服务侧管）。
+    const entry = ready[0];
+    // fire-and-forget：只领首条（单槽位互斥由 activeExecution 承担）；角色随
+    // 条目流动（pool 投影自带 role——launchRoleSession 按它分派合同/授权）；
+    // launch 时领取未发生，claim 传空对象（worktree 清单以领取返回为准）。
+    // 失败记日志不进 tick——下一拍池子复评自然重试（失败预算在 claim/fail
+    // 服务侧管）。
     void this.deps.launch({
       workspaceId: workspace.id,
       workspacePath: workspace.path,
-      task: { key: task.key, title: task.title },
+      role: entry.role,
+      task: { key: entry.key, title: entry.title },
+      claim: {},
       config,
     }).catch((error) => {
-      console.error(`[delivery-runner] designer launch failed for ${task.key}:`, error);
+      console.error(`[delivery-runner] ${entry.role} launch failed for ${entry.key}:`, error);
     });
   }
 }

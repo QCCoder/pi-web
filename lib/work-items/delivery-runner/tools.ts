@@ -1,6 +1,10 @@
 // Phase-2 Task 5: designer 角色领取工具（spec 2026-10-24-phase-two §5.3）。
+// Phase-3 Task 4: 双角色分派（spec 2026-10-24-phase-three §6）——claim/submit/
+// fail 按 grant.role 调 designer/developer 对应服务；submit 参数联合
+// （designer: design_markdown+acceptance_criteria | developer: candidates+notes），
+// 服务端按 grant.role 校验形状（错形状 → validation 文本，不进服务）。
 // 挂载在 buildWorkspaceExtensions（capabilities 含 work-items ∧ workflows，
-// extensions.ts），只对被 dispatcher（T7）授予 designer 角色的会话可用：
+// extensions.ts），只对被 dispatcher 授予角色（designer | developer）的会话可用：
 // execute 第一步经 roleGrantOf(sessionId) 验身份——无 grant / grant 属他
 // 工作区 → 400 文本（不抛异常）；凭证（ownerToken/attemptId/generation）
 // 全程住在进程内 role grant（role-grants.ts），绝不出现在参数 schema。
@@ -19,10 +23,14 @@ import { Type } from "typebox";
 import { WorkItemConflictError, WorkItemValidationError } from "../errors.ts";
 import {
   claimDesignerTask,
+  claimDeveloperTask,
   failDesignerTask,
+  failDeveloperTask,
   submitDesignerResult,
+  submitDeveloperResult,
 } from "./claim.ts";
 import { listDeliveryPool } from "./pool.ts";
+import { readClaim } from "./attempts.ts";
 import {
   grantRole,
   roleGrantOf,
@@ -30,10 +38,12 @@ import {
   type RoleGrant,
 } from "./role-grants.ts";
 
-/** T4 carried ruling：submit 冲突（领取窗口内人抢先 confirm-design / 输入
- *  摘要变化）的释放引导——释放走 fail（claim 仍活，须让出），然后结束。 */
-const RELEASE_VIA_FAIL_GUIDANCE =
+/** submit 冲突的释放引导（T4 carried ruling——释放走 fail，claim 仍活须让出，
+ *  然后结束）；designer 与 developer 各自的漂移语义。 */
+const RELEASE_VIA_FAIL_GUIDANCE_DESIGNER =
   "设计已由人确认/输入已变化，请调用 delivery_fail_task 释放本次领取后结束";
+const RELEASE_VIA_FAIL_GUIDANCE_DEVELOPER =
+  "输入已变化/设计已推进，请调用 delivery_fail_task 释放本次领取后结束";
 
 function result(value: unknown) {
   return {
@@ -50,10 +60,10 @@ function denied(message: string) {
 function requireRoleGrant(sessionId: string, workspacePath: string): RoleGrant | string {
   const grant = roleGrantOf(sessionId);
   if (grant === null) {
-    return "非角色执行会话（not a role execution session）：本会话未被授予 designer 角色，delivery_* 工具不可用";
+    return "非角色执行会话（not a role execution session）：本会话未被授予交付执行角色（designer/developer），delivery_* 工具不可用";
   }
   if (grant.workspacePath !== workspacePath) {
-    return `非角色执行会话（not a role execution session）：本会话的 designer 授权属于另一个工作区（${grant.workspacePath}），与当前挂载的工作区不符`;
+    return `非角色执行会话（not a role execution session）：本会话的角色授权属于另一个工作区（${grant.workspacePath}），与当前挂载的工作区不符`;
   }
   return grant;
 }
@@ -122,9 +132,12 @@ export function createDeliveryRunnerExtension(
         name: "delivery_list_ready_tasks",
         label: "List Ready Delivery Tasks",
         description:
-          "List the designer task pool of this workspace: ready tasks (claimable now, "
-          + "sorted P0→P3) and blocked tasks with per-item reasons. No parameters.",
-        promptSnippet: "List ready/blocked designer delivery tasks for this workspace",
+          "List the delivery task pool of this workspace, both roles (designer: "
+          + "intake→design; developer: ready_for_implementation→implementation): "
+          + "ready tasks (claimable now, merged queue sorted P0→P3 then key, each "
+          + "entry carrying its role) and blocked tasks with per-item reasons and role. "
+          + "No parameters.",
+        promptSnippet: "List ready/blocked delivery tasks (designer + developer) for this workspace",
         parameters: Type.Object({}),
         execute: async (_callId, _params, _signal, _update, ctx) => {
           const sessionId = ctx.sessionManager.getSessionId();
@@ -144,6 +157,7 @@ export function createDeliveryRunnerExtension(
                 key: entry.key,
                 title: entry.title,
                 priority: entry.priority,
+                role: entry.role,
                 reasons: entry.reasons,
               })),
             });
@@ -157,14 +171,18 @@ export function createDeliveryRunnerExtension(
         name: "delivery_claim_task",
         label: "Claim Delivery Task",
         description:
-          "Claim a ready delivery task as the designer role (intake→design, seeds design.md). "
-          + "Returns the input pack: requirement README, repository list, and the design.md path. "
-          + "Idempotent: retrying the same key in the same session replays the original grant.",
+          "Claim a ready delivery task in YOUR granted role, exactly the task your role "
+          + "contract assigns (designer: intake→design, seeds design.md; developer: "
+          + "ready_for_implementation→implementation, prepares isolated worktrees). "
+          + "Returns the input pack: requirement README, repository list, the design.md "
+          + "path, and — for the developer role — the worktree list (path+branch per "
+          + "repository; the ONLY places you may write code). Idempotent: retrying the "
+          + "same key in the same session replays the original grant.",
         promptGuidelines: [
-          "Pick from delivery_list_ready_tasks' ready list (highest priority first); claim exactly one task.",
+          "Pick from delivery_list_ready_tasks' ready list, respecting your role contract — claim exactly the assigned task.",
           "Retry of a timed-out claim is safe — the same claim is replayed, no second transaction.",
         ],
-        promptSnippet: "Claim a delivery task and receive its requirement input pack",
+        promptSnippet: "Claim the assigned delivery task in your role and receive its input pack",
         parameters: Type.Object({
           key: Type.String({ description: "Human key such as REQ-0001" }),
         }),
@@ -173,12 +191,20 @@ export function createDeliveryRunnerExtension(
           const gate = requireRoleGrant(sessionId, workspacePath);
           if (typeof gate === "string") return denied(gate);
           try {
-            const { grant, replayed } = await claimDesignerTask({
-              workspacePath,
-              key: params.key,
-              sessionId,
-              requestId: `claim:${sessionId}:${params.key}`,
-            });
+            const claimed = gate.role === "developer"
+              ? await claimDeveloperTask({
+                workspacePath,
+                key: params.key,
+                sessionId,
+                requestId: `claim:${sessionId}:${params.key}`,
+              })
+              : await claimDesignerTask({
+                workspacePath,
+                key: params.key,
+                sessionId,
+                requestId: `claim:${sessionId}:${params.key}`,
+              });
+            const { grant, replayed } = claimed;
             // 明文 ownerToken 只在首次核发；重放为空串 → 不覆写已存凭证。
             let note: string | undefined;
             if (grant.ownerToken !== "") {
@@ -189,6 +215,7 @@ export function createDeliveryRunnerExtension(
             return result({
               ok: true,
               replayed,
+              role: gate.role,
               attemptId: grant.attemptId,
               generation: grant.generation,
               key: grant.key,
@@ -197,6 +224,10 @@ export function createDeliveryRunnerExtension(
               repositories: grant.item.item.repositories,
               requirementReadme: grant.item.content,
               designDocPath: join(grant.item.path, "delivery", "artifacts", "design.md"),
+              // developer 专属：worktree 清单（claim.json 随领取落盘——重放同样在场）。
+              ...(gate.role === "developer"
+                ? { worktrees: readClaim(grant.item.path)?.worktrees ?? [] }
+                : {}),
               ...(note !== undefined ? { note } : {}),
             });
           } catch (error) {
@@ -212,42 +243,119 @@ export function createDeliveryRunnerExtension(
 
       pi.registerTool({
         name: "delivery_submit_result",
-        label: "Submit Delivery Design",
+        label: "Submit Delivery Result",
         description:
-          "Submit the design result for the claimed task: writes design.md (your design plus a "
-          + "synthesized acceptance-criteria section) and returns the item to awaiting-human-confirmation. "
-          + "Credentials are held server-side — pass only key, design markdown, acceptance criteria. "
-          + "After submitting, end the turn: confirmation (confirm-design) is the human's move.",
+          "Submit the result for the claimed task, in the shape YOUR role requires. "
+          + "designer: design_markdown (full design body) + acceptance_criteria "
+          + "(checkable, at least one) — writes design.md and returns the item to "
+          + "awaiting-human-confirmation. developer: candidates (one "
+          + "{repositoryId, commit} per repository, commits on your worktree "
+          + "branches) + optional notes (change summary / self-test) — submits the "
+          + "implementation candidates and moves the item to verification. "
+          + "Credentials are held server-side. After submitting, end the turn: "
+          + "confirmation and verification are the human's moves.",
         promptGuidelines: [
-          "Write the full design into design_markdown; list concrete, checkable acceptance_criteria (at least one).",
-          "A conflict result means a human already confirmed or the input changed — follow its guidance (release via delivery_fail_task) and end.",
+          "designer: write the full design into design_markdown; list concrete, checkable acceptance_criteria (at least one).",
+          "developer: commit your work on the worktree branches, then submit one candidate {repositoryId, commit} per repository plus notes.",
+          "A conflict result means the input changed or a human already advanced the item — follow its guidance (release via delivery_fail_task) and end.",
         ],
-        promptSnippet: "Submit the claimed delivery task's design and wait for human confirmation",
-        parameters: Type.Object({
-          key: Type.String({ description: "Human key of the claimed task" }),
-          design_markdown: Type.String({
-            description: "Full design document body in Markdown (验收条件 section is appended automatically)",
+        promptSnippet: "Submit the claimed task's result (design or candidates) and wait for the human's move",
+        parameters: Type.Union([
+          Type.Object({
+            key: Type.String({ description: "Human key of the claimed task" }),
+            design_markdown: Type.String({
+              description: "(designer) Full design document body in Markdown (验收条件 section is appended automatically)",
+            }),
+            acceptance_criteria: Type.Array(Type.String(), {
+              minItems: 1,
+              description: "(designer) Checkable acceptance criteria; at least one is required",
+            }),
           }),
-          acceptance_criteria: Type.Array(Type.String(), {
-            minItems: 1,
-            description: "Checkable acceptance criteria; at least one is required",
+          Type.Object({
+            key: Type.String({ description: "Human key of the claimed task" }),
+            candidates: Type.Array(
+              Type.Object({
+                repositoryId: Type.String({
+                  description: "(developer) Repository id from your claim's worktree list",
+                }),
+                commit: Type.String({
+                  description: "(developer) Commit sha on the worktree branch (one per repository)",
+                }),
+              }),
+              {
+                minItems: 1,
+                description: "(developer) Candidate commits; at least one is required",
+              },
+            ),
+            notes: Type.Optional(Type.String({
+              description: "(developer) Change summary and self-test notes",
+            })),
           }),
-        }),
+        ]),
         execute: async (_callId, params, _signal, _update, ctx) => {
           const sessionId = ctx.sessionManager.getSessionId();
           const gate = requireRoleGrant(sessionId, workspacePath);
           if (typeof gate === "string") return denied(gate);
           const credentials = claimCredentialsOf(gate);
           if (credentials === null) return denied(NO_CLAIM_CREDENTIALS);
+          // 形状按 grant.role 校验（schema 联合是提示，服务端校验是权威）：
+          // 错形状 → validation 文本，不进服务。
+          const raw = params as Record<string, unknown>;
+          if (gate.role === "developer") {
+            if (!Array.isArray(raw.candidates) || raw.candidates.length === 0) {
+              return result({
+                ok: false,
+                error: "validation",
+                message:
+                  "developer 提交需要 candidates（至少一个 {repositoryId, commit}，取自领取返回的 worktree 清单）"
+                  + (raw.design_markdown !== undefined || raw.acceptance_criteria !== undefined
+                    ? "——design_markdown/acceptance_criteria 是 designer 角色的形状"
+                    : ""),
+              });
+            }
+          } else {
+            if (typeof raw.design_markdown !== "string" || raw.design_markdown.trim() === ""
+              || !Array.isArray(raw.acceptance_criteria) || raw.acceptance_criteria.length === 0) {
+              return result({
+                ok: false,
+                error: "validation",
+                message:
+                  "designer 提交需要 design_markdown（设计正文）与 acceptance_criteria（至少一条）"
+                  + (raw.candidates !== undefined
+                    ? "——candidates 是 developer 角色的形状"
+                    : ""),
+              });
+            }
+          }
           try {
+            if (gate.role === "developer") {
+              const detail = await submitDeveloperResult({
+                workspacePath,
+                key: raw.key as string,
+                attemptId: credentials.attemptId,
+                generation: credentials.generation,
+                ownerToken: credentials.ownerToken,
+                candidates: raw.candidates as Array<{ repositoryId: string; commit: string }>,
+                ...(typeof raw.notes === "string" ? { notes: raw.notes } : {}),
+                conversationId: sessionId,
+              });
+              resetToBareGrant(sessionId, gate);
+              return result({
+                ok: true,
+                message:
+                  `候选已提交（${(raw.candidates as unknown[]).length} 个 commit，工作项 ${raw.key}），`
+                  + "等待人工验证（record-verification 是人的动作）——本轮到此结束，不要继续推进阶段",
+                item: itemSummary(detail.item),
+              });
+            }
             const detail = await submitDesignerResult({
               workspacePath,
-              key: params.key,
+              key: raw.key as string,
               attemptId: credentials.attemptId,
               generation: credentials.generation,
               ownerToken: credentials.ownerToken,
-              designContent: params.design_markdown,
-              acceptanceCriteria: [...params.acceptance_criteria],
+              designContent: raw.design_markdown as string,
+              acceptanceCriteria: [...(raw.acceptance_criteria as string[])],
               requestId: `submit:${sessionId}:${credentials.attemptId}`,
               conversationId: sessionId,
             });
@@ -255,18 +363,18 @@ export function createDeliveryRunnerExtension(
             return result({
               ok: true,
               message:
-                `设计已提交（design.md 写入 ${params.key}），等待人工确认（confirm-design）——本轮到此结束，不要继续推进阶段`,
+                `设计已提交（design.md 写入 ${raw.key}），等待人工确认（confirm-design）——本轮到此结束，不要继续推进阶段`,
               item: itemSummary(detail.item),
             });
           } catch (error) {
-            return errorResult(
-              error,
-              error instanceof WorkItemConflictError
-                ? error.message.includes("no active claim")
-                  ? "领取已不存在（可能已提交过或已被释放）——不要重复提交，结束本轮"
-                  : RELEASE_VIA_FAIL_GUIDANCE
-                : undefined,
-            );
+            const guidance = error instanceof WorkItemConflictError
+              ? error.message.includes("no active claim")
+                ? "领取已不存在（可能已提交过或已被释放）——不要重复提交，结束本轮"
+                : gate.role === "developer"
+                  ? RELEASE_VIA_FAIL_GUIDANCE_DEVELOPER
+                  : RELEASE_VIA_FAIL_GUIDANCE_DESIGNER
+              : undefined;
+            return errorResult(error, guidance);
           }
         },
       });
@@ -275,9 +383,10 @@ export function createDeliveryRunnerExtension(
         name: "delivery_fail_task",
         label: "Fail / Release Delivery Task",
         description:
-          "Report failure and release the claimed task (design→intake; blocked=true marks the item "
-          + "blocked — still claimable once unblocked). Also used to release a claim invalidated by a "
-          + "human confirm-design, per the submit tool's conflict guidance. Credentials are server-held.",
+          "Report failure and release the claimed task in your role (designer: design→intake; "
+          + "developer: implementation→ready_for_implementation; blocked=true marks the item "
+          + "blocked — still claimable once unblocked). Also used to release a claim invalidated "
+          + "by a human action, per the submit tool's conflict guidance. Credentials are server-held.",
         promptGuidelines: [
           "Give the real reason in reason; set blocked=true only for external/environmental blockers.",
           "After releasing, end the turn — do not immediately re-claim the same item.",
@@ -297,7 +406,7 @@ export function createDeliveryRunnerExtension(
           const credentials = claimCredentialsOf(gate);
           if (credentials === null) return denied(NO_CLAIM_CREDENTIALS);
           try {
-            const detail = await failDesignerTask({
+            const failInput = {
               workspacePath,
               key: params.key,
               attemptId: credentials.attemptId,
@@ -305,7 +414,10 @@ export function createDeliveryRunnerExtension(
               ownerToken: credentials.ownerToken,
               reason: params.reason,
               ...(params.blocked !== undefined ? { blocked: params.blocked } : {}),
-            });
+            };
+            const detail = gate.role === "developer"
+              ? await failDeveloperTask(failInput)
+              : await failDesignerTask(failInput);
             resetToBareGrant(sessionId, gate);
             return result({
               ok: true,
