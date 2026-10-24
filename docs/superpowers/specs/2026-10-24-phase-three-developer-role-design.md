@@ -2,7 +2,7 @@
 
 日期：2026-10-24
 
-状态：草案，待用户审阅；未实施。
+状态：用户已批准（2026-10-24）；未实施。
 
 前置：第二阶段已合入（领取协议 + designer 角色：TaskPool 投影 / claim 事务 / attempt 审计与恢复 / Dispatcher HostJob / 角色授权与四工具 / 会话装配 / 控制路由 / UI）。M2 的 `submit-verification` 语义（候选 `{repositoryId, commit}` 列表、清旧验证、phase→verification）已就绪。
 
