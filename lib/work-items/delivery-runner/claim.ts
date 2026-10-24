@@ -51,6 +51,7 @@ import type { WorkItemDetail, WorkItemRecord } from "../types.ts";
 import {
   clearClaim,
   clearPaused,
+  countRecentFailures,
   hashOwnerToken,
   listAttempts,
   listPendingInterruptions,
@@ -58,6 +59,7 @@ import {
   readPaused,
   writeAttempt,
   writeClaim,
+  writeFailureWindow,
   writePaused,
   type ClaimState,
 } from "./attempts.ts";
@@ -183,15 +185,6 @@ async function requireActiveClaim(
   return { detail, claim };
 }
 
-/** 同 requirementDigest 的 failed attempt 计数（与 pool 读取端同口径——
- *  outcome==="failed" 且 digest 匹配；跨 attempt 全量，不窗口化）。 */
-async function countFailedAttempts(itemPath: string, requirementDigest: string): Promise<number> {
-  const attempts = await listAttempts(itemPath);
-  return attempts.filter(
-    (attempt) => attempt.outcome === "failed" && attempt.requirementDigest === requirementDigest,
-  ).length;
-}
-
 async function maxAttemptsFor(workspacePath: string): Promise<number> {
   const config = await readDeliveryRunnerConfig(workspacePath);
   return config?.budget.maxAttemptsPerInput
@@ -241,17 +234,15 @@ export async function claimDesignerTask(
     const manifest = await readWorkspaceManifest(input.workspacePath);
     assertAutomationCapable(manifest);
     const config = await readDeliveryRunnerConfig(input.workspacePath);
+    const maxAttemptsPerInput = config?.budget.maxAttemptsPerInput
+      ?? DEFAULT_DELIVERY_RUNNER_CONFIG.budget.maxAttemptsPerInput;
     const requirementDigest = contentDigest(current.content);
     const attempts = await listAttempts(itemPath);
-    const failedCountByDigest = new Map<string, number>();
-    for (const attempt of attempts) {
-      if (attempt.outcome === "failed" && typeof attempt.requirementDigest === "string") {
-        failedCountByDigest.set(
-          attempt.requirementDigest,
-          (failedCountByDigest.get(attempt.requirementDigest) ?? 0) + 1,
-        );
-      }
-    }
+    // fix-round 裁定 #1/#2：预算 = 单项自最近 resume 以来的尾随连续失败
+    // （与 pool 读取端同一 helper，口径由构造保证一致）。
+    const failureCountByKey = new Map<string, number>([
+      [input.key, await countRecentFailures(itemPath, requirementDigest, maxAttemptsPerInput)],
+    ]);
     const ctx: DesignerPoolContext = {
       enabled: config?.enabled ?? false,
       // 活动 claim 已在上方以 Conflict 处理，此处必为空集。
@@ -260,9 +251,8 @@ export async function claimDesignerTask(
         ? new Set([input.key])
         : new Set<string>(),
       paused: readPaused(itemPath) !== null ? new Set([input.key]) : new Set<string>(),
-      failedCountByDigest,
-      maxAttemptsPerInput: config?.budget.maxAttemptsPerInput
-        ?? DEFAULT_DELIVERY_RUNNER_CONFIG.budget.maxAttemptsPerInput,
+      failureCountByKey,
+      maxAttemptsPerInput,
     };
     const [entry] = projectDesignerPool(
       [{
@@ -404,7 +394,7 @@ export async function submitDesignerResult(input: SubmitDesignInput): Promise<Wo
     await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
     await appendEvent(
       itemPath,
-      eventFor("delivery.design_updated", "agent", input.conversationId, {
+      eventFor("work_item.design_updated", "agent", input.conversationId, {
         revision: next.revision,
         before_length: previous?.length ?? 0,
         after_length: content.length,
@@ -478,14 +468,15 @@ export async function failDesignerTask(input: FailInput): Promise<WorkItemDetail
       }),
     );
 
-    // 失败预算：同 requirementDigest 的 failed attempts（含刚记的这条）≥ max
-    // → 暂停自动领取，等人显式 resumeAutomation。
+    // 失败预算（fix-round 裁定 #1）：自最近 resume 以来的尾随连续失败（含刚
+    // 记的这条）≥ max → 暂停自动领取，等人显式 resumeAutomation（resume 会写
+    // 失败窗口重置连胜）。reason 如实说窗口口径。
     const maxAttemptsPerInput = await maxAttemptsFor(input.workspacePath);
-    const failedCount = await countFailedAttempts(itemPath, claim.requirementDigest);
+    const failedCount = await countRecentFailures(itemPath, claim.requirementDigest);
     if (failedCount >= maxAttemptsPerInput) {
       writePaused(itemPath, {
         at: now.toISOString(),
-        reason: `consecutive failures (${failedCount})`,
+        reason: `consecutive failures (${failedCount} since last resume)`,
         count: failedCount,
       });
       await appendEvent(
@@ -569,9 +560,9 @@ export async function recordInterruption(
 // ------------------------------------------------------------------ resume
 
 /** 显式恢复自动领取（人处理完阻塞后，actor=user）：清 automation-paused +
- *  delivery.resumed 事件。未暂停 → Validation（路由层映射 400——plan T8）。
- *  注意：这只解除暂停标记；pool 的 failure-limit 按 digest 全量计数（T2 语
- *  义）不受影响——同输入重新领取是否放行由该计数决定（见 T4 报告缺口条目）。 */
+ *  写失败预算窗口（since=now——fix-round 裁定 #1：resume 之后只数新的失败，
+ *  旧连胜不再挡）+ delivery.resumed 事件。未暂停 → Validation（路由层映射
+ *  400——plan T8）。 */
 export async function resumeAutomation(
   workspacePath: string,
   key: string,
@@ -582,7 +573,9 @@ export async function resumeAutomation(
     if (paused === null) {
       throw new WorkItemValidationError(`automation is not paused for ${key}`);
     }
+    const now = new Date().toISOString();
     clearPaused(current.path);
+    writeFailureWindow(current.path, now);
     await appendEvent(
       current.path,
       eventFor("delivery.resumed", "user", undefined, {

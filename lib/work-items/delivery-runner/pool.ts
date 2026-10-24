@@ -6,13 +6,14 @@
 //
 //   listDesignerPool —— 读取端装配器：listWorkItems（仅活动 items，归档/
 //     回收站永不可领）+ Task 1 配置（缺文件 = disabled）+ 每项运行时信号
-//     （claim / 未确认中断 / automation-paused / 失败 attempt 计数，读自
+//     （claim / 未确认中断 / automation-paused / 失败预算计数——单项经
+//     countRecentFailures（尾随连续失败 + resume 窗口），读自
 //     `./attempts.ts`——静态 import：webpack 打包的 server bundle 里动态
 //     相对 import 会 ERR_MODULE_NOT_FOUND → 永久空读 → claimed 项投影为
 //     ready，T2 时代的动态 seam 已按 T3 ruling 移除）。digest 由读取端计算
 //     （contentDigest(README)），纯函数不碰 fs。
 import {
-  listAttempts,
+  countRecentFailures,
   listPendingInterruptions,
   readClaim,
   readPaused,
@@ -59,8 +60,10 @@ export interface DesignerPoolContext {
   pendingInterruptions: Set<string>;
   /** 连续失败达上限后 automation-paused 的 item key 集。 */
   paused: Set<string>;
-  /** 同 requirementDigest 的 failed attempt 计数（跨项共享输入）。 */
-  failedCountByDigest: Map<string, number>;
+  /** 每项的失败预算计数（fix-round 裁定 #2：作用域 = 单项——key → 该项的
+   *  尾随连续失败数，读取端经 countRecentFailures 按项装配；不再跨项按
+   *  digest 聚合）。 */
+  failureCountByKey: Map<string, number>;
   maxAttemptsPerInput: number;
 }
 
@@ -94,7 +97,7 @@ export function projectDesignerPool(
     if (ctx.activeClaims.has(item.key)) reasons.push("active-claim");
     if (ctx.pendingInterruptions.has(item.key)) reasons.push("pending-interruption");
     if (ctx.paused.has(item.key)) reasons.push("automation-paused");
-    if ((ctx.failedCountByDigest.get(item.requirementDigest) ?? 0) >= ctx.maxAttemptsPerInput) {
+    if ((ctx.failureCountByKey.get(item.key) ?? 0) >= ctx.maxAttemptsPerInput) {
       reasons.push("failure-limit");
     }
     if (!CLAIMABLE_STATUSES.includes(item.status)) reasons.push("terminal-status");
@@ -155,7 +158,7 @@ export async function listDesignerPool(
   const activeClaims = new Set<string>();
   const pendingInterruptions = new Set<string>();
   const paused = new Set<string>();
-  const failedCountByDigest = new Map<string, number>();
+  const failureCountByKey = new Map<string, number>();
   for (const [key, itemPath] of itemPaths) {
     try {
       if (readClaim(itemPath)) activeClaims.add(key);
@@ -163,19 +166,12 @@ export async function listDesignerPool(
         pendingInterruptions.add(key);
       }
       if (readPaused(itemPath)) paused.add(key);
-      for (const attempt of await listAttempts(itemPath)) {
-        // 形状守卫只保 attemptId+key，digest 仍作运行时防御（手写文件可缺字段）。
-        if (
-          attempt &&
-          attempt.outcome === "failed" &&
-          typeof attempt.requirementDigest === "string"
-        ) {
-          failedCountByDigest.set(
-            attempt.requirementDigest,
-            (failedCountByDigest.get(attempt.requirementDigest) ?? 0) + 1,
-          );
-        }
-      }
+      // fix-round 裁定 #1/#2：预算 = 单项自最近 resume 以来的尾随连续失败
+      // （shared helper 与 claim 事务同一口径；不再跨项按 digest 聚合）。
+      failureCountByKey.set(
+        key,
+        await countRecentFailures(itemPath, requirementDigests.get(key) ?? "", maxAttemptsPerInput),
+      );
     } catch {
       // 运行时信号读取失败不阻塞投影：视为该项无信号。
     }
@@ -197,7 +193,7 @@ export async function listDesignerPool(
       activeClaims,
       pendingInterruptions,
       paused,
-      failedCountByDigest,
+      failureCountByKey,
       maxAttemptsPerInput,
     },
   );

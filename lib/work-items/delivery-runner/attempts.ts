@@ -3,6 +3,8 @@
 // 文件布局（itemPath = 工作项目录，如 <ws>/.pi/work-items/requirements/REQ-0001-x）：
 //   <item>/delivery/runtime/claim.json              活动领取（运行态，advisory）
 //   <item>/delivery/runtime/automation-paused.json  连续失败暂停标记（运行态，advisory）
+//   <item>/delivery/runtime/failure-window.json     失败预算窗口起点（运行态，advisory；
+//                                                     缺失 = epoch 全量计数）
 //   <item>/delivery/attempts/<attemptId>.json       追加式 attempt 审计（含中断记录）
 //
 // 设计要点：
@@ -271,6 +273,64 @@ export function writePaused(itemPath: string, info: PausedInfo): void {
 
 export function clearPaused(itemPath: string): void {
   rmSync(pausedFilePath(itemPath), { force: true });
+}
+
+// ------------------------------------------- failure window + streak counting
+// （T4 fix-round 裁定：预算计数 = 「自最近一次 resume 以来的尾随连续失败」，
+//   作用域 = 单个工作项——不再跨项按 digest 聚合。）
+
+export interface FailureWindow {
+  /** ISO 时间戳：此时刻之前的 failed attempt 不再计数（缺失 = epoch，全量）。 */
+  since: string;
+}
+
+export function failureWindowFilePath(itemPath: string): string {
+  return join(itemPath, "delivery", "runtime", "failure-window.json");
+}
+
+/** 宽松读：缺失/坏 JSON → null（= epoch——窗口从未写过，全量计数）。 */
+export function readFailureWindow(itemPath: string): FailureWindow | null {
+  const parsed = readJsonFileSync(failureWindowFilePath(itemPath));
+  if (parsed === null || typeof parsed.since !== "string") return null;
+  return parsed as unknown as FailureWindow;
+}
+
+export function writeFailureWindow(itemPath: string, since: string): void {
+  writeAtomicSync(failureWindowFilePath(itemPath), JSON.stringify({ since }, null, 2) + "\n");
+}
+
+/**
+ * 预算计数（fix-round 裁定 #1）：从最新往回数 outcome==="failed" 且 digest
+ * 匹配 且 claimedAt >= 窗口起点（缺失 = epoch）的 attempt；**遇到第一个
+ * outcome==="submitted" 即停**（连胜断点——成功提交后重新起算）；
+ * "interrupted" 不计也不断（中断不是设计成败信号）。按 claimedAt 降序走
+ * （listAttempts 的 attemptId 序是文件名扫描序，须显式排序，attemptId 降序
+ * 作并列 breaker）；缺 claimedAt 的坏记录跳过（无法定位时间线）。
+ * maxStopsAt：计数一超过该值即提前收手（调用方只关心 count >= max 与否，
+ * 返回值不超过 max+1）。 */
+export async function countRecentFailures(
+  itemPath: string,
+  requirementDigest: string,
+  maxStopsAt?: number,
+): Promise<number> {
+  const since = readFailureWindow(itemPath)?.since ?? "";
+  const records = (await listAttempts(itemPath))
+    .filter((record) => typeof record.claimedAt === "string")
+    .sort(
+      (left, right) =>
+        right.claimedAt.localeCompare(left.claimedAt) ||
+        right.attemptId.localeCompare(left.attemptId),
+    );
+  let count = 0;
+  for (const record of records) {
+    if (record.outcome === "submitted") break;
+    if (record.claimedAt < since) continue; // 窗口之前的失败不再计数（resume 重置）
+    if (record.outcome === "failed" && record.requirementDigest === requirementDigest) {
+      count += 1;
+      if (maxStopsAt !== undefined && count > maxStopsAt) break;
+    }
+  }
+  return count;
 }
 
 // -------------------------------------------------------------- owner token
