@@ -1,4 +1,5 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { createDeliveryRunnerExtension } from "../work-items/delivery-runner/tools.ts";
 import { createWorkspaceWorkItemExtension } from "../work-items/extension.ts";
 import { workspaceRepositoryPath } from "./service.ts";
 import type { KnowledgeRepoRef } from "./kb-search/index.ts";
@@ -38,6 +39,18 @@ export const WORKSPACE_EXTENSION_FACTORIES: readonly WorkspaceExtensionFactory[]
     capability: "work-items",
     build: (manifest, workspacePath) =>
       createWorkspaceWorkItemExtension(manifest.id, workspacePath),
+  },
+  {
+    // 交付自动化领取工具（Phase-2）：挂载需要 work-items ∧ workflows 双能力
+    // （与服务侧 claim 的 assertAutomationCapable 同一对，config.ts）。单
+    // capability 的注册表表达不了合取——在 build 里补第二道门，返回
+    // undefined = 静默不挂载。工具运行时另有角色授权身份门
+    // （delivery-runner/role-grants.ts），capability 只管挂载。
+    capability: "work-items",
+    build: (manifest, workspacePath) =>
+      manifest.capabilities.includes("workflows")
+        ? createDeliveryRunnerExtension(manifest.id, workspacePath)
+        : undefined,
   },
   {
     // knowledge capability carries BOTH always-on L0 (agent read/grep/ls, no tool)
