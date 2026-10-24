@@ -6,17 +6,17 @@
 //
 //   listDesignerPool —— 读取端装配器：listWorkItems（仅活动 items，归档/
 //     回收站永不可领）+ Task 1 配置（缺文件 = disabled）+ 每项运行时信号
-//     （claim / 未确认中断 / automation-paused / 失败 attempt 计数）。
-//     digest 由读取端计算（contentDigest(README)），纯函数不碰 fs。
-//
-// Task 3 seam：运行时信号读取器来自 `./attempts.ts`（readClaim /
-// listPendingInterruptions / readPaused / listAttempts）——该模块由 Task 3
-// 提供，落地前可能不存在。经 `loadPoolRuntimeReaders()` 用【非字面量
-// specifier 的动态 import】解析（tsc 不会静态要求该模块存在，T2 可独立
-// 编译链接）；任何失败（模块缺失 / 函数缺席）折叠为全空读取器——等价于
-// 「无 claim、无中断、无暂停、无失败 attempt」，T2 测试独立成立，Task 3
-// 落地后同一路径自动切换到真实读取器。真实读取器自身的 fs 容错
-// （目录缺失 = 空）由 attempts.ts 负责；读取端对每项调用再兜一层 try/catch。
+//     （claim / 未确认中断 / automation-paused / 失败 attempt 计数，读自
+//     `./attempts.ts`——静态 import：webpack 打包的 server bundle 里动态
+//     相对 import 会 ERR_MODULE_NOT_FOUND → 永久空读 → claimed 项投影为
+//     ready，T2 时代的动态 seam 已按 T3 ruling 移除）。digest 由读取端计算
+//     （contentDigest(README)），纯函数不碰 fs。
+import {
+  listAttempts,
+  listPendingInterruptions,
+  readClaim,
+  readPaused,
+} from "./attempts.ts";
 import { readDeliveryRunnerConfig, DEFAULT_DELIVERY_RUNNER_CONFIG } from "./config.ts";
 import { contentDigest } from "../delivery-types.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
@@ -113,55 +113,6 @@ export function projectDesignerPool(
   return entries;
 }
 
-// ---------------------------------------------------------------- Task 3 seam
-
-/** attempts.ts（Task 3）的最小读取面。宽返回类型（unknown / 可选字段）是
- *  有意的：seam 只判真值/长度/outcome 字符串，具体记录形状由 attempts.ts
- *  的消费方（claim.ts/dispatcher.ts）收紧。 */
-interface PoolRuntimeReaders {
-  /** 活动领取（不存在或已失效 → falsy）。 */
-  readClaim(itemPath: string): Promise<unknown>;
-  /** 未确认（needsAttention）中断记录。 */
-  listPendingInterruptions(itemPath: string): Promise<unknown[]>;
-  /** automation-paused 标记。 */
-  readPaused(itemPath: string): Promise<unknown>;
-  /** 结束的 attempt 审计记录（outcome: submitted|failed|interrupted）。 */
-  listAttempts(itemPath: string): Promise<Array<{ outcome?: unknown; requirementDigest?: unknown }>>;
-}
-
-const EMPTY_POOL_RUNTIME_READERS: PoolRuntimeReaders = {
-  readClaim: async () => null,
-  listPendingInterruptions: async () => [],
-  readPaused: async () => null,
-  listAttempts: async () => [],
-};
-
-let poolRuntimeReadersPromise: Promise<PoolRuntimeReaders> | null = null;
-
-/** 惰性解析并记忆 Task 3 读取器；模块缺失/形状不符 → 全空读取器。
- *  specifier 走变量使 tsc 将 import 视为非字面量（不静态要求模块存在），
- *  webpackIgnore 让打包器把它留给运行时（服务端 Node 原生解析 .ts）。 */
-function loadPoolRuntimeReaders(): Promise<PoolRuntimeReaders> {
-  poolRuntimeReadersPromise ??= (async () => {
-    try {
-      const specifier = "./attempts.ts";
-      const mod = (await import(/* webpackIgnore: true */ specifier)) as Partial<PoolRuntimeReaders>;
-      if (
-        typeof mod.readClaim === "function" &&
-        typeof mod.listPendingInterruptions === "function" &&
-        typeof mod.readPaused === "function" &&
-        typeof mod.listAttempts === "function"
-      ) {
-        return mod as PoolRuntimeReaders;
-      }
-      return EMPTY_POOL_RUNTIME_READERS;
-    } catch {
-      return EMPTY_POOL_RUNTIME_READERS;
-    }
-  })();
-  return poolRuntimeReadersPromise;
-}
-
 // -------------------------------------------------------------------- read side
 
 /**
@@ -180,7 +131,6 @@ export async function listDesignerPool(
   const maxAttemptsPerInput =
     config?.budget.maxAttemptsPerInput ??
     DEFAULT_DELIVERY_RUNNER_CONFIG.budget.maxAttemptsPerInput;
-  const readers = await loadPoolRuntimeReaders();
 
   // 只为 managed 项付详情读（readWorkItem：item.yaml+README+events 全读，
   // 池子小可接受）；顺带取 item 目录路径供运行时信号读取。
@@ -204,12 +154,13 @@ export async function listDesignerPool(
   const failedCountByDigest = new Map<string, number>();
   for (const [key, itemPath] of itemPaths) {
     try {
-      if (await readers.readClaim(itemPath)) activeClaims.add(key);
-      if ((await readers.listPendingInterruptions(itemPath)).length > 0) {
+      if (readClaim(itemPath)) activeClaims.add(key);
+      if ((await listPendingInterruptions(itemPath)).length > 0) {
         pendingInterruptions.add(key);
       }
-      if (await readers.readPaused(itemPath)) paused.add(key);
-      for (const attempt of await readers.listAttempts(itemPath)) {
+      if (readPaused(itemPath)) paused.add(key);
+      for (const attempt of await listAttempts(itemPath)) {
+        // 形状守卫只保 attemptId+key，digest 仍作运行时防御（手写文件可缺字段）。
         if (
           attempt &&
           attempt.outcome === "failed" &&
