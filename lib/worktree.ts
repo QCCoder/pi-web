@@ -2,7 +2,9 @@ import { execFile } from "child_process";
 import { existsSync, mkdirSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
-import { allowFileRoot } from "./allowed-roots";
+// `.ts` 后缀：与本仓 node:test 直载的模块（delivery-runner 等）同习语——
+// 无后缀的相对导入裸 node ESM 解析不了（ERR_MODULE_NOT_FOUND）。
+import { allowFileRoot } from "./allowed-roots.ts";
 
 const execFileAsync = promisify(execFile);
 
