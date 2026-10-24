@@ -2,7 +2,7 @@
 
 日期：2026-10-24
 
-状态：草案，待用户审阅；未实施。
+状态：用户已批准（2026-10-24，§10.2 取自动推进版）；未实施。
 
 前置：第三阶段已合入（developer + worktree 隔离：合并双角色池、claim 事务、双角色合同/工具/调度、alias 联表 UI）。M2 的 `delivery.verification`（DeliveryVerificationRecord：requirementDigest + candidateDigest + checks[]）与 `record-verification`/`rework` 动作语义已就绪。
 
