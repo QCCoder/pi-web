@@ -2213,7 +2213,7 @@ export function WorkspaceManager({
                                   <input
                                     value={deliveryDesignerProfile}
                                     disabled={deliverySaving}
-                                    placeholder="subagent profile 名（可选，缺省用内置角色）"
+                                    placeholder="subagent profile 名（可选；未配置模型时从 .pi/agents/<名>.md 解析 model 覆写）"
                                     onChange={(event) => {
                                       setDeliveryDesignerProfile(event.target.value);
                                       setDeliverySaved(false);

@@ -333,7 +333,7 @@ export async function claimDesignerTask(
 
 /**
  * Designer 提交：写 design.md（正文 + 由 acceptanceCriteria 合成的「验收条件」
- * 节）→ 清 claim → attempt submitted → delivery.design_updated +
+ * 节）→ 清 claim → attempt submitted → work_item.design_updated +
  * delivery.submitted 事件 → status 回 open（phase 保持 design 等人工
  * confirm-design——提交即结束，designer 不推进确认）。凭证过期 / 需求摘要
  * 变化 → Conflict（409）。

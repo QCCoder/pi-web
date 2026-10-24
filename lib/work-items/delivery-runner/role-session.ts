@@ -4,7 +4,8 @@
 // （sessionId 到手 → grantRole → delivery 执行登记 → 命名 → 开场 prompt），
 // 会话本身 fire-and-forget——不 await 轮结束，结束钩子（wrapper onDestroy）+
 // 心跳续约兜底。开场合同（appendSystemPrompt）约束职责与硬规则；模型覆写来自
-// Task 1 的 `.pi/delivery.yaml`（config.roles.designer.model）。
+// Task 1 的 `.pi/delivery.yaml`（config.roles.designer.model，缺省时若配置了
+// profile 则从 `.pi/agents/<profile>.md` frontmatter 解析 model 字段）。
 //
 // 结束钩子（onDestroy）：记录本会话遗留的所有未清 claim → revokeRole → 清
 // delivery 执行登记 → 停心跳。领取集 = launch key 快路径 + 全活动项扫描兜底
@@ -18,6 +19,9 @@
 // claim.recordInterruption("host shutdown")（与本钩子竞写安全——服务幂等）。
 import type { CreateSessionInput, CreateSessionResult } from "../../session-host/facade.ts";
 import { createSession, destroySession, sendCommand } from "../../session-host/facade.ts";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { parseFrontmatter } from "../../frontmatter.ts";
 import { getRpcSession } from "../../session-host/registry.ts";
 import {
   clearDeliveryExecutionMark,
@@ -80,6 +84,15 @@ export interface LaunchDeps {
   scanClaims?: (workspacePath: string) => Promise<Array<{ key: string; claim: ClaimState | null }>>;
   heartbeat?: typeof heartbeatActiveClaim;
   record?: typeof recordInterruption;
+  /** 解析工作区 subagent profile 的模型覆写（config.roles.designer.model 缺省而
+   *  profile 在场时的模型来源，final review fix）。返回 undefined = 无覆写。 */
+  readProfileModel?: (
+    workspacePath: string,
+    profile: string,
+  ) =>
+    | Promise<NonNullable<CreateSessionInput["model"]> | undefined>
+    | NonNullable<CreateSessionInput["model"]>
+    | undefined;
   now?: () => Date;
 }
 
@@ -93,6 +106,41 @@ const defaultOnSessionDestroy = (sessionId: string, cb: () => void | Promise<voi
 const defaultResolveItem: NonNullable<LaunchDeps["resolveItem"]> = async (workspacePath, key) => {
   const detail = await readWorkItem(workspacePath, key);
   return { path: detail.path, claim: readClaim(detail.path) };
+};
+
+/** profile 名门（与 subagents assertProfileName 同款）：合法才允许拼路径，把
+ *  `../escape` 之类的配置笔误/穿越形态挡在读盘之前。 */
+const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * 读工作区 subagent profile（`<workspacePath>/.pi/agents/<profile>.md`——subagents
+ * 的 project 作用域目录）frontmatter 的 `model:` 字段，解析成 createSession 的
+ * 模型覆写形状（`provider/model` 首个 `/` 拆分双非空 → {provider, modelId}，裸
+ * modelId → {modelId}）。文件缺失 / 名字不合法 / 无 frontmatter / 无 model /
+ * 值非字符串 → undefined（静默回落默认模型——操作面「配了 profile 却拿不到模型」
+ * 不该把整个 launch 打死）。解析复用 `parseFrontmatter`（subagents 同一习语）。
+ */
+export const readDesignerProfileModel: NonNullable<LaunchDeps["readProfileModel"]> = (
+  workspacePath,
+  profile,
+) => {
+  const name = profile.trim();
+  if (!PROFILE_NAME_RE.test(name)) return undefined;
+  const filePath = join(resolve(workspacePath), ".pi", "agents", `${name}.md`);
+  let source: string;
+  try {
+    source = readFileSync(filePath, "utf8");
+  } catch {
+    return undefined; // 缺文件 = 无覆写，不是错误
+  }
+  const { data } = parseFrontmatter(source);
+  const model = typeof data?.model === "string" ? data.model.trim() : "";
+  if (!model) return undefined;
+  const slash = model.indexOf("/");
+  if (slash > 0 && slash < model.length - 1) {
+    return { provider: model.slice(0, slash), modelId: model.slice(slash + 1) };
+  }
+  return { modelId: model };
 };
 
 /** 工作区全部活动项的当前 claim 扫描：结束钩子兜底与 T7 dispatcher 清道夫
@@ -139,10 +187,21 @@ export async function launchDesignerSession(opts: LaunchDesignerOptions): Promis
     scanClaims: opts.deps?.scanClaims ?? scanActiveItemClaims,
     heartbeat: opts.deps?.heartbeat ?? heartbeatActiveClaim,
     record: opts.deps?.record ?? recordInterruption,
+    readProfileModel: opts.deps?.readProfileModel ?? readDesignerProfileModel,
     now: opts.deps?.now ?? (() => new Date()),
   };
   const { workspacePath, task } = opts;
-  const model = opts.config?.roles?.designer?.model;
+  // 模型覆写：显式 config model 优先；缺省而 profile 在场时从工作区 subagent
+  // profile frontmatter 解析（缺文件/无 model/解析失败 → 静默回落默认，至多日志）。
+  const designer = opts.config?.roles?.designer;
+  let model = designer?.model;
+  if (model === undefined && designer?.profile) {
+    try {
+      model = (await d.readProfileModel(workspacePath, designer.profile)) ?? undefined;
+    } catch (error) {
+      console.error(`[delivery-runner] designer profile model resolution failed (${designer.profile}):`, error);
+    }
+  }
 
   // 1. 建会话（不带 command——sessionId 到手才能 grant/登记/命名）；开场合同走
   //    appendSystemPrompt，模型覆写走 StartSessionOptions.model。

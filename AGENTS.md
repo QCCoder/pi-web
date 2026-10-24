@@ -408,7 +408,11 @@ confirm-design）。developer/verifier/release-preparer 角色、worktree 隔离
   **`grantRole`（先于 prompt）** → `markDeliveryExecutionActive` → `set_session_name`（`designer · <KEY>`）→
   开场 prompt（fire-and-forget，不 await 轮结束）；开场合同（`DESIGNER_CONTRACT` 经 facade
   `CreateSessionInput.appendSystemPrompt` 注入）**限定只领取指派项**；模型覆写 = `config.roles.designer.model`
-  （`CreateSessionInput.model` 透传 StartSessionOptions）。**心跳** 20s 续约（interval unref）；**结束钩子**
+  （`CreateSessionInput.model` 透传 StartSessionOptions）；model 缺省而 `roles.designer.profile` 在场时**从工作区
+  subagent profile 解析模型**（final review fix——profile 字段曾 inert）：读 `<workspace>/.pi/agents/<profile>.md`
+  frontmatter 的 `model:` 字段（`provider/model` 或裸 modelId，复用 `parseFrontmatter`；缺文件/无 model/名字非法/
+  解析抛错 → 静默回落默认模型，至多日志；注入缝 `LaunchDeps.readProfileModel`，默认实现
+  `readDesignerProfileModel`）。**心跳** 20s 续约（interval unref）；**结束钩子**
   （`wrapper.onDestroy`，先于开场 prompt 武装）：launch key 快路径 + **全活动项 claim 扫描兜底**（兜住违约
   领取——本会话 sessionId 名下每个未清 claim 都 recordInterruption）→ revokeRole → 清 delivery 登记 → 停
   心跳；装配失败显式收尾 + destroy 后重抛。
