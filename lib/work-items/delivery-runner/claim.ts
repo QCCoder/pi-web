@@ -186,8 +186,10 @@ interface ActiveClaimExpectations {
 }
 
 /** submit/fail 共用的锁内校验：claim 存在 ∧ attemptId/generation/ownerToken
- *  匹配 ∧ requirementDigest 与领取时一致（README 被人改过 → 409 要求重领）。
- *  凭证/状态过期一律 Conflict——迟到会话不得改动新代状态。 */
+ *  匹配 ∧ requirementDigest 与领取时一致（README 被人改过 → 409 要求重领）
+ *  ∧ 项未被人在领取窗口内 cancel（终态不得被迟到会话复活——Phase-3 final
+ *  review finding；recordInterruption/heartbeat 直读 claim 不经此处，恢复
+ *  路径不受影响）。凭证/状态过期一律 Conflict——迟到会话不得改动新状态。 */
 async function requireActiveClaim(
   workspacePath: string,
   key: string,
@@ -211,6 +213,14 @@ async function requireActiveClaim(
   }
   if (claim.ownerTokenHash !== hashOwnerToken(credentials.ownerToken)) {
     throw new WorkItemConflictError("ownerToken does not match the active claim");
+  }
+  // 人在领取窗口内 cancel（M2 cancel 只写 status=cancelled，phase/digest/
+  // designConfirmed 不动——其余守卫全拦不住）→ 领取已陈旧，迟到会话不得
+  // 复活终态项。恢复路径（recordInterruption 清残留 claim）不经本函数。
+  if (detail.item.status === "cancelled") {
+    throw new WorkItemConflictError(
+      "item was cancelled while the claim was active — release the claim and end",
+    );
   }
   const requirementDigest = contentDigest(detail.content);
   if (claim.requirementDigest !== requirementDigest) {

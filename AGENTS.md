@@ -411,7 +411,10 @@ verifier/release-preparer 角色、验证命令自动化、多槽位并发、任
   verification 清空、phase→verification、status→open；候选是既有 commit，无新产物落盘）。`failDesignerTask`
   /`failDeveloperTask`：blocked 可选（白名单内仍可领）→ **回退守卫**（designer 仅 design→intake、developer 仅
   implementation→ready_for_implementation——人中途动作改了阶段则不回滚人的状态）+ `delivery.attempt_failed`；
-  凭证过期/README 摘要变化 → Conflict。`heartbeatActiveClaim` 20s 轻量续约 lastSeenAt（不 bump revision/不产
+  凭证过期/README 摘要变化 → Conflict；**四个 submit/fail 共用的 `requireActiveClaim` 另有一道 cancelled 守卫
+  （final-review 修复）：人在领取窗口内 cancel（M2 cancel 只写 status=cancelled）→ 迟到 submit/fail 一律 409
+  零状态（claim 保留给 recordInterruption 清——恢复路径不经 requireActiveClaim，不受守卫影响），终态不被复活**。
+  `heartbeatActiveClaim` 20s 轻量续约 lastSeenAt（不 bump revision/不产
   事件/不进 git）；`recordInterruption`（锁内清 claim + needsAttention attempt[role 随 claim 流动] +
   `delivery.exec_interrupted`；不进 git——关停路径不 spawn git，events.jsonl 落盘即持久）；`resumeAutomation`
   （人显式恢复：清 paused + 写 failure-window（since=now）+ `delivery.resumed`；未暂停 → 400）。
