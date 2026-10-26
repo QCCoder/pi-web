@@ -101,8 +101,12 @@ export interface AttemptRecord {
   claimedAt: string;
   endedAt?: string;
   /** asked（final-arch step-2）：ask-a-human 澄清轮的合法终局——不算失败
-   *  （不耗失败预算）也不算成功提交（不断连胜）。 */
-  outcome?: "submitted" | "failed" | "interrupted" | "asked";
+   *  （不耗失败预算）也不算成功提交（不断连胜）。integrate-failed（final-arch
+   *  step-4 T2 fix）：集成段失败的合法终局——同 interrupted/asked **不计也不断**
+   *  （spec §5.3 第四步：集成失败不进预算——环境/运维失败不得消耗 developer 的
+   *  共享失败预算；countRecentFailures 只数 failed、只在 submitted 断，算法
+   *  零变化）。 */
+  outcome?: "submitted" | "failed" | "interrupted" | "asked" | "integrate-failed";
   /** 检查结算的判定（Phase-4 T3 verifier 起；final-arch step-3 T3 增 system 步）：
    *  verified = 全过推进 release_ready；rework = 有失败走 rework 路由；
    *  unverified = 执行环境不完整（system 步落 blocked 等人看环境——agent 结算

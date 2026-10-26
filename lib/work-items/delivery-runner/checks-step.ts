@@ -44,8 +44,9 @@
 //       集成段失败的结算（integrate-failed）也在锁2 内、守卫同门，落点同
 //       unverified 的 blocked 形（阶段不动、verification 不写、下游不清）+
 //       delivery.integrate_failed（actor system，data 带首败仓/exitCode|signal/
-//       stderr 尾部）+ attempt outcome "failed" + reason（本步唯一带失败语义的
-//       终局；仍无失败预算——不写 failure-window、不触暂停）。
+//       stderr 尾部）+ attempt outcome "integrate-failed" + reason（专属终局词
+//       ——同 interrupted/asked 不计也不断：集成失败不进失败预算，不写
+//       failure-window、不触暂停）。
 //
 //   任何异常：清 claim（recordInterruption——needsAttention 中断，人「重新检查
 //   并恢复」）后原样重抛（dispatcher catch 记日志）。宿主关停/崩溃的残留
@@ -563,8 +564,9 @@ function runIntegrateSegment(
  *  他人的新状态）。落定同 unverified 的 blocked 形（阶段不动——verification
  *  就是集成活动的阶段、verification 不写、下游不清）：status blocked + 事件
  *  delivery.integrate_failed（actor system，data 带首败仓 / exitCode|signal /
- *  stderr 尾部）→ 清 claim → attempt outcome "failed" + reason（本步唯一带
- *  失败语义的终局；**无失败预算**——不写 failure-window、不触暂停）→ commit。 */
+ *  stderr 尾部）→ 清 claim → attempt outcome "integrate-failed" + reason（专属
+ *  终局词，AttemptRecord 词表成员——同 interrupted/asked 不计也不断：集成失败
+ *  不进失败预算，不写 failure-window、不触暂停）→ commit。 */
 async function settleIntegrateFailure(
   workspacePath: string,
   key: string,
@@ -623,7 +625,7 @@ async function settleIntegrateFailure(
       key: current.item.key,
       claimedAt: claim.claimedAt,
       endedAt: now.toISOString(),
-      outcome: "failed",
+      outcome: "integrate-failed",
       reason: `integrate failed (${failure.repositoryId})`,
       requirementDigest: claim.requirementDigest,
       worktrees: claim.worktrees,
