@@ -15,6 +15,9 @@ import {
 // legalDeliveryActions moved to the client-safe pure module (M2 T9); the
 // re-export keeps this module's public surface (tests, server consumers).
 export { legalDeliveryActions } from "./legal-actions.ts";
+// stages 配置读取（final-arch step-4：record-release 验收门）。方向安全无环：
+// config.ts 只引 ../service.ts / ../errors.ts / ./roles.ts，绝不引本模块。
+import { readDeliveryRunnerConfig } from "./delivery-runner/config.ts";
 import {
   WorkItemConflictError,
   WorkItemNotFoundError,
@@ -121,7 +124,8 @@ export type ReworkTarget = "implementation" | "design";
  * 不得存在第二份「清什么」清单）：返回调用方需施加的 {phase, status, delivery}
  * （纯函数——不改 next：delivery.ts 的 case 是纯 plan 组装，claim.ts 的
  * verifier 失败路径 / reviewer 打回由调用方 structuredClone 后施加）。下游证据
- * = designConfirmed / candidates / verification / releasePlan——必须重新挣得；
+ * = designConfirmed / candidates / verification / acceptance / releasePlan——
+ * 必须重新挣得（acceptance 为 final-arch step-4 增补：验收随候选集失效）；
  * review 判定刻意保留（人要看为什么打回），released 基线本就拒绝 rework。
  *
  * 落点（两处调用现状不同，最小参数化——各自现状由测试钉死）：
@@ -150,6 +154,7 @@ export function reworkTransition(
       designConfirmed: undefined,
       candidates: undefined,
       verification: undefined,
+      acceptance: undefined,
       releasePlan: undefined,
     },
   };
@@ -242,13 +247,16 @@ function requireReworkPhase(item: WorkItemRecord): void {
 /** Pure transition planning. Illegal actions / missing evidence throw
  *  WorkItemValidationError (HTTP 400/422 via web.ts). Never touches the fs:
  *  README/design.md digests arrive via `digests`, computed by
- *  applyDeliveryAction. */
+ *  applyDeliveryAction. Workspace-config-dependent gates arrive via `options`
+ *  (same injection idiom as digests — the plan stays pure and config-free;
+ *  final-arch step-4: acceptanceRequired gates record-release). */
 export function planDeliveryTransition(
   item: WorkItemRecord,
   action: DeliveryAction,
   payload: Record<string, unknown>,
   now: Date,
   digests?: DeliveryDigests,
+  options?: { acceptanceRequired?: boolean },
 ): DeliveryTransitionPlan {
   if (!DELIVERY_ACTION_SET.has(action)) {
     throw new WorkItemValidationError(`Unknown delivery action: ${String(action)}`);
@@ -289,8 +297,13 @@ export function planDeliveryTransition(
         requirementDigest: digests.requirement,
         designDigest: digests.design,
       };
+      // status 显式归一 "open"（final-arch step-4 Task 1，M2 死角修复）：人工
+      // rework target=design 落 in_progress，plan 此前不写 status 会原样保留——
+      // 项进了 developer 可领阶段却永远无法被 LLM 角色领取（领取谓词只要 open）。
+      // 设计确认即设计阶段收工 → 回队列 open。
       return {
         phase: "ready_for_implementation",
+        status: "open",
         delivery: { ...base, designConfirmed },
         eventType: "delivery.confirm-design",
         eventData: {
@@ -376,6 +389,16 @@ export function planDeliveryTransition(
       const version = requireText(payload.version, "version");
       if (!base.candidates || base.candidates.length === 0) {
         throw new WorkItemValidationError("no candidates submitted — submit-verification first");
+      }
+      // 验收门（final-arch step-4）：workspace 开了 stages.acceptance 后，放行
+      // 必须先有人工验收记录且其摘要与当前候选集绑定（候选换过 → 记录失准 →
+      // 拒）。开关未开（缺省）行为不变。plan 是纯函数——开关由 apply 读
+      // workspace config 后经 options 注入（与 digests 同款）。
+      if (options?.acceptanceRequired === true) {
+        const acceptance = base.acceptance;
+        if (!acceptance || acceptance.candidateDigest !== candidatesDigest(base.candidates)) {
+          throw new WorkItemValidationError("先完成验收（record-acceptance）");
+        }
       }
       const notes = optionalText(payload.notes, "notes")
         ?? optionalText(payload.releaseNotes, "releaseNotes");
@@ -531,7 +554,12 @@ export async function applyDeliveryAction(input: DeliveryActionInput): Promise<D
         ? { design: contentDigest(designContent) }
         : {}),
     };
-    const plan = planDeliveryTransition(current.item, input.action, input.payload ?? {}, now, digests);
+    // workspace 流程开关注入（final-arch step-4）：plan 保持纯函数——配置由
+    // apply 读后经 options 传入（与 digests 同款）。文件缺失 → null = 全关。
+    const runnerConfig = await readDeliveryRunnerConfig(workspacePath);
+    const plan = planDeliveryTransition(current.item, input.action, input.payload ?? {}, now, digests, {
+      acceptanceRequired: runnerConfig?.stages?.acceptance?.enabled === true,
+    });
     // Seed design.md on start-design when the file does not exist yet.
     if (plan.designContent !== undefined && designContent === undefined) {
       await mkdir(dirname(designPath), { recursive: true });

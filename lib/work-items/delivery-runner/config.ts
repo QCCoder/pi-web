@@ -9,9 +9,10 @@
 // final-arch step-2 Task 1（2026-10-26）：增 attention 块（ask-a-human 澄清的
 // nudge/park 天数阈值）——解析后必有，缺块回填默认 3/7，旧文件免迁移。
 // final-arch step-3 Task 1（2026-10-26）：增 stages.review 开关（先审后跑——
-// reviewer 人工审查轮，Task 2/3 接流转）——解析后必有，缺块回填
-// {review:{enabled:false}}（旧文件免迁移、行为不变）；未知 stage 键 →
-// Validation（step-4 进 integrate/acceptance）。
+// reviewer 人工审查轮，Task 2/3 接流转）——解析后必有，缺块回填全关，旧文件免
+// 迁移。final-arch step-4 Task 1（2026-10-26）：stages 进 integrate（集成命令——
+// enabled 时 command 必填非空；关闭时 command 可选保留，回开免重写）与
+// acceptance（验收门——release 前须人工验收记录）；未知 stage 键仍 → Validation。
 // Task 4（2026-10-26）：verifier 退役——roles.verifier 键按 legacy 键处理：
 // 跳过（不进 roles）+ console.warn 每进程一次（写回即丢，round-trip 不带出）；
 // 其余未知键（拼错）仍 Validation。
@@ -44,11 +45,16 @@ export interface DeliveryRunnerConfig {
    *  未答 → nudge 提醒；超过 parkAfterDays 未答 → park 挂起。解析后必有
    *  （缺块回填默认 3/7——旧 v1 文件免迁移）；正整数且 park ≥ nudge。 */
   attention: { nudgeAfterDays: number; parkAfterDays: number };
-  /** 流程阶段开关（final-arch step-3，解析后必有——缺块回填全关）。review =
+  /** 流程阶段开关（final-arch step-3/4，解析后必有——缺块回填全关）。review =
    *  先审后跑：developer 提交候选后先进 reviewer 人工审查轮（enabled 才进）。
-   *  已知 stage 键逐步扩充（step-4：integrate/acceptance）；未知键 → Validation
-   *  （拼错静默失明比报错危险）。 */
-  stages: { review: { enabled: boolean } };
+   *  integrate = 集成阶段开关（enabled 时 command 必填非空；关闭时 command 可选
+   *  保留——回开免重写）。acceptance = 验收门（release 前须人工验收记录，Task 3
+   *  落写入口）。未知 stage 键 → Validation（拼错静默失明比报错危险）。 */
+  stages: {
+    review: { enabled: boolean };
+    integrate: { enabled: boolean; command?: string };
+    acceptance: { enabled: boolean };
+  };
   /** 验证命令（Phase-4 spec §7）：可选缺省 undefined（= 无配置，system 检查步
    *  谓词落 checks-empty 不 due）；空数组合法——等同无配置（检查步按空处理）。 */
   verification?: { checks: DeliveryCheckConfig[] };
@@ -73,7 +79,11 @@ export const DEFAULT_DELIVERY_RUNNER_CONFIG: DeliveryRunnerConfig = {
   roles: {},
   budget: { maxAttemptsPerInput: 3, maxExecutionMinutes: 30 },
   attention: { nudgeAfterDays: 3, parkAfterDays: 7 },
-  stages: { review: { enabled: false } },
+  stages: {
+    review: { enabled: false },
+    integrate: { enabled: false },
+    acceptance: { enabled: false },
+  },
 };
 
 const DELIVERY_CAPABILITY_REQUIREMENTS = ["work-items", "workflows"] as const;
@@ -224,13 +234,15 @@ function parseTimeoutSeconds(value: unknown, field: string): number | undefined 
   return value;
 }
 
-/** stages 块（final-arch step-3）：解析后必有——块/子块缺席回填
- *  {review:{enabled:false}}（旧文件免迁移、行为不变）；已知 stage（当前只有
- *  review）逐个校验，enabled 缺省回填 false、显式必须布尔；未知 stage 键 →
- *  Validation（step-4 进 integrate/acceptance）。 */
+/** stages 块（final-arch step-3/4）：解析后必有——块/子块缺席回填三开关全关
+ *  （旧文件免迁移、行为不变）；已知 stage（review/integrate/acceptance）逐个
+ *  校验，enabled 缺省回填 false、显式必须布尔。integrate.command 经
+ *  optionalNonEmptyString（在场即校验非空字串，与开关无关）；enabled 时 command
+ *  必填（精确文案）；关闭时可给可不给——给了合法值则保留（回开免重写）。未知
+ *  stage 键 → Validation（拼错静默失明比报错危险）。 */
 function parseStages(value: unknown): DeliveryRunnerConfig["stages"] {
   const record = value === undefined ? {} : requireObject(value, "stages");
-  const knownStages = new Set(["review"]);
+  const knownStages = new Set(["review", "integrate", "acceptance"]);
   for (const key of Object.keys(record)) {
     if (!knownStages.has(key)) {
       throw new WorkItemValidationError(`stages.${key} is not a known stage`);
@@ -238,12 +250,38 @@ function parseStages(value: unknown): DeliveryRunnerConfig["stages"] {
   }
   const reviewRecord =
     record.review === undefined ? {} : requireObject(record.review, "stages.review");
+  const integrateRecord =
+    record.integrate === undefined ? {} : requireObject(record.integrate, "stages.integrate");
+  const integrateEnabled = integrateRecord.enabled === undefined
+    ? false
+    : requireBoolean(integrateRecord.enabled, "stages.integrate.enabled");
+  const integrateCommand = optionalNonEmptyString(
+    integrateRecord.command,
+    "stages.integrate.command",
+  );
+  if (integrateEnabled && integrateCommand === undefined) {
+    throw new WorkItemValidationError(
+      "stages.integrate.command is required when integrate is enabled",
+    );
+  }
+  const acceptanceRecord =
+    record.acceptance === undefined ? {} : requireObject(record.acceptance, "stages.acceptance");
   return {
     review: {
       enabled:
         reviewRecord.enabled === undefined
           ? false
           : requireBoolean(reviewRecord.enabled, "stages.review.enabled"),
+    },
+    integrate: {
+      enabled: integrateEnabled,
+      ...(integrateCommand !== undefined ? { command: integrateCommand } : {}),
+    },
+    acceptance: {
+      enabled:
+        acceptanceRecord.enabled === undefined
+          ? false
+          : requireBoolean(acceptanceRecord.enabled, "stages.acceptance.enabled"),
     },
   };
 }

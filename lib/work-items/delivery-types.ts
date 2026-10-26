@@ -66,6 +66,16 @@ export interface DeliveryReleaseRecord {
   rollback?: string;
 }
 
+/** 人工验收记录（final-arch step-4：record-release 验收门的数据面）。structure
+ *  对齐 review/verification 的 digest 绑定纪律——candidateDigest 锁定验收时的
+ *  候选集，候选被换则记录失准（release 门拒）。写入口 record-acceptance 由
+ *  Task 3 落（与 confirm-design / record-release 同款「人的手」）。 */
+export interface DeliveryAcceptanceRecord {
+  notes: string;
+  candidateDigest: string;
+  at: string;
+}
+
 export interface DeliveryReleasePlan { notes?: string; rollback?: string }
 
 /** 审查记录（final-arch step-3 Task 1，2026-10-26：先审后跑）。reviewer 人工
@@ -113,6 +123,10 @@ export interface DeliveryMetadata {
   /** reviewer 审查判定（final-arch step-3：先审后跑）——rework 打回时 source
    *  指认 code|spec；候选摘要绑定同 verification 的 digest 纪律。 */
   review?: DeliveryReviewRecord;
+  /** 人工验收记录（final-arch step-4）：release_ready → released 的验收门证据
+   *  （stages.acceptance.enabled 开启时 record-release 必须先有此块且摘要与
+   *  当前候选绑定）；rework 一并失效（须重新挣得）。 */
+  acceptance?: DeliveryAcceptanceRecord;
   releasePlan?: DeliveryReleasePlan;
   release?: DeliveryReleaseRecord;
   /** 澄清问答（追加式——answer 只补不删，历史保留审计）。 */
@@ -350,6 +364,18 @@ function parseRelease(value: unknown): DeliveryReleaseRecord {
   };
 }
 
+/** acceptance 记录（final-arch step-4 Task 1）：notes 非空（trim 后——验收必须
+ *  说明验了什么）；candidateDigest/at 非空。candidateDigest 与当前候选集的绑定
+ *  由消费侧（record-release 门）校验，parse 只管形状。 */
+function parseAcceptance(value: unknown): DeliveryAcceptanceRecord {
+  const record = requireObject(value, "delivery.acceptance");
+  return {
+    notes: requireText(record.notes, "delivery.acceptance.notes"),
+    candidateDigest: requireText(record.candidateDigest, "delivery.acceptance.candidateDigest"),
+    at: requireText(record.at, "delivery.acceptance.at"),
+  };
+}
+
 function parseLastRequest(value: unknown): { requestId: string; action: DeliveryAction; at: string } {
   const record = requireObject(value, "delivery.lastRequest");
   return {
@@ -428,6 +454,7 @@ export function parseDelivery(value: unknown): DeliveryMetadata {
       : {}),
     ...(present(record.verification) ? { verification: parseVerification(record.verification) } : {}),
     ...(present(record.review) ? { review: parseReview(record.review) } : {}),
+    ...(present(record.acceptance) ? { acceptance: parseAcceptance(record.acceptance) } : {}),
     ...(present(record.releasePlan) ? { releasePlan: parseReleasePlan(record.releasePlan) } : {}),
     ...(present(record.release) ? { release: parseRelease(record.release) } : {}),
     ...(present(record.clarifications)
