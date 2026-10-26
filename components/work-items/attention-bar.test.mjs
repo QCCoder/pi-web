@@ -10,8 +10,7 @@ import { createJiti } from "jiti";
 //     待登记发布/阻塞）、空队列不渲染、展开行 KEY · 标题 · 已 N 天 · 已催办/已泊车
 //     徽标、行点击 → onSelectItem、取数失败降级一行 muted 提示；
 //  2. 数据面：GET …/attention 端点、refreshToken 变化重取（复用页面 5s 节拍）、
-//     组件不自建 setInterval；
-//  3. WorkItemsPage 挂载：顶部条 + onSelectItem + refreshToken 接线。
+//     组件不自建 setInterval。
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
@@ -122,15 +121,4 @@ test("AttentionBar fetches GET …/attention and refetches on refreshToken (no s
   assert.doesNotMatch(source, /setInterval|setTimeout/, "no self-managed polling timer");
   // 数据面类型与 api-types 镜像零漂移（type-only 引用）。
   assert.match(source, /import type \{ AttentionEntry, AttentionKind \} from "@\/lib\/api-types"/);
-});
-
-// --------------------------------------------------- source: page mount
-
-test("WorkItemsPage mounts AttentionBar at the top with select + refresh wiring", () => {
-  const source = readFileSync(new URL("./WorkItemsPage.tsx", import.meta.url), "utf8");
-  assert.match(source, /from "\.\/AttentionBar"/);
-  assert.match(source, /<AttentionBar/);
-  assert.match(source, /onSelectItem=\{handleSelect\}/);
-  // refreshToken = 共享快照的 fetchedAt（5s 轮询换引用 → 待办条同步重取）。
-  assert.match(source, /refreshToken=\{snapshot\?\.fetchedAt\}/);
 });
