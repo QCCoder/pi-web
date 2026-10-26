@@ -10,13 +10,16 @@
 //        stages 按输入、verification 只在 input.checks 给定时写入——经
 //        parseDeliveryRunnerConfig 校验，integrate 开着没命令在这里就 400）。
 //        已存在一字不动（action「config: 已存在，未改动」，enabled:true 永不翻）。
-//     3. 剧本播种：seedRoleProfileTemplates（一次性记录、缺文件才写、永不改写
-//        ——written/skipped 折进动作清单）。
-//     4. from（同布局目录 = .pi/ 在场）：四活角色目标缺文件才复制（剥 frontmatter
-//        seeded_from 换 copied_from——带版本源透传出处、无 seeded_from 的块首插
-//        copied_from: <role>、无 frontmatter 原文；本轮播种刚写的不复制）；
+//     3. from（同布局目录 = .pi/ 在场，给定才走，**先于播种**——spec §13.2 步
+//        骤 5「播种（§6.2）或自 from 复制（§13.3）」：from 给定时源提供的角色
+//        复制优先，源缺的角色才落播种兜底）：四活角色目标缺文件才复制（剥
+//        frontmatter seeded_from 换 copied_from——带版本源透传出处、无
+//        seeded_from 的块首插 copied_from: <role>、无 frontmatter 原文）；
 //        integrate.sh 缺文件才复制；AGENTS.md / delivery.yaml 永不复制——from
 //        的 checks 剥 repositoryId 只进响应 suggestedChecks 供人确认。
+//     4. 剧本播种：seedRoleProfileTemplates（一次性记录、缺文件才写、永不改写
+//        ——written/skipped 折进动作清单；from 刚复制的角色已在盘，wx 撞
+//        EEXIST 按预置收养记 "existing"，一次性语义不变）。
 //     5. 工具链探测：登记活跃 code 仓 × 根 marker 文件 → 检查命令草稿，只进
 //        响应 suggestedChecks（带 repositoryId——仓已登记），从不落盘执行。
 //     6. 就绪清单：写后投影（下方 deliveryReadiness 同一装配）。
@@ -188,18 +191,21 @@ export async function initializeDelivery(
     actions.push("config: 写入默认 delivery.yaml（enabled: false）");
   }
 
-  // 3) 剧本播种（一次性记录在 .pi/delivery-seeded.json；written/skipped 折进动作）。
+  // 3) from 复制先于播种（spec §13.2 步骤 5：播种**或**自 from 复制——from 给
+  //    定时源提供的角色以 from 为准；复制即新所有者，源改动不传播）。
+  const fromChecks =
+    input.from === undefined
+      ? []
+      : await copyFromSource(workspacePath, input.from, actions);
+
+  // 4) 剧本播种（一次性记录在 .pi/delivery-seeded.json；written/skipped 折进动
+  //    作。from 刚复制的角色已在盘 → wx 撞 EEXIST → 记录取 "existing"；源缺的
+  //    角色在此落内置模板兜底）。
   const seeded = await seedRoleProfileTemplates(workspacePath);
   if (seeded.written.length > 0) actions.push(`profiles: 播种 ${seeded.written.join("、")}`);
   if (seeded.skipped.length > 0) {
     actions.push(`profiles: 跳过（已播种或已存在）${seeded.skipped.join("、")}`);
   }
-
-  // 4) from 复制（复制即新所有者——源改动不传播）。
-  const fromChecks =
-    input.from === undefined
-      ? []
-      : await copyFromSource(workspacePath, input.from, seeded.written, actions);
 
   // 5) 工具链探测草稿（对账后重新读 manifest——扫描刚登记的仓立即参与探测）。
   const manifest = await readWorkspaceManifest(workspacePath);
@@ -232,13 +238,14 @@ function withCopiedFromMarker(source: string, role: DeliveryRole): string {
   return `---\n${marked}\n---${source.slice(match[0].length)}`;
 }
 
-/** from 复制：四活角色剧本（目标缺文件才写——wx 竞态安全，本轮播种刚写的不复
- *  制）+ integrate.sh 骨架（缺文件才写、可执行位 755）+ from 的 delivery.yaml
- *  checks 剥 repositoryId 作草稿（宽容解析——坏 yaml 只是没有草稿，不炸 init）。 */
+/** from 复制：四活角色剧本（目标缺文件才写——wx 竞态安全，既有目标永不覆盖）
+ *  + integrate.sh 骨架（缺文件才写、可执行位 755）+ from 的 delivery.yaml
+ *  checks 剥 repositoryId 作草稿（宽容解析——坏 yaml 只是没有草稿，不炸 init）。
+ *  在播种之前调用：源提供的角色这里复制、播种侧随后按预置收养；源缺的角色
+ *  播种兜底。 */
 async function copyFromSource(
   workspacePath: string,
   from: string,
-  seedWritten: DeliveryRole[],
   actions: string[],
 ): Promise<DeliverySuggestedCheck[]> {
   const fromPi = join(resolve(from), ".pi");
@@ -253,17 +260,17 @@ async function copyFromSource(
   }
 
   let copied = 0;
-  const seedWrittenSet = new Set(seedWritten);
+  let provided = 0; // 源侧实际提供的可复制项（角色文件 / integrate.sh）
   const agentsDir = join(workspacePath, ".pi", "agents");
   for (const role of DELIVERY_ROLES) {
-    if (seedWrittenSet.has(role)) continue; // 播种本轮刚写——模板优先，不复制
     let source: string;
     try {
       source = await readFile(join(fromPi, "agents", `${role}.md`), "utf8");
     } catch (error) {
-      if (isEnoent(error)) continue; // 源没这个角色 → 跳过
+      if (isEnoent(error)) continue; // 源没这个角色 → 跳过（播种兜底）
       throw error;
     }
+    provided += 1;
     try {
       await mkdir(agentsDir, { recursive: true });
       await writeFile(join(agentsDir, `${role}.md`), withCopiedFromMarker(source, role), {
@@ -279,6 +286,7 @@ async function copyFromSource(
 
   try {
     const script = await readFile(join(fromPi, "scripts", "integrate.sh"));
+    provided += 1;
     try {
       await mkdir(join(workspacePath, ".pi", "scripts"), { recursive: true });
       await writeFile(join(workspacePath, ".pi", "scripts", "integrate.sh"), script, {
@@ -323,7 +331,12 @@ async function copyFromSource(
     }
   }
 
-  if (copied === 0) actions.push("from: 无可复制项，未复制");
+  // 收尾动作行如实归因：源真的什么都没有 → 「无可复制项」；源有但目标全在
+  // 场（既有目标永不覆盖）→ 「目标均已存在」。此前两者混作「无可复制项」，
+  // 在播种先行 / 重跑场景下误导。
+  if (copied === 0) {
+    actions.push(provided === 0 ? "from: 无可复制项，未复制" : "from: 目标均已存在，未复制");
+  }
   return drafts;
 }
 

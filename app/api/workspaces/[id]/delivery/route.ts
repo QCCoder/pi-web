@@ -11,6 +11,8 @@
 // final-arch step-6 Task 2（2026-10-26）：写成功后同步 AGENTS.md delivery
 // managed 块（updateManagedDeliveryInstructions——有标记才改写）。失败同样只记
 // 日志不挡保存（配置已落盘即事实）。
+// Final-fix（2026-10-26，I1）：块同步移到播种之后——首次保存的剧本由播种创建，
+// 先同步会把四个角色渲染成 (missing)；链序 = 配置落盘 → 播种 → 块同步。
 import { NextResponse } from "next/server";
 import { getWorkspace, readWorkspaceManifest } from "@/lib/workspaces/service";
 import { updateManagedDeliveryInstructions } from "@/lib/workspaces/delivery-managed";
@@ -22,7 +24,7 @@ import {
   writeDeliveryRunnerConfig,
   assertAutomationCapable,
 } from "@/lib/work-items/delivery-runner/config";
-import { seedRoleProfileTemplates } from "@/lib/work-items/delivery-runner/role-templates";
+import { seedRoleProfileTemplates, type SeedResult } from "@/lib/work-items/delivery-runner/role-templates";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -45,25 +47,26 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       }),
     );
     await writeDeliveryRunnerConfig(path, config);
+    // 配置已落盘：播种失败不打死保存——降级 seeded:null + seedingError（200，
+    // UI 非阻断警告），由播种自身兜错。播种先于块同步（final-fix I1）：首次保
+    // 存的剧本在此创建，块的 exists/missing 投影要反映播种后的真实状态。
+    let seeded: SeedResult | null = null;
+    let seedingError: string | undefined;
+    try {
+      seeded = await seedRoleProfileTemplates(path);
+    } catch (error) {
+      seedingError = error instanceof Error ? error.message : String(error);
+      console.error(`[delivery-runner] role template seeding failed for workspace ${id}:`, error);
+    }
     // AGENTS.md delivery managed 块同步（有标记才改写）：失败记日志不挡保存。
     try {
       await updateManagedDeliveryInstructions(path);
     } catch (error) {
       console.error(`[delivery-runner] managed AGENTS.md sync failed for workspace ${id}:`, error);
     }
-    // 配置已落盘：播种失败不打死保存——降级 seeded:null + seedingError（200，
-    // UI 非阻断警告），由播种自身兜错。
-    try {
-      const seeded = await seedRoleProfileTemplates(path);
-      return NextResponse.json({ config, seeded });
-    } catch (error) {
-      console.error(`[delivery-runner] role template seeding failed for workspace ${id}:`, error);
-      return NextResponse.json({
-        config,
-        seeded: null,
-        seedingError: error instanceof Error ? error.message : String(error),
-      });
-    }
+    return seedingError === undefined
+      ? NextResponse.json({ config, seeded })
+      : NextResponse.json({ config, seeded, seedingError });
   } catch (error) {
     return workItemErrorResponse(error);
   }

@@ -16,9 +16,11 @@
 // 析（纯展示，读不到 manifest 就回退原 id）。导入方向：config.ts 已引
 // work-items/service 的 writeAtomic，本模块同向（config.ts 不引本模块，无环）。
 // 调用方 = delivery 配置保存与 init 路由（写成功后同步，失败记日志不挡保存）。
+// final-fix I2（2026-10-26）：AGENTS.md 读-改-写全程持工作区写锁（锁在函数内——
+// 调用方都在其余持锁工作返回后才进来，不可重入锁无嵌套）。
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { readWorkspaceManifest } from "./service.ts";
+import { readWorkspaceManifest, withWorkspaceWriteLock } from "./service.ts";
 import {
   readDeliveryRunnerConfig,
   type DeliveryRunnerConfig,
@@ -80,30 +82,36 @@ export function renderDeliveryManagedBlock(
  * AGENTS.md 缺失 → no-op；无标记 → no-op（文件字节不动）；有标记 → 重渲染替换。
  * 配置读取失败（手写坏 yaml 等）按调用方兜错的原则原样抛出——路由侧 try/catch
  * 记日志、不打死保存。哈希谓词用 include 判位（replace 无匹配时字符串原样）。
+ * AGENTS.md 读-改-写全程持工作区写锁（final-fix I2——双层锁，spec §8.2：与
+ * config / manifest 等写者互斥，防并发丢更新；writeAtomic 自身不取锁，无嵌套）。
+ * 锁不可重入：两个调用方（delivery PUT / init 路由）都在其余持锁工作返回之后
+ * 才调用本函数，无嵌套。
  */
 export async function updateManagedDeliveryInstructions(workspacePath: string): Promise<void> {
-  const agentsPath = join(workspacePath, "AGENTS.md");
-  let current: string;
-  try {
-    current = await readFile(agentsPath, "utf8");
-  } catch {
-    return; // no AGENTS.md to maintain — never created here
-  }
-  if (!current.includes(DELIVERY_MANAGED_START) || !current.includes(DELIVERY_MANAGED_END)) {
-    return; // markers absent or removed by the user → silently stop
-  }
-  const config = await readDeliveryRunnerConfig(workspacePath);
-  let repositoryAliasById = new Map<string, string>();
-  try {
-    const manifest = await readWorkspaceManifest(workspacePath);
-    repositoryAliasById = new Map(manifest.repositories.map((repo) => [repo.id, repo.alias]));
-  } catch {
-    // 别名是纯展示：读不到 manifest 就回退原 id，不挡块同步。
-  }
-  const rendered = renderDeliveryManagedBlock(config, summarizeRoles(workspacePath, config), repositoryAliasById);
-  // 函数式替换：渲染串里的 `$&`/`$'` 等是字面内容（integrate 命令），不能吃进
-  // replace 的特殊替换语义。
-  const next = current.replace(DELIVERY_MANAGED_BLOCK_RE, () => rendered);
-  if (next === current) return;
-  await writeAtomic(agentsPath, next);
+  await withWorkspaceWriteLock(workspacePath, async () => {
+    const agentsPath = join(workspacePath, "AGENTS.md");
+    let current: string;
+    try {
+      current = await readFile(agentsPath, "utf8");
+    } catch {
+      return; // no AGENTS.md to maintain — never created here
+    }
+    if (!current.includes(DELIVERY_MANAGED_START) || !current.includes(DELIVERY_MANAGED_END)) {
+      return; // markers absent or removed by the user → silently stop
+    }
+    const config = await readDeliveryRunnerConfig(workspacePath);
+    let repositoryAliasById = new Map<string, string>();
+    try {
+      const manifest = await readWorkspaceManifest(workspacePath);
+      repositoryAliasById = new Map(manifest.repositories.map((repo) => [repo.id, repo.alias]));
+    } catch {
+      // 别名是纯展示：读不到 manifest 就回退原 id，不挡块同步。
+    }
+    const rendered = renderDeliveryManagedBlock(config, summarizeRoles(workspacePath, config), repositoryAliasById);
+    // 函数式替换：渲染串里的 `$&`/`$'` 等是字面内容（integrate 命令），不能吃进
+    // replace 的特殊替换语义。
+    const next = current.replace(DELIVERY_MANAGED_BLOCK_RE, () => rendered);
+    if (next === current) return;
+    await writeAtomic(agentsPath, next);
+  });
 }
