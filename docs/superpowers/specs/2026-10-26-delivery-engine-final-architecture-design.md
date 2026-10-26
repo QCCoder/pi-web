@@ -321,6 +321,15 @@ dispatcher 每拍遍历 `discoverWorkspaces`、每工作区独立配置与单槽
 - **模型两落点统一认知**：有效模型 = delivery 覆写 › 剧本 frontmatter › 工作区默认；角色表显示有效值与来源，角色表改的是覆写、编辑器改的是剧本默认。
 - **并存手改**：保存带内容哈希，外部改过 → 409 提示重载（现 `saveSubagentProfile` 直接覆盖，需补）。
 
+### 13.5.1 第六步落地决策（2026-10-26 修订记录）
+
+- **`initializeDelivery(workspacePath, input)`**（`lib/workspaces/delivery-init.ts` 新模块；HTTP `POST /api/workspaces/[id]/delivery/init`，capability 门同配置路由）：`input = { from?: string; checks?: DeliveryCheckConfig[]; integrate?: { enabled, command? }; acceptance?: { enabled }; stagesReview?: boolean }`。语义只补缺：仓库触发一次扫描登记（复用 `syncRepositoriesFromScan`）；`delivery.yaml` 缺失才写默认 v2（enabled false、stages 按输入、checks 取输入草稿——**探测出的命令只作为向导草稿返回给人改，从不自动落盘执行**）；剧本播种（复用 `seedRoleProfileTemplates`）；`from` 给定时复制 `.pi/agents/<role>.md`（仅四活角色、仅缺文件才写、剥 frontmatter `seeded_from` 换 `copied_from: <name>@<v>`）与 `.pi/scripts/integrate.sh` 骨架、`from` 的 `delivery.yaml` 作草稿参考（checks 剥 repositoryId 后进响应让人确认，不直接写）；AGENTS.md delivery managed 块有标记才渲染。响应返回所做动作清单 + 就绪清单。**init 永不翻 enabled、永不执行探测命令**。
+- **`deliveryReadiness(workspacePath)`**（同模块，只读）：缺项清单 `{ kind, detail }[]` —— `no-checks`（verification.checks 空）、`missing-profile:<role>`（同名或配置的剧本不存在）、`capabilities-missing`（work-items/workflows）、`check-repo-unregistered`（checks.repositoryId 不在登记仓）、`integrate-no-command`。`GET /api/workspaces/[id]/delivery/readiness`。设置面板常驻显示；**非门禁**（enabled 与否不受它约束）。
+- **delivery managed 块**：`<!-- workspace-managed:delivery:start/end -->`，由 `updateManagedDeliveryInstructions(workspacePath)` 在 delivery 配置保存后更新（机制照抄 repositories 块：无标记 no-op、标记删了即停）；内容 = 启用状态 + 各角色一行 + checks 一行摘要 + integrate/acceptance 开关。
+- **profile 保存哈希冲突**：`.pi/agents/<name>.md` frontmatter 增加 `content_hash`（正文 sha256，写时自算）；`saveSubagentProfile` 对 project 作用域已有文件新增可选 `expectedContentHash` 参数——不符 → 新 `ProfileConflictError` → `PUT /api/subagents/profiles` 409 `{ error, currentContentHash }`；AgentsConfig 保存携带列表态 hash、409 时提示重载。**不传 expectedContentHash = 宽容写（现行为）**——旧客户端不断。
+- **AgentsConfig 交付感知**：被 `roles.<r>.profile` 绑定的 profile 显示角色徽标（数据来自 `GET …/delivery/roles`，已有）；编辑区上方锁定展示不变式（只读灰底，链 spec）；组合预览标签页（`GET …/delivery/roles/[role]/preview` 已有路由）。
+- **模板漂移提示**：角色表状态列已有「模板 vN」（`seeded_from`）——补「与当前模板 vM 不一致」提示 + `POST …/delivery/roles/[role]/template`（把**当前内置模板**写为 `<role>.template.md`——永不覆盖 `<role>.md`）。
+
 ### 13.6 明确不做
 
 工作区间隐式继承或全局可变剧本源；init 自动启用 / 自动执行探测命令 / 自动复制项目事实；工作区自定义角色集合或阶段（§2）。
