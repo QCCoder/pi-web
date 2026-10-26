@@ -347,10 +347,11 @@ async function requireActiveClaim(
   return { detail, claim };
 }
 
-/** 领取事务的池子复验装配（designer/developer/verifier 共用，T3 抽出/P4 增
- *  checks——三角色的事务内双检读同一套规则，永不漂移）。活动 claim 已由调用
- *  方先行处理（Conflict/replay），此处 activeClaims 恒为空集。checks 是
- *  verifier 谓词输入（Phase-4 T1）；随返回值带出供 claim 冻结 checkContexts。 */
+/** 领取事务的池子复验装配（designer/developer/reviewer/release-preparer 共用，
+ *  T3 抽出/P4 增 checks——四角色的事务内双检读同一套规则，永不漂移）。活动
+ *  claim 已由调用方先行处理（Conflict/replay），此处 activeClaims 恒为空集。
+ *  checks 不再是谓词输入（verifier 谓词随角色退役）——随返回值带出供
+ *  reviewer claim 与 checks-step 的 system claim 冻结 checkContexts。 */
 async function poolRecheck(
   workspacePath: string,
   manifest: Pick<WorkspaceManifest, "repositories">,

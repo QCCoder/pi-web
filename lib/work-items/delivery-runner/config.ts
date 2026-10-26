@@ -49,8 +49,8 @@ export interface DeliveryRunnerConfig {
    *  已知 stage 键逐步扩充（step-4：integrate/acceptance）；未知键 → Validation
    *  （拼错静默失明比报错危险）。 */
   stages: { review: { enabled: boolean } };
-  /** 验证命令（Phase-4 spec §7）：可选缺省 undefined（= 无配置，verifier 池投影
-   *  no-checks-configured）；空数组合法——等同无配置（池按空处理）。 */
+  /** 验证命令（Phase-4 spec §7）：可选缺省 undefined（= 无配置，system 检查步
+   *  谓词落 checks-empty 不 due）；空数组合法——等同无配置（检查步按空处理）。 */
   verification?: { checks: DeliveryCheckConfig[] };
 }
 

@@ -70,7 +70,7 @@ export interface DeliveryReleasePlan { notes?: string; rollback?: string }
 
 /** 审查记录（final-arch step-3 Task 1，2026-10-26：先审后跑）。reviewer 人工
  *  审查轮的判定落块（结构对齐 DeliveryVerificationRecord 的 digest 绑定纪律）：
- *  - outcome pass = 审查通过（放行进 verifier/后续阶段）；rework = 打回 developer
+ *  - outcome pass = 审查通过（放行进 system 检查步/后续阶段）；rework = 打回 developer
  *    重做（source 必填——指认问题出在实现 code 还是设计 spec，rework 路由据此
  *    回退阶段）。
  *  - pass 刻意不得携带 source（无源可指）；rework 的 notes 必填非空（重做必须

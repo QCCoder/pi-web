@@ -13,11 +13,14 @@
 //       confirm   phase==="design" ∧ !designConfirmed → 最近 delivery.start-design
 //                 （start-design/confirm-design 人工动作写点），否则 updatedAt。
 //       release   phase==="release_ready" ∧ !release → 最近入阶段事件：
-//                 delivery.record-verification（人工动作——服务侧校验全 passed）
-//                 或 delivery.submitted data.outcome==="verified"（verifier 提交
-//                 写点），否则 updatedAt。
-//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 三事件最新者：
-//                 delivery.block（detail=block 原因）/ delivery.automation_paused
+//                 delivery.record-verification（人工动作——服务侧校验全 passed）、
+//                 delivery.submitted data.outcome==="verified"（verifier 退役前
+//                 提交写点）或 delivery.checks_passed data.outcome==="verified"
+//                 （system 检查步入阶段写点，finalizeChecks），否则 updatedAt。
+//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 四事件最新者：
+//                 delivery.block（detail=block 原因）/ delivery.checks_unverified
+//                 （system 检查步环境未就绪写点，detail=未过检查名，缺名
+//                 「环境未就绪待修复」）/ delivery.automation_paused
 //                 （detail=「自动化已暂停待恢复」——暂停 reason 文本只在
 //                 automation-paused.json，纯投影输入只有 key 集）/ 
 //                 delivery.exec_interrupted（detail=「执行中断待恢复」，
@@ -80,9 +83,11 @@ function latestEventWhere(
   return newest;
 }
 
-/** 入 release_ready 的事件（verifier 提交 verified / 人工 record-verification
- *  ——后者服务侧已校验 checks 全 passed，此处防御性复验）。 */
+/** 入 release_ready 的事件（人工 record-verification 全 passed / verifier 退役
+ *  前的 submitted verified / system 检查步 checks_passed——写点均已服务侧校验
+ *  全 passed，人工路径此处防御性复验）。 */
 function enteredReleaseReady(event: WorkItemEvent): boolean {
+  if (event.type === "delivery.checks_passed") return event.data?.outcome === "verified";
   if (event.type === "delivery.submitted") return event.data?.outcome === "verified";
   if (event.type !== "delivery.record-verification") return false;
   const checks = event.data?.checks;
@@ -124,9 +129,10 @@ function entry(
   };
 }
 
-/** blocked 的 since/detail：三个信号各自的事件锚点取最新，detail 跟随胜出
- *  信号；零事件回落 updatedAt + 按信号静态文案（block 优先，与任务书列举序
- *  一致）。 */
+/** blocked 的 since/detail：各信号的事件锚点取最新，detail 跟随胜出信号；
+ *  零事件回落 updatedAt + 按信号静态文案（block 优先，与任务书列举序一致）。
+ *  system 检查步的 blocked 不写 delivery.block——checks_unverified 同为锚点
+ *  （detail = 未过检查名，缺名回落固定文案）。 */
 function blockedSinceDetail(
   item: WorkItemRecord,
   events: WorkItemEvent[],
@@ -134,9 +140,22 @@ function blockedSinceDetail(
   interrupted: Set<string>,
 ): { since: string; detail: string } {
   const candidates: Array<{ at: string; detail: string }> = [];
-  const block = latestEvent(events, "delivery.block");
-  if (item.status === "blocked" && block !== undefined && typeof block.data?.reason === "string") {
-    candidates.push({ at: block.at, detail: block.data.reason });
+  if (item.status === "blocked") {
+    const block = latestEvent(events, "delivery.block");
+    if (block !== undefined && typeof block.data?.reason === "string") {
+      candidates.push({ at: block.at, detail: block.data.reason });
+    }
+    const checksUnverified = latestEvent(events, "delivery.checks_unverified");
+    if (checksUnverified !== undefined) {
+      const raw = checksUnverified.data?.checks;
+      const names = Array.isArray(raw)
+        ? raw.map((check) => check?.name).filter((name): name is string => typeof name === "string")
+        : [];
+      candidates.push({
+        at: checksUnverified.at,
+        detail: names.length > 0 ? names.join("、") : "环境未就绪待修复",
+      });
+    }
   }
   if (paused.has(item.key)) {
     const automationPaused = latestEvent(events, "delivery.automation_paused");
