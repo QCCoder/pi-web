@@ -46,6 +46,10 @@
 //     stages.acceptance.enabled 进投影输入；nudge/park 阈值仍在 dispatcher）。
 //     详情读失败的项跳过：与池子「缺详情不静默消失」不同——attention 的
 //     nudge/park 幂等全靠事件推导，读不出事件的项无法可靠判定，宁缺勿错。
+//
+//   renderAttentionDigest —— final-arch step-5 Task 2：纯函数渲染（零 fs 零输入
+//     装配），AttentionEntry[] → 业务语言 markdown（patrol 模板的轮内拉取口
+//     ?format=digest）。内部 kind 名与术语不出渲染面（测试 grep 守卫钉死）。
 import { listPendingInterruptions, readPaused } from "./delivery-runner/attempts.ts";
 import { readDeliveryRunnerConfig } from "./delivery-runner/config.ts";
 import { candidatesDigest } from "./delivery-types.ts";
@@ -320,4 +324,53 @@ export async function collectAttention(
     }
   }
   return projectAttention({ items: inputs, paused, interrupted, now, acceptanceEnabled });
+}
+
+// final-arch step-5 Task 2（2026-10-26）：digest 渲染——纯函数第三只（patrol
+// 模板 kit/templates/patrol/SKILL.md 经 ?format=digest 轮内拉取的文本）。业务话
+// 映射与定序在此唯一（内部 kind 名不出渲染面——测试 grep 守卫钉死零内部术语）。
+const DIGEST_KIND_HEADINGS: Record<AttentionKind, string> = {
+  question: "待您解答",
+  confirm: "待确认设计",
+  acceptance: "待人工验收",
+  release: "可登记发布",
+  blocked: "受阻待处理",
+};
+const DIGEST_KIND_ORDER: readonly AttentionKind[] = [
+  "question",
+  "confirm",
+  "acceptance",
+  "release",
+  "blocked",
+];
+
+function digestDate(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** `- <KEY> <标题> — <detail>（已 N 天[，已催办][，已泊车]）`。 */
+function digestLine(entry: AttentionEntry): string {
+  let marks = `已 ${entry.ageDays} 天`;
+  if (entry.nudged) marks += "，已催办";
+  if (entry.parked) marks += "，已泊车";
+  return `- ${entry.key} ${entry.title} — ${entry.detail}（${marks}）`;
+}
+
+/**
+ * 把 attention 队列渲染成业务语言的 markdown 待处理清单（定时巡逻的标准产出）：
+ * 标题 `# 待处理清单 · YYYY-MM-DD`（date 的本地日期），空队列「今日无待处理」；
+ * 否则按 DIGEST_KIND_ORDER 分组出节（空 kind 不出节），节标题业务话、行格式
+ * digestLine。零内部术语——消费人是人（轮会话播报 / 投递渠道），不是机器。
+ */
+export function renderAttentionDigest(entries: AttentionEntry[], date: Date): string {
+  const title = `# 待处理清单 · ${digestDate(date)}`;
+  if (entries.length === 0) return `${title}\n\n今日无待处理。`;
+  const sections: string[] = [];
+  for (const kind of DIGEST_KIND_ORDER) {
+    const group = entries.filter((entry) => entry.kind === kind);
+    if (group.length === 0) continue;
+    sections.push(`## ${DIGEST_KIND_HEADINGS[kind]}\n\n${group.map(digestLine).join("\n")}`);
+  }
+  return `${title}\n\n${sections.join("\n\n")}`;
 }
