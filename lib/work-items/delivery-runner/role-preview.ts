@@ -12,7 +12,11 @@
 //      走同一函数（composeRoleSystemPrompt，key 用 <KEY> 占位），杜绝「预览与
 //      实际不一致」；AGENTS.md 全文仅展示（pi 从 cwd 注入，不参与 composed）。
 // 复用 role-session.ts 的 resolveRoleProfileName / readRoleProfile /
-// composeRoleSystemPrompt / AGENT_INVARIANT_CONTRACT——单一读取器，不二次读盘。
+// composeRoleSystemPrompt / AGENT_INVARIANT_CONTRACT。剧本文件每个投影恰好读
+// 一次盘（final-fix C：摘要与预览共用同一次读取——预览不再二次读盘）；读盘
+// 异常按缺席 + console.error 一条（final-fix D，与 launch「读盘异常当缺场」
+// 同口径），deps.readProfile 为注入缝（测试注异常读取器，LaunchDeps.
+// readProfile 同款）。
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DELIVERY_ROLES, type DeliveryRole } from "./roles.ts";
@@ -55,19 +59,30 @@ export interface RoleSummary {
 const roleProfilePath = (workspacePath: string, name: string): string =>
   join(resolve(workspacePath), ".pi", "agents", `${name}.md`);
 
-/** 单角色摘要：读剧本（同一读取器）+ 按解析序定模型来源。 */
-function summarizeRole(
+/** 读取器注入缝（final-fix D，LaunchDeps.readProfile 同款最小形状）：默认
+ *  readRoleProfile；测试注入抛错读取器覆盖降级路径。 */
+export interface ProjectionDeps {
+  readProfile?: (workspacePath: string, profile: string) => RoleProfile | undefined;
+}
+
+/** 单角色摘要 + 本次读到的剧本（同一次读盘喂两用——summarizeRoles 取摘要、
+ *  previewRolePrompt 连正文一起用，预览不二次读盘）。 */
+function summarizeWithProfile(
   workspacePath: string,
   role: DeliveryRole,
   config: DeliveryRunnerConfig | null,
-): RoleSummary {
+  deps?: ProjectionDeps,
+): { summary: RoleSummary; profile: RoleProfile | undefined } {
+  const readProfile = deps?.readProfile ?? readRoleProfile;
   const roleConfig = config?.roles[role];
   const name = resolveRoleProfileName(role, roleConfig);
-  // 读盘异常按缺席（readRoleProfile 缺文件/非法名静默 undefined；只读投影不抛）。
+  // 读盘异常按缺席（readRoleProfile 缺文件/非法名静默 undefined；抛错 →
+  // console.error 一条后当缺场——只读投影不抛，与 launch 同口径）。
   let profile: RoleProfile | undefined;
   try {
-    profile = readRoleProfile(workspacePath, name);
-  } catch {
+    profile = readProfile(workspacePath, name);
+  } catch (error) {
+    console.error(`[delivery-runner] ${role} profile read failed during projection (${name}):`, error);
     profile = undefined;
   }
   // 模型优先级（launch 同序）：config.roles[role].model → 剧本 frontmatter model
@@ -80,15 +95,18 @@ function summarizeRole(
       ? { effective: profileModel, source: "profile" }
       : { source: "default" };
   return {
-    role,
-    profile: {
-      name,
-      path: roleProfilePath(workspacePath, name),
-      exists: profile !== undefined,
-      explicit: roleConfig?.profile !== undefined,
-      ...(profile?.seededFrom ? { seededFrom: profile.seededFrom } : {}),
+    summary: {
+      role,
+      profile: {
+        name,
+        path: roleProfilePath(workspacePath, name),
+        exists: profile !== undefined,
+        explicit: roleConfig?.profile !== undefined,
+        ...(profile?.seededFrom ? { seededFrom: profile.seededFrom } : {}),
+      },
+      model,
     },
-    model,
+    profile,
   };
 }
 
@@ -97,8 +115,9 @@ function summarizeRole(
 export function summarizeRoles(
   workspacePath: string,
   config: DeliveryRunnerConfig | null,
+  deps?: ProjectionDeps,
 ): RoleSummary[] {
-  return DELIVERY_ROLES.map((role) => summarizeRole(workspacePath, role, config));
+  return DELIVERY_ROLES.map((role) => summarizeWithProfile(workspacePath, role, config, deps).summary);
 }
 
 /** 组合预览（GET …/delivery/roles/[role]/preview）：摘要字段随行 + 三段展示。 */
@@ -114,19 +133,15 @@ export interface RolePromptPreview extends RoleSummary {
   composed: string;
 }
 
-/** 组合预览：key 用 <KEY> 占位；composed = 不变式 + 剧本正文（AGENTS.md 不进）。 */
+/** 组合预览：key 用 <KEY> 占位；composed = 不变式 + 剧本正文（AGENTS.md 不进）。
+ *  剧本与摘要共用同一次读取（summarizeWithProfile——不二次读盘）。 */
 export function previewRolePrompt(
   workspacePath: string,
   role: DeliveryRole,
   config: DeliveryRunnerConfig | null,
+  deps?: ProjectionDeps,
 ): RolePromptPreview {
-  const summary = summarizeRole(workspacePath, role, config);
-  let profile: RoleProfile | undefined;
-  try {
-    profile = readRoleProfile(workspacePath, summary.profile.name);
-  } catch {
-    profile = undefined;
-  }
+  const { summary, profile } = summarizeWithProfile(workspacePath, role, config, deps);
   // AGENTS.md 全文（缺 → null）；读盘异常按缺（展示层容错，与剧本同一口径）。
   let agentsMd: string | null = null;
   try {

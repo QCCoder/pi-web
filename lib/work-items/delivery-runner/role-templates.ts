@@ -6,15 +6,34 @@
 // write-if-missing（writeFile flag "wx" 竞态安全——EEXIST → skipped，其它
 // 错误照抛），不读不比既有内容、永不改写——落盘之日起文件归工作区，用户
 // 怎么改都合法。frontmatter 的 seeded_from 记 "<role>@<ROLE_TEMPLATE_
-// VERSION"；模板升级时递增版本号，作日后「剧本与新版模板漂移」提示的依据
+// VERSION>"；模板升级时递增版本号，作日后「剧本与新版模板漂移」提示的依据
 // （提示本身不在本模块）。模板同时可被 lib/subagents.ts 的 parseProfileFile
 // 解析（name 合法、正文即 systemPrompt）——.pi/agents 本就是双用途目录。
-import { mkdir, writeFile } from "node:fs/promises";
+//
+// Final-fix A（2026-10-26）：播种**每角色只一次**，一次性记录在产品持有的
+// `<ws>/.pi/delivery-seeded.json`（spec §6.2/§13.1「播种一次性、永不重建」）：
+//   - roles.<role> 已记录 → skipped——**文件被用户删了也不重建**（删除即终局；
+//     wx 只看文件在场，挡不住「删了再保存」的复活，记录才是真相源）。
+//   - 未记录但 `<ws>/.pi/agents/<role>.md` 在场 → 收养记 "existing"（用户预
+//     置，产品永不写）；wx 竞态撞上 EEXIST 同样按收养。
+//   - 未记录且缺文件 → 写模板、记 "<role>@<ROLE_TEMPLATE_VERSION>"。
+//   - 记录不可读/畸形 → fail-safe：**一字不写**、全角色 skipped、console.error
+//     一次（「永不重建」的承诺压过播种——宁可一次不播，不可盲目重播）。
+// 记录变更后经 writeAtomic 落盘（与 delivery.yaml 同一原子写；.pi 目录随
+// mkdir recursive 已在场）。
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DELIVERY_ROLES, type DeliveryRole } from "./roles.ts";
+import { writeAtomic } from "../service.ts";
 
 /** 模板版本：模板内容升级时递增；frontmatter seeded_from 与漂移提示的依据。 */
 export const ROLE_TEMPLATE_VERSION = 1;
+
+/** 播种记录 schemaVersion（记录形状变更时递增并迁移）。 */
+export const DELIVERY_SEED_RECORD_SCHEMA_VERSION = 1;
+
+/** 预置剧本的收养标记（区别于 "<role>@<version>" 的产品播种记录）。 */
+const ADOPTED_EXISTING = "existing";
 
 /** frontmatter 三键固定（name / description 一句 / seeded_from 带版本），正文
  *  由各角色给出——拼装集中一处，模板升级只改版本号与正文。 */
@@ -140,28 +159,111 @@ export interface SeedResult {
   skipped: DeliveryRole[];
 }
 
+/** 播种记录的 roles 表（键 = 角色名，值 = "<role>@<版本>" | "existing"；
+ *  未知键原样保留——产品只认 DELIVERY_ROLES，但不销毁人手写进记录的内容）。 */
+type SeedRolesRecord = Record<string, string>;
+
+/** 解析播种记录正文：合法 JSON 对象 + schemaVersion 恰 1 + roles 为纯字符串
+ *  值表才算可读；其余（坏 JSON / 错版本 / 非法形状）→ null（fail-safe）。 */
+function parseSeedRecordRoles(raw: string): SeedRolesRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as { schemaVersion?: unknown; roles?: unknown };
+  if (record.schemaVersion !== DELIVERY_SEED_RECORD_SCHEMA_VERSION) return null;
+  if (typeof record.roles !== "object" || record.roles === null || Array.isArray(record.roles)) {
+    return null;
+  }
+  for (const value of Object.values(record.roles as Record<string, unknown>)) {
+    if (typeof value !== "string") return null;
+  }
+  return record.roles as SeedRolesRecord;
+}
+
 /**
- * 把四份剧本模板播种进 `<workspacePath>/.pi/agents/`（目录缺失先 recursive
- * 建）。write-if-missing：writeFile flag "wx" 的竞态安全写——EEXIST →
- * skipped，其它错误照抛；既不读也不比较既有文件内容，已存在即跳过（幂等、
- * 永不改写——落盘后文件归工作区）。每次配置保存成功都会调用，空转无害。
+ * 把四份剧本模板**一次性**播种进 `<workspacePath>/.pi/agents/`（目录缺失先
+ * recursive 建）。一次性记录在 `<ws>/.pi/delivery-seeded.json`：已记录角色
+ * 直接 skipped（文件删了也不重建——删除即终局）；未记录且文件在场 → 收养记
+ * "existing"、永不写；未记录且缺文件 → writeFile flag "wx" 写模板（EEXIST →
+ * 按收养，其它错误照抛）、记 "<role>@<ROLE_TEMPLATE_VERSION>"。记录不可读 /
+ * 畸形 → fail-safe：一字不写、全角色 skipped、console.error 一次（永不重建
+ * 的承诺压过播种）。每次配置保存成功都会调用，记录齐后空转无害。
  */
 export async function seedRoleProfileTemplates(workspacePath: string): Promise<SeedResult> {
-  const dir = join(resolve(workspacePath), ".pi", "agents");
+  const root = resolve(workspacePath);
+  const dir = join(root, ".pi", "agents");
+  const recordPath = join(root, ".pi", "delivery-seeded.json");
   await mkdir(dir, { recursive: true });
   const written: DeliveryRole[] = [];
   const skipped: DeliveryRole[] = [];
+
+  // 1) 读记录：缺文件（ENOENT）= 全新工作区 / 播种早于记录机制的旧库 → 空表
+  //    起步；读盘异常（EACCES 等）或解析失败 → fail-safe 一字不写（永不重建 >
+  //    播种），全角色 skipped，只报一条。
+  let roles: SeedRolesRecord;
+  try {
+    const parsed = parseSeedRecordRoles(await readFile(recordPath, "utf8"));
+    if (parsed === null) {
+      console.error(
+        `[delivery-runner] seed record at ${recordPath} is malformed; skipping role template seeding`,
+      );
+      return { written, skipped: [...DELIVERY_ROLES] };
+    }
+    roles = parsed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      roles = {};
+    } else {
+      console.error(
+        `[delivery-runner] seed record at ${recordPath} is unreadable; skipping role template seeding:`,
+        error,
+      );
+      return { written, skipped: [...DELIVERY_ROLES] };
+    }
+  }
+
+  // 2) 逐角色三态：已记录 → skipped（删除即终局）；在场未记录 → 收养；缺文件
+  //    未记录 → wx 写模板。记录有变才回写（原子，与 delivery.yaml 同款）。
+  let recordChanged = false;
   for (const role of DELIVERY_ROLES) {
+    if (roles[role] !== undefined) {
+      skipped.push(role);
+      continue;
+    }
+    const profilePath = join(dir, `${role}.md`);
+    let adoptExisting = false;
     try {
-      await writeFile(join(dir, `${role}.md`), ROLE_PROFILE_TEMPLATES[role], { flag: "wx" });
-      written.push(role);
+      await writeFile(profilePath, ROLE_PROFILE_TEMPLATES[role], { flag: "wx" });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException | null)?.code === "EEXIST") {
-        skipped.push(role);
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+        adoptExisting = true; // 竞态或预置文件在场（本实现不预 stat，wx 自报）
       } else {
         throw error;
       }
     }
+    if (adoptExisting) {
+      roles[role] = ADOPTED_EXISTING;
+      skipped.push(role);
+      recordChanged = true;
+      continue;
+    }
+    roles[role] = `${role}@${ROLE_TEMPLATE_VERSION}`;
+    written.push(role);
+    recordChanged = true;
+  }
+  if (recordChanged) {
+    await writeAtomic(
+      recordPath,
+      `${JSON.stringify(
+        { schemaVersion: DELIVERY_SEED_RECORD_SCHEMA_VERSION, roles },
+        null,
+        2,
+      )}\n`,
+    );
   }
   return { written, skipped };
 }
