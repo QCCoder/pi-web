@@ -11,6 +11,7 @@ import { MarkdownBody } from "../MarkdownBody";
 import { formatRelativeTime } from "@/lib/format-time";
 import { responseJson, uploadWorkItemAttachments, WorkItemRequestError } from "./work-item-api";
 import { WorkItemActionbar } from "./WorkItemActionbar";
+import { ClarificationPanel } from "./ClarificationPanel";
 import { WorkItemAttachmentPicker } from "./WorkItemCreateForm";
 import { WorkItemEvents } from "./WorkItemEvents";
 import {
@@ -813,6 +814,11 @@ export function WorkItemDetailView({
         onChanged={onChanged}
         onError={setActionError}
       />
+
+      {/* 人工答复面板（final-arch step-2 T6）：delivery.clarifications 存在才渲染
+          （自守卫）——未答澄清在此作答（answer-clarification 专属表单，永不进
+          动作条：问题全文在动作条无处展示）。 */}
+      <ClarificationPanel workspaceId={workspaceId} item={item} onChanged={onChanged} />
 
       {/* 交付自动执行区（Phase-2 Task 9）：managed 项专属——非 managed 不挂载
           （宿主也不会为其拉取执行状态）。 */}
