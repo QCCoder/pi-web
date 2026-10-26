@@ -134,6 +134,14 @@
 - checks 全绿 → （integrate 启用则执行集成命令，成功才推进）→ phase=release_ready。任一环失败：checks 红 → rework(code)；integrate 失败 → 项停 verification + attention 条目（人裁决重试或返工，引擎不自动重试集成）。
 - 人工 `submit-verification` / `record-verification`（手动模式）语义不变。
 
+第三步落地决策（2026-10-26 修订记录，写第三步实施计划时钉死）：
+- **角色词表**：`DELIVERY_ROLES = designer | developer | reviewer | release-preparer`（verifier 退役）；`LEGACY_DELIVERY_ROLES = ["verifier"]` 仅供读旧 attempts / claim / seeding 记录（类型 `AnyDeliveryRole`），永不再派发。配置 `roles.verifier` 键**接受并忽略**（deprecated，console.warn 一次）——不让第一步落地的 v2 文件变 400。已播种的 `verifier.md` 是工作区文件，不动；reviewer 模板按一次性记录正常播种（记录里无 reviewer → 写）。
+- **reviewer**：池谓词 = `stages.review.enabled` ∧ phase verification ∧ candidates 非空 ∧ 无 `delivery.review` 或其 `candidateDigest` ≠ 当前 ∧ 共用门。领取预建只读候选 checkout（复用 `prepareVerifyCheckouts`）并冻结 `candidateDigest`；`delivery_run_check` 对 reviewer 开放（针对性佐证，结果同样只经服务端记录；**权威全量运行是 system 步**）。submit 形状 `{ key, outcome: "pass" | "rework", source?: "code" | "spec"（rework 必填）, notes }` → `delivery.review = { outcome, source?, notes, candidateDigest, at, attemptId }`，事件 `delivery.reviewed`；pass → phase 仍 verification（system 步接手）；rework → **与既有返工过渡共享同一 helper**：code → 与原 verifier 失败路径逐字同构（ready_for_implementation + 清下游证据）；spec → 与人工 `rework target=design` 逐字同构。rework 是裁定不是执行失败——不计预算（verifier 先例）。fail = 标准（release claim，phase 不变）。
+- **system checks 步**（`lib/work-items/delivery-runner/checks-step.ts`）：due = phase verification ∧ candidates ∧ `verification.checks` 非空 ∧ （review 关闭 ∨ `review.outcome === "pass"` 且 digest 当前）∧ 无 `delivery.verification` 或其 digest ≠ 当前 ∧ 共用门（无 claim / 无中断 / 未 paused）。执行：锁内写 **system claim**（`ClaimState.role: "system"`、`sessionId: "system:<ulid>"`——复用 claim.json 占槽：池 `active-claim` 门、dispatcher 超时清道夫、单槽位全部自然生效，**不加运行态文件**）+ 事件 `delivery.checks_started` → 锁外预建 checkout、逐条 `runConfiguredCheck` 并经 `recordCheckResult` 落 `claim.checkResults` → 锁内结算（与原 `submitVerifierResult` 核心抽成共享 `finalizeChecks`）：全 passed → `delivery.verification`（actor system）+ phase release_ready + `delivery.checks_passed`；任一 failed → rework(code) 过渡 + `delivery.checks_failed`；任一 unverified（环境）→ 清 claim、`status: "blocked"`、`delivery.checks_unverified`（人修环境后 unblock 即再次 due）。checks 结果不计失败预算（verifier 先例）。dispatcher 在 LLM 派发**之前**跑 system 步（占槽即互斥）。
+- **工具面不变（六件）**：`delivery_run_check` 的身份门从 verifier 改为 reviewer；submit/fail 的 verifier 分支删除、reviewer 分支加入。
+- **配置** v2 增 `stages?: { review?: { enabled: boolean } }`（integrate / acceptance 第四步再加），缺省关闭 = 现状语义。
+- **UI**：详情页 review 记录块（结论 / 源头 / 意见 / 时间）；执行卡 system claim 显示「系统检查」+ checkResults；设置块 review 开关；角色表随 `DELIVERY_ROLES` 自动四行（designer / developer / reviewer / release-preparer）。
+
 ### 5.4 ask 的语义
 
 - `delivery_ask_human({question, options?, recommended?})`：清 claim（同 fail 的释放路径）、不计失败预算、不产 blocked；`delivery.clarifications[]` 追加 `{round, question, options?, askedAt}`；attention 入队（question 类）。
