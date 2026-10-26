@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import { formatRelativeTime } from "@/lib/format-time";
+// 词表 type-only import：roles.ts 刻意零依赖（不 import 任何模块），进浏览器
+// bundle 零成本；活值 ∪ legacy verifier ∪ "system"（引擎 checks 步）。
+import type { AnyDeliveryRole } from "@/lib/work-items/delivery-runner/roles";
 
 /** 交付自动执行区（Phase-2 Task 9，spec §5.3/§6.2 详情活动执行区）。
  *  四态呈现：活动 claim（角色会话链接 + 停止执行）/ 自动领取暂停横幅
@@ -17,6 +20,13 @@ import { formatRelativeTime } from "@/lib/format-time";
  *  Phase-5 T2：release-preparer 徽标（RoleBadge 按 role 原文渲染，零映射表）
  *  + attempt 的 releasePlan 摘要（notes 首行截断 + rollback 有无标记，完整
  *  notes/rollback 进 title——发布材料的审计留痕在 attempt.releasePlan）。
+ *  final-arch step-3 T5（2026-10-26）：role 词表换 `AnyDeliveryRole | "system"`
+ *  （roles.ts 直引，type-only import 零运行时）——verifier 成 legacy（旧
+ *  attempts 原样可读）；`system` 徽标「系统检查」+ 系统 claim 卡标题「系统检查
+ *  运行中」（引擎 checks 步占槽，非 LLM 会话）；attempt 的 verificationOutcome
+ *  增 unverified「环境未就绪」（system 步落 blocked 等人修环境）；reviewer
+ *  attempt 增 review 判定徽章（评审通过 / 返工（code|spec）——delivery.review
+ *  同构）。
  *
  *  本组件是纯展示 + 动作转发：执行状态（GET delivery-execution）与三个动作
  *  （POST stop / recover / delivery-resume）都由 WorkItemsPage 持有并经
@@ -27,7 +37,10 @@ import { formatRelativeTime } from "@/lib/format-time";
 // —— UI 侧结构类型（delivery-runner/attempts.ts 的客户端镜像：该模块 import
 //    node:fs，不能进浏览器 bundle——WorkspaceManager 的 kitLoops 同款手法）。 ——
 
-export type ExecutionRole = "designer" | "developer" | "verifier" | "release-preparer";
+/** 词表 = AnyDeliveryRole | "system"（delivery-runner/roles.ts 直引，见文件头
+ *  final-arch step-3 T5）：活值 designer/developer/reviewer/release-preparer ∪
+ *  legacy verifier（旧 attempts/claim 记录原样可读）∪ 引擎 system 检查步。 */
+export type ExecutionRole = AnyDeliveryRole | "system";
 
 /** RoleWorktree（delivery-runner/worktrees.ts）的客户端镜像：developer 领取
  *  时预建的 worktree——repoPath 是登记仓主路径，path 是 worktree 检出路径。
@@ -55,8 +68,9 @@ export interface ExecutionCheckResult {
   outcome: "passed" | "failed" | "unverified";
 }
 
-/** ClaimCheckContext 的客户端镜像：verifier 领取时冻结的检查配置快照
- *  （repositoryId 已解析——缺省值在 claim 事务内落为候选首仓）。 */
+/** ClaimCheckContext 的客户端镜像：领取时冻结的检查配置快照（repositoryId 已
+ *  解析——缺省值在 claim 事务内落为候选首仓）。system 检查步 claim（引擎）
+ *  与 reviewer claim 同形冻结。 */
 export interface ExecutionCheckContext {
   name: string;
   repositoryId: string;
@@ -75,9 +89,10 @@ export interface ExecutionClaimSummary {
   /** developer 领取时预建的 worktree 集（designer claim 无此字段）；verifier
    *  领取时为候选 detached checkout 集。 */
   worktrees?: ExecutionWorktree[];
-  /** verifier 领取时冻结的检查配置快照（Phase-4）。 */
+  /** 领取时冻结的检查配置快照（Phase-4 起；system 检查步 / reviewer 同形）。 */
   checkContexts?: ExecutionCheckContext[];
-  /** verifier 的检查证据仓（Phase-4）——服务端执行器累积，LLM 无其他注入口。 */
+  /** 检查证据仓（Phase-4 起）——服务端执行器累积，LLM 无其他注入口；system
+   *  检查步的 checkResults 就在活动 claim 上逐条落（本组件实时渲染）。 */
   checkResults?: ExecutionCheckResult[];
   lastRequest?: { requestId: string; at: string };
 }
@@ -90,9 +105,11 @@ export interface ExecutionAttemptSummary {
   claimedAt: string;
   endedAt?: string;
   outcome?: "submitted" | "failed" | "interrupted";
-  /** verifier 提交的验证判定（Phase-4）：verified = 全过推进待发布；rework =
-   *  有失败走返工——是验证器完成任务后的合法判定，不是执行失败。 */
-  verificationOutcome?: "verified" | "rework";
+  /** 检查结算的判定（Phase-4 起；final-arch step-3 增 system 步与 unverified）：
+   *  verified = 全过推进待发布；rework = 有失败走返工——合法判定，不是执行
+   *  失败；unverified = 环境未就绪（system 步落 blocked 等人修环境，不自动
+   *  重试）。判定与执行成败（outcome）正交，均不计失败预算。 */
+  verificationOutcome?: "verified" | "rework" | "unverified";
   reason?: string;
   requirementDigest: string;
   needsAttention?: boolean;
@@ -106,6 +123,10 @@ export interface ExecutionAttemptSummary {
    *  delivery.releasePlan 的同构拷贝（M2 prepare-release 形状：notes 必填 /
    *  rollback 可选）。 */
   releasePlan?: { notes: string; rollback?: string };
+  /** reviewer 提交的审查判定（final-arch step-3）：DeliveryReviewRecord 的
+   *  客户端镜像（pass 无 source / rework 必带 code|spec）——claim 清后判定
+   *  在 attempt 留痕，行内渲染判定徽章。 */
+  review?: ExecutionReviewRecord;
 }
 
 export interface DeliveryExecutionState {
@@ -249,15 +270,18 @@ function CheckOutcomeBadge({ outcome }: { outcome: ExecutionCheckResult["outcome
 const VERIFICATION_OUTCOME_LABELS: Record<NonNullable<ExecutionAttemptSummary["verificationOutcome"]>, string> = {
   verified: "已验证",
   rework: "需返工",
+  unverified: "环境未就绪",
 };
 
 const VERIFICATION_OUTCOME_TONES: Record<NonNullable<ExecutionAttemptSummary["verificationOutcome"]>, string> = {
   verified: "#16a34a",
   rework: "#b45309",
+  unverified: "#dc2626",
 };
 
-/** verifier 提交的验证判定徽章：verified 绿 / rework 橙（rework 是合法判定，
- *  与执行失败的红色 outcome 徽章语义区分）。 */
+/** 检查结算判定徽章：verified 绿 / rework 橙（rework 是合法判定，与执行失败
+ *  的红色 outcome 徽章语义区分）/ unverified 红（system 检查步环境未就绪 →
+ *  blocked 硬停等人修环境，不自动重试——红色与 blocked 状态徽章对齐）。 */
 function VerificationOutcomeBadge({ outcome }: { outcome: NonNullable<ExecutionAttemptSummary["verificationOutcome"]> }) {
   const tone = VERIFICATION_OUTCOME_TONES[outcome];
   return (
@@ -283,6 +307,48 @@ function exitCodeText(exitCode: number | null): string {
   return `退出码 ${exitCode ?? "—"}`;
 }
 
+// —— 评审判定（final-arch step-3 reviewer 先审后跑）：DeliveryReviewRecord 的
+//    客户端镜像——attempt.review 留痕，行内判定徽章（与 verificationOutcome
+//    徽章并列：outcome pass 绿 / rework 橙 + 指认源头）。 ——
+
+export interface ExecutionReviewRecord {
+  outcome: "pass" | "rework";
+  /** 仅 rework 携带：code = 实现缺陷（打回开发）；spec = 设计缺陷（打回设计）。 */
+  source?: "code" | "spec";
+  notes: string;
+  candidateDigest: string;
+  at: string;
+  attemptId: string;
+}
+
+const REVIEW_OUTCOME_TONES: Record<ExecutionReviewRecord["outcome"], string> = {
+  pass: "#16a34a",
+  rework: "#b45309",
+};
+
+/** reviewer 判定徽章：pass → 「评审通过」；rework → 「返工（code|spec）」——
+ *  source 指认问题出在实现还是设计，正文渲染进徽章。 */
+function ReviewVerdictBadge({ review }: { review: ExecutionReviewRecord }) {
+  const tone = REVIEW_OUTCOME_TONES[review.outcome];
+  const label = review.outcome === "pass" ? "评审通过" : `返工（${review.source}）`;
+  return (
+    <span
+      title={`评审意见：${review.notes || "（无附言）"}`}
+      style={{
+        padding: "1px 6px",
+        borderRadius: 5,
+        fontSize: 10.5,
+        fontWeight: 700,
+        color: tone,
+        background: `color-mix(in srgb, ${tone} 12%, var(--bg))`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 // —— 发布材料摘要（Phase-5 release-preparer）：attempt 行内联一行——notes 首行
 //    截断 + rollback 有无标记；完整 notes/rollback 进 title（审计细节在
 //    attempts 文件里，行内不铺全文）。 ——
@@ -302,7 +368,8 @@ function releasePlanTitle(releasePlan: { notes: string; rollback?: string }): st
 }
 
 /** 领取角色徽标（Phase-3 T5：developer 角色上岗后需要一眼分辨谁在跑）。
- *  原文 designer/developer/verifier——与 .pi/delivery.yaml 的角色键一致，不翻译。 */
+ *  原文渲染活角色与 legacy verifier（旧记录可读）；`system`（引擎检查步，非
+ *  角色）→「系统检查」徽标——词表唯一一个翻译点。 */
 function RoleBadge({ role }: { role: ExecutionRole }) {
   return (
     <span
@@ -316,7 +383,7 @@ function RoleBadge({ role }: { role: ExecutionRole }) {
         whiteSpace: "nowrap",
       }}
     >
-      {role}
+      {role === "system" ? "系统检查" : role}
     </span>
   );
 }
@@ -386,7 +453,10 @@ export function WorkItemExecution({
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <strong style={{ fontSize: 11, color: "var(--text-dim)" }}>执行中</strong>
+            {/* system claim（引擎检查步占槽）→「系统检查运行中」；角色会话 →「执行中」。 */}
+            <strong style={{ fontSize: 11, color: "var(--text-dim)" }}>
+              {claim.role === "system" ? "系统检查运行中" : "执行中"}
+            </strong>
             <RoleBadge role={claim.role} />
             <span style={{ color: "var(--text-dim)" }}>第 {claim.generation} 代</span>
             <span style={{ flex: 1 }} />
@@ -434,10 +504,11 @@ export function WorkItemExecution({
               ))}
             </div>
           )}
-          {/* verifier 的检查证据仓（Phase-4）：claim.checkResults——服务端执行器
-              （delivery_run_check）累积，LLM 无其他注入口。每条 = outcome 徽章 +
-              名称 + 退出码 + 耗时 + 日志文件名；命令来源（checkContexts 按名联表
-              的冻结快照）进名称 title，完整日志路径进日志名 title。 */}
+          {/* 检查证据仓（Phase-4 起；final-arch step-3 起主要是 system 检查步的
+              活动 claim）：claim.checkResults——服务端执行器累积，LLM 无其他
+              注入口。每条 = outcome 徽章 + 名称 + 退出码 + 耗时 + 日志文件名；
+              命令来源（checkContexts 按名联表的冻结快照）进名称 title，完整
+              日志路径进日志名 title。 */}
           {claim.checkResults && claim.checkResults.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
               {claim.checkResults.map((check) => {
@@ -549,8 +620,11 @@ export function WorkItemExecution({
             >
               <OutcomeBadge outcome={entry.outcome} />
               <RoleBadge role={entry.role} />
-              {/* verifier 提交的验证判定（Phase-4）：与 outcome（执行成败）正交。 */}
+              {/* 检查结算判定（Phase-4 起，与 outcome 执行成败正交；system 检查
+                  步的 verified/rework/unverified 也走这里）与 reviewer 评审判定
+                  （final-arch step-3）——两枚徽章并列。 */}
               {entry.verificationOutcome && <VerificationOutcomeBadge outcome={entry.verificationOutcome} />}
+              {entry.review && <ReviewVerdictBadge review={entry.review} />}
               {entry.needsAttention && (
                 <span
                   style={{
@@ -584,7 +658,7 @@ export function WorkItemExecution({
                   {entry.releasePlan.rollback ? " · 含回滚" : " · 未附回滚"}
                 </span>
               )}
-              {/* verifier 终局的检查证据（Phase-4，rework 路径的失败证据就在这里）：
+              {/* 检查证据终局留痕（Phase-4 起，rework 路径的失败证据就在这里）：
                   紧凑 chips（名称 + outcome），退出码/耗时/日志路径进 title——
                   行内已有判定徽章与候选串，铺全量字段会挤爆。 */}
               {entry.checkResults && entry.checkResults.length > 0 && (
