@@ -230,14 +230,14 @@ attention: { nudgeAfterDays: 3, parkAfterDays: 7 }
 4. `pool.ts:44` `DeliveryRole` 四值 + phase→role 硬编码 → 增 reviewer；review/checks/integrate 的池投影与 system 步执行器（新）。
 5. 新工具 `delivery_ask_human` + clarifications 数据面 + `answer-clarification` / `record-acceptance` 动作。
 6. attention 队列投影与 UI（WorkItemsPage 详情「待处理」面收口）。
-7. lib 与 kit 文档中宪法文件引用清除（含 `role-session.ts:60` designer 合同内过期引用）；`docs/reference/loops.md` / `work-items.md` / AGENTS.md 对应小节随实施同步。
+7. lib 与 kit 文档中宪法文件引用清除（含 `role-session.ts:60` designer 合同内过期引用）；`knowledge/reference/loops.md` / `work-items.md` / AGENTS.md 对应小节随实施同步。
 8. 无 `initializeDelivery` / 就绪清单 / delivery managed 块 / 角色摘要与组合预览路由；`components/AgentsConfig.tsx` + `/api/subagents/profiles` 已是 `.pi/agents/*.md` 的完整编辑器（复用，不重造）；`saveSubagentProfile` 无哈希冲突检测；交付块仅 designer/developer 两个 profile 文本框。
 
 ## 11. 落地顺序（每步都是终局形状的一部分，无过渡架构）
 
 1. **接缝归位**：profile 正文注入 + roles 四键 + 不变式合同 + 模板播种（四段硬编码合同删除）。——纯装配层改动，池/事务/工具零动。**已落地 2026-10-26**（719cd8ae..19bf3763；计划 `plans/2026-10-26-final-arch-1-seam-repositioning.md`）。
 2. **ask 与 attention**：`delivery_ask_human`、clarifications、answer-clarification、队列投影与年龄线、digest 渲染。**已落地 2026-10-26**（a7035523..8ff123c9；计划 `plans/2026-10-26-final-arch-2-ask-and-attention.md`；digest 渲染留第 5 步巡逻）。
-3. **review + checks 系统化**：reviewer 角色与可选阶段；checks 从 verifier 会话改为 system 步；verifier 角色退役（其 submit 形状由引擎结果接管）。
+3. **review + checks 系统化**：reviewer 角色与可选阶段；checks 从 verifier 会话改为 system 步；verifier 角色退役（其 submit 形状由引擎结果接管）。**已落地 2026-10-26**（05b9922c..a395e871；计划 `plans/2026-10-26-final-arch-3-reviewer-and-system-checks.md`；落地决策见 §5.3 修订记录）。
 4. **integrate + acceptance**：集成命令执行器与失败语义、record-acceptance 门条件。
 5. **loop 退役编排**：宪法文件出协议、dev-loop 停编排、剧本改挂、cargoware 切换演练。
 6. **初始化与配置面完善**（不依赖 2–5，可并行）：`initializeDelivery` 与向导、checks 探测草稿、就绪清单、delivery managed 块、`--from` 复制、`seeded_from` 模板对比 / 另存、AgentsConfig 交付感知（角色徽标、锁定不变式）、profile 保存哈希冲突。（角色表 / 剧本下拉 / ModelSelector / 组合预览随第 1 步 Task 4 落。）
