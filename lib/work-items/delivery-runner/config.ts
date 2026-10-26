@@ -3,6 +3,10 @@
 // 双字段）的 profile/model 覆写 + 预算帽；Phase-4 T1 增验证命令
 // verification.checks（人维护——agent 只能触发不能自造，spec
 // 2026-10-24-phase-four §1.2/§7）。
+// Seam-repositioning Task 1（2026-10-26）：config v2——roles 四键同形
+// （designer/developer/verifier/release-preparer，词表 ./roles.ts——本模块
+// 从 roles 引类型、绝不从 pool 引，防循环）；schemaVersion 输入 1|2 兼容
+// （v1 旧文件照常读），输出恒 2。
 // 纯 fs/yaml 层——capability 门（assertAutomationCapable）由路由层在写入前
 // 调用；后续任务（runner/claimer）消费本模块读取配置。
 import { readFile } from "node:fs/promises";
@@ -10,6 +14,7 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { writeAtomic } from "../service.ts";
 import { WorkItemValidationError } from "../errors.ts";
+import { isDeliveryRole, type DeliveryRole } from "./roles.ts";
 
 export interface DeliveryRoleConfig {
   profile?: string;
@@ -17,11 +22,14 @@ export interface DeliveryRoleConfig {
 }
 
 export interface DeliveryRunnerConfig {
-  schemaVersion: 1;
+  /** 配置版本：输出恒 2（parse 把 v1 输入也规范化为 2；落盘即迁移）。 */
+  schemaVersion: 2;
   enabled: boolean;
-  /** 角色配置显式双字段（Phase-3 T5）：designer 与 developer 同形、各自可选；
-   *  旧文件只有 designer 键照常解析，developer 读作缺省（undefined）。 */
-  roles: { designer?: DeliveryRoleConfig; developer?: DeliveryRoleConfig };
+  /** 角色配置四键同形（Seam-repositioning T1，词表 ./roles.ts）：
+   *  designer/developer/verifier/release-preparer 各自可选；键必须 ∈
+   *  DELIVERY_ROLES（否则 Validation）；旧文件只有 designer/developer 键
+   *  照常解析，未配置的角色读作缺省（undefined）。 */
+  roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>>;
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
   /** 验证命令（Phase-4 spec §7）：可选缺省 undefined（= 无配置，verifier 池投影
    *  no-checks-configured）；空数组合法——等同无配置（池按空处理）。 */
@@ -42,7 +50,7 @@ const CHECK_TIMEOUT_SECONDS_MIN = 1;
 const CHECK_TIMEOUT_SECONDS_MAX = 3600;
 
 export const DEFAULT_DELIVERY_RUNNER_CONFIG: DeliveryRunnerConfig = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   enabled: false,
   roles: {},
   budget: { maxAttemptsPerInput: 3, maxExecutionMinutes: 30 },
@@ -163,25 +171,28 @@ function parseTimeoutSeconds(value: unknown, field: string): number | undefined 
 
 export function parseDeliveryRunnerConfig(value: unknown): DeliveryRunnerConfig {
   const record = requireObject(value, "delivery runner config");
-  if (record.schemaVersion !== 1) {
+  // v1|v2 输入都收（v1 旧文件免迁移），输出恒 2；其余版本 → Validation。
+  if (record.schemaVersion !== 1 && record.schemaVersion !== 2) {
     throw new WorkItemValidationError(
       `Unknown delivery runner config schemaVersion: ${String(record.schemaVersion)}`,
     );
   }
   const rolesRecord =
     record.roles === undefined ? {} : requireObject(record.roles, "roles");
+  // 四键同形：遍历传入键逐个校验/解析——键 ∉ DELIVERY_ROLES（拼错如
+  // desginer）→ Validation；v1 文件只带 designer/developer 键不受影响。
+  const roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>> = {};
+  for (const key of Object.keys(rolesRecord)) {
+    if (!isDeliveryRole(key)) {
+      throw new WorkItemValidationError(`roles.${key} is not a delivery role`);
+    }
+    roles[key] = parseRole(rolesRecord[key], `roles.${key}`);
+  }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled:
       record.enabled === undefined ? false : requireBoolean(record.enabled, "enabled"),
-    roles: {
-      ...(rolesRecord.designer !== undefined
-        ? { designer: parseRole(rolesRecord.designer, "roles.designer") }
-        : {}),
-      ...(rolesRecord.developer !== undefined
-        ? { developer: parseRole(rolesRecord.developer, "roles.developer") }
-        : {}),
-    },
+    roles,
     budget: parseBudget(record.budget),
     ...(record.verification !== undefined
       ? { verification: parseVerification(record.verification) }

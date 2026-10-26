@@ -37,11 +37,14 @@ import { candidatesDigest, contentDigest } from "../delivery-types.ts";
 import type { DeliveryCandidate } from "../delivery-types.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
 import { readWorkspaceManifest } from "../../workspaces/service.ts";
+import type { DeliveryRole } from "./roles.ts";
 
 /** 投影角色（spec §1.2：执行槽位单槽位跨角色共享，角色由项所处阶段决定；
  *  Phase-4 §6：verifier 为第三角色——单槽位三角色共享；Phase-5 §2：
- *  release-preparer 为第四角色——纯文档角色，同一单槽位与失败预算）。 */
-export type DeliveryRole = "designer" | "developer" | "verifier" | "release-preparer";
+ *  release-preparer 为第四角色——纯文档角色，同一单槽位与失败预算）。
+ *  Seam-repositioning T1（2026-10-26）：词表单一事实源移 ./roles.ts——
+ *  本处仅 re-export（role-session/role-grants 等既有导入零改动）。 */
+export type { DeliveryRole } from "./roles.ts";
 
 export type DesignerPoolReason =
   | "not-managed" | "automation-disabled" | "wrong-phase" | "active-claim"
