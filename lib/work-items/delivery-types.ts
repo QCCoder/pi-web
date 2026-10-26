@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { WorkItemValidationError } from "./errors.ts";
-import { isDeliveryRole, type DeliveryRole } from "./delivery-runner/roles.ts";
+// 词表守卫：clarification role 走 AnyDeliveryRole（活值 ∪ legacy verifier）——
+// 旧 verifier 澄清记录在 verifier 正式退役（Task 4）后仍永可解析。
+import {
+  isAnyDeliveryRole,
+  type AnyDeliveryRole,
+} from "./delivery-runner/roles.ts";
 
 export type DeliveryAction =
   | "start-design" | "confirm-design" | "start-development" | "submit-verification"
@@ -61,12 +66,33 @@ export interface DeliveryReleaseRecord {
 
 export interface DeliveryReleasePlan { notes?: string; rollback?: string }
 
+/** 审查记录（final-arch step-3 Task 1，2026-10-26：先审后跑）。reviewer 人工
+ *  审查轮的判定落块（结构对齐 DeliveryVerificationRecord 的 digest 绑定纪律）：
+ *  - outcome pass = 审查通过（放行进 verifier/后续阶段）；rework = 打回 developer
+ *    重做（source 必填——指认问题出在实现 code 还是设计 spec，rework 路由据此
+ *    回退阶段）。
+ *  - pass 刻意不得携带 source（无源可指）；rework 的 notes 必填非空（重做必须
+ *    说明缺什么）；pass 的 notes 允许空串（通过可以不附说明）。 */
+export interface DeliveryReviewRecord {
+  outcome: "pass" | "rework";
+  /** 仅 rework 携带：code = 实现缺陷（打回开发）；spec = 设计缺陷（打回设计）。 */
+  source?: "code" | "spec";
+  notes: string;
+  /** 审查时候选集摘要（candidatesDigest）——判定与候选绑定，候选被换则记录失准。 */
+  candidateDigest: string;
+  at: string;
+  /** 产生本判定的 attempt（reviewer 领取轮次）——审计可溯。 */
+  attemptId: string;
+}
+
 /** 澄清问答（final-arch step-2：agent 的 ask-a-human 轮次产物，数据面）。
  *  id 是写方（Task 2 claim 事务）的 ULID 约定——parse 只要求非空字串；
  *  answer/answeredAt 同在同缺（未答 / 已答两态，半对即坏形）。 */
 export interface DeliveryClarification {
   id: string;
-  role: DeliveryRole;
+  /** AnyDeliveryRole（final-arch step-3）：活值 ∪ legacy verifier——旧 verifier
+   *  澄清在角色退役后仍永可解析；新写入面（claim 输入）另由活值守卫把门。 */
+  role: AnyDeliveryRole;
   question: string;
   options?: string[];
   recommended?: string;
@@ -82,6 +108,9 @@ export interface DeliveryMetadata {
   designConfirmed?: DeliveryDesignConfirmation;
   candidates?: DeliveryCandidate[];
   verification?: DeliveryVerificationRecord;
+  /** reviewer 审查判定（final-arch step-3：先审后跑）——rework 打回时 source
+   *  指认 code|spec；候选摘要绑定同 verification 的 digest 纪律。 */
+  review?: DeliveryReviewRecord;
   releasePlan?: DeliveryReleasePlan;
   release?: DeliveryReleaseRecord;
   /** 澄清问答（追加式——answer 只补不删，历史保留审计）。 */
@@ -250,6 +279,50 @@ function parseVerification(value: unknown): DeliveryVerificationRecord {
   };
 }
 
+const REVIEW_OUTCOMES: readonly ("pass" | "rework")[] = ["pass", "rework"];
+
+const REVIEW_SOURCES: readonly ("code" | "spec")[] = ["code", "spec"];
+
+/** review 记录（final-arch step-3 Task 1）：outcome ∈ {pass, rework}；rework
+ *  必带 source ∈ {code, spec}、pass 不得带 source（在场即校验，null 同拒）；
+ *  notes 两种 outcome 都必填且为字符串——rework 非空（重做必须说明缺什么），
+ *  pass 允许空串；candidateDigest/at/attemptId 非空。 */
+function parseReview(value: unknown): DeliveryReviewRecord {
+  const record = requireObject(value, "delivery.review");
+  const outcome = requireEnum(record.outcome, REVIEW_OUTCOMES, "delivery.review.outcome");
+  let source: "code" | "spec" | undefined;
+  if (present(record.source)) {
+    source = requireEnum(record.source, REVIEW_SOURCES, "delivery.review.source");
+  }
+  if (outcome === "rework" && source === undefined) {
+    throw new WorkItemValidationError(
+      "delivery.review.source is required when outcome is rework (code | spec)",
+    );
+  }
+  if (outcome === "pass" && source !== undefined) {
+    throw new WorkItemValidationError(
+      "delivery.review.source must not be present when outcome is pass",
+    );
+  }
+  // notes：字符串必填；rework 非空（requireText 习语）；pass 允许空串（trim
+  // 与 requireText 同规——纯空白视作空）。
+  if (typeof record.notes !== "string") {
+    throw new WorkItemValidationError("delivery.review.notes is required");
+  }
+  const notes = record.notes.trim();
+  if (outcome === "rework" && !notes) {
+    throw new WorkItemValidationError("delivery.review.notes is required");
+  }
+  return {
+    outcome,
+    ...(source !== undefined ? { source } : {}),
+    notes,
+    candidateDigest: requireText(record.candidateDigest, "delivery.review.candidateDigest"),
+    at: requireText(record.at, "delivery.review.at"),
+    attemptId: requireText(record.attemptId, "delivery.review.attemptId"),
+  };
+}
+
 function parseReleasePlan(value: unknown): DeliveryReleasePlan {
   const record = requireObject(value, "delivery.releasePlan");
   const notes = optionalText(record.notes, "delivery.releasePlan.notes");
@@ -284,13 +357,13 @@ function parseLastRequest(value: unknown): { requestId: string; action: Delivery
 }
 
 /** 单条澄清：id/role/question/askedAt/attemptId 必填非空（role 走 roles.ts
- *  词表守卫——delivery-types 与 runner 共享同一份合法值）；options 可选非空
- *  字串数组；recommended 可选非空字串（刻意不与 options 交叉校验——parse 不
- *  掐语义，推荐值自由）；answer/answeredAt 同在同缺。 */
+ *  的 AnyDeliveryRole 守卫——活值 ∪ legacy verifier，旧数据永可解析）；
+ *  options 可选非空字串数组；recommended 可选非空字串（刻意不与 options 交叉
+ *  校验——parse 不掐语义，推荐值自由）；answer/answeredAt 同在同缺。 */
 function parseClarification(entry: unknown, field: string): DeliveryClarification {
   const record = requireObject(entry, field);
   const role = record.role;
-  if (!isDeliveryRole(role)) {
+  if (!isAnyDeliveryRole(role)) {
     throw new WorkItemValidationError(`${field}.role is not a delivery role`);
   }
   const hasAnswer = present(record.answer);
@@ -351,6 +424,7 @@ export function parseDelivery(value: unknown): DeliveryMetadata {
       ? { candidates: parseCandidates(record.candidates, "delivery.candidates") }
       : {}),
     ...(present(record.verification) ? { verification: parseVerification(record.verification) } : {}),
+    ...(present(record.review) ? { review: parseReview(record.review) } : {}),
     ...(present(record.releasePlan) ? { releasePlan: parseReleasePlan(record.releasePlan) } : {}),
     ...(present(record.release) ? { release: parseRelease(record.release) } : {}),
     ...(present(record.clarifications)

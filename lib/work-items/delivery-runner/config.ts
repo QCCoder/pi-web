@@ -9,6 +9,10 @@
 // （v1 旧文件照常读），输出恒 2。
 // final-arch step-2 Task 1（2026-10-26）：增 attention 块（ask-a-human 澄清的
 // nudge/park 天数阈值）——解析后必有，缺块回填默认 3/7，旧文件免迁移。
+// final-arch step-3 Task 1（2026-10-26）：增 stages.review 开关（先审后跑——
+// reviewer 人工审查轮，Task 2/3 接流转）——解析后必有，缺块回填
+// {review:{enabled:false}}（旧文件免迁移、行为不变）；未知 stage 键 →
+// Validation（step-4 进 integrate/acceptance）。
 // 纯 fs/yaml 层——capability 门（assertAutomationCapable）由路由层在写入前
 // 调用；后续任务（runner/claimer）消费本模块读取配置。
 import { readFile } from "node:fs/promises";
@@ -37,6 +41,11 @@ export interface DeliveryRunnerConfig {
    *  未答 → nudge 提醒；超过 parkAfterDays 未答 → park 挂起。解析后必有
    *  （缺块回填默认 3/7——旧 v1 文件免迁移）；正整数且 park ≥ nudge。 */
   attention: { nudgeAfterDays: number; parkAfterDays: number };
+  /** 流程阶段开关（final-arch step-3，解析后必有——缺块回填全关）。review =
+   *  先审后跑：developer 提交候选后先进 reviewer 人工审查轮（enabled 才进）。
+   *  已知 stage 键逐步扩充（step-4：integrate/acceptance）；未知键 → Validation
+   *  （拼错静默失明比报错危险）。 */
+  stages: { review: { enabled: boolean } };
   /** 验证命令（Phase-4 spec §7）：可选缺省 undefined（= 无配置，verifier 池投影
    *  no-checks-configured）；空数组合法——等同无配置（池按空处理）。 */
   verification?: { checks: DeliveryCheckConfig[] };
@@ -61,6 +70,7 @@ export const DEFAULT_DELIVERY_RUNNER_CONFIG: DeliveryRunnerConfig = {
   roles: {},
   budget: { maxAttemptsPerInput: 3, maxExecutionMinutes: 30 },
   attention: { nudgeAfterDays: 3, parkAfterDays: 7 },
+  stages: { review: { enabled: false } },
 };
 
 const DELIVERY_CAPABILITY_REQUIREMENTS = ["work-items", "workflows"] as const;
@@ -199,6 +209,30 @@ function parseTimeoutSeconds(value: unknown, field: string): number | undefined 
   return value;
 }
 
+/** stages 块（final-arch step-3）：解析后必有——块/子块缺席回填
+ *  {review:{enabled:false}}（旧文件免迁移、行为不变）；已知 stage（当前只有
+ *  review）逐个校验，enabled 缺省回填 false、显式必须布尔；未知 stage 键 →
+ *  Validation（step-4 进 integrate/acceptance）。 */
+function parseStages(value: unknown): DeliveryRunnerConfig["stages"] {
+  const record = value === undefined ? {} : requireObject(value, "stages");
+  const knownStages = new Set(["review"]);
+  for (const key of Object.keys(record)) {
+    if (!knownStages.has(key)) {
+      throw new WorkItemValidationError(`stages.${key} is not a known stage`);
+    }
+  }
+  const reviewRecord =
+    record.review === undefined ? {} : requireObject(record.review, "stages.review");
+  return {
+    review: {
+      enabled:
+        reviewRecord.enabled === undefined
+          ? false
+          : requireBoolean(reviewRecord.enabled, "stages.review.enabled"),
+    },
+  };
+}
+
 export function parseDeliveryRunnerConfig(value: unknown): DeliveryRunnerConfig {
   const record = requireObject(value, "delivery runner config");
   // v1|v2 输入都收（v1 旧文件免迁移），输出恒 2；其余版本 → Validation。
@@ -225,6 +259,7 @@ export function parseDeliveryRunnerConfig(value: unknown): DeliveryRunnerConfig 
     roles,
     budget: parseBudget(record.budget),
     attention: parseAttention(record.attention),
+    stages: parseStages(record.stages),
     ...(record.verification !== undefined
       ? { verification: parseVerification(record.verification) }
       : {}),

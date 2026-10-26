@@ -1,6 +1,6 @@
 // Seam-repositioning Task 3（2026-10-26）：交付角色的默认剧本模板与播种。
 // Task 2 之后角色会话的系统提示 = 引擎不变式合同 + `<ws>/.pi/agents/<role>.md`
-// 剧本正文——本模块提供产品缺省剧本（四角色各一份：读什么 / 产什么 / 怎么
+// 剧本正文——本模块提供产品缺省剧本（每角色一份：读什么 / 产什么 / 怎么
 // 干 / 何时失败；只写干活内容——不变式六条归引擎、工作区专属事实不进通用
 // 模板），并在交付配置保存成功后把它们播种进工作区 `.pi/agents/`：
 // write-if-missing（writeFile flag "wx" 竞态安全——EEXIST → skipped，其它
@@ -9,6 +9,12 @@
 // VERSION>"；模板升级时递增版本号，作日后「剧本与新版模板漂移」提示的依据
 // （提示本身不在本模块）。模板同时可被 lib/subagents.ts 的 parseProfileFile
 // 解析（name 合法、正文即 systemPrompt）——.pi/agents 本就是双用途目录。
+//
+// final-arch step-3 Task 1（2026-10-26）：模板表 Partial 化——`reviewer` 先于
+// 模板进词表（roles.ts），这里**刻意不写占位模板**（一次性播种记录会把占位
+// 变成永久）。无模板的角色不播种、不记录、也不进 skipped（结果两列表整个缺
+// 席）；SEEDABLE_ROLES = 词表 ∩ 有模板，播种循环与 fail-safe 全集都以它为准。
+// Task 4 补真 reviewer 模板后此过渡自然消失。
 //
 // Final-fix A（2026-10-26）：播种**每角色只一次**，一次性记录在产品持有的
 // `<ws>/.pi/delivery-seeded.json`（spec §6.2/§13.1「播种一次性、永不重建」）：
@@ -145,15 +151,25 @@ release_notes（必填）至少覆盖：
 - 用 delivery_submit_result 提交：release_notes 必填，rollback_notes 可选。
 `;
 
-/** 四角色默认剧本（只读；播种后归工作区，引擎不再回看这份内容）。 */
-export const ROLE_PROFILE_TEMPLATES: Readonly<Record<DeliveryRole, string>> = {
+/** 角色默认剧本（只读；播种后归工作区，引擎不再回看这份内容）。Partial——
+ *  词表超前的角色（reviewer 待 Task 4 真模板）整个缺席：**不做占位模板**
+ *  （一次性播种记录会把占位变成永久），播种侧按 SEEDABLE_ROLES 跳过。 */
+export const ROLE_PROFILE_TEMPLATES: Readonly<Partial<Record<DeliveryRole, string>>> = {
   designer: roleTemplate("designer", "交付设计师剧本：把需求整理成可实施、可核验的设计。", DESIGNER_BODY),
   developer: roleTemplate("developer", "交付开发者剧本：在领取的工作区分支内按设计实现并自测。", DEVELOPER_BODY),
   verifier: roleTemplate("verifier", "交付验证者剧本：逐项运行配置的检查并如实记录结果。", VERIFIER_BODY),
   "release-preparer": roleTemplate("release-preparer", "交付发布准备者剧本：基于已登记的验证证据起草发布材料。", RELEASE_PREPARER_BODY),
 };
 
-/** 播种结果：written / skipped 各为角色列表，按 DELIVERY_ROLES 序。 */
+/** 当前有模板、可播种的角色（DELIVERY_ROLES 序）——播种循环与 fail-safe 全集。
+ *  无模板的角色在播种结果（written/skipped）里整个缺席。 */
+const SEEDABLE_ROLES: readonly DeliveryRole[] = DELIVERY_ROLES.filter(
+  (role) => ROLE_PROFILE_TEMPLATES[role] !== undefined,
+);
+
+/** 播种结果：written / skipped 各为角色列表，按 DELIVERY_ROLES 序；只含有
+ *  模板的角色（SEEDABLE_ROLES）——无模板角色整个缺席（既不写也不记也不
+ *  skipped）。 */
 export interface SeedResult {
   written: DeliveryRole[];
   skipped: DeliveryRole[];
@@ -185,14 +201,15 @@ function parseSeedRecordRoles(raw: string): SeedRolesRecord | null {
 }
 
 /**
- * 把四份剧本模板**一次性**播种进 `<workspacePath>/.pi/agents/`（目录缺失先
- * recursive 建）。一次性记录在 `<ws>/.pi/delivery-seeded.json`：已记录角色
+ * 把有模板的角色剧本**一次性**播种进 `<workspacePath>/.pi/agents/`（目录缺失
+ * 先 recursive 建）。一次性记录在 `<ws>/.pi/delivery-seeded.json`：已记录角色
  * 直接 skipped（文件删了也不重建——删除即终局）；未记录且文件在场 → 收养记
  * "existing"、永不写；未记录且缺文件 → writeFile flag "wx" 写模板（EEXIST →
  * 按收养，其它错误照抛）、记 "<role>@<ROLE_TEMPLATE_VERSION>"。记录不可读 /
  * 畸形 → fail-safe：一字不写、全角色 skipped、console.error 一次（永不重建
  * 的承诺压过播种）。每次配置保存成功都会调用，记录齐后空转无害。
- */
+ * 无模板的角色（reviewer 待 Task 4）整个缺席于本函数的一切产出（文件/记录/
+ * 返回列表）——词表与模板解耦的过渡态。 */
 export async function seedRoleProfileTemplates(workspacePath: string): Promise<SeedResult> {
   const root = resolve(workspacePath);
   const dir = join(root, ".pi", "agents");
@@ -211,7 +228,7 @@ export async function seedRoleProfileTemplates(workspacePath: string): Promise<S
       console.error(
         `[delivery-runner] seed record at ${recordPath} is malformed; skipping role template seeding`,
       );
-      return { written, skipped: [...DELIVERY_ROLES] };
+      return { written, skipped: [...SEEDABLE_ROLES] };
     }
     roles = parsed;
   } catch (error) {
@@ -222,22 +239,27 @@ export async function seedRoleProfileTemplates(workspacePath: string): Promise<S
         `[delivery-runner] seed record at ${recordPath} is unreadable; skipping role template seeding:`,
         error,
       );
-      return { written, skipped: [...DELIVERY_ROLES] };
+      return { written, skipped: [...SEEDABLE_ROLES] };
     }
   }
 
   // 2) 逐角色三态：已记录 → skipped（删除即终局）；在场未记录 → 收养；缺文件
   //    未记录 → wx 写模板。记录有变才回写（原子，与 delivery.yaml 同款）。
+  //    只走 SEEDABLE_ROLES——无模板角色不产生任何痕迹。
   let recordChanged = false;
-  for (const role of DELIVERY_ROLES) {
+  for (const role of SEEDABLE_ROLES) {
     if (roles[role] !== undefined) {
       skipped.push(role);
       continue;
     }
+    // Partial 表按 SEEDABLE_ROLES 走——此处的 undefined 分支纯防漂移（词表与
+    // 模板表将来失同步时静默缺席，绝不写半空文件）。
+    const template = ROLE_PROFILE_TEMPLATES[role];
+    if (template === undefined) continue;
     const profilePath = join(dir, `${role}.md`);
     let adoptExisting = false;
     try {
-      await writeFile(profilePath, ROLE_PROFILE_TEMPLATES[role], { flag: "wx" });
+      await writeFile(profilePath, template, { flag: "wx" });
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
         adoptExisting = true; // 竞态或预置文件在场（本实现不预 stat，wx 自报）

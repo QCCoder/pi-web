@@ -34,6 +34,7 @@ import { createUlid } from "../../workspaces/id.ts";
 import { contentDigest } from "../delivery-types.ts";
 import { WorkItemValidationError } from "../errors.ts";
 import { writeAtomic } from "../service.ts";
+import type { AnyDeliveryRole } from "./roles.ts";
 import type { RoleWorktree } from "./worktrees.ts";
 import type { CheckEvidence } from "./checks.ts";
 
@@ -55,8 +56,10 @@ export interface ClaimState {
   /** 领取角色（Phase-3 T3 泛化：developer 领取共用同一运行态文件；Phase-4 T3
    *  增 verifier——verifier claim 不改阶段，claim 携候选 checkout 与证据仓；
    *  Phase-5 T1 增 release-preparer——纯文档角色，claim 携 candidateDigest
-   *  快照、无 worktrees/checkContexts/checkResults）。 */
-  role: "designer" | "developer" | "verifier" | "release-preparer";
+   *  快照、无 worktrees/checkContexts/checkResults）。final-arch step-3 T1：
+   *  类型放宽为 AnyDeliveryRole | "system"——旧 verifier 记录（verifier 退役
+   *  后成 legacy）与 Task 3 的引擎 system 领取读回零变化。 */
+  role: AnyDeliveryRole | "system";
   sessionId: string;
   claimedAt: string;
   lastSeenAt: string;
@@ -86,8 +89,9 @@ export interface AttemptRecord {
   attemptId: string;
   generation: number;
   /** 领取角色（Phase-3 T3 泛化——审计按角色如实记录；Phase-4 T3 增 verifier；
-   *  Phase-5 T1 增 release-preparer）。 */
-  role: "designer" | "developer" | "verifier" | "release-preparer";
+   *  Phase-5 T1 增 release-preparer）。final-arch step-3 T1：AnyDeliveryRole |
+   *  "system"——旧 verifier 审计记录永可读；"system" 备 Task 3 引擎系统步。 */
+  role: AnyDeliveryRole | "system";
   sessionId: string;
   workspacePath: string;
   key: string;

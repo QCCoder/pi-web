@@ -237,8 +237,10 @@ async function ensureRuntimeGitignore(workspacePath: string): Promise<void> {
 interface ActiveClaimExpectations {
   /** 活动 claim 必须由该角色持有（角色间不得互释对方的 claim——verifier 的
    *  submit/fail 不得释放 designer/developer 的 claim，反之亦然；Phase-5 起
-   *  release-preparer 同门——四角色凭证互不通用）。 */
-  expectedRole?: "designer" | "developer" | "verifier" | "release-preparer";
+   *  release-preparer 同门——角色凭证互不通用）。final-arch step-3 T1：类型
+   *  走词表（DeliveryRole，词 ./roles.ts）——reviewer 进表后 ask 门随之合法
+   *  （Task 2/3 接 reviewer 流转），不再手抄四角色并集。 */
+  expectedRole?: DeliveryRole;
   /** true = designDigest 复验：claim 领取时的 design.md 摘要快照必须仍等于
    *  锁内重算的当前 design.md contentDigest（developer submit 专用——
    *  designer claim 无该字段）。 */
