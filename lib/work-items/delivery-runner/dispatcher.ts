@@ -1,6 +1,6 @@
 // Phase-2 Task 7: DeliveryDispatcher——交付自动化的宿主心跳（HostJob，对照
 // LoopKitSpawner 形态）：每 30s 一拍（首拍立即，timer unref），每拍对每个可用
-// 工作区做两件事：
+// 工作区做三件事：
 //
 //   ① 超时清道夫：活动 delivery claim（listWorkItems + readClaim 扫描——与
 //      role-session 结束钩子同一 scanActiveItemClaims 习语）按 claim.claimedAt
@@ -22,16 +22,28 @@
 //      派发窗口）。角色由条目所处阶段决定（pool 投影），dispatcher 只透传——
 //      消除 T1 的过渡窗口（developer-ready 项不再被当 designer 起会话后领取即拒）。
 //
+//   ③ attention 催办/泊车（final-arch step-2 Task 5，2026-10-26，spec §8——
+//      唯一人工待办队列的维护步）：collectAttention 投影（与 GET …/attention
+//      路由共用装配器）后按 config.attention 阈值逐条处理——过泊车线未泊 →
+//      writePaused(attention-parked) + delivery.parked；过催办线未催未泊 →
+//      delivery.nudged。幂等由构造保证（事件只进 events.jsonl——不动 item.yaml
+//      不 bump revision——下一拍投影翻位不再命中）；泊车复用 automation-paused
+//      机制，人经既有 resumeAutomation 恢复。 attend 在派发之后（本轮新派发的
+//      会话立即可见，不该当轮就被催/泊）。
+//
 // 装配在 background.ts（guard 链后的第二个 HostJob，懒加载——work-item 服务
 // 不进 resident bundle）；关停序列 stopBackgroundSafely 同时停两个 job。
 import type { HostJob } from "../../session-host/jobs.ts";
 import { destroySession, probeSession } from "../../session-host/facade.ts";
 import { discoverWorkspaces, readWorkspaceManifest } from "../../workspaces/service.ts";
-import { assertAutomationCapable, readDeliveryRunnerConfig, type DeliveryRunnerConfig } from "./config.ts";
+import { assertAutomationCapable, readDeliveryRunnerConfig, DEFAULT_DELIVERY_RUNNER_CONFIG, type DeliveryRunnerConfig } from "./config.ts";
 import { listDeliveryPool } from "./pool.ts";
 import { hasAnyActiveExecution } from "./role-grants.ts";
 import { launchRoleSession, scanActiveItemClaims } from "./role-session.ts";
 import { recordInterruption } from "./claim.ts";
+import { writePaused } from "./attempts.ts";
+import { collectAttention } from "../attention.ts";
+import { appendEvent, eventFor, readWorkItem } from "../service.ts";
 
 const DISPATCHER_TICK_MS = 30_000;
 
@@ -52,6 +64,17 @@ export interface DispatcherDeps {
   probeSession?: typeof probeSession;
   destroySession?: typeof destroySession;
   recordInterruption?: typeof recordInterruption;
+  /** attention 投影数据源（final-arch step-2 Task 5；默认 collectAttention——
+   *  与 GET …/attention 路由共用同一装配器）。 */
+  collectAttention?: typeof collectAttention;
+  /** nudge/parked 事件追加（默认 service.appendEvent——只进 events.jsonl，
+   *  不动 item.yaml、不 bump revision）。 */
+  appendEvent?: typeof appendEvent;
+  /** 泊车写标记（默认 attempts.writePaused——复用 automation-paused 机制，
+   *  人经 resumeAutomation 恢复）。 */
+  writePaused?: typeof writePaused;
+  /** key → 工作项目录（默认 readWorkItem().path——泊车/事件都要 itemPath）。 */
+  readItemPath?: (workspacePath: string, key: string) => Promise<string>;
   /** 默认 Date.now（ms——与 Date.parse(claim.claimedAt) 同单位）。 */
   now?: () => number;
 }
@@ -78,6 +101,12 @@ export class DeliveryDispatcher implements HostJob {
       probeSession: deps.probeSession ?? probeSession,
       destroySession: deps.destroySession ?? destroySession,
       recordInterruption: deps.recordInterruption ?? recordInterruption,
+      collectAttention: deps.collectAttention ?? collectAttention,
+      appendEvent: deps.appendEvent ?? appendEvent,
+      writePaused: deps.writePaused ?? writePaused,
+      readItemPath:
+        deps.readItemPath
+        ?? (async (workspacePath: string, key: string) => (await readWorkItem(workspacePath, key)).path),
       now: deps.now ?? Date.now,
     };
   }
@@ -122,6 +151,9 @@ export class DeliveryDispatcher implements HostJob {
     assertAutomationCapable(await this.deps.readManifest(workspace.path));
     await this.reapTimedOutClaims(workspace.path, config);
     await this.dispatch(workspace, config);
+    // ③ attention 催办/泊车（final-arch step-2 Task 5）——在派发之后（新派发
+    // 的会话立即可见，不该当轮就被催/泊）。
+    await this.attend(workspace, config);
   }
 
   private async reapTimedOutClaims(
@@ -170,5 +202,60 @@ export class DeliveryDispatcher implements HostJob {
     }).catch((error) => {
       console.error(`[delivery-runner] ${entry.role} launch failed for ${entry.key}:`, error);
     });
+  }
+
+  /**
+   * ③ attention 催办/泊车（final-arch step-2 Task 5，spec §8）：对人工待办投影
+   *  逐条按 config.attention 阈值处理——
+   *    ageDays ≥ parkAfterDays 且未泊 → writePaused(reason=attention-parked,
+   *    count=0) + delivery.parked 事件（复用 automation-paused 机制，人经
+   *    resumeAutomation 恢复）；
+   *    否则 ageDays ≥ nudgeAfterDays 且未催未泊 → delivery.nudged 事件。
+   *  幂等由构造保证：事件进 events.jsonl 后投影翻起 nudged/parked 位，下一拍
+   *  不再命中；泊过的不催。单条失败记日志跳过（下拍重试），整体异常交 tick 的
+   *  per-workspace catch——永不抛出 tick。
+   */
+  private async attend(
+    workspace: { id: string; path: string },
+    config: DeliveryRunnerConfig,
+  ): Promise<void> {
+    // 配置解析后 attention 必有（config.ts 缺块回填默认 3/7）；测试假 config
+    // 可能缺块 → 同一默认兜底。
+    const attention = config.attention ?? DEFAULT_DELIVERY_RUNNER_CONFIG.attention;
+    const now = new Date(this.deps.now());
+    for (const entry of await this.deps.collectAttention(workspace.path, now)) {
+      try {
+        if (!entry.parked && entry.ageDays >= attention.parkAfterDays) {
+          const itemPath = await this.deps.readItemPath(workspace.path, entry.key);
+          this.deps.writePaused(itemPath, {
+            at: now.toISOString(),
+            reason: "attention-parked",
+            count: 0,
+          });
+          await this.deps.appendEvent(
+            itemPath,
+            eventFor("delivery.parked", "agent", undefined, {
+              kind: entry.kind,
+              ageDays: entry.ageDays,
+              since: entry.since,
+            }),
+          );
+        } else if (
+          !entry.nudged && !entry.parked && entry.ageDays >= attention.nudgeAfterDays
+        ) {
+          const itemPath = await this.deps.readItemPath(workspace.path, entry.key);
+          await this.deps.appendEvent(
+            itemPath,
+            eventFor("delivery.nudged", "agent", undefined, {
+              kind: entry.kind,
+              ageDays: entry.ageDays,
+              since: entry.since,
+            }),
+          );
+        }
+      } catch (error) {
+        console.error(`[delivery-runner] attend failed for ${entry.key} (${entry.kind}):`, error);
+      }
+    }
   }
 }
