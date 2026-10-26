@@ -7,7 +7,9 @@
 //     候选非空 ∧ 配置 checks 非空 ∧ 过审门（review 关闭 ∨ reviewPending=false
 //     ——与 pool.ts 角色投影共用同一 reviewPending，永不漂移）∧ 无 verification
 //     或其 candidateDigest 与当前候选集不符（checks-done——该候选集已验证过）
-//     ∧ 共用门（无 claim ∧ 无未确认中断 ∧ 未 paused ∧ 可领状态 ∧ 未归档）∧
+//     ∧ 共用门（无 claim ∧ 无未确认中断 ∧ 未 paused ∧ 状态门：open 直跑 /
+//       in_progress=人工 unblock 落点可跑 / blocked 等 unblock / 其余 terminal
+//       ∧ 未归档）∧
 //     仓解析门（每条 check 的 repositoryId 缺省解析候选首仓、须在候选集内且
 //     manifest 登记 active—— retired verifier 谓词同款，防 prepareVerifyCheckouts
 //     对未登记仓硬炸）。reasons 镜像池 reason 词表 + 本步专属：checks-empty
@@ -32,6 +34,8 @@
 //       失败）+ delivery.checks_unverified。三者均：清 claim、attempt（role
 //       system、outcome "submitted" + verificationOutcome 判定——检查步完成
 //       了一轮，不计失败；**全步零失败预算**）、commit。无会话自链接。
+//       blocked 是硬停：等人工 unblock 才再次 due（spec §5.3「人修环境后
+//       unblock 即再次 due」——不自动重试，不 hammer 机器；fix round 1）。
 //
 //   任何异常：清 claim（recordInterruption——needsAttention 中断，人「重新检查
 //   并恢复」）后原样重抛（dispatcher catch 记日志）。宿主关停/崩溃的残留
@@ -77,10 +81,6 @@ import { appendEvent, eventFor, listWorkItems, readWorkItem, serializeWorkItem, 
 import type { WorkItemDetail } from "../types.ts";
 import { prepareVerifyCheckouts, type RoleWorktree } from "./worktrees.ts";
 
-/** 可领状态白名单（与 pool.ts CLAIMABLE_STATUSES 同一语义——过审后 system 开跑
- *  的项停 open；checks_unverified 落 blocked 仍可重跑）。 */
-const CLAIMABLE_STATUSES: readonly string[] = ["open", "blocked"];
-
 export type ChecksDueReason =
   | "not-managed" | "automation-disabled" | "wrong-phase"
   // 候选/检查/仓门（retired verifier 谓词同款语义，词表随本步落位）：
@@ -89,6 +89,9 @@ export type ChecksDueReason =
   | "awaiting-review"
   // 同 digest 验证记录已在场——该候选集已验证过，不再重跑。
   | "checks-done"
+  // 状态门（final-arch step-3 T3 fix round 1，spec §5.3：checks_unverified 落
+  // blocked 后「人修环境后 unblock 即再次 due」——不自动重试、不计预算）。
+  | "blocked-awaiting-unblock"
   // 共用门（与池 sharedReasons 同词表；失败预算刻意不是本步的门——检查步
   // 无失败预算，attempt outcome submitted 不计不断）。
   | "active-claim" | "pending-interruption" | "automation-paused"
@@ -155,7 +158,14 @@ export function checksDue(
   if (ctx.activeClaims.has(item.key)) reasons.push("active-claim");
   if (ctx.pendingInterruptions.has(item.key)) reasons.push("pending-interruption");
   if (ctx.paused.has(item.key)) reasons.push("automation-paused");
-  if (!CLAIMABLE_STATUSES.includes(item.status)) reasons.push("terminal-status");
+  // 状态门（spec §5.3）：blocked = checks_unverified 的落点——硬停等人工
+  // unblock（不自动重试）；in_progress 是人工 unblock 的落点（delivery.ts
+  // unblock → 非 released 相位落 in_progress），无 claim 即无并发面——解锁后
+  // 立即可跑；其余（cancelled/done/released…）沿用池的 terminal-status 词。
+  if (item.status === "blocked") reasons.push("blocked-awaiting-unblock");
+  else if (item.status !== "open" && item.status !== "in_progress") {
+    reasons.push("terminal-status");
+  }
   if (item.archivedAt !== null) reasons.push("archived");
   return { due: reasons.length === 0, reasons };
 }
