@@ -243,3 +243,11 @@ export interface DeliveryReadinessResponse {
   /** 当前内置剧本模板版本（role-templates ROLE_TEMPLATE_VERSION——漂移提示依据）。 */
   currentTemplateVersion: number;
 }
+
+// final-arch step-6 Task 3（2026-10-26）：模板另存（POST …/delivery/roles/[role]/template）
+// 的响应形状——副本写在 `<ws>/.pi/agents/<role>.template.md`（wx 写即全新；
+// 已存在 → 409，永不覆盖）。单一定义处：role-templates.ts writeRoleTemplateCopy
+// type-only 引用本形状（attention 同款零漂移镜像）。
+export interface DeliveryRoleTemplateSaveResponse {
+  path: string;
+}

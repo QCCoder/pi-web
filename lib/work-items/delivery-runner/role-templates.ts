@@ -28,8 +28,16 @@
 //     一次（「永不重建」的承诺压过播种——宁可一次不播，不可盲目重播）。
 // 记录变更后经 writeAtomic 落盘（与 delivery.yaml 同一原子写；.pi 目录随
 // mkdir recursive 已在场）。
+//
+// final-arch step-6 Task 3（2026-10-26）：模板另存副本 writeRoleTemplateCopy
+// ——模板升级后把**当前**内置模板写到 `<ws>/.pi/agents/<role>.template.md`
+//（flag "wx"，存在即 WorkItemConflictError → 路由 409，永不覆盖）。永不碰
+// `<role>.md`（剧本文件归工作区，另存不等于应用）、永不碰播种记录（播种
+// 一次性语义不受影响）——副本只是给用户的参考件，用不用、怎么用人说了算。
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { DeliveryRoleTemplateSaveResponse } from "../../api-types.ts";
+import { WorkItemConflictError } from "../errors.ts";
 import { DELIVERY_ROLES, type DeliveryRole } from "./roles.ts";
 import { writeAtomic } from "../service.ts";
 
@@ -280,4 +288,30 @@ export async function seedRoleProfileTemplates(workspacePath: string): Promise<S
     );
   }
   return { written, skipped };
+}
+
+/**
+ * 模板另存副本（final-arch step-6 Task 3）：把 `role` 的**当前**内置模板写到
+ * `<workspacePath>/.pi/agents/<role>.template.md`。写即全新（flag "wx"）——
+ * 副本已存在 → WorkItemConflictError（路由映射 409），**永不覆盖**；永不碰
+ * `<role>.md`（剧本文件归工作区，另存不是应用）与播种记录（播种一次性语义
+ * 不动）。模板升级后用户从这里拿到新版参考件，怎么改、用不用是人的手。
+ */
+export async function writeRoleTemplateCopy(
+  workspacePath: string,
+  role: DeliveryRole,
+): Promise<DeliveryRoleTemplateSaveResponse> {
+  const root = resolve(workspacePath);
+  const dir = join(root, ".pi", "agents");
+  await mkdir(dir, { recursive: true });
+  const copyPath = join(dir, `${role}.template.md`);
+  try {
+    await writeFile(copyPath, ROLE_PROFILE_TEMPLATES[role], { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+      throw new WorkItemConflictError(`template copy already exists: ${copyPath}`);
+    }
+    throw error;
+  }
+  return { path: copyPath };
 }
