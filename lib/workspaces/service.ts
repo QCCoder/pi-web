@@ -580,7 +580,11 @@ function repositoryAliasFromDirName(name: string): string {
  *  - removed 条目重现 → 恢复 active。
  *  变更时同步刷新 AGENTS.md managed 段并（若是 git 仓）提交审计。调用方需持有
  *  工作区写锁。返回是否发生了变更。 */
-async function syncRepositoriesFromScan(
+/** 导出（final-arch step-6 Task 1）：交付初始化（delivery-init.ts）触发同一次
+ *  扫描对账——比绕 listWorkspaceRepositories 轻（无 TTL 缓存语义、无每仓 git
+ *  子进程）。调用方须持有工作区写锁（下方 computeListWorkspaceRepositories
+ *  同款包裹）。返回是否发生了变更。 */
+export async function syncRepositoriesFromScan(
   workspacePath: string,
   manifest: WorkspaceManifest,
 ): Promise<boolean> {

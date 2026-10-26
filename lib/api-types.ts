@@ -203,3 +203,43 @@ export interface AttentionEntry {
 export interface AttentionResponse {
   entries: AttentionEntry[];
 }
+
+// final-arch step-6 Task 1（2026-10-26）：交付初始化（POST …/delivery/init）与
+// 就绪清单（GET …/delivery/readiness）的响应形状。单一定义处 = 此文件；服务端
+// lib/workspaces/delivery-init.ts type-only 引用（attention 同款零漂移镜像）。
+// 语义（spec §13.2/§13.3/§13.5.1）：init 只补缺、只建议——探测/from 草稿只进
+// suggestedChecks 供人确认，从不落盘执行；readiness 非门禁。
+export interface DeliverySuggestedCheck {
+  name: string;
+  command: string;
+  /** from 复制的草稿剥除（仓绑定待面板重绑）；工具链探测草稿携带（仓已登记）。 */
+  repositoryId?: string;
+}
+
+/** 就绪缺项五类（kind 序即展示序）：no-checks / missing-profile:<role> /
+ *  capabilities-missing / check-repo-unregistered / integrate-no-command。 */
+export type DeliveryReadinessKind =
+  | "no-checks"
+  | `missing-profile:${string}`
+  | "capabilities-missing"
+  | "check-repo-unregistered"
+  | "integrate-no-command";
+
+export interface DeliveryReadinessItem {
+  kind: DeliveryReadinessKind;
+  detail: string;
+}
+
+export interface DeliveryInitResponse {
+  /** 所做动作清单（人话一行一条；「已存在，未改动」= 幂等跳过）。 */
+  actions: string[];
+  /** 确认草稿（from checks 剥 repositoryId + 工具链探测）——非空才在。 */
+  suggestedChecks?: DeliverySuggestedCheck[];
+  readiness: DeliveryReadinessItem[];
+}
+
+export interface DeliveryReadinessResponse {
+  items: DeliveryReadinessItem[];
+  /** 当前内置剧本模板版本（role-templates ROLE_TEMPLATE_VERSION——漂移提示依据）。 */
+  currentTemplateVersion: number;
+}
