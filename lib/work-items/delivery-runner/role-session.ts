@@ -1,27 +1,24 @@
-// Phase-2 Task 6: designer 角色会话装配（spec 2026-10-24-phase-two §5.4）。
-// Phase-3 Task 4: 泛化为双角色 launchRoleSession/buildRoleContract（spec
-// 2026-10-24-phase-three §6）——designer 合同/路径逐字节保留（buildRoleContract
-// ("designer") 即 DESIGNER_CONTRACT 原文）；developer 合同按 spec §6 新写
-// （worktree 唯一代码工作区 / 不合并不推送 / 候选提交 / 验证由人）。
-// Phase-4 Task 4: 第三角色 verifier 合同（spec 2026-10-24-phase-four §6）——
-// 检查只经 delivery_run_check 触发（bash 替代命令不作证据）/ 验证环境只读
-// （发现问题走 rework 反馈，不自行修复）/ 不合并不推送 / submit 只需 key。
-// Phase-5 Task 2: 第四角色 release-preparer 合同（spec 2026-10-25-phase-five
-// §3）——纯文档角色：只读（不发布/不登记发布/不合并推送/不改代码与 release
-// 块），材料由验证证据支撑不虚构验证结论，submit 只写 releasePlan 等人
-// record-release；会话命名/结束钩子/心跳/登记 role 无关（泛化链路自动覆盖）。
+// Seam-repositioning Task 2（2026-10-26）：角色会话装配终形——引擎不变式合同 +
+// 工作区剧本正文。四段角色专属合同（designer/developer/verifier/release-
+// preparer）删除：角色差异全部下沉到 `<ws>/.pi/agents/<profile>.md` 剧本（默认
+// 剧本名 = 角色名，config.roles[role].profile 可覆写；正文经 appendSystemPrompt
+// 注入，frontmatter 的 model 作模型覆写来源），引擎只保留对四角色一致的回合
+// 不变式（AGENT_INVARIANT_CONTRACT，spec §4.3.1 六条：领取纪律 / 写域隔离 /
+// submit-fail 终态 / 证据规则 / 人工动作边界 / 项目事实出处）。开场 prompt 单一
+// 通用四步（列池 → 领指派项 → 按剧本工作 → submit/fail 结束）；领取上下文
+// （需求、上游产物、worktree 或检查清单）由 delivery_claim_task 的返回带给
+// 会话——不进系统提示。
 //
 // dispatcher 判定该起角色会话时调 launchRoleSession：两步创建序
 // （sessionId 到手 → grantRole → delivery 执行登记 → 命名 → 开场 prompt），
 // 会话本身 fire-and-forget——不 await 轮结束，结束钩子（wrapper onDestroy）+
-// 心跳续约兜底。开场合同（appendSystemPrompt）约束职责与硬规则；模型覆写来自
-// `.pi/delivery.yaml`（config.roles[role].model，缺省时若配置了 profile 则从
-// `.pi/agents/<profile>.md` frontmatter 解析 model 字段；roles.developer 的
-// 配置解析由 T5 落地，消费侧已按 role 取）。
+// 心跳续约兜底。模型优先级：config.roles[role].model ?? 剧本 frontmatter
+// model ?? 会话默认；剧本缺场（缺文件/非法名）→ warn 一条后仅以不变式开场，
+// 读盘异常 → error 记录当缺场——「配了剧本却读不到」不打死整个 launch。
 //
 // 结束钩子（onDestroy）：记录本会话遗留的所有未清 claim → revokeRole → 清
 // delivery 执行登记 → 停心跳。领取集 = launch key 快路径 + 全活动项扫描兜底
-// （fix-round 1 裁定：开场合同限定「只领取指派项」，扫描兜住违约领取——对每个
+// （fix-round 1 裁定：不变式限定「只领取指派项」，扫描兜住违约领取——对每个
 // claim.sessionId 匹配的项 recordInterruption，服务幂等，先到者清 claim）。
 // claim 已清 / 他人会话 / 二次触发都只做无条件的 revoke/clear，不动记录。
 // 结束钩子/心跳/登记 role 无关（claim.sessionId 匹配，不问角色）。
@@ -48,150 +45,57 @@ import type { DeliveryRunnerConfig, DeliveryRoleConfig } from "./config.ts";
 import type { DeliveryRole } from "./pool.ts";
 import type { RoleWorktree } from "./worktrees.ts";
 
-/** designer 开场合同：职责 / 硬规则 / 结束条件（随 appendSystemPrompt 注入）。
- *  Phase-3 T4 起经 buildRoleContract("designer", …) 产出——文本逐字节保留。 */
-export const DESIGNER_CONTRACT = (task: { key: string; title: string }) => `# designer 角色合同（${task.key}）
+/** 交付回合不变式（spec §4.3.1 六条，四角色一致）：领取纪律 / 写域隔离 /
+ *  submit-fail 终态 / 证据规则 / 人工动作边界 / 项目事实出处。role 与 key 是
+ *  仅有的内插位；工具名不加反引号（库内 prompt 习语）。 */
+export const AGENT_INVARIANT_CONTRACT: (ctx: { role: DeliveryRole; key: string }) => string = ({ role, key }) =>
+  `# 交付回合不变式（${role} · ${key}）
 
-## 职责
-把工作项 ${task.key}（${task.title}）的需求梳理成设计与验收条件：通读需求 README 与涉及仓库，产出可执行的 design.md（方案、影响面、步骤拆解）与逐条可核验的验收条件。
+1. 先 delivery_claim_task 成功才动手；本轮只领指派项 ${key}，不可领取即说明并结束。
+2. 只在 claim 返回的 worktree / 目录内写，其余一律只读；不合并、不推送、不碰受保护分支——集成与发布是引擎与人的事。
+3. 本轮以 submit / fail 二者之一结束；结束时不得留进行中的领取。
+4. 自述不是证据；检查只经 delivery_run_check 触发。
+5. 确认、验收、发布登记没有工具——那是人的手。
+6. 项目事实（gate 命令、构建环境、分支纪律）查工作区 AGENTS.md 与你的剧本。`;
 
-## 硬规则
-1. 先 delivery_list_ready_tasks 看池子，再 delivery_claim_task 领取成功后才动手——领取失败/冲突不得绕过或强写。本轮只领取工作项 ${task.key}；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项。
-2. 只允许操作本工作项：禁改工作区宪法（.pi/loop/constraints.md、.pi/loop/budget.md）、AGENTS.md、其他工作项与无关文件。
-3. 设计与验收条件写好后经 delivery_submit_result 提交即结束本轮——不推进确认或后续阶段。
-4. 无法推进（需求不清、外部阻塞）时用 delivery_fail_task 说明原因后结束；环境/依赖类阻塞带 blocked=true。
-5. 设计与验收的确认由人完成（confirm-design 是人的动作），你没有确认动作。
-
-## 结束条件
-以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
-
-/** developer 开场合同（spec §6）：职责 / 硬规则 / 结束条件。worktree 清单来自
- *  claim（领取事务预建）；launch 时领取未发生——清单以 delivery_claim_task
- *  返回为准（不虚构路径）。 */
-const developerContract = (
-  task: { key: string; title: string },
-  claim?: { worktrees?: RoleWorktree[] },
-): string => {
-  const worktrees = claim?.worktrees ?? [];
-  const worktreeList = worktrees.length > 0
-    ? worktrees
-      .map((worktree) => `   - ${worktree.path}（分支 ${worktree.branch}，仓库 ${worktree.repositoryId}）`)
-      .join("\n")
-    : "   - （领取时核发——以 delivery_claim_task 返回的 worktrees 清单为准，逐项 path+branch）";
-  return `# developer 角色合同（${task.key}）
-
-## 职责
-按工作项 ${task.key}（${task.title}）已确认的设计与验收条件完成实现：在指定的 worktree 中编码与自测，提交候选 commit。
-
-## 硬规则
-1. 先 delivery_list_ready_tasks 看池子，再 delivery_claim_task 领取成功后才动手——领取失败/冲突不得绕过或强写。本轮只领取工作项 ${task.key}；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项。
-2. 代码只改以下 worktree（逐项 path+branch）：
-${worktreeList}
-   主工作区与其它目录一律只读。
-3. 分支纪律按工作区 AGENTS/git 规则：只在 worktree 的草稿分支上工作，不合并不推送——合并到主分支由人做。
-4. 完成后在 worktree 分支上 commit，用 delivery_submit_result 提交 candidates（每仓一个 commit sha）与 notes（变更说明/自测情况）。
-5. 阻塞（需求不可实现、环境/依赖问题）时用 delivery_fail_task 说明原因后结束；环境/依赖类阻塞带 blocked=true。
-6. 验证结论由人给出，你没有验证登记动作。
-
-## 结束条件
-以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
-};
-
-/** verifier 开场合同（Phase-4 Task 4，spec §6）：职责 / 硬规则 / 结束条件。
- *  检查清单与候选 checkout 来自 claim（领取事务冻结的 checkContexts + 预建
- *  checkout）；launch 时领取未发生——清单以 delivery_claim_task 返回为准
- *  （不虚构名字/路径）。 */
-const verifierContract = (task: { key: string; title: string }): string => `# verifier 角色合同（${task.key}）
-
-## 职责
-对工作项 ${task.key}（${task.title}）的候选实现执行验证：触发全部配置的验证检查（delivery_run_check）并提交验证结论（全部通过 → 放行等人工 release；有失败 → 返工反馈）。
-
-## 硬规则
-1. 先 delivery_list_ready_tasks 看池子，再 delivery_claim_task 领取成功后才动手——领取失败/冲突不得绕过或强写。本轮只领取工作项 ${task.key}；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项。
-2. 检查只通过 delivery_run_check 触发——不要自己用 bash 跑替代命令（其结果不作证据）；对领取返回的 checks 清单逐项运行（同名重跑覆盖；unverified 是环境问题，处理后重跑）。
-3. 全部检查跑完后用 delivery_submit_result 提交（verifier 只需 key，可选 notes——检查结果由服务端从 delivery_run_check 的记录取用），提交即结束本轮。
-4. 验证环境只读：候选 checkout 与主工作区一律只读——发现实现问题走提交后的 rework 反馈，不自行修复代码。
-5. 不合并不推送——候选合并与发布由人做。
-6. 环境/依赖问题（命令无法执行、依赖缺失）用 delivery_fail_task 说明原因后结束；环境/依赖类阻塞带 blocked=true。
-
-## 结束条件
-以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
-
-/** release-preparer 开场合同（Phase-5 Task 2，spec §3）：职责 / 硬规则 / 结束
- *  条件。纯文档角色——材料 = 需求 README + 已确认设计（design.md）+ 候选提交
- *  + 验证证据（delivery.verification），全部在领取返回/工作项内可读；产出只写
- *  delivery.releasePlan（submit 服务端写，会话自身零落盘动作）。 */
-const releasePreparerContract = (task: { key: string; title: string }): string => `# release-preparer 角色合同（${task.key}）
-
-## 职责
-基于工作项 ${task.key}（${task.title}）已确认的设计、候选提交与验证证据，起草发布材料：变更摘要（做了什么/为什么）、影响面（波及的模块与行为）、验证结论引用（引用 delivery.verification 里实际登记的检查与结果）、回滚步骤建议，经 delivery_submit_result 提交（release_notes 必填、rollback_notes 可选）。
-
-## 硬规则
-1. 先 delivery_list_ready_tasks 看池子，再 delivery_claim_task 领取成功后才动手——领取失败/冲突不得绕过或强写。本轮只领取工作项 ${task.key}；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项。
-2. 全程只读：不发布、不登记发布（record-release 与实际发布是人做的）、不合并不推送；不改代码、不写 delivery.release 块——你的产出只有提交的发布材料。
-3. 材料必须由验证证据支撑：验证结论只能引用 delivery.verification 实际登记的检查与结果，不虚构、不推断未跑过的检查；证据不足以支撑发布说明时不要编造。
-4. 材料写好后用 delivery_submit_result 提交（release_notes 必填，rollback_notes 可选——回滚步骤建议），提交即结束本轮——发布与登记发布由人完成。
-5. 阻塞（验证证据缺失、材料无法支撑）用 delivery_fail_task 说明原因后结束；环境/依赖类阻塞带 blocked=true。
-
-## 结束条件
-以下任一即结束本轮：submit 成功；fail 释放成功；目标项 ${task.key} 不可领取。结束时不得留进行中的领取。`;
-
-/** 角色开场合同：designer = 现行文本（逐字节）；developer = worktree 隔离合同；
- *  verifier = 服务端检查执行合同（Phase-4 T4）；release-preparer = 纯文档
- *  发布材料合同（Phase-5 T2）。 */
-export function buildRoleContract(
-  role: DeliveryRole,
-  task: { key: string; title: string },
-  claim?: { worktrees?: RoleWorktree[] },
-): string {
-  return role === "developer"
-    ? developerContract(task, claim)
-    : role === "verifier"
-      ? verifierContract(task)
-      : role === "release-preparer"
-        ? releasePreparerContract(task)
-        : DESIGNER_CONTRACT(task);
+/** 工作区角色剧本：frontmatter 的 model 覆写 + 正文 body（随 appendSystemPrompt
+ *  注入——角色差异的唯一载体）。 */
+export interface RoleProfile {
+  model?: { provider?: string; modelId: string };
+  body: string;
 }
 
-/** 开场指令：列出池子 → 领取指派项（唯一目标，不领其他项）→ 工作 → 提交。 */
-function openingPromptFor(role: DeliveryRole, task: { key: string; title: string }): string {
-  if (role === "developer") {
-    return [
-      "你是本工作区的交付 developer 会话，请开始本轮工作：",
-      "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
-      `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
-      "3. 依据领取返回的已确认设计（design.md）与 worktree 清单，在对应 worktree 分支上实现并自测；",
-      "4. 在 worktree 分支 commit 后用 delivery_submit_result 提交 candidates（每仓 commit sha）与 notes 即结束本轮；无法推进时 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
-    ].join("\n");
-  }
-  if (role === "verifier") {
-    return [
-      "你是本工作区的交付 verifier 会话，请开始本轮工作：",
-      "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
-      `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
-      "3. 对领取返回的 checks 清单逐项调用 delivery_run_check（不要用 bash 自跑替代命令——自述结果不构成证据）；",
-      "4. 全部检查跑完后用 delivery_submit_result 提交（只需 key，可选 notes——检查结果服务端自取）即结束本轮；环境问题 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
-    ].join("\n");
-  }
-  if (role === "release-preparer") {
-    return [
-      "你是本工作区的交付 release-preparer 会话，请开始本轮工作：",
-      "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
-      `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
-      "3. 通读全部相关材料：需求 README、已确认设计（design.md）、候选提交与验证证据（delivery.verification 的检查与结果），全程只读；",
-      "4. 基于验证证据起草发布材料（变更摘要/影响面/验证结论引用 + 回滚步骤建议），用 delivery_submit_result 提交（release_notes 必填，rollback_notes 可选）即结束本轮——发布与登记发布由人完成；无法推进时 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
-    ].join("\n");
-  }
+/** 剧本名解析：config.roles[role].profile 显式优先，缺省 = 角色名（约定同名
+ *  剧本 .pi/agents/&lt;role&gt;.md）。 */
+export function resolveRoleProfileName(role: DeliveryRole, roleConfig?: DeliveryRoleConfig): string {
+  return roleConfig?.profile ?? role;
+}
+
+/** 会话系统提示装配：不变式合同在前，剧本正文在后（空白正文按缺席——仅不变式，
+ *  无尾分隔符）。 */
+export function composeRoleSystemPrompt(
+  ctx: { role: DeliveryRole; key: string },
+  profile?: RoleProfile,
+): string {
+  const parts = [AGENT_INVARIANT_CONTRACT(ctx), profile?.body].filter(
+    (part): part is string => typeof part === "string" && part.trim().length > 0,
+  );
+  return parts.join("\n\n");
+}
+
+/** 开场指令（四角色单一通用文案，仅首行 role 字样不同）：列池 → 领指派项 →
+ *  按剧本工作（上下文以领取返回为准）→ submit/fail 结束。 */
+export function openingPromptFor(role: DeliveryRole, task: { key: string; title: string }): string {
   return [
-    "你是本工作区的交付 designer 会话，请开始本轮工作：",
+    `你是本工作区的交付 ${role} 会话，请开始本轮工作：`,
     "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
-    `2. 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
-    "3. 依据领取返回的需求 README 与仓库清单梳理设计，撰写 design.md 与逐条可核验的验收条件；",
-    "4. delivery_submit_result 提交后即结束本轮；无法推进时 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
+    `2. 用 delivery_claim_task 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
+    "3. 依据领取返回的上下文（需求、上游产物、worktree 或检查清单）按你的剧本完成本阶段工作；",
+    "4. 用 delivery_submit_result 提交后即结束本轮；无法推进时用 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
   ].join("\n");
 }
 
-/** claim 心跳周期（spec §5.2 轻量续约；两角色共用）。 */
+/** claim 心跳周期（spec §5.2 轻量续约；四角色共用）。 */
 export const DESIGNER_HEARTBEAT_INTERVAL_MS = 20_000;
 
 export interface LaunchDeps {
@@ -210,21 +114,18 @@ export interface LaunchDeps {
     workspacePath: string,
     key: string,
   ) => Promise<{ path: string; claim: ClaimState | null } | null>;
-  /** 扫描工作区全部活动项的当前 claim（结束钩子兜底——合同限定只领指派项，
+  /** 扫描工作区全部活动项的当前 claim（结束钩子兜底——不变式限定只领指派项，
    *  扫描兜住违约领取）。默认 listWorkItems + 逐项读，单项读失败 = claim null。 */
   scanClaims?: (workspacePath: string) => Promise<Array<{ key: string; claim: ClaimState | null }>>;
   heartbeat?: typeof heartbeatActiveClaim;
   record?: typeof recordInterruption;
-  /** 解析工作区 subagent profile 的模型覆写（config.roles[role].model 缺省而
-   *  profile 在场时的模型来源，final review fix——两角色共用）。返回 undefined
-   *  = 无覆写。 */
-  readProfileModel?: (
+  /** 读工作区角色剧本 `<ws>/.pi/agents/<profile>.md`（默认 readRoleProfile）：
+   *  frontmatter 的 model 覆写 + 正文 body。返回 undefined = 剧本缺场（launch
+   *  侧 warn 后仅以不变式开场）。 */
+  readProfile?: (
     workspacePath: string,
     profile: string,
-  ) =>
-    | Promise<NonNullable<CreateSessionInput["model"]> | undefined>
-    | NonNullable<CreateSessionInput["model"]>
-    | undefined;
+  ) => RoleProfile | undefined | Promise<RoleProfile | undefined>;
   now?: () => Date;
 }
 
@@ -245,17 +146,15 @@ const defaultResolveItem: NonNullable<LaunchDeps["resolveItem"]> = async (worksp
 const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
- * 读工作区 subagent profile（`<workspacePath>/.pi/agents/<profile>.md`——subagents
- * 的 project 作用域目录）frontmatter 的 `model:` 字段，解析成 createSession 的
- * 模型覆写形状（`provider/model` 首个 `/` 拆分双非空 → {provider, modelId}，裸
- * modelId → {modelId}）。文件缺失 / 名字不合法 / 无 frontmatter / 无 model /
- * 值非字符串 → undefined（静默回落默认模型——操作面「配了 profile 却拿不到模型」
- * 不该把整个 launch 打死）。解析复用 `parseFrontmatter`（subagents 同一习语）。
+ * 读工作区角色剧本（`<workspacePath>/.pi/agents/<profile>.md`——subagents 的
+ * project 作用域目录）：frontmatter 的 `model:` 字段按现行拆分规则解析
+ * （`provider/modelId` 首个 `/` 双非空 → {provider, modelId}，裸 → {modelId}；
+ * 非字符串/空 → 缺席），body = frontmatter 之后全文 trim（无 frontmatter 即
+ * 全文）。文件缺失 / 名字不合法 → undefined（静默——launch 侧 warn 兜底）。
+ * 刻意只读工作区目录（不走 resolveSubagentProfile——它跨 user/project 作用域，
+ * 有同名歧义）；解析复用 `parseFrontmatter`（subagents 同一习语）。
  */
-export const readDesignerProfileModel: NonNullable<LaunchDeps["readProfileModel"]> = (
-  workspacePath,
-  profile,
-) => {
+export function readRoleProfile(workspacePath: string, profile: string): RoleProfile | undefined {
   const name = profile.trim();
   if (!PROFILE_NAME_RE.test(name)) return undefined;
   const filePath = join(resolve(workspacePath), ".pi", "agents", `${name}.md`);
@@ -263,17 +162,19 @@ export const readDesignerProfileModel: NonNullable<LaunchDeps["readProfileModel"
   try {
     source = readFileSync(filePath, "utf8");
   } catch {
-    return undefined; // 缺文件 = 无覆写，不是错误
+    return undefined; // 缺文件 = 无剧本，不是错误
   }
-  const { data } = parseFrontmatter(source);
-  const model = typeof data?.model === "string" ? data.model.trim() : "";
-  if (!model) return undefined;
-  const slash = model.indexOf("/");
-  if (slash > 0 && slash < model.length - 1) {
-    return { provider: model.slice(0, slash), modelId: model.slice(slash + 1) };
-  }
-  return { modelId: model };
-};
+  const { data, rest } = parseFrontmatter(source);
+  const modelValue = typeof data?.model === "string" ? data.model.trim() : "";
+  const slash = modelValue.indexOf("/");
+  const model =
+    modelValue === ""
+      ? undefined
+      : slash > 0 && slash < modelValue.length - 1
+        ? { provider: modelValue.slice(0, slash), modelId: modelValue.slice(slash + 1) }
+        : { modelId: modelValue };
+  return { ...(model ? { model } : {}), body: rest.trim() };
+}
 
 /** 工作区全部活动项的当前 claim 扫描：结束钩子兜底与 T7 dispatcher 清道夫
  *  共用同一习语（listWorkItems → 逐项 readWorkItem → readClaim）；单项读失败
@@ -298,15 +199,15 @@ export interface LaunchRoleOptions {
   /** 本次拉起的角色（池条目所处阶段决定——dispatcher 透传 entry.role）。 */
   role: DeliveryRole;
   task: { key: string; title: string };
-  /** 领取上下文（launch 时领取尚未发生 → 空对象；worktree 清单以领取返回为准，
-   *  合同相应指向 delivery_claim_task 的返回）。 */
+  /** 领取上下文（dispatcher 透传空对象）。装配当前不消费——worktree/检查清单
+   *  由 delivery_claim_task 的返回带给会话，不进系统提示；类型保留以稳调用面。 */
   claim: { worktrees?: RoleWorktree[] };
   config: DeliveryRunnerConfig;
   deps?: LaunchDeps;
 }
 
 /**
- * 拉起一个角色会话（designer | developer）并返回 sessionId（不 await 轮结束）。
+ * 拉起一个角色会话（四角色通用）并返回 sessionId（不 await 轮结束）。
  * 两步创建序：createSession 不带 command → grantRole → markDeliveryExecutionActive
  * → set_session_name（`${role} · ${key}`）→ prompt；任何装配失败都会收尾
  * （revoke/clear/destroy）后重抛。结束钩子/心跳/登记 role 无关（claim.sessionId
@@ -326,30 +227,36 @@ export async function launchRoleSession(opts: LaunchRoleOptions): Promise<string
     scanClaims: opts.deps?.scanClaims ?? scanActiveItemClaims,
     heartbeat: opts.deps?.heartbeat ?? heartbeatActiveClaim,
     record: opts.deps?.record ?? recordInterruption,
-    readProfileModel: opts.deps?.readProfileModel ?? readDesignerProfileModel,
+    readProfile: opts.deps?.readProfile ?? readRoleProfile,
     now: opts.deps?.now ?? (() => new Date()),
   };
   const { workspacePath, task, role } = opts;
-  // 模型覆写按 role 取（roles 已是显式双字段——T5 落地，designer/developer
-  // 各自可选，未配置的角色读 undefined 即回落默认模型）：显式 config model
-  // 优先；缺省而 profile 在场时从工作区 subagent profile frontmatter 解析
-  // （缺文件/无 model/解析失败 → 静默回落默认，至多日志）。
-  const roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>> | undefined = opts.config?.roles;
-  const roleConfig = roles?.[role];
-  let model = roleConfig?.model;
-  if (model === undefined && roleConfig?.profile) {
-    try {
-      model = (await d.readProfileModel(workspacePath, roleConfig.profile)) ?? undefined;
-    } catch (error) {
-      console.error(`[delivery-runner] ${role} profile model resolution failed (${roleConfig.profile}):`, error);
-    }
+  // 剧本与模型解析：剧本名 = config.roles[role].profile ?? 角色名；读 `<ws>/
+  //  .pi/agents/<profile>.md`——正文进系统提示，frontmatter model 作模型来源。
+  //  模型优先级：显式 config model ?? 剧本 model ?? 会话默认。剧本缺场（缺文件/
+  //  非法名）→ warn 一条后仅以不变式开场；读盘异常 → error 记录当缺场——
+  //  「配了剧本却读不到」不该把整个 launch 打死。
+  const roleConfig = opts.config.roles[role];
+  const profileName = resolveRoleProfileName(role, roleConfig);
+  let profile: RoleProfile | undefined;
+  try {
+    profile = (await d.readProfile(workspacePath, profileName)) ?? undefined;
+  } catch (error) {
+    console.error(`[delivery-runner] ${role} profile read failed (${profileName}):`, error);
+    profile = undefined;
   }
+  if (profile === undefined) {
+    console.warn(
+      `[delivery-runner] ${role} has no profile at .pi/agents/${profileName}.md; running with invariant contract only`,
+    );
+  }
+  const model = roleConfig?.model ?? profile?.model;
 
-  // 1. 建会话（不带 command——sessionId 到手才能 grant/登记/命名）；开场合同走
-  //    appendSystemPrompt，模型覆写走 StartSessionOptions.model。
+  // 1. 建会话（不带 command——sessionId 到手才能 grant/登记/命名）；系统提示 =
+  //    不变式合同 + 剧本正文，模型覆写走 StartSessionOptions.model。
   const created = await d.createSession({
     cwd: workspacePath,
-    appendSystemPrompt: buildRoleContract(role, task, opts.claim),
+    appendSystemPrompt: composeRoleSystemPrompt({ role, key: task.key }, profile),
     ...(model ? { model } : {}),
   });
   const sessionId = created.sessionId;
@@ -362,7 +269,7 @@ export async function launchRoleSession(opts: LaunchRoleOptions): Promise<string
     }
   };
   // 结束钩子：幂等（单飞守卫）。遗留领取集 = launch key 快路径 ∪ 全活动项扫描
-  // 兜底（fix-round 1：合同限定只领指派项，扫描兜住违约领取——本会话 sessionId
+  // 兜底（fix-round 1：不变式限定只领指派项，扫描兜住违约领取——本会话 sessionId
   // 名下的每个未清 claim 都记中断），随后 revoke/clear/停心跳。
   let ended = false;
   const handleEnd = async (): Promise<void> => {
