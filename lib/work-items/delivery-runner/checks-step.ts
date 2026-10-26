@@ -25,6 +25,11 @@
 //       delivery.checks_started（actor system）→ commit。
 //     锁外 逐条 runConfiguredCheck（真 shell、真候选 checkout）→
 //       recordCheckResult（heartbeat 习语累积证据）。顺序执行。
+//     锁外 集成段（final-arch step-4 T2，spec §5.3 第四步）：checks 全 passed ∧
+//       stages.integrate.enabled（锁1 的 config 读取随身带出——不二读盘上配置）
+//       → 逐候选仓（claim.worktrees 冻结序）在 checkout 内跑集成命令：bash -c、
+//       cwd = 该仓 checkout、{repositoryId}/{branch} 原样替换、600s 上限；顺序
+//       执行、首败短路（余仓不跑，失败现场只报首败仓）。
 //     锁2 复读 item+claim（必须仍是本 run 的——否则 skip）+ 阶段守卫 + 候选
 //       digest 守卫（中途被换 → 释放 claim 跳过，下一拍按新候选重跑）→
 //       finalizeChecks(actor "system")：verified → verification（actor system）
@@ -36,11 +41,17 @@
 //       了一轮，不计失败；**全步零失败预算**）、commit。无会话自链接。
 //       blocked 是硬停：等人工 unblock 才再次 due（spec §5.3「人修环境后
 //       unblock 即再次 due」——不自动重试，不 hammer 机器；fix round 1）。
+//       集成段失败的结算（integrate-failed）也在锁2 内、守卫同门，落点同
+//       unverified 的 blocked 形（阶段不动、verification 不写、下游不清）+
+//       delivery.integrate_failed（actor system，data 带首败仓/exitCode|signal/
+//       stderr 尾部）+ attempt outcome "failed" + reason（本步唯一带失败语义的
+//       终局；仍无失败预算——不写 failure-window、不触暂停）。
 //
 //   任何异常：清 claim（recordInterruption——needsAttention 中断，人「重新检查
 //   并恢复」）后原样重抛（dispatcher catch 记日志）。宿主关停/崩溃的残留
 //   system claim 由既有超时清道夫回收（probeSession null → 只记中断）——不设
 //   第二套机制。
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
   commitWorkspaceChanges,
@@ -55,6 +66,7 @@ import {
   listPendingInterruptions,
   readClaim,
   readPaused,
+  writeAttempt,
   writeClaim,
   type ClaimState,
 } from "./attempts.ts";
@@ -76,7 +88,7 @@ import {
   reviewPending,
   type DeliveryPoolItem,
 } from "./pool.ts";
-import { runConfiguredCheck } from "./checks.ts";
+import { runConfiguredCheck, type CheckEvidence } from "./checks.ts";
 import { appendEvent, eventFor, listWorkItems, readWorkItem, serializeWorkItem, writeAtomic } from "../service.ts";
 import type { WorkItemDetail } from "../types.ts";
 import { prepareVerifyCheckouts, type RoleWorktree } from "./worktrees.ts";
@@ -242,11 +254,68 @@ export async function checksCandidatesFor(
 
 // ------------------------------------------------------------------ run step
 
-export type ChecksStepOutcome = "verified" | "rework" | "unverified" | "skipped";
+/** "integrate-failed"（final-arch step-4 T2）：集成段任一候选仓失败——blocked
+ *  硬停 + delivery.integrate_failed，检查结算不发生（verification 不写）。 */
+export type ChecksStepOutcome = "verified" | "rework" | "unverified" | "skipped" | "integrate-failed";
+
+/** 集成命令的执行上限（spec §5.3 第四步：分钟级集成脚本——10 分钟，模块常量）。 */
+export const INTEGRATE_TIMEOUT_MS = 600_000;
+
+/** 集成命令执行入参（command 已完成 {repositoryId}/{branch} 替换）。 */
+export interface IntegrateCommandArgs {
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+}
+
+/** 集成命令执行结果：ok=false 时 exitCode（正常退出）/ signal（超时等被杀）/
+ *  stderrTail（stderr 尾部——默认执行器取 400 字符）至少其一在场。 */
+export interface IntegrateCommandResult {
+  ok: boolean;
+  exitCode?: number;
+  signal?: NodeJS.Signals | string;
+  stderrTail?: string;
+}
+
+export type IntegrateCommandRunner = (args: IntegrateCommandArgs) => IntegrateCommandResult;
+
+const INTEGRATE_STDERR_TAIL_CHARS = 400;
+const SPAWN_MAX_BUFFER = 1024 * 1024;
+
+/** 字符串版尾部截断（checks.ts 的 tailText 同语义：超长砍头保尾）。 */
+function tailChars(text: string | null | undefined, max: number): string {
+  if (text === undefined || text === null || text.length === 0) return "";
+  return text.length > max ? text.slice(text.length - max) : text;
+}
+
+/** 默认集成命令执行器：spawnSync 经 `bash -c`（集成脚本是整条 shell 命令，
+ *  checks 的 /bin/sh 先例同构——bash 允许集成脚本用 bash 语法）、cwd = 候选
+ *  checkout、timeout 到点 SIGTERM。signal 判定先于 error：超时（ETIMEDOUT）
+ *  也带 signal——它是失败的一种（signal 形状），不是 spawn 失败。 */
+function defaultIntegrateCommandRunner(args: IntegrateCommandArgs): IntegrateCommandResult {
+  const result = spawnSync("bash", ["-c", args.command], {
+    cwd: args.cwd,
+    timeout: args.timeoutMs,
+    env: process.env,
+    maxBuffer: SPAWN_MAX_BUFFER,
+  });
+  const stderrTail = tailChars(result.stderr?.toString("utf8"), INTEGRATE_STDERR_TAIL_CHARS);
+  if (result.signal !== null) {
+    return { ok: false, signal: result.signal, stderrTail };
+  }
+  if (result.error != null) {
+    return { ok: false, stderrTail: stderrTail || result.error.message };
+  }
+  if (result.status === 0) return { ok: true };
+  return { ok: false, exitCode: result.status ?? undefined, stderrTail };
+}
 
 /** deps 注入缝（错误注入测试；默认真执行器）。 */
 export interface ChecksStepDeps {
   runCheck?: typeof runConfiguredCheck;
+  /** 集成命令执行缝（默认 spawnSync bash——见 defaultIntegrateCommandRunner）：
+   *  测试注入假执行器钉住 signal/超时形状。 */
+  integrateCommandRunner?: IntegrateCommandRunner;
 }
 
 /** 锁1 的产物（锁外执行与锁2 结算的归属凭据）。 */
@@ -255,6 +324,9 @@ interface StartedChecksRun {
   attemptId: string;
   itemPath: string;
   claim: ClaimState;
+  /** stages.integrate 快照（锁1 的 config 读取随身带出——锁外集成段不二读盘上
+   *  配置，与 claim 冻结的候选/检查快照同拍一致）。 */
+  integrate: { enabled: boolean; command?: string };
 }
 
 /** 锁1：复验 due → checkout 预建（零状态失败面）→ system claim → in_progress →
@@ -362,23 +434,25 @@ async function startChecksRun(
     if (claim === null) {
       throw new Error(`system claim for ${key} vanished right after write`);
     }
-    return { sessionId, attemptId, itemPath, claim };
+    return { sessionId, attemptId, itemPath, claim, integrate: config?.stages?.integrate ?? { enabled: false } };
   });
 }
 
 /** 锁外执行：逐条配置命令在候选 checkout 内真跑（runConfiguredCheck——日志
  *  落盘、证据产物），recordCheckResult heartbeat 习语累积进 claim。顺序执行；
- *  归属丢失（他人释放/中断）即停——锁2 结算按 skip 处理。 */
+ *  归属丢失（他人释放/中断）即停——锁2 结算按 skip 处理。返回本轮证据（集成
+ *  段据其判定「全 passed」）；null = claim 中途丢失（后续全按 skip 走）。 */
 async function executeChecks(
   workspacePath: string,
   key: string,
   run: StartedChecksRun,
   runCheck: typeof runConfiguredCheck,
-): Promise<void> {
+): Promise<CheckEvidence[] | null> {
   const logDir = join(run.itemPath, "delivery", "artifacts", "verification-logs", run.attemptId);
   const checkoutByRepo = new Map(
     (run.claim.worktrees ?? []).map((worktree: RoleWorktree) => [worktree.repositoryId, worktree.path]),
   );
+  const evidence: CheckEvidence[] = [];
   for (const context of run.claim.checkContexts ?? []) {
     const checkoutPath = checkoutByRepo.get(context.repositoryId);
     if (checkoutPath === undefined) {
@@ -388,10 +462,12 @@ async function executeChecks(
     }
     // ClaimCheckContext 是 DeliveryCheckConfig 的已解析超集（repositoryId 必填）——
     // 执行器只消费 name/command/timeout_seconds。
-    const evidence = runCheck(context as DeliveryCheckConfig, checkoutPath, logDir);
-    const recorded = await recordCheckResult(workspacePath, key, run.sessionId, evidence);
-    if (!recorded) return; // claim 已不归本 run——结算阶段按 skip 走
+    const evidenceEntry = runCheck(context as DeliveryCheckConfig, checkoutPath, logDir);
+    evidence.push(evidenceEntry);
+    const recorded = await recordCheckResult(workspacePath, key, run.sessionId, evidenceEntry);
+    if (!recorded) return null; // claim 已不归本 run——结算阶段按 skip 走
   }
+  return evidence;
 }
 
 /** 锁2：归属/阶段/候选 digest 三重守卫后经 finalizeChecks(actor "system") 结算
@@ -442,10 +518,130 @@ async function settleChecksRun(
   });
 }
 
+/** 集成段的单仓失败现场（settleIntegrateFailure 的输入——首败仓）。 */
+interface IntegrateFailure {
+  repositoryId: string;
+  exitCode?: number;
+  signal?: NodeJS.Signals | string;
+  stderrTail?: string;
+}
+
+/** 锁外集成段（spec §5.3 第四步）：checks 全 passed 后逐候选仓（claim.worktrees
+ *  冻结序）跑集成命令——{repositoryId}/{branch} 原样替换、cwd = 该仓 checkout、
+ *  600s 上限。顺序执行、首败短路（余仓不跑——失败现场只报首败仓）。返回 null
+ *  = 全部成功（结算照旧走 finalizeChecks）。 */
+function runIntegrateSegment(
+  run: StartedChecksRun,
+  integrateCommandRunner: IntegrateCommandRunner,
+): IntegrateFailure | null {
+  const template = run.integrate.command ?? "";
+  for (const worktree of run.claim.worktrees ?? []) {
+    const command = template
+      .replaceAll("{repositoryId}", worktree.repositoryId)
+      .replaceAll("{branch}", worktree.branch);
+    const result = integrateCommandRunner({
+      command,
+      cwd: worktree.path,
+      timeoutMs: INTEGRATE_TIMEOUT_MS,
+    });
+    if (!result.ok) {
+      return {
+        repositoryId: worktree.repositoryId,
+        ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+        ...(result.signal !== undefined ? { signal: result.signal } : {}),
+        ...(result.stderrTail !== undefined && result.stderrTail !== ""
+          ? { stderrTail: result.stderrTail }
+          : {}),
+      };
+    }
+  }
+  return null;
+}
+
+/** 锁2（integrate-failed 终局，final-arch step-4 T2）：守卫与 settleChecksRun
+ *  同门（claim 归属 / 阶段 / 候选 digest——失配即 skipped，迟到结算不得覆写
+ *  他人的新状态）。落定同 unverified 的 blocked 形（阶段不动——verification
+ *  就是集成活动的阶段、verification 不写、下游不清）：status blocked + 事件
+ *  delivery.integrate_failed（actor system，data 带首败仓 / exitCode|signal /
+ *  stderr 尾部）→ 清 claim → attempt outcome "failed" + reason（本步唯一带
+ *  失败语义的终局；**无失败预算**——不写 failure-window、不触暂停）→ commit。 */
+async function settleIntegrateFailure(
+  workspacePath: string,
+  key: string,
+  sessionId: string,
+  attemptId: string,
+  failure: IntegrateFailure,
+): Promise<ChecksStepOutcome> {
+  return withWorkspaceWriteLock(workspacePath, async () => {
+    const current: WorkItemDetail = await readWorkItem(workspacePath, key);
+    const itemPath = current.path;
+    const claim = readClaim(itemPath);
+    if (claim === null || claim.sessionId !== sessionId || claim.attemptId !== attemptId) {
+      return "skipped";
+    }
+    // 阶段/候选 digest 守卫（settleChecksRun 同款）：窗口内被人推进/换候选 →
+    // 本轮现场失准，释放领取跳过（不落自己的终局）。
+    const phaseStale = current.item.phase !== "verification";
+    const digestStale = claim.candidateDigest
+      !== candidatesDigest(current.item.delivery?.candidates ?? []);
+    if (phaseStale || digestStale) {
+      clearClaim(itemPath);
+      if (current.item.status === "in_progress") {
+        const next = structuredClone(current.item);
+        next.status = "open";
+        next.revision += 1;
+        next.updatedAt = new Date().toISOString();
+        await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+      }
+      return "skipped";
+    }
+    const now = new Date();
+    const next = structuredClone(current.item);
+    next.status = "blocked";
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.integrate_failed", "system", undefined, {
+        repositoryId: failure.repositoryId,
+        ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+        ...(failure.signal !== undefined ? { signal: failure.signal } : {}),
+        ...(failure.stderrTail !== undefined ? { stderrTail: failure.stderrTail } : {}),
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        revision: next.revision,
+      }),
+    );
+    clearClaim(itemPath);
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: claim.role,
+      sessionId: claim.sessionId,
+      workspacePath,
+      key: current.item.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "failed",
+      reason: `integrate failed (${failure.repositoryId})`,
+      requirementDigest: claim.requirementDigest,
+      worktrees: claim.worktrees,
+      checkResults: claim.checkResults,
+    });
+    await commitWorkspaceChanges(workspacePath, `workspace: delivery integrate ${key}`);
+    return "integrate-failed";
+  });
+}
+
 /**
  * 系统检查步入口（dispatcher 每拍对首个 due 项调用，fire-and-forget）。返回
- * 终局词（"skipped" = 锁内复验/守卫判定本轮不开跑或不结算——不是错误）。任何
- * 异常：recordInterruption 清 claim + 记 needsAttention 中断后原样重抛。
+ * 终局词（"skipped" = 锁内复验/守卫判定本轮不开跑或不结算——不是错误）。
+ * 集成段（final-arch step-4 T2）：checks 全 passed ∧ stages.integrate.enabled →
+ * 锁外逐候选仓跑集成命令（runIntegrateSegment），任一失败 → settleIntegrate-
+ * Failure（"integrate-failed"）；全成功 → 结算照旧（verified/rework/unverified
+ * 分支零变化）。任何异常：recordInterruption 清 claim + 记 needsAttention 中断
+ * 后原样重抛。
  */
 export async function runChecksStep(
   workspacePath: string,
@@ -453,12 +649,28 @@ export async function runChecksStep(
   deps: ChecksStepDeps = {},
 ): Promise<ChecksStepOutcome> {
   const runCheck = deps.runCheck ?? runConfiguredCheck;
+  const integrateCommandRunner = deps.integrateCommandRunner ?? defaultIntegrateCommandRunner;
   let sessionId = "";
   try {
     const started = await startChecksRun(workspacePath, key);
     if (started === null) return "skipped";
     sessionId = started.sessionId;
-    await executeChecks(workspacePath, key, started, runCheck);
+    const evidence = await executeChecks(workspacePath, key, started, runCheck);
+    if (evidence !== null && started.integrate.enabled === true) {
+      // 集成段前置判断：checks 全 passed 才跑——有 failed/unverified 的轮次由
+      // finalizeChecks 按原语义结算（rework/unverified），不叠加集成。
+      const contexts = started.claim.checkContexts ?? [];
+      const allPassed = contexts.every((context) =>
+        evidence.some((entry) => entry.name === context.name && entry.outcome === "passed"));
+      if (allPassed) {
+        const failure = runIntegrateSegment(started, integrateCommandRunner);
+        if (failure !== null) {
+          return await settleIntegrateFailure(
+            workspacePath, key, sessionId, started.attemptId, failure,
+          );
+        }
+      }
+    }
     return await settleChecksRun(workspacePath, key, sessionId, started.attemptId);
   } catch (error) {
     if (sessionId !== "") {
