@@ -25,6 +25,10 @@
 //     active|removed；manifest 缺失/损坏 → 空登记表——developer 项以
 //     repo-not-registered 可见、designer 项不受影响，与运行时信号的 fs 容错
 //     同习语）。digest 由读取端计算（contentDigest(README)），纯函数不碰 fs。
+//
+//   final-arch step-2（2026-10-26）：共用检查增 awaiting-answer 澄清门——任一
+//     delivery.clarifications 条目未答（answer 缺席）即停领等人工答复（ask 事务
+//     的持久产物，四角色同门；答复走 Task 4 的 answer-clarification 人工动作）。
 import {
   countRecentFailures,
   listPendingInterruptions,
@@ -66,7 +70,11 @@ export type DesignerPoolReason =
   // ——已准备过的项不再自动重派；人重新起草走人工 prepare-release 路由。无此
   // 闸，自动准备 → submit 写 releasePlan → 池子仍 ready → 下一拍再领再写，
   // 循环刷 attempt。
-  | "release-plan-exists";
+  | "release-plan-exists"
+  // ask-a-human 澄清门（final-arch step-2）：任一 delivery.clarifications 条目
+  // 未答（answer 缺席）——ask 事务（claim.ts）交还执行权后，未答的问题说明
+  // 输入不完整，自动领取在人工答复（Task 4 answer-clarification）前不得重入。
+  | "awaiting-answer";
 
 export interface PoolEntry {
   key: string;
@@ -109,6 +117,10 @@ export interface DeliveryPoolItem {
      *  在场与否（在场 → release-plan-exists，已准备过的项不再自动重派；读取
      *  端透传完整 DeliveryReleasePlan，纯投影不读内容）。 */
     releasePlan?: unknown;
+    /** 澄清问答（final-arch step-2）——共用检查消费：任一条 answer 缺席 →
+     *  awaiting-answer（未答 = 输入不完整，停领等人工答复）；读取端透传完整
+     *  DeliveryClarification，纯投影只读 answer 在场与否。 */
+    clarifications?: Array<{ answer?: string }>;
   } | null;
 }
 
@@ -156,7 +168,7 @@ const VERIFIER_READY_PHASE = "verification";
  *  活动；released 等更后阶段照旧 designer wrong-phase）。 */
 const RELEASE_PREPARER_READY_PHASE = "release_ready";
 
-/** 两角色共用的阻塞检查（运行时信号 + 状态白名单 + 归档）。 */
+/** 四角色共用的阻塞检查（运行时信号 + 状态白名单 + 归档 + 澄清门）。 */
 function sharedReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): DesignerPoolReason[] {
   const reasons: DesignerPoolReason[] = [];
   if (ctx.activeClaims.has(item.key)) reasons.push("active-claim");
@@ -167,6 +179,12 @@ function sharedReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): Design
   }
   if (!CLAIMABLE_STATUSES.includes(item.status)) reasons.push("terminal-status");
   if (item.archivedAt !== null) reasons.push("archived");
+  // ask-a-human 澄清门（final-arch step-2）：任一未答 → 停领等人工答复（四角色
+  // 同门——问题不分角色，答完即恢复；判定只看 answer 在场与否，历史已答条目
+  // 不停车）。
+  if (item.delivery?.clarifications?.some((clarification) => clarification.answer === undefined)) {
+    reasons.push("awaiting-answer");
+  }
   return reasons;
 }
 

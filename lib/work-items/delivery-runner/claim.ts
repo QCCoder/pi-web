@@ -76,6 +76,20 @@
 //     不触发布、不写 release 块）+ status→open。
 //   - fail：release-preparer claim 不改阶段——无阶段可归还（release_ready→
 //     release_ready 零变化，只归还 status，verifier 同款）。
+//
+// final-arch step-2 Task 2（ask-a-human 提问事务，spec 2026-10-26-final-arch）：
+// askHumanQuestion 四角色同一个函数（不再按角色出四个副本——ask 的行为跨角色
+// 逐字节相同，差异只在凭据校验的 expectedRole）。与 fail 的释放骨架同形
+// （requireActiveClaim 三凭据 + cancel 守卫 → 清 claim → attempt 审计 → 状态
+// 落盘 → 事件 → commit），但语义是「问人并交还执行权」，刻意不做 fail 的两件
+// 事：phase 一概不动（问的是当下输入的澄清，不是失败——designer/developer 的
+// claim 阶段是借来的，verifier/release-preparer 本就无阶段可归还，四角色统一
+// 「无阶段可还给」）；失败预算不写（asked 既不算 failed 也不算 submitted，
+// countRecentFailures 不计不断——澄清轮不耗预算、不触 automation-paused、不写
+// failure-window）。澄清本身是持久产物：DeliveryClarification（id=ULID）追加
+// 进 delivery.clarifications（数组缺则建，answer 只补不删——人工答复由 Task 4
+// 的 answer-clarification 写），池谓词据此把未答项停在 awaiting-answer 直到
+// 人答复。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -87,7 +101,11 @@ import {
 import { createUlid } from "../../workspaces/id.ts";
 import type { WorkspaceManifest } from "../../workspaces/types.ts";
 import { DESIGN_SEED } from "../delivery.ts";
-import { candidatesDigest, contentDigest } from "../delivery-types.ts";
+import {
+  candidatesDigest,
+  contentDigest,
+  type DeliveryClarification,
+} from "../delivery-types.ts";
 import {
   WorkItemConflictError,
   WorkItemValidationError,
@@ -125,6 +143,7 @@ import {
 } from "./config.ts";
 import type { DeliveryCheckConfig } from "./config.ts";
 import { projectDeliveryPool, type DeliveryPoolContext, type PoolEntry } from "./pool.ts";
+import { DELIVERY_ROLES, isDeliveryRole, type DeliveryRole } from "./roles.ts";
 import { prepareVerifyCheckouts, prepareWorktrees, verifyCandidateCommits } from "./worktrees.ts";
 
 export interface ClaimGrant {
@@ -1731,6 +1750,144 @@ export async function failReleasePreparerTask(
     }
     await commitWorkspaceChanges(input.workspacePath, `workspace: delivery fail ${input.key}`);
     return readWorkItem(input.workspacePath, input.key);
+  });
+}
+
+// ------------------------------------------- ask-a-human (final-arch step-2 T2)
+
+export interface AskHumanInput {
+  workspacePath: string;
+  key: string;
+  attemptId: string;
+  generation: number;
+  ownerToken: string;
+  /** 提问角色 = grant.role：与 claim.role 不符 → Conflict（凭据不得跨角色
+   *  提问/释放——requireActiveClaim 的 expectedRole 同一门）。 */
+  role: DeliveryRole;
+  /** 必填非空（trim 后落盘）；事件里另留 ≤120 字摘要，全文在 clarification。 */
+  question: string;
+  /** 可选——给了就必须是非空字串数组（逐项 trim 校验，原样落盘）。 */
+  options?: string[];
+  /** 可选——trim 后落盘，空白视同未给（键省略，rollbackNotes 先例）。 */
+  recommended?: string;
+  /** 会话自链接（服务层不变式，submit 先例）：带 conversationId 的提问把会话
+   *  挂入 item.conversations，并随 delivery.asked 事件携带。 */
+  conversationId?: string;
+}
+
+/** delivery.asked 事件 data.question 的摘要上限（全文在 clarification——事件
+ *  是给人扫的时间线，超长提问截断到可读长度）。 */
+const ASKED_QUESTION_SUMMARY_MAX = 120;
+
+/**
+ * ask-a-human 提问事务（final-arch step-2 T2）：角色会话在执行中向人提问并
+ * 交还执行权。四角色同一实现（行为跨角色逐字节相同——见文件头），锁内步骤：
+ * requireActiveClaim（三凭据 + expectedRole + cancel 守卫 + requirementDigest
+ * 复验）→ 澄清（id=ULID）追加进 delivery.clarifications（数组缺则建）→ 清
+ * claim（同 fail 路径）→ attempt outcome "asked"（reason 记全文提问）→
+ * phase 不动、status 归还 open、revision+1 → delivery.asked 事件（actor=
+ * agent，data 带 question 摘要）→ conversationId 自链接 → commit。
+ *
+ * 与 fail 的差异（刻意不做）：不还阶段（无阶段可归还——问的是输入澄清，不是
+ * 失败）、不写失败预算（不调 countRecentFailures / writePaused，不写
+ * failure-window——asked 不计不断，澄清轮不消耗暂停闸）。未答项由池谓词
+ * awaiting-answer 停在 ready 队列之外（pool.ts 共用检查），人工答复（Task 4
+ * answer-clarification）补上 answer 后恢复。
+ *
+ * 校验：role 词表外 → Validation（400，碰 claim 之前）；question 空白 →
+ * Validation；options 给了就必须是非空字串数组；recommended trim、空白省键。
+ * 凭据不符 / role 与 claim.role 不符 / 项被 cancel / 重放（claim 已清）→
+ * Conflict（409）。ask 不是幂等动作——凭据随 claim 清除一次性失效。
+ */
+export async function askHumanQuestion(
+  input: AskHumanInput,
+): Promise<{ detail: WorkItemDetail; clarificationId: string }> {
+  if (!isDeliveryRole(input.role)) {
+    throw new WorkItemValidationError(`role must be one of: ${DELIVERY_ROLES.join(", ")}`);
+  }
+  const question = requireText(input.question, "question");
+  const options = (() => {
+    if (input.options === undefined) return undefined;
+    if (!Array.isArray(input.options) || input.options.length === 0) {
+      throw new WorkItemValidationError("options must contain at least one option");
+    }
+    return input.options.map((option, index) => requireText(option, `options[${index}]`));
+  })();
+  const recommended = input.recommended !== undefined && input.recommended !== null
+    ? input.recommended.trim()
+    : "";
+
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const { detail: current, claim } = await requireActiveClaim(
+      input.workspacePath,
+      input.key,
+      input,
+      { expectedRole: input.role },
+    );
+    const itemPath = current.path;
+    const now = new Date();
+    const clarificationId = createUlid();
+    const clarification: DeliveryClarification = {
+      id: clarificationId,
+      role: input.role,
+      question,
+      ...(options !== undefined ? { options } : {}),
+      ...(recommended ? { recommended } : {}),
+      askedAt: now.toISOString(),
+      attemptId: claim.attemptId,
+    };
+
+    // 释放与审计先行（fail 同序——崩溃窗口内 claim 已清，池子不再投影 ready）。
+    clearClaim(itemPath);
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: input.role,
+      sessionId: claim.sessionId,
+      workspacePath: input.workspacePath,
+      key: input.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "asked",
+      reason: question,
+      requirementDigest: claim.requirementDigest,
+    });
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    // 澄清是持久产物：追加式（answer 只补不删——Task 4 的人工答复写它）。
+    // delivery 块在 managed 项上必在（claim 谓词保证），缺则按最小合法块建。
+    const delivery = next.delivery ?? { protocolVersion: 1 as const, mode: "manual" as const };
+    next.delivery = {
+      ...delivery,
+      clarifications: [...(delivery.clarifications ?? []), clarification],
+    };
+    // 问人不是失败：phase 一概不动（四角色同款——无阶段可归还），status 归还
+    // open 等人答复（池谓词 awaiting-answer 把未答项停在 ready 队列之外）。
+    next.status = "open";
+    // 会话自链接（服务层不变式，submit 先例）。
+    if (input.conversationId && !next.conversations.includes(input.conversationId)) {
+      next.conversations = [...next.conversations, input.conversationId];
+    }
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.asked", "agent", input.conversationId, {
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        clarificationId,
+        question: question.length > ASKED_QUESTION_SUMMARY_MAX
+          ? question.slice(0, ASKED_QUESTION_SUMMARY_MAX)
+          : question,
+        revision: next.revision,
+      }),
+    );
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery ask ${input.key}`);
+    return {
+      detail: await readWorkItem(input.workspacePath, input.key),
+      clarificationId,
+    };
   });
 }
 
