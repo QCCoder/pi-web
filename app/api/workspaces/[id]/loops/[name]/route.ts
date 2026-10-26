@@ -87,7 +87,7 @@ export async function PATCH(
 }
 
 /** 删除 loop（spec §5.3）：锁活 409；有绑定工作项需 {confirmBound:true} 二次确认；
- *  整目录删除（git 历史即审计），SKILL 与根宪法不动。 */
+ *  整目录删除（git 历史即审计），SKILL 不动。 */
 export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ id: string; name: string }> },

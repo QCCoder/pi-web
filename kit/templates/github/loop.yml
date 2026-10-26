@@ -15,4 +15,4 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.PI_PROVIDER_KEY }}
         run: |
-          pi -p --approve "读 loop-constraints.md 与 loop-budget.md（绑定，禁改）；读 loops/{{name}}/STATE.md 恢复上下文；执行 /skill:{{pattern}}；结束前更新 loops/{{name}}/STATE.md 并按断路器规则追加 loop-ledger.json。L1 纪律：只读 + 只写 STATE.md/ledger。"
+          pi -p --approve "执行 /skill:{{pattern}}（合同本体在 SKILL.md，跑完即走）；结束前在 loops/{{name}}/STATE.md 更新 Last run 行。L1 纪律：只读 + 只写 STATE.md 的 Last run 行。"

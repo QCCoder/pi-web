@@ -1,19 +1,19 @@
 /** loop 配置面服务端逻辑（spec docs/superpowers/specs/2026-09-03-loop-config-ui-design.md §5）：
  *  校验/路径解析/读写/守卫全部集中于此，路由保持薄壳。写面按域收窄——唯一 PUT
  *  入口 + 文件名白名单 + 服务端拼路径；不触 /api/files 的只读 allow-list。
- *  并发语义（spec §5.4）：知识/正文/宪法在轮开场被读取，编辑不加锁、下一轮生效；
- *  STATE.md 无写路径；删除在锁活时拒绝。 */
+ *  并发语义（spec §5.4）：知识/正文在轮开场被读取，编辑不加锁、下一轮生效；
+ *  STATE.md 无写路径；删除在锁活时拒绝。
+ *  2026-10-26 终局：宪法两文件（constraints/budget）退役——不再读取/展示/写入。 */
 import { readdir, readFile, rename, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { findKitLoopByName } from "./lookup.ts";
 import { listWorkItems } from "../work-items/service.ts";
 import { initLoop } from "../../packages/pi-loop/init.ts";
 import { isValidCronExpression } from "../../packages/pi-loop/cron.ts";
 import { isValidTimezone, splitLoopFile } from "../../packages/pi-loop/frontmatter.ts";
 import { isRoundLockStale, readRoundLock } from "../../packages/pi-loop/round-lock.ts";
-import { constitutionDirPath, loopDirPath, skillDirPath } from "../../packages/pi-loop/paths.ts";
+import { loopDirPath, skillDirPath } from "../../packages/pi-loop/paths.ts";
 import type { LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
 
 // NOTE (task-2 deviation): the brief's verbatim code used TypeScript parameter
@@ -34,11 +34,9 @@ export class LoopManageError extends Error {
 
 export type WriteTarget =
   | { kind: "doc"; file: string }
-  | { kind: "body" }
-  | { kind: "constitution"; file: "constraints" | "budget" };
+  | { kind: "body" };
 
 export interface DocEntry { name: string; content: string; mtimeMs: number; }
-export interface ConstitutionEntry { content: string; mtimeMs: number; }
 export interface LoopDocsBundle {
   frontmatter: { cron: string; timezone: string; level: string; maxMinutes: number; pattern: string };
   running: boolean;
@@ -47,19 +45,12 @@ export interface LoopDocsBundle {
   loopBody: string;
   loopBodyMtimeMs: number;
   stateMd: string;
-  constitution: { constraints?: ConstitutionEntry; budget?: ConstitutionEntry };
-  constitutionTemplates: { constraints: string; budget: string };
   boundItems: string[];
 }
 
 const DOC_FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
 const RESERVED_DOC_NAMES = new Set(["LOOP.md", "STATE.md"]);
 const LOOP_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-/** 根级宪法落在 `.pi/loop/`（2026-09 布局约定），文件名去 loop- 前缀。 */
-const CONSTITUTION_FILES = { constraints: "constraints.md", budget: "budget.md" } as const;
-const TEMPLATES_ROOT = join(
-  dirname(fileURLToPath(import.meta.url)), "..", "..", "kit", "templates", "basic", "root",
-);
 
 export function isValidDocFilename(file: string): boolean {
   return DOC_FILENAME_RE.test(file) && !RESERVED_DOC_NAMES.has(file);
@@ -76,7 +67,9 @@ function isRunning(declaration: LoopDeclaration): boolean {
   return !!lock && !isRoundLockStale(lock, declaration.maxMinutes * 60_000 + 15 * 60_000);
 }
 
-async function readIfExists(path: string): Promise<ConstitutionEntry | undefined> {
+interface FileEntry { content: string; mtimeMs: number; }
+
+async function readIfExists(path: string): Promise<FileEntry | undefined> {
   try {
     const [content, info] = await Promise.all([readFile(path, "utf8"), stat(path)]);
     return { content, mtimeMs: info.mtimeMs };
@@ -125,14 +118,6 @@ export async function getLoopDocs(workspacePath: string, name: string): Promise<
     loopBody: splitLoopFile(loopFile.content)?.body ?? loopFile.content,
     loopBodyMtimeMs: loopFile.mtimeMs,
     stateMd: stateFile?.content ?? "",
-    constitution: {
-      constraints: await readIfExists(join(constitutionDirPath(workspacePath), CONSTITUTION_FILES.constraints)),
-      budget: await readIfExists(join(constitutionDirPath(workspacePath), CONSTITUTION_FILES.budget)),
-    },
-    constitutionTemplates: {
-      constraints: await readFile(join(TEMPLATES_ROOT, CONSTITUTION_FILES.constraints), "utf8"),
-      budget: await readFile(join(TEMPLATES_ROOT, CONSTITUTION_FILES.budget), "utf8"),
-    },
     boundItems: await listBoundItems(workspacePath, name),
   };
 }
@@ -178,22 +163,8 @@ export async function writeLoopFile(
     const next = raw.slice(0, raw.length - parts.body.length) + content; // frontmatter 前缀字节保真
     return { mtimeMs: await atomicWrite(path, next) };
   }
-  // fix(final-review F1): 畸形 target（未知 kind / constitution 非法 file）此前落入宪法
-  // 路径使 CONSTITUTION_FILES[target.file] === undefined → join(path, undefined) TypeError →
-  // HTTP 500；路由层壳无法从 500 还原语义，按写面收窄原则在此显式 400。
-  if (target.kind !== "constitution" || (target.file !== "constraints" && target.file !== "budget")) {
-    throw new LoopManageError("未知的写入 target", 400);
-  }
-  const fileName = CONSTITUTION_FILES[target.file];
-  const path = join(constitutionDirPath(workspacePath), fileName);
-  const existing = await readIfExists(path);
-  if (baseMtimeMs !== undefined && existing && existing.mtimeMs !== baseMtimeMs) {
-    throw new LoopManageError(`${fileName} 已被其它编辑修改`, 409, {
-      currentContent: existing.content,
-      currentMtimeMs: existing.mtimeMs,
-    });
-  }
-  return { mtimeMs: await atomicWrite(path, content) }; // 缺失即创建（含「从模板创建」预填后的保存）
+  // 畸形 target（未知 kind）显式 400——写面只认 doc|body，路由层壳无法从 500 还原语义。
+  throw new LoopManageError("未知的写入 target", 400);
 }
 
 export interface CreateLoopInput {
@@ -259,7 +230,7 @@ export async function deleteLoop(
   if (boundItems.length > 0 && !opts.confirmBound) {
     throw new LoopManageError("有工作项绑定到该 loop，需二次确认", 409, { boundItems });
   }
-  // 整目录删除（git 历史即审计）；SKILL.md 与根级宪法不删（宪法可能被其它 loop 共享）。
+  // 整目录删除（git 历史即审计）；SKILL.md 在 loop 目录外，不删。
   await rm(declaration.dir, { recursive: true, force: true });
   return { deleted: true };
 }

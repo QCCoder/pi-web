@@ -13,14 +13,9 @@ export function loopsDirPath(workspacePath: string): string {
   return join(workspacePath, ".pi", "loops");
 }
 
-/** `.pi/loop/pause-all` — 全工作区 loop 停机旗（原根级 `loop-pause-all`）。 */
+/** `.pi/loop/` — 宿主文件目录（pause-all 全工作区停机旗；2026-10-26 终局：宪法两件退役，kit 不创建此目录）。 */
 export function haltMarkerPath(workspacePath: string): string {
   return join(workspacePath, ".pi", "loop", "pause-all");
-}
-
-/** `.pi/loop/` — 根级共享宪法目录（constraints.md / budget.md）。 */
-export function constitutionDirPath(workspacePath: string): string {
-  return join(workspacePath, ".pi", "loop");
 }
 
 /** `.pi/skills/<pattern>/` — 项目技能合同目录（pi 原生发现 `<cwd>/.pi/skills/`）。 */

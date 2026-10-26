@@ -14,7 +14,7 @@ function errorResponse(error: unknown): NextResponse {
 }
 
 /** 配置面板数据包（spec §5.1）：知识文档列表+内容 / LOOP.md 正文 / STATE.md（只读）/
- *  宪法两文件（存在性+内容+模板）/ 绑定工作项 / running+paused。 */
+ *  绑定工作项 / running+paused。2026-10-26 终局：宪法两文件退役，不再读取/展示。 */
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string; name: string }> },
@@ -28,7 +28,7 @@ export async function GET(
   }
 }
 
-/** 唯一写入口（spec §5.1/§5.2）：target 判别联合 doc|body|constitution；
+/** 唯一写入口（spec §5.1/§5.2）：target 判别联合 doc|body（constitution 已退役，未知 kind → 400）；
  *  文件名白名单与路径越界校验在 manage.ts；baseMtime 乐观并发（409 附当前内容）。 */
 export async function PUT(
   req: Request,

@@ -35,10 +35,6 @@ const chipActive: CSSProperties = { ...chip, borderColor: "var(--accent)", color
 const summaryStyle: CSSProperties = { cursor: "pointer", color: "var(--text-muted)", fontSize: 12 };
 
 const DOC_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
-const CON_LABEL: Record<"constraints" | "budget", string> = {
-  constraints: "loop-constraints.md（绑定约束）",
-  budget: "loop-budget.md（token/轮数预算总帽）",
-};
 
 interface PutResult { ok: boolean; error?: string }
 
@@ -204,7 +200,6 @@ function LoopConfigDetail({
   const [docDraft, setDocDraft] = useState<string | null>(null);
   const [docPreview, setDocPreview] = useState(false);
   const [newDocName, setNewDocName] = useState("");
-  const [conDraft, setConDraft] = useState<{ constraints: string | null; budget: string | null }>({ constraints: null, budget: null });
   const [delError, setDelError] = useState<string | null>(null);
 
   // fix(review F2): refresh 的 useCallback deps 必须保持 [api, name]——把 bundle/selectedDoc 加进 deps 会让
@@ -246,16 +241,6 @@ function LoopConfigDetail({
         return cur === null || cur === oldC || cur === newC ? null : cur;
       });
       setNewDocName("");
-      setConDraft((cur) => {
-        const next = { ...cur };
-        for (const k of ["constraints", "budget"] as const) {
-          const oldC = prev?.constitution[k]?.content;
-          const newC = data.constitution[k]?.content ?? data.constitutionTemplates[k];
-          const v = cur[k];
-          if (v === null || v === oldC || v === newC) next[k] = null;
-        }
-        return next;
-      });
     } catch (cause) {
       setLoadError(String(cause));
     }
@@ -336,23 +321,6 @@ function LoopConfigDetail({
       setError(String(cause));
     } finally { setBusy(false); }
   }, [bundle, name, newDocName, put, refresh]);
-
-  const saveConstitution = useCallback(async (which: "constraints" | "budget") => {
-    if (!bundle) return;
-    const draft = conDraft[which];
-    const existing = bundle.constitution[which];
-    const value = draft ?? existing?.content ?? bundle.constitutionTemplates[which];
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await put(name, { kind: "constitution", file: which }, value, existing?.mtimeMs);
-      if (!result.ok) { setError(result.error ?? "保存失败"); return; }
-      await refresh();
-    } catch (cause) {
-      // fix(review optional): try/finally 无 catch 时网络拒绝逃逸为 unhandled rejection
-      setError(String(cause));
-    } finally { setBusy(false); }
-  }, [bundle, conDraft, name, put, refresh]);
 
   const doDelete = useCallback(async () => {
     if (!bundle) return;
@@ -489,32 +457,11 @@ function LoopConfigDetail({
         <pre style={{ ...box, whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)", margin: "6px 0 0" }}>{bundle.stateMd || "（空）"}</pre>
       </details>
 
-      {/* 5. 宪法文件（根共享） */}
-      <h3 style={sectionTitle}>宪法文件（根共享 · 所有 loop 生效 · agent 禁改）</h3>
-      {(["constraints", "budget"] as const).map((which) => {
-        const existing = bundle.constitution[which];
-        const draft = conDraft[which];
-        const value = draft ?? existing?.content ?? bundle.constitutionTemplates[which];
-        return (
-          <details key={which} style={{ marginBottom: 4 }}>
-            <summary style={summaryStyle}>
-              {CON_LABEL[which]}{existing ? "" : "（缺失——已预填模板，保存即创建）"}
-            </summary>
-            <div style={{ ...box, marginTop: 6 }}>
-              <textarea style={textarea} value={value} onChange={(e) => setConDraft({ ...conDraft, [which]: e.target.value })} />
-              <button disabled={busy || draft === null || draft === value} style={primaryButton} onClick={() => void saveConstitution(which)}>
-                保存
-              </button>
-            </div>
-          </details>
-        );
-      })}
-
-      {/* 6. 危险区 */}
+      {/* 5. 危险区 */}
       <h3 style={{ ...sectionTitle, color: "#b91c1c" }}>危险区</h3>
       <div style={{ ...box, borderColor: "#b91c1c55" }}>
         <div>
-          删除 loop（整个 loops/{name}/ 目录；SKILL 与宪法不动；git 历史保留审计）
+          删除 loop（整个 loops/{name}/ 目录；SKILL 不动；git 历史保留审计）
           {bundle.boundItems.length > 0 && (
             <div style={muted}>绑定工作项：{bundle.boundItems.join("、")}（删除后按未绑定处理）</div>
           )}
