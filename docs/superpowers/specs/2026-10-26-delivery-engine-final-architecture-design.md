@@ -104,7 +104,7 @@
 > 5. 确认、验收、发布登记没有工具——那是人的手。
 > 6. 项目事实（gate 命令、构建环境、分支纪律）查工作区 AGENTS.md 与你的剧本。
 
-修订记录：2026-10-26 写第一步实施计划时，规则 2 并入「不合并、不推送、不碰受保护分支」——现行四段合同共有此条，且终局中集成是引擎 system 步、发布是人手，按删除测试属不变式而非剧本。同日注：第一步落地时规则 3 暂为「submit / fail 二者之一」——`delivery_ask_human` 随第二步上线即改为上文终文；代码常量由测试钉死当前文本，改文先改此处。同日注（final-fix）：代码常量（`AGENT_INVARIANT_CONTRACT`）内的工具名一律裸写、不加 markdown 反引号——本文的反引号是文档排版；代码库 prompt 习语从不给工具名加反引号。
+修订记录：2026-10-26 写第一步实施计划时，规则 2 并入「不合并、不推送、不碰受保护分支」——现行四段合同共有此条，且终局中集成是引擎 system 步、发布是人手，按删除测试属不变式而非剧本。同日注：第一步落地时规则 3 暂为「submit / fail 二者之一」——`delivery_ask_human` 随第二步上线即改为上文终文；代码常量由测试钉死当前文本，改文先改此处。同日注（final-fix）：代码常量（`AGENT_INVARIANT_CONTRACT`）内的工具名一律裸写、不加 markdown 反引号——本文的反引号是文档排版；代码库 prompt 习语从不给工具名加反引号。第二步（2026-10-26）：规则 3 切换为终文「submit / fail / ask 三者之一」，常量与钉死测试同步切换。
 
 ## 5. 流水线终态
 
@@ -139,6 +139,16 @@
 - `delivery_ask_human({question, options?, recommended?})`：清 claim（同 fail 的释放路径）、不计失败预算、不产 blocked；`delivery.clarifications[]` 追加 `{round, question, options?, askedAt}`；attention 入队（question 类）。
 - 人答复走新人工动作 `answer-clarification`（答案追加进同条记录，actor=user）；答复后项自动回池（digest 未变则免重跑上游）。
 - 任务包（§6.1）从此携带全部 clarifications 问答——grilling 的共识以数据形态沉淀在工作项里，而非会话记忆。
+
+第二步落地决策（2026-10-26 修订记录，写第二步实施计划时钉死）：
+- **存储**：`DeliveryMetadata.clarifications?: DeliveryClarification[]`，条目 `{ id, role, question, options?, recommended?, askedAt, attemptId, answer?, answeredAt? }`；`id` = ULID；走 `parseDelivery` 逐字段校验；events 只追加 `delivery.asked` / `delivery.answered`。
+- **ask 事务**（claim.ts 新函数，四角色同形）：三凭据 + cancel 守卫 → 追加 clarification → 清 claim（同 fail 释放路径）→ **phase 不变**（designer 停 design、developer 停 implementation 等——人答后直接续跑，不回退；回退是 fail 的语义）→ `status: "open"`（不产 blocked）→ attempt 记 `outcome: "asked"` → **不计失败预算**（`failure-window` 不写）→ conversationId 自链接。
+- **不被重领**：池共用谓词新增 `无未答 clarification`（`clarifications.some(c => c.answer === undefined)` → reason `awaiting-answer`，四角色同）；人答复后条件自然解除、项回池。
+- **人工动作** `answer-clarification`：加入 `DELIVERY_ACTIONS`；payload `{ clarificationId, answer }`；守卫：条目存在且未答，否则 409/400；追加 `answer`/`answeredAt`，phase/status 不变；`lastRequest` 幂等同族。**刻意不做 LLM 工具**（答问题是人的手，与 confirm/record 同列）。
+- **任务包**：opening prompt 增一段「人的答复」——按 `askedAt` 升序列出全部已答 clarifications（问 → 答），未答的不会出现（有未答项不可领取）。
+- **attention 投影**：`lib/work-items/attention.ts` 纯函数 `projectAttention(items, config, now)` → `AttentionEntry[]`（`{ key, kind: question|confirm|acceptance|release|blocked, since, ageDays, nudged: boolean, parked: boolean, detail }`）；`GET /api/workspaces/[id]/attention`（只读，无 capability 门）。`since` 取各类的锚事件时间（question = 最早未答 `askedAt`；confirm = design 阶段进入时间；release = 进入 release_ready 时间；blocked = block/中断/paused 时间；acceptance 第四步再实装）。
+- **催办与泊车**：dispatcher 每拍对每个 enabled 工作区跑 `projectAttention`；`ageDays ≥ nudgeAfterDays` 且未催过 → 追加事件 `delivery.nudged`（actor=agent，data {kind, ageDays}）；`ageDays ≥ parkAfterDays` 且未泊过 → 写 automation-paused（复用，`reason: "attention-parked"`）+ 事件 `delivery.parked`。「催过/泊过」以 events 里是否已有同 kind 的 `delivery.nudged` / `delivery.parked`（晚于 `since`）判定——**不加运行态文件**，不 bump revision 的需求由事件追加本身满足（appendEvent 不改 item.yaml）。`attention: { nudgeAfterDays, parkAfterDays }` 进 config v2，缺省 3 / 7，正整数且 park ≥ nudge。
+- **UI**：工作项中央页顶部「待处理」条（attention 条目按 kind 分组，点击定位项）；详情页 question 类条目内联「回答」表单（走 `answer-clarification` 动作）。digest 渲染（巡逻）不在第二步。
 
 ## 6. 回合装配
 
