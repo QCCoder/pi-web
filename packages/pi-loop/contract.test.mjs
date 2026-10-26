@@ -46,3 +46,12 @@ test("非 manual（自动心跳）：保留严格 PAUSED 收尾规则", () => {
   assert.ok(prompt.includes("立即收尾退出本轮"));
   assert.ok(!prompt.includes("手动触发"));
 });
+
+test("patrol 轮合同：STATE 收窄为 Last run 叙事行，退役编排词不再注入", () => {
+  for (const opts of [{ sessionId: "sess-p" }, { sessionId: "sess-p", manual: true }]) {
+    const prompt = buildRoundPrompt(DECL, opts);
+    assert.ok(prompt.includes("Last run")); // STATE 规则只更新 `Last run:` 一行
+    assert.ok(!prompt.includes("复盘节")); // 复盘节已随 STATE 编排退役
+    assert.ok(!prompt.includes("chandao")); // dev-loop 编排流水线叙事已退役（手动轮也不注入）
+  }
+});

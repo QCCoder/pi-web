@@ -6,12 +6,14 @@
 ## 1. 前置
 
 1. pi-web 重启到含 final-arch step 1–6 的版本（`git log --oneline -1` 确认含 `feat: attention digest rendering …` 及其后）。
-2. 打开工作区交付设置页保存一次 `.pi/delivery.yaml`（`enabled` 暂仍 false），确认设置页可读写。
+2. 打开工作区交付设置页保存一次 `.pi/delivery.yaml`（`enabled` 暂仍 false），确认设置页可读写——保存 delivery 配置要求工作区具备 work-items + workflows 双能力；缺项在 readiness 显示 capabilities-missing。
 3. `GET /api/workspaces/<wsId>/delivery/readiness`：记录当前缺项清单（剧本/检查/配置）——第 2、3 步逐项消掉，收尾时复跑应为「就绪」。
 
 ## 2. 剧本改挂（`.pi/agents/`，人工校订后改名/改挂）
 
 现役四剧本改为 delivery 角色剧本（两种挂法任选：复制成 `<role>.md` 同名，或保留原名在 `.pi/delivery.yaml` 的 `roles.<role>.profile` 指向别名）：
+
+> 顺序：剧本改名/改挂放在首次保存 delivery 配置（§1 第 2 步）之前，可让一次性播种直接收养人工剧本（record existing，避免 seeded_from 漂移提示）。
 
 - **analyst → `designer.md`**：SPEC.md 落点改为 `delivery/artifacts/design.md` + 验收条件（写进 design.md 末节）；**删掉「不向用户提问」类条款**——现在用 `delivery_ask_human` 提问，答复走 attention 队列；产出改为「起草 design.md，完成即结束回合」。
 - **implementer → `developer.md`**：TDD 纪律保留；**删除 worktree 自建/分支自管段**——引擎按仓预建 worktree 与候选分支，剧本只写「在给定 worktree 内实现 → `delivery_submit` 提交候选（带说明）」；失败超预算等引擎 pause，不自循环。
@@ -67,11 +69,11 @@ stages:
 
 ## 6. 禅道同步与 digest 改挂 patrol 模板
 
-1. 复制 `kit/templates/patrol/{LOOP.md,SKILL.md}` 两份进 `.pi/loops/`：
+1. 复制 `kit/templates/patrol/{LOOP.md,SKILL.md}` 到位——LOOP.md → `.pi/loops/patrol/LOOP.md`；SKILL.md → `.pi/skills/patrol/SKILL.md`（skill 走 pi 原生发现 `.pi/skills/<pattern>/`，LOOP.md 在 `.pi/loops/<name>/`；chandao-sync 同规则，SKILL 不进 `.pi/loops/`）：
    - `chandao-sync/`（cron 改 `0 9 * * 1-5`，SKILL 换成「跑 scripts/chandao-sync.py + 摘要播报」）；
    - `patrol/`（保持 cron `0 20 * * 1-5`：拉 `GET /api/workspaces/<wsId>/attention?format=digest`，原文播报，结束）。
 2. 原 dev-loop 的禅道同步职责（若有轮内步骤）随停编排一并失效——同步不再依赖编排轮。
-3. `pi-loop init --name patrol --cron "0 20 * * 1-5" --root <workspace>` 可替代手工复制（骨架来自 basic 模板；SKILL 内容按 patrol 模板改写）。
+3. `pi-loop init --name patrol --cron "0 20 * * 1-5" --root <workspace>` 可替代手工复制（骨架来自 basic 模板；LOOP.md 落 `.pi/loops/patrol/`、SKILL.md 落 `.pi/skills/patrol/`；SKILL 内容按 patrol 模板改写）。
 
 ## 7. 验证清单（全部勾完才算切换完成）
 
