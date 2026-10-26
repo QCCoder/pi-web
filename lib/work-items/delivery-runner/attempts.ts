@@ -32,6 +32,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createUlid } from "../../workspaces/id.ts";
 import { contentDigest } from "../delivery-types.ts";
+import type { DeliveryReviewRecord } from "../delivery-types.ts";
 import { WorkItemValidationError } from "../errors.ts";
 import { writeAtomic } from "../service.ts";
 import type { AnyDeliveryRole } from "./roles.ts";
@@ -41,10 +42,12 @@ import type { CheckEvidence } from "./checks.ts";
 /** Phase-4 T3（carried ruling #2）：claim 时冻结的检查配置快照——
  *  submitVerifierResult 的完整性比对与 delivery_run_check 的配置查找都以它
  *  为准（领取后配置变更不追溯，下轮生效）。repositoryId 在冻结时已解析
- *  （缺省 = 候选首仓）。 */
+ *  （缺省 = 候选首仓）。final-arch step-3 T3：引擎 system 检查步的 system
+ *  claim 冻结同形快照（checks-step 复用 freezeCheckContexts 语义），
+ *  finalizeChecks 的完整性比对同一份。 */
 export interface ClaimCheckContext {
   name: string;
-  /** 已解析的仓库 id（缺省值在 claimVerifierTask 内落为候选首仓）。 */
+  /** 已解析的仓库 id（缺省值在领取/开跑时落为候选首仓）。 */
   repositoryId: string;
   command: string;
   timeout_seconds?: number;
@@ -100,10 +103,12 @@ export interface AttemptRecord {
   /** asked（final-arch step-2）：ask-a-human 澄清轮的合法终局——不算失败
    *  （不耗失败预算）也不算成功提交（不断连胜）。 */
   outcome?: "submitted" | "failed" | "interrupted" | "asked";
-  /** verifier 提交的验证判定（Phase-4 T3）：verified = 全过推进 release_ready；
-   *  rework = 有失败走 M2 rework 路由。判定与执行成败（outcome）正交——
-   *  rework 是验证器完成任务后的合法判定，不消耗失败预算。 */
-  verificationOutcome?: "verified" | "rework";
+  /** 检查结算的判定（Phase-4 T3 verifier 起；final-arch step-3 T3 增 system 步）：
+   *  verified = 全过推进 release_ready；rework = 有失败走 rework 路由；
+   *  unverified = 执行环境不完整（system 步落 blocked 等人看环境——agent 结算
+   *  路径对 unverified 仍拒绝，见 finalizeChecks）。判定与执行成败（outcome）
+   *  正交——rework/unverified 是检查步完成一轮后的合法终局，不消耗失败预算。 */
+  verificationOutcome?: "verified" | "rework" | "unverified";
   reason?: string;
   requirementDigest: string;
   needsAttention?: boolean;
@@ -119,6 +124,10 @@ export interface AttemptRecord {
    *  （notes 必填 / rollback 可选——M2 prepare-release 形状；item 侧同构
    *  写入 delivery.releasePlan，claim 清后材料在此留痕）。 */
   releasePlan?: { notes: string; rollback?: string };
+  /** reviewer 提交的审查判定（final-arch step-3 T2）：从 submit 输入拷贝入审计
+   *  （pass 无 source / rework 必带 source——DeliveryReviewRecord 全量）；
+   *  claim 清后判定在此留痕。Task 2 以结构扩展写入，T3 正式化入类型。 */
+  review?: DeliveryReviewRecord;
 }
 
 export interface PausedInfo {

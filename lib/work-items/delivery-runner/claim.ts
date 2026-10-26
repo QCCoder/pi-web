@@ -107,7 +107,16 @@
 //     reworkTransition（spec → design / code → ready_for_implementation）且
 //     review 判定仍在场（人要看为什么打回）；**无失败预算**（判定不是失败——
 //     不写 failure-window、不触暂停）；fail 标准（phase 不动 + 预算计数）。
-//     verifier 三函数本任务保留（Task 3 落 system 步时一并退役）。
+//
+// final-arch step-3 Task 3（system 检查步，2026-10-26 先审后跑的执行半）：
+//   - verifier 谓词在 pool.ts 退役——verification 阶段过审项由引擎 system 步
+//     （checks-step.ts）接手，池子不再投影 verifier 条目、dispatcher 不再拉起
+//     verifier 会话。claimVerifierTask / submitVerifierResult / failVerifierTask
+//     因此不可达但暂留（tools.ts 的 verifier 分支 Task 4 重写时一并摘除——
+//     函数删除与调用方删除同拍，过渡期零调用方）。finalizeChecks 的 system
+//     actor 分支本任务落地：unverified → blocked + delivery.checks_unverified
+//     （agent 路径字节不变，unverified 仍拒绝）；verified/rework 的 system
+//     事件为 delivery.checks_passed / delivery.checks_failed。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -229,8 +238,9 @@ const RUNTIME_GITIGNORE_ENTRY = ".pi/work-items/**/delivery/runtime/";
 
 /** T3 carried ruling：claim 首写 runtime/ 时把该路径幂等接进工作区 .gitignore
  *  （文件缺失则创建，已含则不动；attempts/ 审计目录是事实源，不入 ignore）。
- *  读-改-写发生在 claim 事务锁内，无并发压力。 */
-async function ensureRuntimeGitignore(workspacePath: string): Promise<void> {
+ *  读-改-写发生在 claim 事务锁内，无并发压力。final-arch step-3 T3：checks-step
+ *  的 system claim 首写 runtime/ 同样接线（导出共用同一实现）。 */
+export async function ensureRuntimeGitignore(workspacePath: string): Promise<void> {
   const gitignorePath = join(workspacePath, ".gitignore");
   let current = "";
   try {
@@ -367,14 +377,13 @@ async function poolRecheck(
     paused: readPaused(current.path) !== null ? new Set([current.item.key]) : new Set<string>(),
     failureCountByKey,
     maxAttemptsPerInput,
-    // designer 复验不消费仓库登记表（developer/verifier 谓词专属）；manifest
-    // 已由调用方读过，按项内数据装配保持与池子读取端同源。
+    // designer 复验不消费仓库登记表（developer 谓词专属）；manifest 已由调用
+    // 方读过，按项内数据装配保持与池子读取端同源。
     registeredRepos: new Map(manifest.repositories.map((repo) => [repo.id, repo.status])),
-    // verifier 谓词输入（Phase-4）：config.verification.checks——与池子读取端
-    // 同源（undefined/空 = no-checks-configured）。
-    checks: config?.verification?.checks,
     // 先审后跑（final-arch step-3 T2）：config.stages.review.enabled——与池子
     // 读取端同源；review 开启且候选集欠审的 verification 项投影为 reviewer。
+    //（T3：checks 不再进投影 ctx——verifier 谓词退役；claimVerifierTask /
+    // claimReviewerTask 的快照冻结用 poolRecheck 返回值里的 checks。）
     reviewEnabled: config?.stages?.review?.enabled ?? false,
   };
   const [entry] = projectDeliveryPool(
@@ -1037,8 +1046,10 @@ export interface VerifierFailInput {
 
 /** claim 时冻结检查配置快照（carried ruling #2）：缺省 repositoryId 在此刻解析
  *  为候选首仓（池谓词同款缺省规则）；快照进 claim.checkContexts，领取后的
- *  配置变更不追溯（submit 完整性比对与 run_check 的配置查找都以它为准）。 */
-function freezeCheckContexts(
+ *  配置变更不追溯（submit 完整性比对与 run_check 的配置查找都以它为准）。
+ *  final-arch step-3 T3：checks-step 的 system claim 冻结同一份（导出共用——
+ *  「缺省仓解析」不得存在第二份实现）。 */
+export function freezeCheckContexts(
   checks: DeliveryCheckConfig[] | undefined,
   fallbackRepositoryId: string,
 ): ClaimCheckContext[] {
@@ -1179,8 +1190,9 @@ export async function claimVerifierTask(
 }
 
 /** 结算输入（final-arch step-3 T2）。actor = 结算者身份：verifier 提交走
- *  "agent"；Task 3 的引擎 system 步（checks 服务端跑完后）复用同一结算走
- *  "system"。notes/conversationId 随事件与自链接透传（verifier 同款）。 */
+ *  "agent"（字节不变路径——T3 起 verifier 谓词已退役，仅存量 claim 结算可达）；
+ *  T3 的引擎 system 检查步（checks 服务端跑完后）复用同一结算走 "system"。
+ *  notes/conversationId 仅 agent 会话路径携带（system 无会话，恒缺席）。 */
 export interface FinalizeChecksInput {
   workspacePath: string;
   current: WorkItemDetail;
@@ -1191,22 +1203,31 @@ export interface FinalizeChecksInput {
 }
 
 export interface FinalizeChecksOutcome {
-  outcome: "verified" | "rework";
+  /** verified = 全过推进 release_ready；rework = 有失败打回开发；
+   *  unverified = 执行环境不完整（仅 system——agent 路径对 unverified 拒绝，
+   *  字节不变）。 */
+  outcome: "verified" | "rework" | "unverified";
   detail: WorkItemDetail;
 }
 
 /**
- * 检查结算核心（final-arch step-3 T2 从 submitVerifierResult 抽出——Task 3 的
- * system 步复用）：证据只从 claim.checkResults 取（服务端执行器唯一注入口），
- * 按 claim.checkContexts（领取时冻结的配置快照）逐名完整性比对——缺名 →
- * Validation；未知名证据 → Validation；unverified → Validation 零变化拒绝
- * （终局口径：submit 是终局动作，环境问题重跑 delivery_run_check 或
- * fail(blocked)，不静默 blocked；此刻尚未写任何状态）。之后按 M2
+ * 检查结算核心（final-arch step-3 T2 从 submitVerifierResult 抽出——T3 的
+ * system 步复用同一结算）：证据只从 claim.checkResults 取（服务端执行器唯一
+ * 注入口），按 claim.checkContexts（领取时冻结的配置快照）逐名完整性比对——
+ * 缺名 → Validation；未知名证据 → Validation。unverified（执行环境不完整）
+ * 分流：agent 路径零变化拒绝（终局口径：submit 是终局动作，环境问题重跑或
+ * fail(blocked)，不静默 blocked；此刻尚未写任何状态——T3 字节不变钉子）；
+ * system 路径落 blocked（阶段不动、verification 不写、事件
+ * delivery.checks_unverified——环境修好下一拍重新开跑）。之后按 M2
  * record-verification / rework 语义【同构内联】推进（不调 applyDeliveryAction
  * ——其自取 withWorkspaceWriteLock 不可重入，designer design.md 直写同款
- * 先例）：有 failed → 共享 reworkTransition 四清 + 回 ready_for_implementation；
+ * 先例）：有 failed → 共享 reworkTransition 四清 + 回 ready_for_implementation
+ * （agent 发 delivery.rework_suggested / system 发 delivery.checks_failed）；
  * 全 passed → delivery.verification（actor=结算者 + 服务端证据）+ phase→
- * release_ready。写 item.yaml + 事件 → 清 claim → attempt → commit。
+ * release_ready（agent 发 delivery.submitted / system 发
+ * delivery.checks_passed，落块 actor "system"）。写 item.yaml + 事件 → 清
+ * claim → attempt（role 随 claim——agent=verifier 字节不变 / system=system；
+ * outcome 恒 submitted + verificationOutcome 判定，无失败预算）→ commit。
  * 调用方必须已持锁并完成凭据/阶段/候选 digest 守卫（requireActiveClaim 同窗）。
  */
 export async function finalizeChecks(
@@ -1238,12 +1259,14 @@ export async function finalizeChecks(
       );
     }
   }
-  // unverified = 执行环境不完整（超时/无法执行）——不是实现问题也不是判定，
-  // 推进与 rework 都不适用：零变化拒绝，让会话重跑或 fail(blocked)。
-  const unverified = results.find((result) => result.outcome === "unverified");
-  if (unverified !== undefined) {
+  // unverified = 执行环境不完整（超时/无法执行）——不是实现问题也不是判定。
+  // agent 路径（字节不变）：零变化拒绝，让会话重跑或 fail(blocked)。system
+  // 路径（final-arch step-3 T3）：检查步没有会话可重跑——落 blocked 等人看
+  // 环境（事件 delivery.checks_unverified），验证记录不写、阶段不动。
+  const unverifiedResults = results.filter((result) => result.outcome === "unverified");
+  if (unverifiedResults.length > 0 && actor === "agent") {
     throw new WorkItemValidationError(
-      `check ${unverified.name} unverified — resolve environment and re-run via delivery_run_check before submitting`,
+      `check ${unverifiedResults[0].name} unverified — resolve environment and re-run via delivery_run_check before submitting`,
     );
   }
 
@@ -1254,76 +1277,91 @@ export async function finalizeChecks(
   const next: WorkItemRecord = structuredClone(current.item);
   let eventType: string;
   let eventData: Record<string, unknown>;
-  let verificationOutcome: "verified" | "rework";
+  let verificationOutcome: FinalizeChecksOutcome["outcome"];
 
-  const failed = results.filter((result) => result.outcome === "failed");
-  if (failed.length > 0) {
-    // 有 failed → M2 rework 同构（四清清单归共享 reworkTransition——final-arch
-    // step-3 T2 唯一实现）：清全部下游证据（designConfirmed/candidates/
-    // verification/releasePlan——须重新挣得）+ 回 ready_for_implementation 等
-    // developer 再领；反馈事件携带失败条目与日志引用（开发返工的输入）。
-    verificationOutcome = "rework";
-    const transition = reworkTransition(next, "implementation", "open");
-    next.phase = transition.phase;
-    next.status = transition.status;
-    next.delivery = transition.delivery;
-    eventType = "delivery.rework_suggested";
+  if (unverifiedResults.length > 0) {
+    // system 专属：环境问题 → status blocked（阶段不动、verification 不写、
+    // 下游不清——不是实现失败，环境修好下一拍 checksDue 重新为真）。attempt
+    // 同样 outcome submitted + verificationOutcome unverified（完成了一轮
+    // 检查步，不是失败——不写 failure-window，无失败预算）。
+    verificationOutcome = "unverified";
+    next.status = "blocked";
+    eventType = "delivery.checks_unverified";
     eventData = {
-      reason: "verification-failed",
-      checks: failed.map((result) => ({
-        name: result.name,
-        exitCode: result.exitCode,
-        logRef: result.logRef,
-      })),
+      checks: unverifiedResults.map((result) => ({ name: result.name })),
     };
   } else {
-    // 全 passed → delivery.verification（结算者 actor + 服务端证据——命令取自
-    // 冻结快照）+ phase→release_ready。落块 actor 词表此刻仍是 "user"|"agent"
-    // （delivery-types 不在本任务面）——system 结算的词表放宽随 Task 3 落地，
-    // 过渡映射显式注明（此刻唯一调用方传 "agent"）。
-    verificationOutcome = "verified";
-    next.phase = "release_ready";
-    next.status = "open";
-    next.delivery = {
-      ...delivery,
-      verification: {
-        at: now.toISOString(),
-        actor: actor === "system" ? "agent" : actor,
-        requirementDigest: contentDigest(current.content),
-        candidateDigest: claim.candidateDigest ?? "",
+    const failed = results.filter((result) => result.outcome === "failed");
+    if (failed.length > 0) {
+      // 有 failed → M2 rework 同构（四清清单归共享 reworkTransition——final-arch
+      // step-3 T2 唯一实现）：清全部下游证据（designConfirmed/candidates/
+      // verification/releasePlan——须重新挣得）+ 回 ready_for_implementation 等
+      // developer 再领；反馈事件携带失败条目与日志引用（开发返工的输入）。
+      // agent 会话路径沿用 delivery.rework_suggested（字节不变）；system 步发
+      // delivery.checks_failed（同一 data 形状）。
+      verificationOutcome = "rework";
+      const transition = reworkTransition(next, "implementation", "open");
+      next.phase = transition.phase;
+      next.status = transition.status;
+      next.delivery = transition.delivery;
+      eventType = actor === "system" ? "delivery.checks_failed" : "delivery.rework_suggested";
+      eventData = {
+        reason: "verification-failed",
+        checks: failed.map((result) => ({
+          name: result.name,
+          exitCode: result.exitCode,
+          logRef: result.logRef,
+        })),
+      };
+    } else {
+      // 全 passed → delivery.verification（结算者 actor + 服务端证据——命令取自
+      // 冻结快照）+ phase→release_ready。actor 词表随 T3 放宽（delivery-types
+      // 加 "system"）——system 结算以 system 落块。agent 会话路径沿用
+      // delivery.submitted（字节不变）；system 步发 delivery.checks_passed。
+      verificationOutcome = "verified";
+      next.phase = "release_ready";
+      next.status = "open";
+      next.delivery = {
+        ...delivery,
+        verification: {
+          at: now.toISOString(),
+          actor,
+          requirementDigest: contentDigest(current.content),
+          candidateDigest: claim.candidateDigest ?? "",
+          checks: contexts.map((context) => {
+            const result = byName.get(context.name)!;
+            return {
+              name: context.name,
+              outcome: "passed" as const,
+              evidence: {
+                command: context.command,
+                exitCode: result.exitCode,
+                durationMs: result.durationMs,
+                logRef: result.logRef,
+              },
+            };
+          }),
+        },
+      };
+      eventType = actor === "system" ? "delivery.checks_passed" : "delivery.submitted";
+      eventData = {
+        outcome: "verified",
         checks: contexts.map((context) => {
           const result = byName.get(context.name)!;
           return {
             name: context.name,
-            outcome: "passed" as const,
-            evidence: {
-              command: context.command,
-              exitCode: result.exitCode,
-              durationMs: result.durationMs,
-              logRef: result.logRef,
-            },
+            exitCode: result.exitCode,
+            logRef: result.logRef,
           };
         }),
-      },
-    };
-    eventType = "delivery.submitted";
-    eventData = {
-      outcome: "verified",
-      checks: contexts.map((context) => {
-        const result = byName.get(context.name)!;
-        return {
-          name: context.name,
-          exitCode: result.exitCode,
-          logRef: result.logRef,
-        };
-      }),
-    };
+      };
+    }
   }
 
   next.revision += 1;
   next.updatedAt = now.toISOString();
   // 会话自链接（fix round 1，designer submit 同款）：带 conversationId 的
-  // 提交把会话挂入 conversations。
+  // 提交把会话挂入 conversations（system 无会话——键缺席）。
   if (conversationId && !next.conversations.includes(conversationId)) {
     next.conversations = [...next.conversations, conversationId];
   }
@@ -1340,10 +1378,13 @@ export async function finalizeChecks(
   );
 
   clearClaim(itemPath);
+  // role 随 claim 流动：agent 路径 claim.role === "verifier"（字节不变）；
+  // system 路径 role "system"。unverified 同样 outcome submitted（检查步
+  // 完成了一轮，判定 unverified 随 verificationOutcome 入审计——不计失败）。
   await writeAttempt({
     attemptId: claim.attemptId,
     generation: claim.generation,
-    role: "verifier",
+    role: claim.role,
     sessionId: claim.sessionId,
     workspacePath,
     key: current.item.key,
@@ -1360,11 +1401,12 @@ export async function finalizeChecks(
 }
 
 /**
- * Verifier 提交：requireActiveClaim 三凭据 + role 门 + candidateDigest 复验
- * （候选在领取后被换——人 rework/重提交——→ 409 释放重领）+ 阶段守卫（人在
- * 窗口内推进 → 409）。结算核心（完整性门 → unverified 零变化拒绝 / 有 failed
- * → rework / 全 passed → verification + release_ready）在 finalizeChecks
- * （final-arch step-3 T2 抽出）——Task 3 的引擎 system 步复用同一结算。
+ * Verifier 提交（final-arch step-3 T3 起经池子不可达——verifier 谓词退役，
+ * verification 过审项由 checks-step 的 system 步结算；函数随 tools.ts 的
+ * verifier 分支在 Task 4 一并退役）：requireActiveClaim 三凭据 + role 门 +
+ * candidateDigest 复验（候选在领取后被换——人 rework/重提交——→ 409 释放
+ * 重领）+ 阶段守卫（人在窗口内推进 → 409）。结算核心在 finalizeChecks
+ * （T2 抽出，T3 增 system actor 分支——agent 路径字节不变）。
  */
 export async function submitVerifierResult(input: VerifierSubmitInput): Promise<WorkItemDetail> {
   const notes = input.notes === undefined || input.notes === null
@@ -1805,7 +1847,7 @@ export async function submitReviewerResult(input: ReviewerSubmitInput): Promise<
       worktrees: claim.worktrees,
       checkResults: claim.checkResults,
       review,
-    } as AttemptRecord);
+    });
     await commitWorkspaceChanges(input.workspacePath, `workspace: delivery submit ${input.key}`);
     return readWorkItem(input.workspacePath, input.key);
   });
@@ -2419,9 +2461,10 @@ export async function recordInterruption(
           ? { from: "design", to: "intake" }
           : claim.role === "developer"
             ? { from: "implementation", to: "ready_for_implementation" }
-            // verifier（Phase-4）与 release-preparer（Phase-5 T1）：claim 不改
-            // 阶段（verification/release_ready 各自 from=to 零变化）——无阶段可
-            // 归还，只归还 status。
+            // verifier（legacy）/ reviewer / release-preparer / system（final-arch
+            // step-3 T3——system 检查步的 claim 同样不改阶段）：claim 不改阶段
+            // （verification/release_ready 各自 from=to 零变化）——无阶段可归还，
+            // 只归还 status。default 显式为 null（缺省分支即这些角色）。
             : null;
       if (phaseBack !== null && next.phase === phaseBack.from) {
         giveBack.phase = phaseBack;

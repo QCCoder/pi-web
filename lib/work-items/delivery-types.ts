@@ -46,10 +46,12 @@ export interface DeliveryVerificationCheck {
 
 export interface DeliveryVerificationRecord {
   at: string;
-  /** Phase-4（spec §1.4）：verifier 自动验证以 agent 落块（人工 record-verification
-   *  仍 user——两者同块同 digest 绑定规则，最后写入者生效）。confirm-design /
+  /** 落块者：user = 人工 record-verification；agent = 旧 verifier 会话自动验证
+   *  （final-arch step-3 T3 起 verifier 已退役——存量 agent 块永可读）；
+   *  system = 引擎 system 检查步（checks-step 的 finalizeChecks 结算）。
+   *  三者同块同 digest 绑定规则，最后写入者生效。confirm-design /
    *  record-release 永远 user，不放宽。 */
-  actor: "user" | "agent";
+  actor: "user" | "agent" | "system";
   requirementDigest: string;
   candidateDigest: string;
   checks: DeliveryVerificationCheck[];
@@ -188,11 +190,12 @@ function requireUserActor(value: unknown, field: string): "user" {
   return value as "user";
 }
 
-/** verification 专属（Phase-4）：user（人工登记）| agent（verifier 自动验证）。
- *  designConfirmed / release 不放宽——仍 requireUserActor。 */
-function requireVerificationActor(value: unknown, field: string): "user" | "agent" {
-  if (value !== "user" && value !== "agent") {
-    throw new WorkItemValidationError(`${field} must be "user" or "agent"`);
+/** verification 专属：user（人工登记）| agent（旧 verifier 自动验证，legacy 可读）
+ *  | system（引擎 system 检查步落块，final-arch step-3 T3 起——verifier 自动验证
+ *  已退役）。designConfirmed / release 不放宽——仍 requireUserActor。 */
+function requireVerificationActor(value: unknown, field: string): "user" | "agent" | "system" {
+  if (value !== "user" && value !== "agent" && value !== "system") {
+    throw new WorkItemValidationError(`${field} must be "user", "agent" or "system"`);
   }
   return value;
 }

@@ -22,6 +22,15 @@
 //      派发窗口）。角色由条目所处阶段决定（pool 投影），dispatcher 只透传——
 //      消除 T1 的过渡窗口（developer-ready 项不再被当 designer 起会话后领取即拒）。
 //
+//   ②′ 系统检查步（final-arch step-3 Task 3，2026-10-26——先审后跑的执行半）：
+//      verifier 会话退役后，verification 阶段过审项由引擎自己跑检查：checks-step
+//      的 due 扫描（checksCandidatesFor + checksDue——与池投影共用 reviewPending
+//      判定）找到首个 due 项 → runChecksStep fire-and-forget（catch 记日志，
+//      launch 同款）并【本拍 return】——检查步以 system claim 占单槽位
+//      （activeExecution 的 claim 扫描天然看到它），同拍不再起 LLM 轮；下一拍
+//      活动执行在场，派发与检查步都自然让路。检查步排空后才走 ② 的会话派发。
+//      单槽位闸先行：已有活动执行（LLM 会话或在跑的检查步）→ 检查步不与它并发。
+//
 //   ③ attention 催办/泊车（final-arch step-2 Task 5，2026-10-26，spec §8——
 //      唯一人工待办队列的维护步）：collectAttention 投影（与 GET …/attention
 //      路由共用装配器）后按 config.attention 阈值逐条处理——过泊车线未泊 →
@@ -38,6 +47,12 @@ import { destroySession, probeSession } from "../../session-host/facade.ts";
 import { discoverWorkspaces, readWorkspaceManifest } from "../../workspaces/service.ts";
 import { assertAutomationCapable, readDeliveryRunnerConfig, DEFAULT_DELIVERY_RUNNER_CONFIG, type DeliveryRunnerConfig } from "./config.ts";
 import { listDeliveryPool } from "./pool.ts";
+import {
+  checksCandidatesFor,
+  checksDue,
+  runChecksStep,
+  type ChecksCandidate,
+} from "./checks-step.ts";
 import { hasAnyActiveExecution } from "./role-grants.ts";
 import { launchRoleSession, scanActiveItemClaims } from "./role-session.ts";
 import { recordInterruption } from "./claim.ts";
@@ -64,6 +79,12 @@ export interface DispatcherDeps {
   probeSession?: typeof probeSession;
   destroySession?: typeof destroySession;
   recordInterruption?: typeof recordInterruption;
+  /** 系统检查步三件（final-arch step-3 Task 3；默认 checks-step 真实现）：
+   *  due 判定 / due 候选扫描 / 单项执行——tickWorkspace 在派发之前对首个 due
+   *  项开跑（占槽 + 本拍 return，不再起 LLM 轮）。 */
+  checksDue?: typeof checksDue;
+  checksCandidates?: typeof checksCandidatesFor;
+  runChecksStep?: typeof runChecksStep;
   /** attention 投影数据源（final-arch step-2 Task 5；默认 collectAttention——
    *  与 GET …/attention 路由共用同一装配器）。 */
   collectAttention?: typeof collectAttention;
@@ -101,6 +122,9 @@ export class DeliveryDispatcher implements HostJob {
       probeSession: deps.probeSession ?? probeSession,
       destroySession: deps.destroySession ?? destroySession,
       recordInterruption: deps.recordInterruption ?? recordInterruption,
+      checksDue: deps.checksDue ?? checksDue,
+      checksCandidates: deps.checksCandidates ?? checksCandidatesFor,
+      runChecksStep: deps.runChecksStep ?? runChecksStep,
       collectAttention: deps.collectAttention ?? collectAttention,
       appendEvent: deps.appendEvent ?? appendEvent,
       writePaused: deps.writePaused ?? writePaused,
@@ -150,10 +174,36 @@ export class DeliveryDispatcher implements HostJob {
     // capability 复验（缺项/manifest 坏 → 抛 → tick 的 per-workspace catch 跳过）。
     assertAutomationCapable(await this.deps.readManifest(workspace.path));
     await this.reapTimedOutClaims(workspace.path, config);
+    // ②′ 系统检查步（final-arch step-3 T3）：有 due 项 → 开跑并本拍 return
+    // （检查步占槽——同拍不起 LLM 轮；attention 延一拍无碍）。
+    if (await this.runDueChecks(workspace)) return;
     await this.dispatch(workspace, config);
     // ③ attention 催办/泊车（final-arch step-2 Task 5）——在派发之后（新派发
     // 的会话立即可见，不该当轮就被催/泊）。
     await this.attend(workspace, config);
+  }
+
+  /**
+   * ②′ 系统检查步：单槽位闸（活动执行在场不并发）→ due 扫描（失败记日志让路
+   * 给派发——扫描坏不该停整个 runner）→ 首个 due 项 runChecksStep fire-and-
+   * forget（catch 记日志，launch 同款——失败下一拍 checksDue 复评自然重试）。
+   * 返回是否开跑（开跑 = 本拍跳过派发）。
+   */
+  private async runDueChecks(workspace: { id: string; path: string }): Promise<boolean> {
+    if (await Promise.resolve(this.deps.activeExecution(workspace.path))) return false;
+    let candidates: ChecksCandidate[];
+    try {
+      candidates = await this.deps.checksCandidates(workspace.path);
+    } catch (error) {
+      console.error(`[delivery-runner] checks scan failed for ${workspace.id}:`, error);
+      return false;
+    }
+    const due = candidates.find((candidate) => this.deps.checksDue(candidate.item, candidate.ctx).due);
+    if (due === undefined) return false;
+    void this.deps.runChecksStep(workspace.path, due.key).catch((error) => {
+      console.error(`[delivery-runner] checks step failed for ${due.key}:`, error);
+    });
+    return true;
   }
 
   private async reapTimedOutClaims(

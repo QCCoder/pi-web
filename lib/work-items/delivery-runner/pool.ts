@@ -10,11 +10,13 @@
 //     requirementDigest、manifest 仓库登记表与配置验证命令 checks）由调用方
 //     传入；只比较，只排序，只分桶标记。角色由项所处阶段决定（spec §1.2 +
 //     phase-four §6 + phase-five §2）：ready_for_implementation → developer
-//     （§3 谓词），verification → verifier（phase-four §3 谓词），
-//     release_ready → release-preparer（phase-five §2 谓词——verification
-//     通过记录在场且 candidateDigest 与当前候选集一致），其余 → designer——
-//     designer 谓词保持 P2 行为逐字节不变（非 intake 阶段照旧 wrong-phase，
-//     blocked 桶对存量项的投影与 P2 完全一致）。
+//     （§3 谓词），verification → reviewPending 分流（final-arch step-3：
+//     欠审 → reviewer，T2；过审 → 引擎 system 检查步 checks-step 的 due 输入
+//     ——T3 起 verifier 谓词退役，过审项不再进 LLM 队列，按 P2 语义落
+//     designer wrong-phase 桶），release_ready → release-preparer（phase-five
+//     §2 谓词——verification 通过记录在场且 candidateDigest 与当前候选集一致），
+//     其余 → designer——designer 谓词保持 P2 行为逐字节不变（非 intake 阶段
+//     照旧 wrong-phase，blocked 桶对存量项的投影与 P2 完全一致）。
 //
 //   listDeliveryPool —— 读取端装配器：listWorkItems（仅活动 items，归档/
 //     回收站永不可领）+ 配置（缺文件 = disabled）+ 每项运行时信号（claim /
@@ -35,11 +37,15 @@
 //   final-arch step-3 T2（2026-10-26，先审后跑）：verification 阶段按
 //     reviewPending 分流——stages.review.enabled ∧ 候选集尚未「pass 审查」的项
 //     投影为 reviewer（新谓词：候选非空 ∧ 无 review 或 review.candidateDigest
-//     与当前候选集不符；新 reason：review-disabled / review-done），审查通过
-//     （pass 且 digest 与当前候选集一致）的项照旧投影 verifier（interim——
-//     Task 3 换成引擎 system 步）。verifier 谓词增 awaiting-review 闸（共用
-//     reviewPending 判定——经投影不可达，角色投影把欠审项先分给 reviewer；
-//     Task 3 的 checksDue 复用同一判定）。review 关闭（或缺省）零变化回归。
+//     与当前候选集不符；新 reason：review-disabled / review-done）。
+//
+//   final-arch step-3 T3（2026-10-26，system 检查步）：verifier 谓词退役——
+//     过审（或 review 关闭）的 verification 项不再是可领任务，由 dispatcher 的
+//     system 步按 checks-step.checksDue 开跑（reason 词表 checks-empty /
+//     checks-done / awaiting-review 迁往 checks-step）；reviewPending 导出保留
+//     （谓词/投影/checks-step 三处共用同一判定，永不漂移）。review 关闭（或缺
+//     省）的投影变化：verification 项从「verifier ready」变「designer
+//     wrong-phase blocked」——它们本就不是 LLM 会话的活了。
 import {
   countRecentFailures,
   listPendingInterruptions,
@@ -47,7 +53,6 @@ import {
   readPaused,
 } from "./attempts.ts";
 import { readDeliveryRunnerConfig, DEFAULT_DELIVERY_RUNNER_CONFIG } from "./config.ts";
-import type { DeliveryCheckConfig } from "./config.ts";
 import { candidatesDigest, contentDigest } from "../delivery-types.ts";
 import type {
   DeliveryCandidate,
@@ -71,12 +76,8 @@ export type DesignerPoolReason =
   | "terminal-status" | "archived"
   // developer 专属（spec §3）：设计未确认 / 空仓库范围 / 仓未登记或非 active。
   | "design-unconfirmed" | "no-repo-scope" | "repo-not-registered"
-  // verifier 专属（spec 2026-10-24-phase-four §3）：未配置验证命令（引导人
-  // 配置或走人工验证）。空候选复用 no-repo-scope（候选即 verifier 的仓范围）、
-  // 仓候选外/未登记/removed 复用 repo-not-registered。
-  | "no-checks-configured"
   // release-preparer 专属（spec 2026-10-25-phase-five §2）：验证通过记录缺失
-  //（release_ready 但无人/verifier 登记过验证——材料必须由验证证据支撑）/
+  //（release_ready 但无人/系统登记过验证——材料必须由验证证据支撑）/
   // 候选被换（verification.candidateDigest 与当前候选集摘要不匹配——旧验证
   // 下的材料不许准备，人须重走验证）。
   | "verification-missing" | "stale-verification"
@@ -92,14 +93,13 @@ export type DesignerPoolReason =
   | "awaiting-answer"
   // reviewer 专属（final-arch step-3 T2，先审后跑）：review 阶段开关关闭
   // （review-disabled——谓词防御分支，经投影不可达：角色投影把 review 关闭的
-  // 项直接分给 verifier，否则 verification 项无人处理）/ 判定已与当前候选集
-  // 绑定（review-done——candidateDigest 与当前候选集摘要一致，无论 pass 还是
-  // rework：该候选集已审过，不再重派）。
-  | "review-disabled" | "review-done"
-  // verifier 先审后跑闸（final-arch step-3 T2）：review 开启且当前候选集尚未
-  // 审查通过 → 等 reviewer（reviewPending 共用判定）。经投影不可达——角色投影
-  // 把欠审项先分给 reviewer；Task 3 的 checksDue 复用本判定。
-  | "awaiting-review";
+  // 项交给 system 检查步，不走 reviewer）/ 判定已与当前候选集绑定（review-done
+  // ——candidateDigest 与当前候选集摘要一致，无论 pass 还是 rework：该候选集
+  // 已审过，不再重派）。
+  // verifier 谓词专属词（no-checks-configured / awaiting-review）随 T3 谓词
+  // 退役迁往 checks-step 的 ChecksDueReason（checks-empty / checks-done /
+  // awaiting-review）。
+  | "review-disabled" | "review-done";
 
 export interface PoolEntry {
   key: string;
@@ -171,25 +171,21 @@ export interface DeliveryPoolContext {
   failureCountByKey: Map<string, number>;
   maxAttemptsPerInput: number;
   /** manifest 仓库登记表（repositoryId → active|removed），读取端从
-   *  readWorkspaceManifest 的 repositories[] 装配——developer 与 verifier
-   *  谓词消费。 */
+   *  readWorkspaceManifest 的 repositories[] 装配——developer 谓词消费。 */
   registeredRepos: Map<string, "active" | "removed">;
-  /** 配置的验证命令（Phase-4 T1：config.verification.checks，读取端从配置
-   *  装配，claim.ts 复验同源）——只有 verifier 谓词消费；undefined / 空数组
-   *  = 未配置（no-checks-configured）。 */
-  checks?: DeliveryCheckConfig[];
   /** review 阶段开关（final-arch step-3 T2：config.stages.review.enabled，读取
    *  端与 claim.ts poolRecheck 同源装配；缺省/缺键 = false = 旧流程零变化）——
-   *  verification 阶段的角色投影（欠审 → reviewer / 过审 → verifier）与
-   *  verifier 谓词的 awaiting-review 闸消费。 */
+   *  verification 阶段的角色投影（欠审 → reviewer / 过审 → system 检查步）与
+   *  reviewPending 判定消费。 */
   reviewEnabled?: boolean;
 }
 
 /** 先审后跑门（final-arch step-3 T2）：当前候选集是否仍欠 reviewer 审查——
  *  review 开启 ∧ 候选集没有「pass 且 candidateDigest 与当前候选集一致」的
- *  审查判定。三处共用同一判定（永不漂移）：verifier 谓词的 awaiting-review
- *  闸、verification 阶段的角色投影（欠审 → reviewer，过审 → verifier）、
- *  Task 3 的 checksDue。导出 = 谓词/投影/池测试共用面（纯函数零 fs）。 */
+ *  审查判定。共用同一判定（永不漂移）的三处：verification 阶段的角色投影
+ *  （欠审 → reviewer，过审 → 交给 system 检查步）、checks-step 的 checksDue
+ *  （awaiting-review 闸）。（T3 起原第三处 verifier 谓词随谓词退役——本导出
+ *  即谓词/投影/池测试与 checks-step 的共用面，纯函数零 fs。） */
 export function reviewPending(
   item: Pick<DeliveryPoolItem, "delivery">,
   ctx: Pick<DeliveryPoolContext, "reviewEnabled">,
@@ -209,15 +205,22 @@ const CLAIMABLE_STATUSES: readonly string[] = ["open", "blocked"];
 const PRIORITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
 const UNKNOWN_PRIORITY_RANK = PRIORITY_RANK.P3 + 1;
 
+/** 投影与 checks-step due 扫描共用的优先级序（P0→P3，未知垫底）——单一事实源，
+ *  两处排序不得漂移。 */
+export function deliveryPriorityRank(priority: string): number {
+  return PRIORITY_RANK[priority] ?? UNKNOWN_PRIORITY_RANK;
+}
+
 /** designer 可领阶段（领取事务内流转到 design 后不再可领）。 */
 const DESIGNER_READY_PHASE = "intake";
 /** developer 可领阶段（spec §3）——也是角色判定：处于该阶段的项按 developer
- * 谓词投影，其余（含 developer 领取后的 implementation）按 designer 谓词
- * （P2 wrong-phase 语义不变）。 */
+ *  谓词投影，其余（含 developer 领取后的 implementation）按 designer 谓词
+ *  （P2 wrong-phase 语义不变）。 */
 const DEVELOPER_READY_PHASE = "ready_for_implementation";
-/** verifier 可领阶段（Phase-4 spec §3）——角色判定同款：处于该阶段的项按
- *  verifier 谓词投影（claim 不改阶段，验证就是该阶段的活动）。 */
-const VERIFIER_READY_PHASE = "verification";
+/** verification 阶段（final-arch step-3：先审后跑）——角色判定：欠审 →
+ *  reviewer；过审 → 交给引擎 system 检查步（T3 起 verifier 谓词退役，过审项
+ *  不再是 LLM 可领任务，按 P2 语义落 designer wrong-phase 桶等系统开跑）。 */
+const VERIFICATION_PHASE = "verification";
 /** release-preparer 可领阶段（Phase-5 spec §2）——角色判定同款：处于该阶段的
  *  项按 release-preparer 谓词投影（claim 不改阶段，准备发布材料就是该阶段的
  *  活动；released 等更后阶段照旧 designer wrong-phase）。 */
@@ -271,45 +274,6 @@ function developerReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): Des
   return [...reasons, ...sharedReasons(item, ctx)];
 }
 
-/** verifier 谓词（Phase-4 spec §3，binding）：ready ⇔ managed ∧ enabled ∧
- * （阶段由角色判定保证——只有 verification 的项按本谓词投影）∧ designConfirmed
- * 真值 ∧ 候选非空 ∧ 配置 checks 非空 ∧ 每个 check 的 repositoryId（缺省=候选
- * 首仓）在候选仓集合内且 manifest 登记 active ∧ 共用检查。空候选 →
- * no-repo-scope（候选即 verifier 的仓范围，与 developer 空范围同因）；checks
- * 未配置/为空 → no-checks-configured（引导人配置或走人工验证）。仓解析检查在
- * 候选/检查齐备前无意义（缺省仓无从解析 / 空集恒空过）——同 developer 的
- * if/elif 结构。 */
-function verifierReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): DesignerPoolReason[] {
-  const reasons: DesignerPoolReason[] = [];
-  if (!item.delivery) reasons.push("not-managed");
-  if (!ctx.enabled) reasons.push("automation-disabled");
-  if (!item.delivery?.designConfirmed) reasons.push("design-unconfirmed");
-  const candidates = item.delivery?.candidates ?? [];
-  const checks = ctx.checks ?? [];
-  if (candidates.length === 0) {
-    reasons.push("no-repo-scope");
-  } else if (checks.length === 0) {
-    reasons.push("no-checks-configured");
-  } else {
-    const candidateRepoIds = new Set(candidates.map((candidate) => candidate.repositoryId));
-    // 缺省 repositoryId = 候选首仓（spec §7）。
-    const fallbackRepositoryId = candidates[0].repositoryId;
-    const repoViolation = checks.some((check) => {
-      const repositoryId = check.repositoryId ?? fallbackRepositoryId;
-      return (
-        !candidateRepoIds.has(repositoryId) ||
-        ctx.registeredRepos.get(repositoryId) !== "active"
-      );
-    });
-    if (repoViolation) reasons.push("repo-not-registered");
-  }
-  // 先审后跑闸（final-arch step-3 T2）：review 开启且当前候选集尚未审查通过
-  // → awaiting-review（判定与角色投影共用 reviewPending——经投影不可达，欠审
-  // 项已被分给 reviewer；闸本体留给 Task 3 的 checksDue 复用）。
-  if (reviewPending(item, ctx)) reasons.push("awaiting-review");
-  return [...reasons, ...sharedReasons(item, ctx)];
-}
-
 /** reviewer 谓词（final-arch step-3 T2，先审后跑，binding）：ready ⇔ managed ∧
  *  enabled ∧ review 阶段开关开启（阶段由角色判定保证——只有欠审的 verification
  *  项按本谓词投影）∧ 候选非空（候选即 reviewer 的审阅对象，空 → no-repo-scope）
@@ -322,8 +286,8 @@ function reviewerReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext): Desi
   const reasons: DesignerPoolReason[] = [];
   if (!item.delivery) reasons.push("not-managed");
   if (!ctx.enabled) reasons.push("automation-disabled");
-  // 防御分支（经投影不可达：角色投影把 review 关闭的项分给 verifier）——
-  // 词表完整性与 Task 3 复用面保留。
+  // 防御分支（经投影不可达：角色投影把 review 关闭的项交给 system 检查步）——
+  // 词表完整性保留。
   if (ctx.reviewEnabled !== true) reasons.push("review-disabled");
   const candidates = item.delivery?.candidates ?? [];
   if (candidates.length === 0) {
@@ -363,13 +327,14 @@ function releasePreparerReasons(item: DeliveryPoolItem, ctx: DeliveryPoolContext
 }
 
 /**
- * 角色投影（final-arch step-3 T2 增 reviewer 分流）：每项按所处阶段选定角色
- * （ready_for_implementation → developer，verification → reviewPending 分流——
- * 欠审 → reviewer、过审 → verifier（interim，Task 3 换 system 步），
- * release_ready → release-preparer，其余 → designer）后套该角色谓词。所有命中
- * 原因按声明顺序累积（供 UI 与日志），不短路——多项违例一次看全。输出按
- * P0→P3→key 升序（未知优先级垫底）；角色不作 tiebreaker——同优先级跨角色按
- * key 交错。
+ * 角色投影（final-arch step-3 T3 起 verification 不再投影 verifier）：每项按
+ * 所处阶段选定角色（ready_for_implementation → developer；verification →
+ * reviewPending 分流——欠审 → reviewer，过审 → 交给引擎 system 检查步
+ * （checks-step.checksDue 的 due 输入，不再是 LLM 可领任务——按 P2 语义落
+ * designer wrong-phase 桶）；release_ready → release-preparer，其余 →
+ * designer）后套该角色谓词。所有命中原因按声明顺序累积（供 UI 与日志），
+ * 不短路——多项违例一次看全。输出按 P0→P3→key 升序（未知优先级垫底）；角色
+ * 不作 tiebreaker——同优先级跨角色按 key 交错。
  */
 export function projectDeliveryPool(
   items: DeliveryPoolItem[],
@@ -378,10 +343,8 @@ export function projectDeliveryPool(
   const entries: PoolEntry[] = items.map((item) => {
     const role: DeliveryRole = item.phase === DEVELOPER_READY_PHASE
       ? "developer"
-      : item.phase === VERIFIER_READY_PHASE
-        ? reviewPending(item, ctx)
-          ? "reviewer"
-          : "verifier"
+      : item.phase === VERIFICATION_PHASE && reviewPending(item, ctx)
+        ? "reviewer"
         : item.phase === RELEASE_PREPARER_READY_PHASE
           ? "release-preparer"
           : "designer";
@@ -389,11 +352,9 @@ export function projectDeliveryPool(
       ? developerReasons(item, ctx)
       : role === "reviewer"
         ? reviewerReasons(item, ctx)
-        : role === "verifier"
-          ? verifierReasons(item, ctx)
-          : role === "release-preparer"
-            ? releasePreparerReasons(item, ctx)
-            : designerReasons(item, ctx);
+        : role === "release-preparer"
+          ? releasePreparerReasons(item, ctx)
+          : designerReasons(item, ctx);
     // 澄清问答原样随条目透出（final-arch step-2 Task 3——dispatcher 把已答
     // 部分随任务包进下一轮开场 prompt）；无澄清 → 键省略（投影形状零变化）。
     const clarifications = item.delivery?.clarifications ?? [];
@@ -410,8 +371,7 @@ export function projectDeliveryPool(
   });
   entries.sort(
     (left, right) =>
-      (PRIORITY_RANK[left.priority] ?? UNKNOWN_PRIORITY_RANK) -
-        (PRIORITY_RANK[right.priority] ?? UNKNOWN_PRIORITY_RANK) ||
+      deliveryPriorityRank(left.priority) - deliveryPriorityRank(right.priority) ||
       left.key.localeCompare(right.key),
   );
   return entries;
@@ -420,10 +380,11 @@ export function projectDeliveryPool(
 // -------------------------------------------------------------------- read side
 
 /** manifest 仓库登记表（id → active|removed）。manifest 缺失/损坏 → 空表
- * （developer/verifier 项以 repo-not-registered 可见，designer 不受影响——池子
+ * （developer 项以 repo-not-registered 可见，designer 不受影响——池子
  * 读路径的既有 fs 容错习语；dispatcher 路径本就先经 assertAutomationCapable
- * 复验）。 */
-async function readRegisteredRepos(
+ * 复验）。final-arch step-3 T3：checks-step 的 due 扫描装配同一张表（导出
+ * 共用）。 */
+export async function readRegisteredRepos(
   workspacePath: string,
 ): Promise<Map<string, "active" | "removed">> {
   try {
@@ -510,8 +471,9 @@ export async function listDeliveryPool(
       failureCountByKey,
       maxAttemptsPerInput,
       registeredRepos,
-      checks: config?.verification?.checks,
       // 先审后跑（final-arch step-3 T2）：缺键 = false = 旧流程零变化。
+      //（T3：config.verification.checks 不再进投影 ctx——verifier 谓词退役，
+      // 检查配置由 checks-step 的 due 扫描直接从 config 装配。）
       reviewEnabled: config?.stages?.review?.enabled ?? false,
     },
   );
