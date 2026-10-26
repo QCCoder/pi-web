@@ -29,6 +29,8 @@
 //   final-arch step-2（2026-10-26）：共用检查增 awaiting-answer 澄清门——任一
 //     delivery.clarifications 条目未答（answer 缺席）即停领等人工答复（ask 事务
 //     的持久产物，四角色同门；答复走 Task 4 的 answer-clarification 人工动作）。
+//     Task 3 起纯投影另把问答原样带进 PoolEntry.clarifications——dispatcher 把
+//     已答部分随任务包进下一轮开场 prompt（role-session「人的答复」段）。
 import {
   countRecentFailures,
   listPendingInterruptions,
@@ -38,7 +40,7 @@ import {
 import { readDeliveryRunnerConfig, DEFAULT_DELIVERY_RUNNER_CONFIG } from "./config.ts";
 import type { DeliveryCheckConfig } from "./config.ts";
 import { candidatesDigest, contentDigest } from "../delivery-types.ts";
-import type { DeliveryCandidate } from "../delivery-types.ts";
+import type { DeliveryCandidate, DeliveryClarification } from "../delivery-types.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
 import { readWorkspaceManifest } from "../../workspaces/service.ts";
 import type { DeliveryRole } from "./roles.ts";
@@ -87,6 +89,9 @@ export interface PoolEntry {
   reasons: DesignerPoolReason[];
   /** 该项当前所处角色的投影（由 phase 决定，见模块头）。 */
   role: DeliveryRole;
+  /** 条目携带的澄清问答（final-arch step-2 Task 3，原样透传——已答/未答都在；
+   *  dispatcher 把已答部分随任务包进下一轮开场 prompt）。键省略 = 无澄清。 */
+  clarifications?: Array<Pick<DeliveryClarification, "question" | "answer" | "askedAt">>;
 }
 
 /** 纯投影的项输入（listDeliveryPool 从 WorkItemRecord 装配）。delivery
@@ -117,10 +122,11 @@ export interface DeliveryPoolItem {
      *  在场与否（在场 → release-plan-exists，已准备过的项不再自动重派；读取
      *  端透传完整 DeliveryReleasePlan，纯投影不读内容）。 */
     releasePlan?: unknown;
-    /** 澄清问答（final-arch step-2）——共用检查消费：任一条 answer 缺席 →
-     *  awaiting-answer（未答 = 输入不完整，停领等人工答复）；读取端透传完整
-     *  DeliveryClarification，纯投影只读 answer 在场与否。 */
-    clarifications?: Array<{ answer?: string }>;
+    /** 澄清问答（final-arch step-2）——两处消费：共用检查看 answer 在场与否
+     *  （任一缺席 → awaiting-answer）；纯投影把问答/时间序原样带进 PoolEntry
+     *  （Task 3——dispatcher 据此把已答部分随任务包进开场 prompt）。读取端
+     *  透传完整 DeliveryClarification，结构子集即可。 */
+    clarifications?: Array<Pick<DeliveryClarification, "question" | "answer" | "askedAt">>;
   } | null;
 }
 
@@ -302,6 +308,9 @@ export function projectDeliveryPool(
         : role === "release-preparer"
           ? releasePreparerReasons(item, ctx)
           : designerReasons(item, ctx);
+    // 澄清问答原样随条目透出（final-arch step-2 Task 3——dispatcher 把已答
+    // 部分随任务包进下一轮开场 prompt）；无澄清 → 键省略（投影形状零变化）。
+    const clarifications = item.delivery?.clarifications ?? [];
     return {
       key: item.key,
       title: item.title,
@@ -310,6 +319,7 @@ export function projectDeliveryPool(
       ready: reasons.length === 0,
       reasons,
       role,
+      ...(clarifications.length > 0 ? { clarifications } : {}),
     };
   });
   entries.sort(

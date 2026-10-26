@@ -17,6 +17,12 @@
 // 无 worktrees/checks）；submit 增第四形状 release_notes（必填）+
 // rollback_notes（可选）——服务端写 delivery.releasePlan，phase 保持
 // release_ready 等人 record-release；工具面仍恰五件。
+// final-arch step-2 Task 3: 第六件工具 delivery_ask_human（spec
+// 2026-10-26-final-arch）——四角色通用的问人出口：askHumanQuestion 单实现
+// （claim.ts，问的行为跨角色逐字节相同），释放领取、phase 不动、失败预算不写
+// ——问人不是失败；人工答复后项回池，下一轮开场 prompt 携带问答
+//（role-session opening 的「人的答复」段）。凭证一次性失效（ask 不幂等，
+// 同 fail）。
 // 挂载在 buildWorkspaceExtensions（capabilities 含 work-items ∧ workflows，
 // extensions.ts），只对被 dispatcher 授予角色（designer | developer | verifier |
 // release-preparer）的会话可用：execute 第一步经 roleGrantOf(sessionId) 验身份
@@ -24,9 +30,10 @@
 //（ownerToken/attemptId/generation）全程住在进程内 role grant（role-grants.ts），
 // 绝不出现在参数 schema。
 //
-// 工具面五件：list / claim / submit / fail / run_check。confirm-design、
-// record-verification、release、block、unblock、cancel 等人工/动作面住在
-// M2 delivery 路由（HTTP），刻意不做成 LLM 工具——确认与放行是人的手。
+// 工具面六件：list / claim / submit / fail / ask / run_check。confirm-design、
+// record-verification、release、block、unblock、cancel、answer-clarification
+// 等人工/动作面住在 M2 delivery 路由（HTTP），刻意不做成 LLM 工具——确认、
+// 放行与答复是人的手。
 //
 // 身份来源：ctx.sessionManager.getSessionId()（ExtensionAPI 本身不带
 // sessionId；与 work-items extension 的 conversationId 同款通道）。
@@ -38,6 +45,7 @@ import { Type } from "typebox";
 import { WorkItemConflictError, WorkItemValidationError } from "../errors.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
 import {
+  askHumanQuestion,
   claimDesignerTask,
   claimDeveloperTask,
   claimReleasePreparerTask,
@@ -614,6 +622,82 @@ export function createDeliveryRunnerExtension(
             return result({
               ok: true,
               message: `已释放领取（${params.key}）——${params.reason}`,
+              item: itemSummary(detail.item),
+            });
+          } catch (error) {
+            return errorResult(
+              error,
+              error instanceof WorkItemConflictError
+                ? "领取凭证已失效（他方领取、人工处理或已释放）——结束本轮即可"
+                : undefined,
+            );
+          }
+        },
+      });
+
+      // final-arch step-2 Task 3：第六件工具——问人（ask-a-human），四角色通用
+      // （askHumanQuestion 单实现，差异只在凭据校验的 expectedRole=grant.role）。
+      // 问人不是失败：释放领取、phase 一概不动、失败预算不写（不计不断）；人工
+      // 答复（HTTP answer-clarification）后项回池，下一轮开场 prompt 携带问答。
+      // 凭证一次性失效（同 fail）——ask 不是幂等动作，重问须重新领取。
+      pi.registerTool({
+        name: "delivery_ask_human",
+        label: "Ask the Human a Clarifying Question",
+        description:
+          "Ask the human ONE clarifying question about the claimed task and end your "
+          + "round: the claim is released (phase untouched, NOT counted against the "
+          + "failure budget), the human answers in the UI, and the item returns to "
+          + "the pool — your next round's opening prompt carries the answer. Use it "
+          + "when the input is ambiguous or a decision is yours to execute but not "
+          + "yours to make. Credentials are server-held and invalidated by asking "
+          + "(re-claim after the answer).",
+        promptGuidelines: [
+          "Ask one decision at a time — never bundle multiple questions into one call.",
+          "When the choice is enumerable, always provide options plus a recommended default.",
+          "After asking, end the turn — the round is over; do not re-claim until answered.",
+        ],
+        promptSnippet: "Ask the human one clarifying question, release the claim and end the round",
+        parameters: Type.Object({
+          key: Type.String({ description: "Human key of the claimed task" }),
+          question: Type.String({
+            description: "The single question for the human (concrete, self-contained)",
+          }),
+          options: Type.Optional(Type.Array(Type.String({
+            description: "One enumerable choice",
+          }), {
+            description: "Candidate answers the human can pick from (omit for open questions)",
+          })),
+          recommended: Type.Optional(Type.String({
+            description: "Your recommended default among the options",
+          })),
+        }),
+        execute: async (_callId, params, _signal, _update, ctx) => {
+          const sessionId = ctx.sessionManager.getSessionId();
+          const gate = requireRoleGrant(sessionId, workspacePath);
+          if (typeof gate === "string") return denied(gate);
+          const credentials = claimCredentialsOf(gate);
+          if (credentials === null) return denied(NO_CLAIM_CREDENTIALS);
+          try {
+            const { detail, clarificationId } = await askHumanQuestion({
+              workspacePath,
+              key: params.key,
+              attemptId: credentials.attemptId,
+              generation: credentials.generation,
+              ownerToken: credentials.ownerToken,
+              role: gate.role,
+              question: params.question,
+              ...(params.options !== undefined ? { options: [...params.options] } : {}),
+              ...(params.recommended !== undefined
+                ? { recommended: params.recommended }
+                : {}),
+              // 会话自链接（服务层不变式，四角色 submit 先例）。
+              conversationId: sessionId,
+            });
+            resetToBareGrant(sessionId, gate);
+            return result({
+              ok: true,
+              clarificationId,
+              message: `已向人提问并释放领取（${params.key}）——结束本轮，等待人工答复`,
               item: itemSummary(detail.item),
             });
           } catch (error) {

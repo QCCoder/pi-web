@@ -155,14 +155,17 @@ export class DeliveryDispatcher implements HostJob {
     // fire-and-forget：只领首条（单槽位互斥由 activeExecution 承担）；角色随
     // 条目流动（pool 投影自带 role——launchRoleSession 按它分派合同/授权）；
     // launch 时领取未发生，claim 传空对象（worktree 清单以领取返回为准）。
-    // 失败记日志不进 tick——下一拍池子复评自然重试（失败预算在 claim/fail
-    // 服务侧管）。
+    // 上一轮 ask 的已答澄清随任务包进下一轮开场 prompt（final-arch step-2
+    // Task 3——只透传已答条目：未答项本被池谓词 awaiting-answer 挡在 ready 外，
+    // 此过滤是防御性钉子）。失败记日志不进 tick——下一拍池子复评自然重试
+    //（失败预算在 claim/fail 服务侧管）。
     void this.deps.launch({
       workspaceId: workspace.id,
       workspacePath: workspace.path,
       role: entry.role,
       task: { key: entry.key, title: entry.title },
       claim: {},
+      clarifications: (entry.clarifications ?? []).filter((c) => c.answer !== undefined),
       config,
     }).catch((error) => {
       console.error(`[delivery-runner] ${entry.role} launch failed for ${entry.key}:`, error);

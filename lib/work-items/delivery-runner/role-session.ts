@@ -4,10 +4,13 @@
 // 剧本名 = 角色名，config.roles[role].profile 可覆写；正文经 appendSystemPrompt
 // 注入，frontmatter 的 model 作模型覆写来源），引擎只保留对四角色一致的回合
 // 不变式（AGENT_INVARIANT_CONTRACT，spec §4.3.1 六条：领取纪律 / 写域隔离 /
-// submit-fail 终态 / 证据规则 / 人工动作边界 / 项目事实出处）。开场 prompt 单一
-// 通用四步（列池 → 领指派项 → 按剧本工作 → submit/fail 结束）；领取上下文
-// （需求、上游产物、worktree 或检查清单）由 delivery_claim_task 的返回带给
-// 会话——不进系统提示。
+// submit-fail-ask 终态 / 证据规则 / 人工动作边界 / 项目事实出处）。开场 prompt
+// 单一通用四步（列池 → 领指派项 → 按剧本工作 → submit/fail/ask 结束）；领取
+// 上下文（需求、上游产物、worktree 或检查清单）由 delivery_claim_task 的返回
+// 带给会话——不进系统提示。final-arch step-2 Task 3（2026-10-26）：上一轮
+// delivery_ask_human 的人工答复随任务包回场——LaunchRoleOptions.clarifications
+//（dispatcher 自池条目透传，只含已答）进开场 prompt 的「人的答复」段（按
+// askedAt 升序、仅已答；无已答则整段不出），下一轮从人的决定起步。
 //
 // dispatcher 判定该起角色会话时调 launchRoleSession：两步创建序
 // （sessionId 到手 → grantRole → delivery 执行登记 → 命名 → 开场 prompt），
@@ -41,19 +44,20 @@ import { heartbeatActiveClaim, recordInterruption } from "./claim.ts";
 import { readClaim, type ClaimState } from "./attempts.ts";
 import { grantRole, revokeRole } from "./role-grants.ts";
 import { listWorkItems, readWorkItem } from "../service.ts";
+import type { DeliveryClarification } from "../delivery-types.ts";
 import type { DeliveryRunnerConfig, DeliveryRoleConfig } from "./config.ts";
 import type { DeliveryRole } from "./pool.ts";
 import type { RoleWorktree } from "./worktrees.ts";
 
 /** 交付回合不变式（spec §4.3.1 六条，四角色一致）：领取纪律 / 写域隔离 /
- *  submit-fail 终态 / 证据规则 / 人工动作边界 / 项目事实出处。role 与 key 是
- *  仅有的内插位；工具名不加反引号（库内 prompt 习语）。 */
+ *  submit-fail-ask 终态 / 证据规则 / 人工动作边界 / 项目事实出处。role 与 key
+ *  是仅有的内插位；工具名不加反引号（库内 prompt 习语）。 */
 export const AGENT_INVARIANT_CONTRACT: (ctx: { role: DeliveryRole; key: string }) => string = ({ role, key }) =>
   `# 交付回合不变式（${role} · ${key}）
 
 1. 先 delivery_claim_task 成功才动手；本轮只领指派项 ${key}，不可领取即说明并结束。
 2. 只在 claim 返回的 worktree / 目录内写，其余一律只读；不合并、不推送、不碰受保护分支——集成与发布是引擎与人的事。
-3. 本轮以 submit / fail 二者之一结束；结束时不得留进行中的领取。
+3. 本轮以 submit / fail / ask 三者之一结束；结束时不得留进行中的领取。
 4. 自述不是证据；检查只经 delivery_run_check 触发。
 5. 确认、验收、发布登记没有工具——那是人的手。
 6. 项目事实（gate 命令、构建环境、分支纪律）查工作区 AGENTS.md 与你的剧本。`;
@@ -86,16 +90,41 @@ export function composeRoleSystemPrompt(
   return parts.join("\n\n");
 }
 
+/** 开场任务包携带的澄清（final-arch step-2 Task 3）：上一轮 delivery_ask_human
+ *  的条目子集——只保留问答与时间序所需的字段。 */
+export type OpeningClarification = Pick<
+  DeliveryClarification,
+  "question" | "answer" | "askedAt"
+>;
+
 /** 开场指令（四角色单一通用文案，仅首行 role 字样不同）：列池 → 领指派项 →
- *  按剧本工作（上下文以领取返回为准）→ submit/fail 结束。 */
-export function openingPromptFor(role: DeliveryRole, task: { key: string; title: string }): string {
-  return [
+ *  按剧本工作（上下文以领取返回为准）→ submit/fail/ask 结束。context.
+ *  clarifications 含已答条目时，在四步之后追加「人的答复」段（按 askedAt 升序，
+ *  每条一行问一行答；未答条目省略；无已答则整段不出——prompt 与无 context
+ *  时逐字节相同）。 */
+export function openingPromptFor(
+  role: DeliveryRole,
+  task: { key: string; title: string },
+  context?: { clarifications?: ReadonlyArray<OpeningClarification> },
+): string {
+  const steps = [
     `你是本工作区的交付 ${role} 会话，请开始本轮工作：`,
     "1. 调用 delivery_list_ready_tasks 列出当前就绪池；",
     `2. 用 delivery_claim_task 领取本轮目标 ${task.key} ${task.title}——本轮只领取这一项；若它已不可领取（被领走/门禁变化），说明原因后结束本轮，不要领取其他工作项；`,
     "3. 依据领取返回的上下文（需求、上游产物、worktree 或检查清单）按你的剧本完成本阶段工作；",
-    "4. 用 delivery_submit_result 提交后即结束本轮；无法推进时用 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
-  ].join("\n");
+    "4. 用 delivery_submit_result 提交后即结束本轮；需要人的决定时用 delivery_ask_human 提问后结束；无法推进时用 delivery_fail_task 说明原因（环境/依赖阻塞带 blocked=true）后结束。",
+  ];
+  // 上一轮 ask 的人工答复随任务包回场（ISO askedAt 字典序 = 时间序；空白答复
+  // 视同未答——dispatcher 只滤 undefined，此处是最后一道语义滤网）。
+  const answered = (context?.clarifications ?? [])
+    .filter((c) => c.answer !== undefined && c.answer.trim() !== "")
+    .sort((a, b) => a.askedAt.localeCompare(b.askedAt));
+  const section = answered.length === 0
+    ? ""
+    : `\n\n## 人的答复（按时间）${
+      answered.map((c) => `\nQ: ${c.question}\nA: ${c.answer}`).join("")
+    }`;
+  return `${steps.join("\n")}${section}`;
 }
 
 /** claim 心跳周期（spec §5.2 轻量续约；四角色共用）。 */
@@ -211,6 +240,10 @@ export interface LaunchRoleOptions {
   /** 领取上下文（dispatcher 透传空对象）。装配当前不消费——worktree/检查清单
    *  由 delivery_claim_task 的返回带给会话，不进系统提示；类型保留以稳调用面。 */
   claim: { worktrees?: RoleWorktree[] };
+  /** 上一轮 delivery_ask_human 的人工答复（dispatcher 自池条目透传，只含已答
+   *  ——未答项被池谓词挡在 ready 外）——openingPromptFor 据此追加「人的答复」
+   *  段，下一轮从人的决定起步。 */
+  clarifications?: OpeningClarification[];
   config: DeliveryRunnerConfig;
   deps?: LaunchDeps;
 }
@@ -344,9 +377,13 @@ export async function launchRoleSession(opts: LaunchRoleOptions): Promise<string
     return sessionId;
   }
 
-  // 5. 开场指令。send 只等受理（fire-and-forget），轮结束由结束钩子兜底。
+  // 5. 开场指令。send 只等受理（fire-and-forget），轮结束由结束钩子兜底；
+  //    上一轮 ask 的已答澄清随任务包进「人的答复」段。
   try {
-    await d.sendCommand(sessionId, { type: "prompt", message: openingPromptFor(role, task) });
+    await d.sendCommand(sessionId, {
+      type: "prompt",
+      message: openingPromptFor(role, task, { clarifications: opts.clarifications }),
+    });
   } catch (error) {
     await handleEnd().catch(() => {});
     d.destroySession(sessionId);
