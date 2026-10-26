@@ -96,8 +96,8 @@ const DELIVERY_ACTION_SET: ReadonlySet<string> = new Set([
   "block",
   "unblock",
   "cancel",
-  // 词表已进（delivery-types DELIVERY_ACTIONS；路由 slug 门放行）——流转 case
-  // 由 step-2 Task 4 实现，此前落到 switch default 的干净 400。
+  // 词表与路由 slug 门同源（delivery-types DELIVERY_ACTIONS）；流转 case 见
+  // switch 内 answer-clarification（final-arch step-2 Task 4 起实现）。
   "answer-clarification",
 ]);
 
@@ -416,9 +416,36 @@ export function planDeliveryTransition(
         eventData: { phase: item.phase, ...(reason !== undefined ? { reason } : {}) },
       };
     }
+    // 人工答复（final-arch step-2 Task 4）：与 confirm-design / record-release
+    // 同款「人的手」，刻意不做 LLM 工具。phase/status 一概不动（答复只是补全
+    // 输入——池谓词 awaiting-answer 解除后同阶段重新可领）；答案不可变（改主意
+    // 是 agent 的新问题，不是改写历史条目）。
+    case "answer-clarification": {
+      const clarificationId = requireText(payload.clarificationId, "clarificationId");
+      const clarifications = base.clarifications ?? [];
+      const entry = clarifications.find((candidate) => candidate.id === clarificationId);
+      if (entry === undefined) {
+        throw new WorkItemValidationError(`clarification not found: ${clarificationId}`);
+      }
+      if (entry.answer !== undefined) {
+        throw new WorkItemConflictError(`clarification already answered: ${clarificationId}`);
+      }
+      const answer = requireText(payload.answer, "answer");
+      return {
+        phase: item.phase,
+        delivery: {
+          ...base,
+          clarifications: clarifications.map((candidate) =>
+            candidate.id === clarificationId
+              ? { ...candidate, answer, answeredAt: at }
+              : candidate),
+        },
+        eventType: "delivery.answered",
+        eventData: { clarificationId, phase: item.phase },
+      };
+    }
     // 词表与实现解耦的保险（controller ruling）：进词表但流转 case 未实现的
-    // slug（如 Task 4 前的 answer-clarification）必须是干净 400，而非 undefined
-    // 返回静默产出坏 plan。
+    // slug 必须是干净 400，而非 undefined 返回静默产出坏 plan。
     default:
       throw new WorkItemValidationError(`Unknown delivery action: ${String(action)}`);
   }
