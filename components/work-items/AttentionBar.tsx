@@ -5,15 +5,16 @@ import type { AttentionEntry, AttentionKind } from "@/lib/api-types";
 
 /**
  * 中央页顶部「待处理」条（final-arch step-2 Task 6，spec §8——唯一人工待办
- * 队列的 UI 面）：GET /api/workspaces/[id]/attention 的四类条目按 kind 计数成
- * chips（待答问题 / 待确认设计 / 待登记发布 / 阻塞），展开后逐行 KEY · 标题 ·
- * 已 N 天 · 已催办/已泊车 徽标（完整 detail 进 title），点行 → onSelectItem(key)
- * 定位详情——未答澄清在详情的 ClarificationPanel 作答。取数时机 = 挂载 +
- * refreshToken 变化：宿主 WorkItemsPage 把共享快照的 fetchedAt 传进来，即复用
- * 既有 5s 轮询节拍，本组件不建第二个 timer。空队列渲染 null；取数失败降级为
- * 一行 muted 提示（advisory 面板不抛错、不打断页面；已有条目时保留旧列表）。
- * AttentionBarView 是纯展示子件，测试直染（WorkItemExecution 的 props 注入
- * 同款习语）。条在页面流内，不设固定视口高度（ui-shell 键盘适配规则）。
+ * 队列的 UI 面）：GET /api/workspaces/[id]/attention 的五类条目按 kind 计数成
+ * chips（待答问题 / 待确认设计 / 待登记发布 / 待人工验收 / 阻塞），展开后
+ * 逐行 KEY · 标题 · 已 N 天 · 已催办/已泊车 徽标（完整 detail 进 title），点行
+ * → onSelectItem(key) 定位详情——未答澄清在详情的 ClarificationPanel 作答。
+ * 取数时机 = 挂载 + refreshToken 变化：宿主 WorkItemsPage 把共享快照的
+ * fetchedAt 传进来，即复用既有 5s 轮询节拍，本组件不建第二个 timer。空队列
+ * 渲染 null；取数失败降级为一行 muted 提示（advisory 面板不抛错、不打断页
+ * 面；已有条目时保留旧列表）。AttentionBarView 是纯展示子件，测试直染
+ * （WorkItemExecution 的 props 注入同款习语）。条在页面流内，不设固定视口
+ * 高度（ui-shell 键盘适配规则）。
  */
 
 /** kind 定序与文案（chips 固定序 = 任务书列举序；acceptance = step-4 人工验收）。 */

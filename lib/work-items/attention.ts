@@ -24,10 +24,13 @@
 //                 config 的 stages.acceptance.enabled——纯投影不读 config，标志
 //                 由调用方传入（digests/acceptanceRequired 的注入同款）；匹配的
 //                 验收记录落地（record-acceptance）即消失，候选换过则重现。
-//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 四事件最新者：
+//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 五事件最新者：
 //                 delivery.block（detail=block 原因）/ delivery.checks_unverified
 //                 （system 检查步环境未就绪写点，detail=未过检查名，缺名
-//                 「环境未就绪待修复」）/ delivery.automation_paused
+//                 「环境未就绪待修复」）/ delivery.integrate_failed
+//                 （final-arch step-4 集成段失败写点——spec §5.3 第四步与
+//                 checks_unverified 同走 blocked 类，detail=「集成失败（仓）」，
+//                 缺仓回落「集成失败」）/ delivery.automation_paused
 //                 （detail=「自动化已暂停待恢复」——暂停 reason 文本只在
 //                 automation-paused.json，纯投影输入只有 key 集）/ 
 //                 delivery.exec_interrupted（detail=「执行中断待恢复」，
@@ -146,7 +149,9 @@ function entry(
 /** blocked 的 since/detail：各信号的事件锚点取最新，detail 跟随胜出信号；
  *  零事件回落 updatedAt + 按信号静态文案（block 优先，与任务书列举序一致）。
  *  system 检查步的 blocked 不写 delivery.block——checks_unverified 同为锚点
- *  （detail = 未过检查名，缺名回落固定文案）。 */
+ *  （detail = 未过检查名，缺名回落固定文案）；integrate 集成段失败同样落
+ *  blocked——delivery.integrate_failed 也是锚点（detail = 集成失败（首败仓），
+ *  缺仓回落固定文案），同一「最新者胜出」候选列表。 */
 function blockedSinceDetail(
   item: WorkItemRecord,
   events: WorkItemEvent[],
@@ -168,6 +173,16 @@ function blockedSinceDetail(
       candidates.push({
         at: checksUnverified.at,
         detail: names.length > 0 ? names.join("、") : "环境未就绪待修复",
+      });
+    }
+    const integrateFailed = latestEvent(events, "delivery.integrate_failed");
+    if (integrateFailed !== undefined) {
+      const repositoryId = integrateFailed.data?.repositoryId;
+      candidates.push({
+        at: integrateFailed.at,
+        detail: typeof repositoryId === "string" && repositoryId !== ""
+          ? `集成失败（${repositoryId}）`
+          : "集成失败",
       });
     }
   }
