@@ -10,11 +10,12 @@
 // （提示本身不在本模块）。模板同时可被 lib/subagents.ts 的 parseProfileFile
 // 解析（name 合法、正文即 systemPrompt）——.pi/agents 本就是双用途目录。
 //
-// final-arch step-3 Task 1（2026-10-26）：模板表 Partial 化——`reviewer` 先于
-// 模板进词表（roles.ts），这里**刻意不写占位模板**（一次性播种记录会把占位
-// 变成永久）。无模板的角色不播种、不记录、也不进 skipped（结果两列表整个缺
-// 席）；SEEDABLE_ROLES = 词表 ∩ 有模板，播种循环与 fail-safe 全集都以它为准。
-// Task 4 补真 reviewer 模板后此过渡自然消失。
+// final-arch step-3 Task 1（2026-10-26）：模板表随词表进 reviewer。
+// Task 4（2026-10-26）：verifier 模板删除、reviewer 真模板落位（先审后跑三层
+// 审：SPEC/design.md 合规 / README 原始验收核对 / 代码质量）——四活值角色
+// 全部有模板，ROLE_PROFILE_TEMPLATES 回到全键同形
+// Readonly<Record<DeliveryRole, string>>（播种循环直接走 DELIVERY_ROLES）；
+// ROLE_TEMPLATE_VERSION 递增到 2（frontmatter seeded_from 全部跟随）。
 //
 // Final-fix A（2026-10-26）：播种**每角色只一次**，一次性记录在产品持有的
 // `<ws>/.pi/delivery-seeded.json`（spec §6.2/§13.1「播种一次性、永不重建」）：
@@ -32,8 +33,9 @@ import { join, resolve } from "node:path";
 import { DELIVERY_ROLES, type DeliveryRole } from "./roles.ts";
 import { writeAtomic } from "../service.ts";
 
-/** 模板版本：模板内容升级时递增；frontmatter seeded_from 与漂移提示的依据。 */
-export const ROLE_TEMPLATE_VERSION = 1;
+/** 模板版本：模板内容升级时递增；frontmatter seeded_from 与漂移提示的依据。
+ *  Task 4（verifier 退役 / reviewer 模板落位）递增到 2。 */
+export const ROLE_TEMPLATE_VERSION = 2;
 
 /** 播种记录 schemaVersion（记录形状变更时递增并迁移）。 */
 export const DELIVERY_SEED_RECORD_SCHEMA_VERSION = 1;
@@ -99,28 +101,31 @@ const DEVELOPER_BODY = `
 - 设计无法实施（前提不成立、环境缺依赖、与仓库现状冲突）→ 用失败结束并说明具体阻塞点，不要硬造实现。
 `;
 
-const VERIFIER_BODY = `
-# 验证者剧本
+const REVIEWER_BODY = `
+# 评审者剧本
 
-你是本工作区的交付验证者：对开发的候选实现逐项运行配置好的检查。
+你是本工作区的交付评审者：先审后跑——在检查自动运行之前，对开发的候选实现做人工审查。
 
-## 工作方式
+## 三层审查（先审后跑，逐层过）
 
-- 领取返回的 checks 清单就是本轮全部检查项：逐项用 delivery_run_check 运行，一项不落；清单之外的检查不替工作区发明。
-- 同名检查重跑会覆盖旧结果：环境问题（网络、依赖、磁盘等）导致的失败，处理环境后重跑同一项即可。
-- 领取返回里没有检查清单（未配置检查）→ 如实说明后提交。
+1. SPEC/design.md 合规：把已确认设计的验收条件逐条对候选 diff 核对——做了没、做对没、做全没；设计未声明的自作主张改动（顺手重构、夹带行为变化）按违规处理。
+2. README 原始验收核对：回到需求 README 的原始诉求，不迷信设计——设计本身误读了需求时，问题源头标 spec。
+3. 代码质量：调试残留、死代码、缺失的错误处理、与仓库既有模式不符的写法。
 
-## 发现实现问题
+## 检查的边界
 
-- 检查暴露实现缺陷时不要自己动手修：把失败现象（哪项检查、什么输出、指向哪里）写进 notes，开发会在重做轮次处理。
+- 领取返回的 checks 清单可用 delivery_run_check 按名做针对性佐证（比如用一次失败输出确认可疑点）；结果只记录为评审证据。
+- 配置的检查由系统在你提交 pass 后自动全量运行——那是权威判定，不是你、也不由你的佐证结果代替；不要为了「跑全检查」而逐项空转。
 
-## 提交
+## 判定与提交
 
-- 全部检查项都有结果后提交：只需 key，可选附 notes 汇总——检查结果由服务端从运行记录取用，不在参数里传。
+- 用 delivery_submit_result 提交：outcome = pass 或 rework。
+- pass：notes 写审过的要点（三层各自看了什么、结论）。
+- rework：source 必填（code = 实现缺陷 / spec = 设计缺陷），notes 逐条列返工条目，每条格式：file:line 问题 期望 [源头: code|spec]——缺任何一段不算合格条目。
 
 ## 何时失败
 
-- 环境长期不可用、检查无法运行且重试无望 → 用失败结束并说明阻塞情况与已跑 / 未跑清单。
+- 候选 checkout 损坏、材料缺失等环境问题导致无法审查 → 用失败结束并说明阻塞点，不要凭空脑补审查结论。
 `;
 
 const RELEASE_PREPARER_BODY = `
@@ -151,25 +156,17 @@ release_notes（必填）至少覆盖：
 - 用 delivery_submit_result 提交：release_notes 必填，rollback_notes 可选。
 `;
 
-/** 角色默认剧本（只读；播种后归工作区，引擎不再回看这份内容）。Partial——
- *  词表超前的角色（reviewer 待 Task 4 真模板）整个缺席：**不做占位模板**
- *  （一次性播种记录会把占位变成永久），播种侧按 SEEDABLE_ROLES 跳过。 */
-export const ROLE_PROFILE_TEMPLATES: Readonly<Partial<Record<DeliveryRole, string>>> = {
+/** 角色默认剧本（只读；播种后归工作区，引擎不再回看这份内容）。四活值角色
+ *  全键同形（Task 4 起 reviewer 真模板落位、verifier 模板随角色退役）。 */
+export const ROLE_PROFILE_TEMPLATES: Readonly<Record<DeliveryRole, string>> = {
   designer: roleTemplate("designer", "交付设计师剧本：把需求整理成可实施、可核验的设计。", DESIGNER_BODY),
   developer: roleTemplate("developer", "交付开发者剧本：在领取的工作区分支内按设计实现并自测。", DEVELOPER_BODY),
-  verifier: roleTemplate("verifier", "交付验证者剧本：逐项运行配置的检查并如实记录结果。", VERIFIER_BODY),
+  reviewer: roleTemplate("reviewer", "交付评审者剧本：先审后跑——对候选实现做三层审查并给出判定。", REVIEWER_BODY),
   "release-preparer": roleTemplate("release-preparer", "交付发布准备者剧本：基于已登记的验证证据起草发布材料。", RELEASE_PREPARER_BODY),
 };
 
-/** 当前有模板、可播种的角色（DELIVERY_ROLES 序）——播种循环与 fail-safe 全集。
- *  无模板的角色在播种结果（written/skipped）里整个缺席。 */
-const SEEDABLE_ROLES: readonly DeliveryRole[] = DELIVERY_ROLES.filter(
-  (role) => ROLE_PROFILE_TEMPLATES[role] !== undefined,
-);
-
-/** 播种结果：written / skipped 各为角色列表，按 DELIVERY_ROLES 序；只含有
- *  模板的角色（SEEDABLE_ROLES）——无模板角色整个缺席（既不写也不记也不
- *  skipped）。 */
+/** 播种结果：written / skipped 各为角色列表，按 DELIVERY_ROLES 序（全键同形
+ *  表——两列表恒覆盖词表全集）。 */
 export interface SeedResult {
   written: DeliveryRole[];
   skipped: DeliveryRole[];
@@ -207,9 +204,7 @@ function parseSeedRecordRoles(raw: string): SeedRolesRecord | null {
  * "existing"、永不写；未记录且缺文件 → writeFile flag "wx" 写模板（EEXIST →
  * 按收养，其它错误照抛）、记 "<role>@<ROLE_TEMPLATE_VERSION>"。记录不可读 /
  * 畸形 → fail-safe：一字不写、全角色 skipped、console.error 一次（永不重建
- * 的承诺压过播种）。每次配置保存成功都会调用，记录齐后空转无害。
- * 无模板的角色（reviewer 待 Task 4）整个缺席于本函数的一切产出（文件/记录/
- * 返回列表）——词表与模板解耦的过渡态。 */
+ * 的承诺压过播种）。每次配置保存成功都会调用，记录齐后空转无害。 */
 export async function seedRoleProfileTemplates(workspacePath: string): Promise<SeedResult> {
   const root = resolve(workspacePath);
   const dir = join(root, ".pi", "agents");
@@ -228,7 +223,7 @@ export async function seedRoleProfileTemplates(workspacePath: string): Promise<S
       console.error(
         `[delivery-runner] seed record at ${recordPath} is malformed; skipping role template seeding`,
       );
-      return { written, skipped: [...SEEDABLE_ROLES] };
+      return { written, skipped: [...DELIVERY_ROLES] };
     }
     roles = parsed;
   } catch (error) {
@@ -239,23 +234,20 @@ export async function seedRoleProfileTemplates(workspacePath: string): Promise<S
         `[delivery-runner] seed record at ${recordPath} is unreadable; skipping role template seeding:`,
         error,
       );
-      return { written, skipped: [...SEEDABLE_ROLES] };
+      return { written, skipped: [...DELIVERY_ROLES] };
     }
   }
 
   // 2) 逐角色三态：已记录 → skipped（删除即终局）；在场未记录 → 收养；缺文件
   //    未记录 → wx 写模板。记录有变才回写（原子，与 delivery.yaml 同款）。
-  //    只走 SEEDABLE_ROLES——无模板角色不产生任何痕迹。
+  //    全键同形表——循环直接走词表全集。
   let recordChanged = false;
-  for (const role of SEEDABLE_ROLES) {
+  for (const role of DELIVERY_ROLES) {
     if (roles[role] !== undefined) {
       skipped.push(role);
       continue;
     }
-    // Partial 表按 SEEDABLE_ROLES 走——此处的 undefined 分支纯防漂移（词表与
-    // 模板表将来失同步时静默缺席，绝不写半空文件）。
     const template = ROLE_PROFILE_TEMPLATES[role];
-    if (template === undefined) continue;
     const profilePath = join(dir, `${role}.md`);
     let adoptExisting = false;
     try {

@@ -3,16 +3,18 @@
 // 双字段）的 profile/model 覆写 + 预算帽；Phase-4 T1 增验证命令
 // verification.checks（人维护——agent 只能触发不能自造，spec
 // 2026-10-24-phase-four §1.2/§7）。
-// Seam-repositioning Task 1（2026-10-26）：config v2——roles 四键同形
-// （designer/developer/verifier/release-preparer，词表 ./roles.ts——本模块
-// 从 roles 引类型、绝不从 pool 引，防循环）；schemaVersion 输入 1|2 兼容
-// （v1 旧文件照常读），输出恒 2。
+// Seam-repositioning Task 1（2026-10-26）：config v2——roles 各键同形
+// （词表 ./roles.ts——本模块从 roles 引类型、绝不从 pool 引，防循环）；
+// schemaVersion 输入 1|2 兼容（v1 旧文件照常读），输出恒 2。
 // final-arch step-2 Task 1（2026-10-26）：增 attention 块（ask-a-human 澄清的
 // nudge/park 天数阈值）——解析后必有，缺块回填默认 3/7，旧文件免迁移。
 // final-arch step-3 Task 1（2026-10-26）：增 stages.review 开关（先审后跑——
 // reviewer 人工审查轮，Task 2/3 接流转）——解析后必有，缺块回填
 // {review:{enabled:false}}（旧文件免迁移、行为不变）；未知 stage 键 →
 // Validation（step-4 进 integrate/acceptance）。
+// Task 4（2026-10-26）：verifier 退役——roles.verifier 键按 legacy 键处理：
+// 跳过（不进 roles）+ console.warn 每进程一次（写回即丢，round-trip 不带出）；
+// 其余未知键（拼错）仍 Validation。
 // 纯 fs/yaml 层——capability 门（assertAutomationCapable）由路由层在写入前
 // 调用；后续任务（runner/claimer）消费本模块读取配置。
 import { readFile } from "node:fs/promises";
@@ -20,7 +22,7 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { writeAtomic } from "../service.ts";
 import { WorkItemValidationError } from "../errors.ts";
-import { isDeliveryRole, type DeliveryRole } from "./roles.ts";
+import { isDeliveryRole, LEGACY_DELIVERY_ROLES, type DeliveryRole } from "./roles.ts";
 
 export interface DeliveryRoleConfig {
   profile?: string;
@@ -31,9 +33,10 @@ export interface DeliveryRunnerConfig {
   /** 配置版本：输出恒 2（parse 把 v1 输入也规范化为 2；落盘即迁移）。 */
   schemaVersion: 2;
   enabled: boolean;
-  /** 角色配置四键同形（Seam-repositioning T1，词表 ./roles.ts）：
-   *  designer/developer/verifier/release-preparer 各自可选；键必须 ∈
-   *  DELIVERY_ROLES（否则 Validation）；旧文件只有 designer/developer 键
+  /** 角色配置各键同形（Seam-repositioning T1，词表 ./roles.ts）：活值四键
+   *  （designer/developer/reviewer/release-preparer）各自可选；键必须 ∈
+   *  DELIVERY_ROLES（否则 Validation）。legacy 键 verifier（final-arch step-3
+   *  退役）→ 跳过不进 roles + 每进程告警一次；旧文件只有 designer/developer 键
    *  照常解析，未配置的角色读作缺省（undefined）。 */
   roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>>;
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
@@ -161,6 +164,18 @@ function parsePositiveInteger(value: unknown, field: string, fallback: number): 
   return value;
 }
 
+/** legacy roles 键（verifier）的退役告警——每进程恰一次（模块级旗标；解析
+ *  是纯函数，告警是迁移提示不是数据）。 */
+let legacyRoleWarned = false;
+function warnLegacyRoleOnce(key: string): void {
+  if (legacyRoleWarned) return;
+  legacyRoleWarned = true;
+  console.warn(
+    `[delivery-runner] roles.${key} is deprecated `
+    + "(verifier role retired; checks run as a system step) — ignored",
+  );
+}
+
 /** verification 块（Phase-4）：checks 必须是数组（含空——空=合法，等同无配置），
  *  逐条校验见 parseCheck。 */
 function parseVerification(value: unknown): { checks: DeliveryCheckConfig[] } {
@@ -243,10 +258,15 @@ export function parseDeliveryRunnerConfig(value: unknown): DeliveryRunnerConfig 
   }
   const rolesRecord =
     record.roles === undefined ? {} : requireObject(record.roles, "roles");
-  // 四键同形：遍历传入键逐个校验/解析——键 ∉ DELIVERY_ROLES（拼错如
-  // desginer）→ Validation；v1 文件只带 designer/developer 键不受影响。
+  // 各键同形：遍历传入键逐个校验/解析——legacy 键（verifier，退役）→ 跳过
+  // 不进 roles + 告警一次（写回即丢——round-trip 不带出）；键 ∉ DELIVERY_ROLES
+  // （拼错如 desginer）→ Validation；v1 文件只带 designer/developer 键不受影响。
   const roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>> = {};
   for (const key of Object.keys(rolesRecord)) {
+    if ((LEGACY_DELIVERY_ROLES as readonly string[]).includes(key)) {
+      warnLegacyRoleOnce(key);
+      continue;
+    }
     if (!isDeliveryRole(key)) {
       throw new WorkItemValidationError(`roles.${key} is not a delivery role`);
     }
