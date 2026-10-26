@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { stringify as stringifyYaml } from "yaml";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
@@ -39,6 +40,13 @@ export interface SubagentProfile {
   enabled: boolean;
   scope: SubagentScope;
   filePath?: string;
+  /**
+   * Body content hash (sha256 of the exact text after the frontmatter block),
+   * computed from the file at read time — never the stored `content_hash`
+   * frontmatter value. Lets the UI carry optimistic concurrency on save
+   * (`expectedContentHash`); absent for built-ins.
+   */
+  contentHash?: string;
 }
 
 export interface SubagentMetadata {
@@ -134,9 +142,29 @@ const MANAGED_FRONTMATTER_KEYS = new Set([
   "color",
   "isolation",
   "persist_session",
+  "content_hash",
 ]);
 
 const FRONTMATTER_OPEN_RE = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\n|\r)/;
+
+/** 正文 = frontmatter 块之外的精确文本（parseFrontmatter(...).rest）。哈希写时
+ *  自算进 frontmatter `content_hash`、读时从正文现算（不信任存储值）——乐观并
+ *  发（expectedContentHash）与外部改动检测的唯一基准面。 */
+function bodyContentHash(body: string): string {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+/** project 作用域带 expectedContentHash 保存而文件已被外部改动（正文哈希不符）
+ *  时抛出——路由层映射 409 { error, currentContentHash }，UI 提示重载。 */
+export class ProfileConflictError extends Error {
+  readonly currentContentHash: string;
+
+  constructor(message: string, currentContentHash: string) {
+    super(message);
+    this.name = "ProfileConflictError";
+    this.currentContentHash = currentContentHash;
+  }
+}
 
 /**
  * The UI exposes two booleans (`load_skills` / `load_extensions`); pi-subagents reads
@@ -309,6 +337,7 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
       enabled: booleanValue(data?.enabled, true),
       scope,
       filePath,
+      contentHash: bodyContentHash(rest),
     };
   } catch {
     return null;
@@ -387,10 +416,21 @@ function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScop
   return dir;
 }
 
+export interface SaveSubagentProfileOptions {
+  /**
+   * Optimistic concurrency (spec §13.5.1): for the project scope, when the
+   * target file already exists, a mismatch against the current body hash throws
+   * `ProfileConflictError`. Omitted → tolerant write (overwrites). The global
+   * scope and brand-new files never conflict.
+   */
+  expectedContentHash?: string;
+}
+
 export function saveSubagentProfile(
   cwd: string,
   scope: SubagentWritableScope,
   profile: Omit<SubagentProfile, "scope" | "filePath">,
+  options?: SaveSubagentProfileOptions,
 ): SubagentProfile {
   const name = assertProfileName(profile.name);
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
@@ -417,7 +457,22 @@ export function saveSubagentProfile(
     throw new Error("Agent profile directory is outside the project root");
   }
   const filePath = join(dir, `${name}.md`);
+  // 乐观并发（spec §13.5.1）：仅 project 作用域 + 文件已存在 + expected 给定才
+  // 设防；哈希以正文（frontmatter 之外）现算为准。global 作用域与新文件宽容。
+  if (scope === "project" && options?.expectedContentHash !== undefined && existsSync(filePath)) {
+    const currentBody = parseFrontmatter(readFileSync(filePath, "utf8")).rest;
+    const currentContentHash = bodyContentHash(currentBody);
+    if (currentContentHash !== options.expectedContentHash) {
+      throw new ProfileConflictError(
+        `Agent profile "${name}" was modified externally — reload it before saving`,
+        currentContentHash,
+      );
+    }
+  }
   const stored = readStoredFrontmatter(filePath);
+  // 落盘正文恒为 `\n<systemPrompt>\n`（frontmatter 闭合行之后）——哈希对齐读侧
+  // parseFrontmatter(...).rest 的精确字节。
+  const contentHash = bodyContentHash(`\n${systemPrompt}\n`);
   const managed: Record<string, unknown> = {
     description,
     display_name: displayName,
@@ -428,6 +483,7 @@ export function saveSubagentProfile(
     inherit_context: profile.inheritContext,
     run_in_background: profile.runInBackground,
     prompt_mode: promptMode,
+    content_hash: contentHash,
   };
   syncFlagAlias(managed, "skills", stored.skills, loadSkills);
   syncFlagAlias(managed, "extensions", stored.extensions, loadExtensions);
@@ -462,6 +518,7 @@ export function saveSubagentProfile(
     ...(profile.persistSession !== undefined ? { persistSession: profile.persistSession } : {}),
     scope,
     filePath,
+    contentHash,
   };
 }
 

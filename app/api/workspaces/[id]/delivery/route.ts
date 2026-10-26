@@ -8,8 +8,12 @@
 // Final-fix B（2026-10-26）：播种失败不打死保存——配置写入成功即事实，播种
 // 包在自身 try/catch 内，失败 → console.error + 200 { config, seeded: null,
 // seedingError }（UI 出非阻断警告，保存状态照常成功）。
+// final-arch step-6 Task 2（2026-10-26）：写成功后同步 AGENTS.md delivery
+// managed 块（updateManagedDeliveryInstructions——有标记才改写）。失败同样只记
+// 日志不挡保存（配置已落盘即事实）。
 import { NextResponse } from "next/server";
 import { getWorkspace, readWorkspaceManifest } from "@/lib/workspaces/service";
+import { updateManagedDeliveryInstructions } from "@/lib/workspaces/delivery-managed";
 import { WorkItemValidationError } from "@/lib/work-items/errors";
 import { workItemErrorResponse } from "@/lib/work-items/web";
 import {
@@ -41,6 +45,12 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       }),
     );
     await writeDeliveryRunnerConfig(path, config);
+    // AGENTS.md delivery managed 块同步（有标记才改写）：失败记日志不挡保存。
+    try {
+      await updateManagedDeliveryInstructions(path);
+    } catch (error) {
+      console.error(`[delivery-runner] managed AGENTS.md sync failed for workspace ${id}:`, error);
+    }
     // 配置已落盘：播种失败不打死保存——降级 seeded:null + seedingError（200，
     // UI 非阻断警告），由播种自身兜错。
     try {

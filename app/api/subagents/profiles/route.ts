@@ -4,6 +4,7 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 import {
   deleteSubagentProfile,
   listSubagentProfileSources,
+  ProfileConflictError,
   saveSubagentProfile,
   type SubagentProfile,
   type SubagentWritableScope,
@@ -38,13 +39,33 @@ export async function PUT(req: Request) {
       cwd?: unknown;
       scope?: unknown;
       profile?: Omit<SubagentProfile, "scope" | "filePath">;
+      expectedContentHash?: unknown;
     };
     const cwd = await validateCwd(body.cwd);
     const scope = validateScope(body.scope);
     if (!body.profile || typeof body.profile.name !== "string") {
       return NextResponse.json({ error: "profile required" }, { status: 400 });
     }
-    return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, body.profile) });
+    // 乐观并发（spec §13.5.1）：UI 编辑既有 profile 时携带列表态 contentHash，
+    // 外部改过 → ProfileConflictError → 409 { error, currentContentHash }；
+    // 不传 = 宽容写（旧客户端不断）。
+    const expectedContentHash = typeof body.expectedContentHash === "string" && body.expectedContentHash
+      ? body.expectedContentHash
+      : undefined;
+    try {
+      const profile = saveSubagentProfile(cwd, scope, body.profile, {
+        ...(expectedContentHash !== undefined ? { expectedContentHash } : {}),
+      });
+      return NextResponse.json({ profile });
+    } catch (error) {
+      if (error instanceof ProfileConflictError) {
+        return NextResponse.json(
+          { error: error.message, currentContentHash: error.currentContentHash },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });
