@@ -330,6 +330,15 @@ dispatcher 每拍遍历 `discoverWorkspaces`、每工作区独立配置与单槽
 - **AgentsConfig 交付感知**：被 `roles.<r>.profile` 绑定的 profile 显示角色徽标（数据来自 `GET …/delivery/roles`，已有）；编辑区上方锁定展示不变式（只读灰底，链 spec）；组合预览标签页（`GET …/delivery/roles/[role]/preview` 已有路由）。
 - **模板漂移提示**：角色表状态列已有「模板 vN」（`seeded_from`）——补「与当前模板 vM 不一致」提示 + `POST …/delivery/roles/[role]/template`（把**当前内置模板**写为 `<role>.template.md`——永不覆盖 `<role>.md`）。
 
+### 13.7 收尾步落地决策（2026-10-26 修订记录，清各步记档项）
+
+- **checks 启动失败表面化**：`runChecksStep` 在 system claim 写入前失败（如候选 sha 不可解析导致 checkout 抛错）→ 追加事件 `delivery.checks_start_failed`（data {reason}），**每连续失败串只记一条**（上一条事件已是同类型且 digest 未变则不重复）——不加运行态文件；attention `blocked` 锚点把它与 `integrate_failed`/`checks_unverified` 同列（detail = reason）。人看到即修（换候选/修仓）。
+- **泊车抑制派生 blocked 的催办/泊车**：`attend` 对 `blocked` 类条目，若 events 中存在晚于 since 的任一 `delivery.parked`（不问 kind）则跳过 nudge/park——消除「attention 泊车后派生 blocked 再被泊一次」的重复。
+- **`askedAt` 格式校验**：`parseClarification` 对 `askedAt`/`answeredAt` 做 `Date.parse` 有效性校验（无效 → Validation）——手改坏日期不再产生 NaN 天。
+- **AgentsConfig 交付感知接线**：DesktopShell / MobileShell 向 AgentsConfig 传 `workspaceId`（激活工作区），徽标 / 锁定不变式 / 组合预览上线。
+- **WorkspaceManager PUT 携带 `attention` 块**（防手设 nudge/park 阈值被存盘重置为 3/7）。
+- 小项：init 的 `from` 布局在输入解析期前置校验；`updateManagedDeliveryInstructions` 的 catch 收窄到 ENOENT（其余记日志）；WorkItemActionbar/AttentionBar 过时注释清理。
+
 ### 13.6 明确不做
 
 工作区间隐式继承或全局可变剧本源；init 自动启用 / 自动执行探测命令 / 自动复制项目事实；工作区自定义角色集合或阶段（§2）。
