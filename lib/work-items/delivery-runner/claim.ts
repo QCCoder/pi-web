@@ -90,6 +90,24 @@
 // 进 delivery.clarifications（数组缺则建，answer 只补不删——人工答复由 Task 4
 // 的 answer-clarification 写），池谓词据此把未答项停在 awaiting-answer 直到
 // 人答复。
+//
+// final-arch step-3 Task 2（reviewer 三事务 + 共享返工过渡 + finalizeChecks，
+// 2026-10-26 先审后跑）：
+//   - reworkTransition（delivery.ts 导入——claim.ts 不落第二份「清什么」清单）：
+//     verifier 失败路径与 reviewer 打回共用同一「回退 + 清全部下游证据」实现。
+//   - finalizeChecks：submitVerifierResult 的结算核心（完整性门 → unverified
+//     零变化拒绝 / 有 failed → rework 四清 / 全 passed → verification 记录 +
+//     release_ready，事件/attempt/清 claim/commit）抽成导出函数，actor
+//     "agent"|"system" 参数化——Task 3 的引擎 system 步复用同一结算。
+//   - claimReviewerTask / submitReviewerResult / failReviewerTask（先审后跑）：
+//     reviewer 与 verifier 同骨架（只读候选 checkout + candidateDigest +
+//     checkContexts 冻结——checkContexts 供 delivery_run_check 取配置）；差异面：
+//     submit 的判定来自会话自述（pass 必无 source；rework 必带 source code|spec
+//     且 notes 非空），pass → phase 不变（verification）status open；rework →
+//     reworkTransition（spec → design / code → ready_for_implementation）且
+//     review 判定仍在场（人要看为什么打回）；**无失败预算**（判定不是失败——
+//     不写 failure-window、不触暂停）；fail 标准（phase 不动 + 预算计数）。
+//     verifier 三函数本任务保留（Task 3 落 system 步时一并退役）。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -100,11 +118,12 @@ import {
 } from "../../workspaces/service.ts";
 import { createUlid } from "../../workspaces/id.ts";
 import type { WorkspaceManifest } from "../../workspaces/types.ts";
-import { DESIGN_SEED } from "../delivery.ts";
+import { DESIGN_SEED, reworkTransition } from "../delivery.ts";
 import {
   candidatesDigest,
   contentDigest,
   type DeliveryClarification,
+  type DeliveryReviewRecord,
 } from "../delivery-types.ts";
 import {
   WorkItemConflictError,
@@ -354,6 +373,9 @@ async function poolRecheck(
     // verifier 谓词输入（Phase-4）：config.verification.checks——与池子读取端
     // 同源（undefined/空 = no-checks-configured）。
     checks: config?.verification?.checks,
+    // 先审后跑（final-arch step-3 T2）：config.stages.review.enabled——与池子
+    // 读取端同源；review 开启且候选集欠审的 verification 项投影为 reviewer。
+    reviewEnabled: config?.stages?.review?.enabled ?? false,
   };
   const [entry] = projectDeliveryPool(
     [{
@@ -1156,16 +1178,193 @@ export async function claimVerifierTask(
   });
 }
 
+/** 结算输入（final-arch step-3 T2）。actor = 结算者身份：verifier 提交走
+ *  "agent"；Task 3 的引擎 system 步（checks 服务端跑完后）复用同一结算走
+ *  "system"。notes/conversationId 随事件与自链接透传（verifier 同款）。 */
+export interface FinalizeChecksInput {
+  workspacePath: string;
+  current: WorkItemDetail;
+  claim: ClaimState;
+  actor: "agent" | "system";
+  notes?: string;
+  conversationId?: string;
+}
+
+export interface FinalizeChecksOutcome {
+  outcome: "verified" | "rework";
+  detail: WorkItemDetail;
+}
+
+/**
+ * 检查结算核心（final-arch step-3 T2 从 submitVerifierResult 抽出——Task 3 的
+ * system 步复用）：证据只从 claim.checkResults 取（服务端执行器唯一注入口），
+ * 按 claim.checkContexts（领取时冻结的配置快照）逐名完整性比对——缺名 →
+ * Validation；未知名证据 → Validation；unverified → Validation 零变化拒绝
+ * （终局口径：submit 是终局动作，环境问题重跑 delivery_run_check 或
+ * fail(blocked)，不静默 blocked；此刻尚未写任何状态）。之后按 M2
+ * record-verification / rework 语义【同构内联】推进（不调 applyDeliveryAction
+ * ——其自取 withWorkspaceWriteLock 不可重入，designer design.md 直写同款
+ * 先例）：有 failed → 共享 reworkTransition 四清 + 回 ready_for_implementation；
+ * 全 passed → delivery.verification（actor=结算者 + 服务端证据）+ phase→
+ * release_ready。写 item.yaml + 事件 → 清 claim → attempt → commit。
+ * 调用方必须已持锁并完成凭据/阶段/候选 digest 守卫（requireActiveClaim 同窗）。
+ */
+export async function finalizeChecks(
+  input: FinalizeChecksInput,
+): Promise<FinalizeChecksOutcome> {
+  const { workspacePath, current, claim, actor, notes, conversationId } = input;
+  const delivery = current.item.delivery;
+  // delivery 块守卫（本函数自含——verifier 包装层已先查，此处不可达；Task 3 的
+  // system 步复用时同门）：块缺失 = 输入已变，迟到结算不得覆写。
+  if (delivery === undefined) {
+    throw new WorkItemConflictError(
+      "input changed since claim — release via fail and re-claim",
+    );
+  }
+  // 完整性比对按冻结快照（配置变更不追溯）：每名恰有一条记录；LLM 不能凭空补。
+  const contexts = claim.checkContexts ?? [];
+  const results = claim.checkResults ?? [];
+  for (const context of contexts) {
+    if (!results.some((result) => result.name === context.name)) {
+      throw new WorkItemValidationError(
+        `check ${context.name} not run — run every configured check via delivery_run_check before submitting`,
+      );
+    }
+  }
+  for (const result of results) {
+    if (!contexts.some((context) => context.name === result.name)) {
+      throw new WorkItemValidationError(
+        `check ${result.name} is not part of the claim's check contexts`,
+      );
+    }
+  }
+  // unverified = 执行环境不完整（超时/无法执行）——不是实现问题也不是判定，
+  // 推进与 rework 都不适用：零变化拒绝，让会话重跑或 fail(blocked)。
+  const unverified = results.find((result) => result.outcome === "unverified");
+  if (unverified !== undefined) {
+    throw new WorkItemValidationError(
+      `check ${unverified.name} unverified — resolve environment and re-run via delivery_run_check before submitting`,
+    );
+  }
+
+  const itemPath = current.path;
+  const now = new Date();
+  const byName = new Map(results.map((result) => [result.name, result]));
+
+  const next: WorkItemRecord = structuredClone(current.item);
+  let eventType: string;
+  let eventData: Record<string, unknown>;
+  let verificationOutcome: "verified" | "rework";
+
+  const failed = results.filter((result) => result.outcome === "failed");
+  if (failed.length > 0) {
+    // 有 failed → M2 rework 同构（四清清单归共享 reworkTransition——final-arch
+    // step-3 T2 唯一实现）：清全部下游证据（designConfirmed/candidates/
+    // verification/releasePlan——须重新挣得）+ 回 ready_for_implementation 等
+    // developer 再领；反馈事件携带失败条目与日志引用（开发返工的输入）。
+    verificationOutcome = "rework";
+    const transition = reworkTransition(next, "implementation", "open");
+    next.phase = transition.phase;
+    next.status = transition.status;
+    next.delivery = transition.delivery;
+    eventType = "delivery.rework_suggested";
+    eventData = {
+      reason: "verification-failed",
+      checks: failed.map((result) => ({
+        name: result.name,
+        exitCode: result.exitCode,
+        logRef: result.logRef,
+      })),
+    };
+  } else {
+    // 全 passed → delivery.verification（结算者 actor + 服务端证据——命令取自
+    // 冻结快照）+ phase→release_ready。落块 actor 词表此刻仍是 "user"|"agent"
+    // （delivery-types 不在本任务面）——system 结算的词表放宽随 Task 3 落地，
+    // 过渡映射显式注明（此刻唯一调用方传 "agent"）。
+    verificationOutcome = "verified";
+    next.phase = "release_ready";
+    next.status = "open";
+    next.delivery = {
+      ...delivery,
+      verification: {
+        at: now.toISOString(),
+        actor: actor === "system" ? "agent" : actor,
+        requirementDigest: contentDigest(current.content),
+        candidateDigest: claim.candidateDigest ?? "",
+        checks: contexts.map((context) => {
+          const result = byName.get(context.name)!;
+          return {
+            name: context.name,
+            outcome: "passed" as const,
+            evidence: {
+              command: context.command,
+              exitCode: result.exitCode,
+              durationMs: result.durationMs,
+              logRef: result.logRef,
+            },
+          };
+        }),
+      },
+    };
+    eventType = "delivery.submitted";
+    eventData = {
+      outcome: "verified",
+      checks: contexts.map((context) => {
+        const result = byName.get(context.name)!;
+        return {
+          name: context.name,
+          exitCode: result.exitCode,
+          logRef: result.logRef,
+        };
+      }),
+    };
+  }
+
+  next.revision += 1;
+  next.updatedAt = now.toISOString();
+  // 会话自链接（fix round 1，designer submit 同款）：带 conversationId 的
+  // 提交把会话挂入 conversations。
+  if (conversationId && !next.conversations.includes(conversationId)) {
+    next.conversations = [...next.conversations, conversationId];
+  }
+  await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+  await appendEvent(
+    itemPath,
+    eventFor(eventType, actor, conversationId, {
+      ...eventData,
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      ...(notes !== undefined ? { notes } : {}),
+      revision: next.revision,
+    }),
+  );
+
+  clearClaim(itemPath);
+  await writeAttempt({
+    attemptId: claim.attemptId,
+    generation: claim.generation,
+    role: "verifier",
+    sessionId: claim.sessionId,
+    workspacePath,
+    key: current.item.key,
+    claimedAt: claim.claimedAt,
+    endedAt: now.toISOString(),
+    outcome: "submitted",
+    verificationOutcome,
+    requirementDigest: claim.requirementDigest,
+    worktrees: claim.worktrees,
+    checkResults: claim.checkResults,
+  });
+  await commitWorkspaceChanges(workspacePath, `workspace: delivery submit ${current.item.key}`);
+  return { outcome: verificationOutcome, detail: await readWorkItem(workspacePath, current.item.key) };
+}
+
 /**
  * Verifier 提交：requireActiveClaim 三凭据 + role 门 + candidateDigest 复验
  * （候选在领取后被换——人 rework/重提交——→ 409 释放重领）+ 阶段守卫（人在
- * 窗口内推进 → 409）。证据只从 claim.checkResults 取（服务端执行器唯一注入
- * 口），按 claim.checkContexts（领取时冻结的配置快照）逐名完整性比对——
- * 缺名 → Validation；未知名证据 → Validation；unverified → Validation 零变化
- * （最终口径：submit 是终局动作，环境问题重跑 delivery_run_check 或
- * fail(blocked)，不静默 blocked）。之后按 M2 record-verification / rework 语义
- * 【同构内联】推进（不调 applyDeliveryAction——其自取 withWorkspaceWriteLock
- * 不可重入，designer design.md 直写同款先例）。
+ * 窗口内推进 → 409）。结算核心（完整性门 → unverified 零变化拒绝 / 有 failed
+ * → rework / 全 passed → verification + release_ready）在 finalizeChecks
+ * （final-arch step-3 T2 抽出）——Task 3 的引擎 system 步复用同一结算。
  */
 export async function submitVerifierResult(input: VerifierSubmitInput): Promise<WorkItemDetail> {
   const notes = input.notes === undefined || input.notes === null
@@ -1194,144 +1393,15 @@ export async function submitVerifierResult(input: VerifierSubmitInput): Promise<
       );
     }
 
-    // 完整性比对按冻结快照（配置变更不追溯）：每名恰有一条记录；LLM 不能凭空补。
-    const contexts = claim.checkContexts ?? [];
-    const results = claim.checkResults ?? [];
-    for (const context of contexts) {
-      if (!results.some((result) => result.name === context.name)) {
-        throw new WorkItemValidationError(
-          `check ${context.name} not run — run every configured check via delivery_run_check before submitting`,
-        );
-      }
-    }
-    for (const result of results) {
-      if (!contexts.some((context) => context.name === result.name)) {
-        throw new WorkItemValidationError(
-          `check ${result.name} is not part of the claim's check contexts`,
-        );
-      }
-    }
-    // unverified = 执行环境不完整（超时/无法执行）——不是实现问题也不是判定，
-    // 推进与 rework 都不适用：零变化拒绝，让会话重跑或 fail(blocked)。
-    const unverified = results.find((result) => result.outcome === "unverified");
-    if (unverified !== undefined) {
-      throw new WorkItemValidationError(
-        `check ${unverified.name} unverified — resolve environment and re-run via delivery_run_check before submitting`,
-      );
-    }
-
-    const itemPath = current.path;
-    const now = new Date();
-    const byName = new Map(results.map((result) => [result.name, result]));
-
-    const next: WorkItemRecord = structuredClone(current.item);
-    let eventType: string;
-    let eventData: Record<string, unknown>;
-    let verificationOutcome: "verified" | "rework";
-
-    const failed = results.filter((result) => result.outcome === "failed");
-    if (failed.length > 0) {
-      // 有 failed → M2 rework 同构：清全部下游证据（designConfirmed/candidates/
-      // verification/releasePlan——须重新挣得）+ 回 ready_for_implementation 等
-      // developer 再领；反馈事件携带失败条目与日志引用（开发返工的输入）。
-      verificationOutcome = "rework";
-      next.phase = "ready_for_implementation";
-      next.status = "open";
-      next.delivery = {
-        ...delivery,
-        designConfirmed: undefined,
-        candidates: undefined,
-        verification: undefined,
-        releasePlan: undefined,
-      };
-      eventType = "delivery.rework_suggested";
-      eventData = {
-        reason: "verification-failed",
-        checks: failed.map((result) => ({
-          name: result.name,
-          exitCode: result.exitCode,
-          logRef: result.logRef,
-        })),
-      };
-    } else {
-      // 全 passed → delivery.verification（actor=agent + 服务端证据——命令取自
-      // 冻结快照）+ phase→release_ready。
-      verificationOutcome = "verified";
-      next.phase = "release_ready";
-      next.status = "open";
-      next.delivery = {
-        ...delivery,
-        verification: {
-          at: now.toISOString(),
-          actor: "agent" as const,
-          requirementDigest: contentDigest(current.content),
-          candidateDigest: claim.candidateDigest ?? "",
-          checks: contexts.map((context) => {
-            const result = byName.get(context.name)!;
-            return {
-              name: context.name,
-              outcome: "passed" as const,
-              evidence: {
-                command: context.command,
-                exitCode: result.exitCode,
-                durationMs: result.durationMs,
-                logRef: result.logRef,
-              },
-            };
-          }),
-        },
-      };
-      eventType = "delivery.submitted";
-      eventData = {
-        outcome: "verified",
-        checks: contexts.map((context) => {
-          const result = byName.get(context.name)!;
-          return {
-            name: context.name,
-            exitCode: result.exitCode,
-            logRef: result.logRef,
-          };
-        }),
-      };
-    }
-
-    next.revision += 1;
-    next.updatedAt = now.toISOString();
-    // 会话自链接（fix round 1，designer submit 同款）：带 conversationId 的
-    // 提交把会话挂入 conversations。
-    if (input.conversationId && !next.conversations.includes(input.conversationId)) {
-      next.conversations = [...next.conversations, input.conversationId];
-    }
-    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
-    await appendEvent(
-      itemPath,
-      eventFor(eventType, "agent", input.conversationId, {
-        ...eventData,
-        attemptId: claim.attemptId,
-        generation: claim.generation,
-        ...(notes !== undefined ? { notes } : {}),
-        revision: next.revision,
-      }),
-    );
-
-    clearClaim(itemPath);
-    await writeAttempt({
-      attemptId: claim.attemptId,
-      generation: claim.generation,
-      role: "verifier",
-      sessionId: claim.sessionId,
+    const finalized = await finalizeChecks({
       workspacePath: input.workspacePath,
-      key: input.key,
-      claimedAt: claim.claimedAt,
-      endedAt: now.toISOString(),
-      outcome: "submitted",
-      verificationOutcome,
-      requirementDigest: claim.requirementDigest,
-      worktrees: claim.worktrees,
-      checkResults: claim.checkResults,
+      current,
+      claim,
+      actor: "agent",
+      notes,
+      conversationId: input.conversationId,
     });
-    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery submit ${input.key}`);
-    return readWorkItem(input.workspacePath, input.key);
+    return finalized.detail;
   });
 }
 
@@ -1444,6 +1514,381 @@ export async function recordCheckResult(
   else results.push(evidence);
   writeClaim(detail.path, { ...claim, checkResults: results });
   return true;
+}
+
+// ------------------------------------------- reviewer (final-arch step-3 T2)
+
+export interface ReviewerClaimInput {
+  workspacePath: string;
+  key: string;
+  sessionId: string;
+  requestId: string;
+}
+
+export interface ReviewerSubmitInput {
+  workspacePath: string;
+  key: string;
+  attemptId: string;
+  generation: number;
+  ownerToken: string;
+  /** 判定（delivery.review.outcome）：pass = 放行进验证；rework = 打回
+   *  （source 必填——code|spec 指认问题源，打回路由据此回退阶段）。 */
+  outcome: "pass" | "rework";
+  /** 仅 rework 携带：code = 实现缺陷（打回 ready_for_implementation）；spec =
+   *  设计缺陷（打回 design）。pass 带 source → Validation（与 delivery.review
+   *  parse 同律——通过无源可指）。 */
+  source?: "code" | "spec";
+  /** rework 必填非空（重做必须说明缺什么）；pass 可空（通过可以不附说明）。 */
+  notes?: string;
+  /** 会话自链接（服务层不变式，submit 先例）：带 conversationId 的提交把会话
+   *  挂入 item.conversations，并随 delivery.reviewed 事件携带。 */
+  conversationId?: string;
+}
+
+export interface ReviewerFailInput {
+  workspacePath: string;
+  key: string;
+  attemptId: string;
+  generation: number;
+  ownerToken: string;
+  reason: string;
+  blocked?: boolean;
+}
+
+/**
+ * Reviewer 领取事务（verifier 同骨架——先审后跑）：幂等重放 → capability/
+ * 配置/谓词双检（poolRecheck，reviewer 角色——review 开启且候选集欠审的
+ * verification 项才投影 reviewer）→ 只读候选 detached checkout 预建（**在任何
+ * 状态落盘之前**——失败=零状态，已建孤儿无害）→ claim.json（role reviewer +
+ * candidateDigest 快照 + checkContexts 冻结——供 delivery_run_check 取配置，
+ * 配置变更不追溯 + worktrees + checkResults 空仓）→ **phase 不变**（verification
+ * 就是审查活动的阶段）+ status=in_progress + delivery.claimed 事件。
+ */
+export async function claimReviewerTask(
+  input: ReviewerClaimInput,
+): Promise<{ grant: ClaimGrant; replayed: boolean }> {
+  const requestId = requireText(input.requestId, "requestId");
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const current = await readWorkItem(input.workspacePath, input.key);
+    const itemPath = current.path;
+
+    // 幂等重放（同 designer/developer/verifier 契约）：claim.lastRequest 命中
+    // 同 requestId → 现 grant（ownerToken 空串——明文无法重建；不 bump 不追加）。
+    const existingClaim = readClaim(itemPath);
+    if (existingClaim?.lastRequest?.requestId === requestId) {
+      return {
+        grant: {
+          attemptId: existingClaim.attemptId,
+          generation: existingClaim.generation,
+          ownerToken: "",
+          key: input.key,
+          item: current,
+        },
+        replayed: true,
+      };
+    }
+    if (existingClaim !== null) {
+      throw new WorkItemConflictError(
+        `item ${input.key} already has an active claim (attempt ${existingClaim.attemptId}, session ${existingClaim.sessionId})`,
+      );
+    }
+
+    const manifest = await readWorkspaceManifest(input.workspacePath);
+    assertAutomationCapable(manifest);
+    const { entry, attempts, requirementDigest, checks } = await poolRecheck(
+      input.workspacePath, manifest, current,
+    );
+    // 角色由阶段 + 先审后跑门决定（池子投影）：review 关闭或已过审的项按
+    // verifier 谓词投影——须同时 ready 且投影为 reviewer。
+    if (!entry.ready || entry.role !== "reviewer") {
+      const detail = entry.ready
+        ? `item is ready for the ${entry.role} role, not reviewer (phase ${current.item.phase})`
+        : entry.reasons.join(", ");
+      throw new WorkItemValidationError(
+        `delivery claim preconditions failed: ${detail}`,
+      );
+    }
+
+    const generation = attempts.reduce((max, attempt) => Math.max(max, attempt.generation), 0) + 1;
+    const attemptId = createUlid();
+    const ownerToken = randomUUID();
+    const now = new Date();
+
+    const candidates = current.item.delivery?.candidates ?? [];
+    // 候选 checkout 预建在写任何状态之前（P2 语义同款；只读审阅用，与 verifier
+    // 同一 prepareVerifyCheckouts）：任一仓失败整体抛——claim/gitignore/
+    // item.yaml/事件全未写（零状态）。
+    const repoPaths = new Map(
+      manifest.repositories
+        .filter((repo) => repo.status === "active")
+        .map((repo) => [repo.id, join(input.workspacePath, repo.path)]),
+    );
+    const worktrees = await prepareVerifyCheckouts(
+      input.workspacePath,
+      { key: current.item.key },
+      candidates,
+      generation,
+      repoPaths,
+    );
+
+    // 候选集摘要快照（锁内自算——claim 谓词已保证候选非空）+ 检查配置冻结
+    //（verifier 同款：repositoryId 缺省解析为候选首仓；delivery_run_check 的
+    // 配置查找以此为准）。
+    const candidateDigest = candidatesDigest(candidates);
+    const checkContexts = freezeCheckContexts(checks, candidates[0].repositoryId);
+
+    await ensureRuntimeGitignore(input.workspacePath);
+    writeClaim(itemPath, {
+      attemptId,
+      generation,
+      role: "reviewer",
+      sessionId: input.sessionId,
+      claimedAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      requirementDigest,
+      ownerTokenHash: hashOwnerToken(ownerToken),
+      candidateDigest,
+      worktrees,
+      checkContexts,
+      checkResults: [],
+      lastRequest: { requestId, at: now.toISOString() },
+    });
+
+    // 状态后改：phase 不变（verification）、status=in_progress + revision+1。
+    const next: WorkItemRecord = structuredClone(current.item);
+    next.status = "in_progress";
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.claimed", "agent", undefined, {
+        phase: { from: current.item.phase, to: next.phase },
+        generation,
+        attemptId,
+        worktrees,
+        candidateDigest,
+        revision: next.revision,
+      }),
+    );
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery claim ${input.key}`);
+    return {
+      grant: {
+        attemptId,
+        generation,
+        ownerToken,
+        key: input.key,
+        item: await readWorkItem(input.workspacePath, input.key),
+      },
+      replayed: false,
+    };
+  });
+}
+
+/**
+ * Reviewer 提交（先审后跑的判定事务）：requireActiveClaim 三凭据 + role 门 +
+ * candidateDigest 复验（候选在领取后被换 → 409 释放重领）+ 阶段守卫（人在
+ * 窗口内推进 → 409）。pass：delivery.review 写入、**phase 不变**（verification
+ * 等验证/系统步）、status open；rework：共享 reworkTransition（source==="spec"
+ * → design / 否则 ready_for_implementation）且 review 判定仍在场——人要看
+ * 为什么打回。事件 delivery.reviewed → attempt submitted（携 review 判定）→
+ * 会话自链接 → 清 claim → commit。**无失败预算**（判定不是失败——不写
+ * failure-window、不触暂停；fail 才计预算）。
+ */
+export async function submitReviewerResult(input: ReviewerSubmitInput): Promise<WorkItemDetail> {
+  if (input.outcome !== "pass" && input.outcome !== "rework") {
+    throw new WorkItemValidationError(
+      `outcome must be one of: pass, rework (got ${String(input.outcome)})`,
+    );
+  }
+  let source: "code" | "spec" | undefined;
+  if (input.outcome === "rework") {
+    if (input.source !== "code" && input.source !== "spec") {
+      throw new WorkItemValidationError(
+        "source is required when outcome is rework (code | spec)",
+      );
+    }
+    source = input.source;
+  } else if (input.source !== undefined) {
+    throw new WorkItemValidationError("source must not be present when outcome is pass");
+  }
+  // rework 必填非空（重做必须说明缺什么）；pass 可空（通过可以不附说明——
+  // parse 同律：trim 后落盘）。
+  const notes = input.outcome === "rework"
+    ? requireText(input.notes, "notes")
+    : typeof input.notes === "string" ? input.notes.trim() : "";
+
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const { detail: current, claim } = await requireActiveClaim(
+      input.workspacePath,
+      input.key,
+      input,
+      { expectedRole: "reviewer", expectedCandidateDigest: true },
+    );
+    if (current.item.phase !== "verification") {
+      throw new WorkItemConflictError(
+        `claim is stale — the item phase is now ${current.item.phase} (expected verification)`,
+      );
+    }
+    const delivery = current.item.delivery;
+    // 领取窗口内人清掉 designConfirmed（或 delivery 块整个消失）→ 输入已变，
+    // 迟到判定不得覆写（verifier submit 同款守卫；候选漂移已被 candidateDigest
+    // 复验拦下）。
+    if (delivery?.designConfirmed === undefined) {
+      throw new WorkItemConflictError(
+        "input changed since claim — release via fail and re-claim",
+      );
+    }
+
+    const itemPath = current.path;
+    const now = new Date();
+    const review: DeliveryReviewRecord = {
+      outcome: input.outcome,
+      ...(source !== undefined ? { source } : {}),
+      notes,
+      candidateDigest: claim.candidateDigest ?? "",
+      at: now.toISOString(),
+      attemptId: claim.attemptId,
+    };
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    if (input.outcome === "rework") {
+      // 打回（共享 reworkTransition——final-arch step-3 T2 唯一清单）：spec →
+      // design（人工重新确认设计）；code → ready_for_implementation（developer
+      // 可领阶段）。agent 落点 status open（回队列可领）。
+      const transition = reworkTransition(
+        next,
+        source === "spec" ? "design" : "implementation",
+        "open",
+      );
+      next.phase = transition.phase;
+      next.status = transition.status;
+      next.delivery = { ...transition.delivery, review };
+    } else {
+      // pass：phase 不变（verification 等验证/系统步）、status open。
+      next.status = "open";
+      next.delivery = { ...delivery, review };
+    }
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    // 会话自链接（服务层不变式）：带 conversationId 的提交把会话挂入 conversations。
+    if (input.conversationId && !next.conversations.includes(input.conversationId)) {
+      next.conversations = [...next.conversations, input.conversationId];
+    }
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.reviewed", "agent", input.conversationId, {
+        outcome: input.outcome,
+        ...(source !== undefined ? { source } : {}),
+        candidateDigest: review.candidateDigest,
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        revision: next.revision,
+      }),
+    );
+
+    clearClaim(itemPath);
+    // review 判定随审计落盘（AttemptRecord 词表扩展随 Task 3/4 的 attempts.ts
+    // 面正式化——本任务以结构扩展写入，审计 JSON 原样透传，读取零损失）。
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: "reviewer",
+      sessionId: claim.sessionId,
+      workspacePath: input.workspacePath,
+      key: input.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "submitted",
+      requirementDigest: claim.requirementDigest,
+      worktrees: claim.worktrees,
+      checkResults: claim.checkResults,
+      review,
+    } as AttemptRecord);
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery submit ${input.key}`);
+    return readWorkItem(input.workspacePath, input.key);
+  });
+}
+
+/**
+ * Reviewer 失败（环境/依赖问题 → blocked；verifier fail 同骨架）：清 claim →
+ * attempt failed（role reviewer，checkout 与已累积证据随 claim 入审计）→
+ * **phase 不动**（reviewer claim 不改阶段，verification→verification 零变化
+ * ——无阶段可归还）→ 失败预算（按 digest 跨角色共享——环境失败照常计数，
+ * 与 pass/rework 判定的「无预算」刻意相反）。blocked 是给人看的环境/依赖
+ * 标志（白名单内仍可领）。
+ */
+export async function failReviewerTask(input: ReviewerFailInput): Promise<WorkItemDetail> {
+  const reason = requireText(input.reason, "reason");
+  return withWorkspaceWriteLock(input.workspacePath, async () => {
+    const { detail: current, claim } = await requireActiveClaim(
+      input.workspacePath,
+      input.key,
+      input,
+      { expectedRole: "reviewer" },
+    );
+    const itemPath = current.path;
+    const now = new Date();
+
+    clearClaim(itemPath);
+    await writeAttempt({
+      attemptId: claim.attemptId,
+      generation: claim.generation,
+      role: "reviewer",
+      sessionId: claim.sessionId,
+      workspacePath: input.workspacePath,
+      key: input.key,
+      claimedAt: claim.claimedAt,
+      endedAt: now.toISOString(),
+      outcome: "failed",
+      reason,
+      requirementDigest: claim.requirementDigest,
+      worktrees: claim.worktrees,
+      checkResults: claim.checkResults,
+    });
+
+    const next: WorkItemRecord = structuredClone(current.item);
+    // 失败即归还 status；phase 从不动（claim 本就不改阶段——人若中途推进/回退
+    // 过阶段，更不得回滚）。
+    next.status = input.blocked === true ? "blocked" : "open";
+    next.revision += 1;
+    next.updatedAt = now.toISOString();
+    await writeAtomic(join(itemPath, "item.yaml"), serializeWorkItem(next));
+    await appendEvent(
+      itemPath,
+      eventFor("delivery.attempt_failed", "agent", undefined, {
+        reason,
+        blocked: input.blocked === true,
+        role: "reviewer",
+        attemptId: claim.attemptId,
+        generation: claim.generation,
+        revision: next.revision,
+      }),
+    );
+
+    // 失败预算跨角色共享（spec §8——同一预算，防互刷绕上限）。
+    const maxAttemptsPerInput = await maxAttemptsFor(input.workspacePath);
+    const failedCount = await countRecentFailures(itemPath, claim.requirementDigest);
+    if (failedCount >= maxAttemptsPerInput) {
+      writePaused(itemPath, {
+        at: now.toISOString(),
+        reason: `consecutive failures (${failedCount} since last resume)`,
+        count: failedCount,
+      });
+      await appendEvent(
+        itemPath,
+        eventFor("delivery.automation_paused", "agent", undefined, {
+          count: failedCount,
+          maxAttemptsPerInput,
+          attemptId: claim.attemptId,
+          revision: next.revision,
+        }),
+      );
+    }
+    await commitWorkspaceChanges(input.workspacePath, `workspace: delivery fail ${input.key}`);
+    return readWorkItem(input.workspacePath, input.key);
+  });
 }
 
 // ------------------------------------------- release-preparer (Phase-5 T1)

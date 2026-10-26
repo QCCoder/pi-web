@@ -113,6 +113,48 @@ const RELEASED_ALLOWED_ACTIONS: ReadonlySet<DeliveryAction> = new Set([
 export const DESIGN_SEED = (title: string): string =>
   `# 设计：${title}\n\n## 方案\n\n## 验收条件\n- [ ] \n`;
 
+/** 返工目标词（final-arch step-3 T2）：implementation = 打回开发；design = 打回设计。 */
+export type ReworkTarget = "implementation" | "design";
+
+/**
+ * 共享返工过渡（final-arch step-3 T2——「回退 + 清全部下游证据」的唯一实现，
+ * 不得存在第二份「清什么」清单）：返回调用方需施加的 {phase, status, delivery}
+ * （纯函数——不改 next：delivery.ts 的 case 是纯 plan 组装，claim.ts 的
+ * verifier 失败路径 / reviewer 打回由调用方 structuredClone 后施加）。下游证据
+ * = designConfirmed / candidates / verification / releasePlan——必须重新挣得；
+ * review 判定刻意保留（人要看为什么打回），released 基线本就拒绝 rework。
+ *
+ * 落点（两处调用现状不同，最小参数化——各自现状由测试钉死）：
+ *  - status 由调用方给：M2 人工 rework 落 in_progress（人工接手继续）；
+ *    claim 侧 agent rework（verifier 失败 / reviewer 打回）落 open（回队列可领）。
+ *  - target "design" → phase "design"；target "implementation" → 缺省落
+ *    ready_for_implementation（developer 可领阶段——agent 侧语义）；M2 人工
+ *    路径显式传 implementationPhase: "implementation"（历史语义——人工 rework
+ *    直接落 implementation 阶段，delivery.test.mjs 钉死）。
+ */
+export function reworkTransition(
+  next: WorkItemRecord,
+  target: ReworkTarget,
+  status: WorkItemStatus,
+  implementationPhase: "implementation" | "ready_for_implementation" = "ready_for_implementation",
+): { phase: WorkItemPhase; status: WorkItemStatus; delivery: DeliveryMetadata } {
+  const base = next.delivery;
+  if (base === undefined || base === null) {
+    throw new WorkItemValidationError("rework requires a managed item (delivery block missing)");
+  }
+  return {
+    phase: target === "design" ? "design" : implementationPhase,
+    status,
+    delivery: {
+      ...base,
+      designConfirmed: undefined,
+      candidates: undefined,
+      verification: undefined,
+      releasePlan: undefined,
+    },
+  };
+}
+
 function requireText(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new WorkItemValidationError(`${field} is required`);
@@ -367,16 +409,13 @@ export function planDeliveryTransition(
       }
       // Rewinding invalidates ALL downstream evidence (design confirmation,
       // candidates, verification) — it must be re-earned on the next pass.
+      // 清单归共享 reworkTransition（final-arch step-3 T2 唯一实现）；M2 人工
+      // 落点：implementation 阶段 + in_progress（历史语义，测试钉死）。
+      const transition = reworkTransition(item, target, "in_progress", "implementation");
       return {
-        phase: target,
-        status: "in_progress",
-        delivery: {
-          ...base,
-          designConfirmed: undefined,
-          candidates: undefined,
-          verification: undefined,
-          releasePlan: undefined,
-        },
+        phase: transition.phase,
+        status: transition.status,
+        delivery: transition.delivery,
         eventType: "delivery.rework",
         eventData: { phase: target, reason, target },
       };
