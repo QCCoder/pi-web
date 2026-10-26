@@ -246,7 +246,7 @@ attention: { nudgeAfterDays: 3, parkAfterDays: 7 }
 3. **review + checks 系统化**：reviewer 角色与可选阶段；checks 从 verifier 会话改为 system 步；verifier 角色退役（其 submit 形状由引擎结果接管）。**已落地 2026-10-26**（05b9922c..a395e871；计划 `plans/2026-10-26-final-arch-3-reviewer-and-system-checks.md`；落地决策见 §5.3 修订记录）。
 4. **integrate + acceptance**：集成命令执行器与失败语义、record-acceptance 门条件。**已落地 2026-10-26**（885ebdc3..8ca5f0d3；计划 `plans/2026-10-26-final-arch-4-integrate-and-acceptance.md`；落地决策见 §5.3 修订记录「第四步」；携修：confirm-design 归一 open、attention integrate_failed 锚点）。
 5. **loop 退役编排**：宪法文件出协议、dev-loop 停编排、剧本改挂、cargoware 切换演练。
-6. **初始化与配置面完善**（不依赖 2–5，可并行）：`initializeDelivery` 与向导、checks 探测草稿、就绪清单、delivery managed 块、`--from` 复制、`seeded_from` 模板对比 / 另存、AgentsConfig 交付感知（角色徽标、锁定不变式）、profile 保存哈希冲突。（角色表 / 剧本下拉 / ModelSelector / 组合预览随第 1 步 Task 4 落。）
+6. **初始化与配置面完善**（不依赖 2–5，可并行）：`initializeDelivery` 与向导、checks 探测草稿、就绪清单、delivery managed 块、`--from` 复制、`seeded_from` 模板对比 / 另存、AgentsConfig 交付感知（角色徽标、锁定不变式）、profile 保存哈希冲突。（角色表 / 剧本下拉 / ModelSelector / 组合预览随第 1 步 Task 4 落。）**已落地 2026-10-26**（f066bf5c..674cc9ff；计划 `plans/2026-10-26-final-arch-6-init-and-config-surface.md`；AgentsConfig 交付感知门在可选 `workspaceId` prop，宿主接线后生效）。
 
 每步验证基线：引擎既有测试全绿；新增行为按本文件 §5/§8 断言；端到端冒烟覆盖 ask→答→续跑、review→rework 路由、integrate 失败挂 attention、acceptance 门拒绝无记录的 record-release；`tsc` / `lint` / `node:test`，不跑 `next build`。
 
