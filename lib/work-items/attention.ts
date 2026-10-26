@@ -17,6 +17,13 @@
 //                 delivery.submitted data.outcome==="verified"（verifier 退役前
 //                 提交写点）或 delivery.checks_passed data.outcome==="verified"
 //                 （system 检查步入阶段写点，finalizeChecks），否则 updatedAt。
+//       acceptance final-arch step-4 Task 3：acceptanceEnabled ∧
+//                 phase==="release_ready" ∧ 有候选 ∧（无 delivery.acceptance ∨
+//                 其 candidateDigest ≠ 当前候选摘要）→ since = release 同一入阶段
+//                 锚点（复用谓词），detail = 「待人工验收」。开关在 workspace
+//                 config 的 stages.acceptance.enabled——纯投影不读 config，标志
+//                 由调用方传入（digests/acceptanceRequired 的注入同款）；匹配的
+//                 验收记录落地（record-acceptance）即消失，候选换过则重现。
 //       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 四事件最新者：
 //                 delivery.block（detail=block 原因）/ delivery.checks_unverified
 //                 （system 检查步环境未就绪写点，detail=未过检查名，缺名
@@ -32,10 +39,13 @@
 //
 //   collectAttention —— 读取端装配：managed 项才付详情读（readWorkItem：events
 //     已随读，无需单独 reader）+ readPaused + listPendingInterruptions（与
-//     pool.ts listDeliveryPool 同一对调用）。配置无关（阈值消费在 dispatcher）。
+//     pool.ts listDeliveryPool 同一对调用）+ readDeliveryRunnerConfig（一读——
+//     stages.acceptance.enabled 进投影输入；nudge/park 阈值仍在 dispatcher）。
 //     详情读失败的项跳过：与池子「缺详情不静默消失」不同——attention 的
 //     nudge/park 幂等全靠事件推导，读不出事件的项无法可靠判定，宁缺勿错。
 import { listPendingInterruptions, readPaused } from "./delivery-runner/attempts.ts";
+import { readDeliveryRunnerConfig } from "./delivery-runner/config.ts";
+import { candidatesDigest } from "./delivery-types.ts";
 import { listWorkItems, readWorkItem } from "./service.ts";
 import type { WorkItemEvent, WorkItemRecord } from "./types.ts";
 // 类型单一定义处 = api-types（浏览器镜像）；此处 type-only 引用再 re-export——
@@ -50,6 +60,10 @@ export interface AttentionInput {
   paused: Set<string>;
   interrupted: Set<string>;
   now: Date;
+  /** stages.acceptance.enabled（final-arch step-4）——acceptance 待办的可见
+   *  开关。纯投影零 fs：标志由调用方读 config 后传入（plan 的 options 注入
+   *  同款），缺省关闭 = 开关未开的 workspace 零噪音。 */
+  acceptanceEnabled: boolean;
 }
 
 const DAY_MS = 86_400_000;
@@ -189,6 +203,7 @@ function projectItem(
   paused: Set<string>,
   interrupted: Set<string>,
   now: Date,
+  acceptanceEnabled: boolean,
 ): AttentionEntry[] {
   const delivery = item.delivery;
   if (!delivery) return [];
@@ -211,6 +226,20 @@ function projectItem(
     const anchor = latestEventWhere(events, enteredReleaseReady);
     entries.push(entry(item, "release", anchor?.at ?? item.updatedAt, "待登记发布", now, events));
   }
+  // acceptance（final-arch step-4 Task 3）：release_ready 且有候选且验收记录
+  // 缺失/摘要失准 → 待人工验收。锚点复用 release 的入阶段谓词（同一事件进
+  // 阶段，两种待办同起算）；release 类条件不变——两 kind 可并存。
+  const candidates = delivery.candidates;
+  if (
+    acceptanceEnabled
+    && item.phase === "release_ready"
+    && candidates !== undefined
+    && candidates.length > 0
+    && delivery.acceptance?.candidateDigest !== candidatesDigest(candidates)
+  ) {
+    const anchor = latestEventWhere(events, enteredReleaseReady);
+    entries.push(entry(item, "acceptance", anchor?.at ?? item.updatedAt, "待人工验收", now, events));
+  }
   if (item.status === "blocked" || paused.has(item.key) || interrupted.has(item.key)) {
     const { since, detail } = blockedSinceDetail(item, events, paused, interrupted);
     entries.push(entry(item, "blocked", since, detail, now, events));
@@ -225,7 +254,16 @@ function projectItem(
 export function projectAttention(input: AttentionInput): AttentionEntry[] {
   const projected: Array<{ priority: string; entry: AttentionEntry }> = [];
   for (const { item, events } of input.items) {
-    for (const attention of projectItem(item, events, input.paused, input.interrupted, input.now)) {
+    for (
+      const attention of projectItem(
+        item,
+        events,
+        input.paused,
+        input.interrupted,
+        input.now,
+        input.acceptanceEnabled,
+      )
+    ) {
       projected.push({ priority: item.priority, entry: attention });
     }
   }
@@ -247,6 +285,10 @@ export async function collectAttention(
   workspacePath: string,
   now: Date = new Date(),
 ): Promise<AttentionEntry[]> {
+  // stages.acceptance.enabled（final-arch step-4）：一读 config 进投影输入
+  // （文件缺失 → null = 关）。nudge/park 阈值仍在 dispatcher 消费。
+  const runnerConfig = await readDeliveryRunnerConfig(workspacePath);
+  const acceptanceEnabled = runnerConfig?.stages?.acceptance?.enabled === true;
   const { items } = await listWorkItems(workspacePath);
   const inputs: AttentionInput["items"] = [];
   const paused = new Set<string>();
@@ -262,5 +304,5 @@ export async function collectAttention(
       // 详情读失败 → 跳过（nudge/park 幂等依赖事件，读不出事件的项不投影）。
     }
   }
-  return projectAttention({ items: inputs, paused, interrupted, now });
+  return projectAttention({ items: inputs, paused, interrupted, now, acceptanceEnabled });
 }

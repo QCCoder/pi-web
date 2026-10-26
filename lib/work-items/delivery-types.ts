@@ -9,7 +9,10 @@ import {
 
 export type DeliveryAction =
   | "start-design" | "confirm-design" | "start-development" | "submit-verification"
-  | "record-verification" | "prepare-release" | "record-release"
+  | "record-verification" | "prepare-release"
+  // final-arch step-4：人工验收（release_ready 原地记账，delivery.accepted）——
+  // 词表先进（路由 slug 门与 lastRequest 校验即刻合法）。
+  | "record-acceptance" | "record-release"
   | "rework" | "block" | "unblock" | "cancel"
   // final-arch step-2：ask-a-human 升为一等轮次终局——词表先进（路由 slug 门与
   // lastRequest 校验即刻合法），流转 case 由 Task 4 实现（此前 default 分支 400）。
@@ -144,6 +147,7 @@ export const DELIVERY_ACTIONS: readonly DeliveryAction[] = [
   "submit-verification",
   "record-verification",
   "prepare-release",
+  "record-acceptance",
   "record-release",
   "rework",
   "block",

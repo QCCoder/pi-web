@@ -21,6 +21,8 @@ const ACTION_LABELS: Record<DeliveryAction, string> = {
   "submit-verification": "提交验证",
   "record-verification": "记录验证",
   "prepare-release": "准备发布",
+  // final-arch step-4：人工验收记账（release_ready 原地，notes 必填）。
+  "record-acceptance": "登记验收",
   "record-release": "登记发布",
   rework: "返工",
   block: "阻塞",
@@ -414,6 +416,49 @@ function ReleaseNotesFields({
   );
 }
 
+/** record-acceptance 的验收说明表单（final-arch step-4）：notes 必填非空
+ *  （服务端 requireText 同规——验收必须说明验了什么）。落块与当前候选集摘要
+ *  绑定；不通过不走这里——「返工」表达 fail。 */
+function RecordAcceptanceForm({
+  busy,
+  onSubmitPayload,
+  onCancel,
+}: {
+  busy: boolean;
+  onSubmitPayload: (payload: Record<string, unknown>) => void;
+  onCancel: () => void;
+}) {
+  const [notes, setNotes] = useState("");
+  const canSubmit = !busy && notes.trim() !== "";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ color: "var(--text-muted)", fontSize: 11.5 }}>
+        登记人工验收结论（与当前候选提交的版本摘要绑定——之后候选变更会使本记录失准，需重新验收）。验收不通过请走「返工」。
+      </div>
+      <label style={fieldLabelStyle}>
+        <span>验收说明（必填）</span>
+        <textarea
+          style={{ ...inputStyle, minHeight: 64, resize: "vertical" }}
+          value={notes}
+          placeholder="验了什么、结论如何"
+          onChange={(event) => setNotes(event.target.value)}
+        />
+      </label>
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <button type="button" style={SECONDARY_BUTTON_STYLE} onClick={onCancel}>取消</button>
+        <button
+          type="button"
+          style={PRIMARY_BUTTON_STYLE}
+          disabled={!canSubmit}
+          onClick={() => onSubmitPayload({ notes: notes.trim() })}
+        >
+          {busy ? "提交中…" : "登记验收"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ReworkForm({ onSubmitPayload, busy, onCancel }: ActionFormProps) {
   const [reason, setReason] = useState("");
   const [target, setTarget] = useState<"implementation" | "design">("implementation");
@@ -523,6 +568,14 @@ function ActionForm(props: ActionFormProps) {
           showVersion={false}
           busy={props.busy}
           submitLabel="保存发布计划"
+          onSubmitPayload={props.onSubmitPayload}
+          onCancel={props.onCancel}
+        />
+      );
+    case "record-acceptance":
+      return (
+        <RecordAcceptanceForm
+          busy={props.busy}
           onSubmitPayload={props.onSubmitPayload}
           onCancel={props.onCancel}
         />

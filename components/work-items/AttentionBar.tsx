@@ -16,13 +16,14 @@ import type { AttentionEntry, AttentionKind } from "@/lib/api-types";
  * 同款习语）。条在页面流内，不设固定视口高度（ui-shell 键盘适配规则）。
  */
 
-/** kind 定序与文案（chips 固定序 = 任务书列举序）。 */
-const KIND_ORDER: readonly AttentionKind[] = ["question", "confirm", "release", "blocked"];
+/** kind 定序与文案（chips 固定序 = 任务书列举序；acceptance = step-4 人工验收）。 */
+const KIND_ORDER: readonly AttentionKind[] = ["question", "confirm", "release", "acceptance", "blocked"];
 
 const KIND_LABELS: Record<AttentionKind, string> = {
   question: "待答问题",
   confirm: "待确认设计",
   release: "待登记发布",
+  acceptance: "待人工验收",
   blocked: "阻塞",
 };
 
@@ -30,6 +31,7 @@ const KIND_COLORS: Record<AttentionKind, string> = {
   question: "var(--accent)",
   confirm: "#b45309",
   release: "#16a34a",
+  acceptance: "#2563eb",
   blocked: "#dc2626",
 };
 

@@ -94,6 +94,7 @@ const DELIVERY_ACTION_SET: ReadonlySet<string> = new Set([
   "submit-verification",
   "record-verification",
   "prepare-release",
+  "record-acceptance",
   "record-release",
   "rework",
   "block",
@@ -382,6 +383,27 @@ export function planDeliveryTransition(
           ...(notes !== undefined ? { notes } : {}),
           ...(rollback !== undefined ? { rollback } : {}),
         },
+      };
+    }
+    // 人工验收（final-arch step-4 Task 3）：release_ready 原地记账——phase/status
+    // 一概不动（prepare-release 同款），只是把验收记录（notes + 当前候选摘要）
+    // 落进 delivery.acceptance。fail 不是动作——不通过走 rework（重开下游）；
+    // 重登记 = 覆写（last write wins，同 verification）。摘要绑定当前候选集：
+    // 候选换过则记录失准（record-release 的验收门拒之，attention 的 acceptance
+    // 待办重现）。与 confirm-design / record-release 同款「人的手」，刻意不做
+    // LLM 工具；released 基线冻结（不在 RELEASED_ALLOWED_ACTIONS）。
+    case "record-acceptance": {
+      requirePhase(item, action, "release_ready");
+      const notes = requireText(payload.notes, "notes");
+      if (!base.candidates || base.candidates.length === 0) {
+        throw new WorkItemValidationError("no candidates submitted — submit-verification first");
+      }
+      const candidateDigest = candidatesDigest(base.candidates);
+      return {
+        phase: "release_ready",
+        delivery: { ...base, acceptance: { notes, candidateDigest, at } },
+        eventType: "delivery.accepted",
+        eventData: { phase: "release_ready", candidateDigest },
       };
     }
     case "record-release": {

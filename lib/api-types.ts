@@ -178,7 +178,9 @@ export interface DeliveryRolePreviewResponse {
 // 待办投影）GET …/workspaces/[id]/attention 的响应形状。类型单一定义处：
 // lib/work-items/attention.ts（服务端，import node 模块）也 type-only 引用
 // 这里的定义——镜像零漂移（DeliveryRoleSummary 手抄镜像的反例教训）。
-export type AttentionKind = "question" | "confirm" | "release" | "blocked";
+// acceptance（final-arch step-4 Task 3）：release_ready 待人工验收（开关
+// stages.acceptance.enabled 才投影）。
+export type AttentionKind = "question" | "confirm" | "release" | "acceptance" | "blocked";
 
 export interface AttentionEntry {
   key: string;
@@ -191,7 +193,8 @@ export interface AttentionEntry {
   /** events.jsonl 中晚于 since 的 delivery.nudged / delivery.parked（同 kind）。 */
   nudged: boolean;
   parked: boolean;
-  /** question 原文 / 「设计待确认」/ 「待登记发布」/ block·暂停·中断文案。 */
+  /** question 原文 / 「设计待确认」/ 「待登记发布」/ 「待人工验收」/
+   *  block·暂停·中断文案。 */
   detail: string;
   /** kind === "question" 时 = 最早未答澄清的 id。 */
   clarificationId?: string;

@@ -33,7 +33,11 @@ export function legalDeliveryActions(item: WorkItemRecord): DeliveryAction[] {
     ready_for_implementation: ["start-development", "rework"],
     implementation: ["submit-verification", "rework"],
     verification: ["record-verification", "rework"],
-    release_ready: ["prepare-release", "record-release", "rework"],
+    // record-acceptance（final-arch step-4 Task 3）：合法性刻意不带
+    // stages.acceptance.enabled 条件——legal-actions 是纯客户端、无 config；
+    // 验收门只装在 record-release 上，开关未开时多给一个无害动作（人可以记账，
+    // 门不卡）可接受且简单。
+    release_ready: ["prepare-release", "record-acceptance", "record-release", "rework"],
     // released: frozen baseline — only display actions below stay legal
   };
   return [...(phaseActions[item.phase] ?? []), "block", "cancel", ...answerAction];
