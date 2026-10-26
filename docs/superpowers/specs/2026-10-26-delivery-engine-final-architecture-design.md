@@ -227,8 +227,8 @@ attention: { nudgeAfterDays: 3, parkAfterDays: 7 }
 
 ## 11. 落地顺序（每步都是终局形状的一部分，无过渡架构）
 
-1. **接缝归位**：profile 正文注入 + roles 四键 + 不变式合同 + 模板播种（四段硬编码合同删除）。——纯装配层改动，池/事务/工具零动。
-2. **ask 与 attention**：`delivery_ask_human`、clarifications、answer-clarification、队列投影与年龄线、digest 渲染。
+1. **接缝归位**：profile 正文注入 + roles 四键 + 不变式合同 + 模板播种（四段硬编码合同删除）。——纯装配层改动，池/事务/工具零动。**已落地 2026-10-26**（719cd8ae..19bf3763；计划 `plans/2026-10-26-final-arch-1-seam-repositioning.md`）。
+2. **ask 与 attention**：`delivery_ask_human`、clarifications、answer-clarification、队列投影与年龄线、digest 渲染。**已落地 2026-10-26**（a7035523..8ff123c9；计划 `plans/2026-10-26-final-arch-2-ask-and-attention.md`；digest 渲染留第 5 步巡逻）。
 3. **review + checks 系统化**：reviewer 角色与可选阶段；checks 从 verifier 会话改为 system 步；verifier 角色退役（其 submit 形状由引擎结果接管）。
 4. **integrate + acceptance**：集成命令执行器与失败语义、record-acceptance 门条件。
 5. **loop 退役编排**：宪法文件出协议、dev-loop 停编排、剧本改挂、cargoware 切换演练。
