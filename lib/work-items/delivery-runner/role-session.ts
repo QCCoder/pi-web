@@ -59,9 +59,12 @@ export const AGENT_INVARIANT_CONTRACT: (ctx: { role: DeliveryRole; key: string }
 6. 项目事实（gate 命令、构建环境、分支纪律）查工作区 AGENTS.md 与你的剧本。`;
 
 /** 工作区角色剧本：frontmatter 的 model 覆写 + 正文 body（随 appendSystemPrompt
- *  注入——角色差异的唯一载体）。 */
+ *  注入——角色差异的唯一载体）。seededFrom（Task 4 增）透出 frontmatter 的
+ *  seeded_from（Task 3 模板播种标记，spec §13.3 漂移提示依据）——装配不消费，
+ *  只读投影（role-preview.ts）用它标「模板 vN」。 */
 export interface RoleProfile {
   model?: { provider?: string; modelId: string };
+  seededFrom?: string;
   body: string;
 }
 
@@ -173,7 +176,13 @@ export function readRoleProfile(workspacePath: string, profile: string): RolePro
       : slash > 0 && slash < modelValue.length - 1
         ? { provider: modelValue.slice(0, slash), modelId: modelValue.slice(slash + 1) }
         : { modelId: modelValue };
-  return { ...(model ? { model } : {}), body: rest.trim() };
+  // seeded_from（Task 3 播种标记）只透出非空字符串；缺席/空串 → 键省略。
+  const seededFromValue = typeof data?.seeded_from === "string" ? data.seeded_from.trim() : "";
+  return {
+    ...(model ? { model } : {}),
+    ...(seededFromValue ? { seededFrom: seededFromValue } : {}),
+    body: rest.trim(),
+  };
 }
 
 /** 工作区全部活动项的当前 claim 扫描：结束钩子兜底与 T7 dispatcher 清道夫
