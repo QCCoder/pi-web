@@ -26,6 +26,9 @@ const ACTION_LABELS: Record<DeliveryAction, string> = {
   block: "阻塞",
   unblock: "解除阻塞",
   cancel: "取消",
+  // final-arch step-2：词表扩了 answer-clarification（Record 穷尽性要求此键）；
+  // legalActionBarActions 尚不产出它（Task 4 接流转），标签先行占位。
+  "answer-clarification": "答复澄清",
 };
 
 /** 无必填字段的动作：点击即执行（无需展开表单）。 */

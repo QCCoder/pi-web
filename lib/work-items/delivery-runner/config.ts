@@ -7,6 +7,8 @@
 // （designer/developer/verifier/release-preparer，词表 ./roles.ts——本模块
 // 从 roles 引类型、绝不从 pool 引，防循环）；schemaVersion 输入 1|2 兼容
 // （v1 旧文件照常读），输出恒 2。
+// final-arch step-2 Task 1（2026-10-26）：增 attention 块（ask-a-human 澄清的
+// nudge/park 天数阈值）——解析后必有，缺块回填默认 3/7，旧文件免迁移。
 // 纯 fs/yaml 层——capability 门（assertAutomationCapable）由路由层在写入前
 // 调用；后续任务（runner/claimer）消费本模块读取配置。
 import { readFile } from "node:fs/promises";
@@ -31,6 +33,10 @@ export interface DeliveryRunnerConfig {
    *  照常解析，未配置的角色读作缺省（undefined）。 */
   roles: Partial<Record<DeliveryRole, DeliveryRoleConfig>>;
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
+  /** attention 队列（final-arch step-2）：ask-a-human 澄清超过 nudgeAfterDays
+   *  未答 → nudge 提醒；超过 parkAfterDays 未答 → park 挂起。解析后必有
+   *  （缺块回填默认 3/7——旧 v1 文件免迁移）；正整数且 park ≥ nudge。 */
+  attention: { nudgeAfterDays: number; parkAfterDays: number };
   /** 验证命令（Phase-4 spec §7）：可选缺省 undefined（= 无配置，verifier 池投影
    *  no-checks-configured）；空数组合法——等同无配置（池按空处理）。 */
   verification?: { checks: DeliveryCheckConfig[] };
@@ -54,6 +60,7 @@ export const DEFAULT_DELIVERY_RUNNER_CONFIG: DeliveryRunnerConfig = {
   enabled: false,
   roles: {},
   budget: { maxAttemptsPerInput: 3, maxExecutionMinutes: 30 },
+  attention: { nudgeAfterDays: 3, parkAfterDays: 7 },
 };
 
 const DELIVERY_CAPABILITY_REQUIREMENTS = ["work-items", "workflows"] as const;
@@ -111,6 +118,29 @@ function parseBudget(value: unknown): DeliveryRunnerConfig["budget"] {
       DEFAULT_DELIVERY_RUNNER_CONFIG.budget.maxExecutionMinutes,
     ),
   };
+}
+
+function parseAttention(value: unknown): DeliveryRunnerConfig["attention"] {
+  // 缺块回填默认（3 / 7）——v1 旧文件免迁移；显式提供的必须是正整数
+  // （parsePositiveInteger 同 budget），且 park ≥ nudge（nudge 抬过缺省 park
+  // 的组合同样拒绝——包括只写 nudge 一键时与缺省 7 相撞）。
+  const record = value === undefined ? {} : requireObject(value, "attention");
+  const nudgeAfterDays = parsePositiveInteger(
+    record.nudgeAfterDays,
+    "attention.nudgeAfterDays",
+    DEFAULT_DELIVERY_RUNNER_CONFIG.attention.nudgeAfterDays,
+  );
+  const parkAfterDays = parsePositiveInteger(
+    record.parkAfterDays,
+    "attention.parkAfterDays",
+    DEFAULT_DELIVERY_RUNNER_CONFIG.attention.parkAfterDays,
+  );
+  if (parkAfterDays < nudgeAfterDays) {
+    throw new WorkItemValidationError(
+      "attention.parkAfterDays must be >= attention.nudgeAfterDays",
+    );
+  }
+  return { nudgeAfterDays, parkAfterDays };
 }
 
 function parsePositiveInteger(value: unknown, field: string, fallback: number): number {
@@ -194,6 +224,7 @@ export function parseDeliveryRunnerConfig(value: unknown): DeliveryRunnerConfig 
       record.enabled === undefined ? false : requireBoolean(record.enabled, "enabled"),
     roles,
     budget: parseBudget(record.budget),
+    attention: parseAttention(record.attention),
     ...(record.verification !== undefined
       ? { verification: parseVerification(record.verification) }
       : {}),

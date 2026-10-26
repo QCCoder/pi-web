@@ -93,7 +93,9 @@ export interface AttemptRecord {
   key: string;
   claimedAt: string;
   endedAt?: string;
-  outcome?: "submitted" | "failed" | "interrupted";
+  /** asked（final-arch step-2）：ask-a-human 澄清轮的合法终局——不算失败
+   *  （不耗失败预算）也不算成功提交（不断连胜）。 */
+  outcome?: "submitted" | "failed" | "interrupted" | "asked";
   /** verifier 提交的验证判定（Phase-4 T3）：verified = 全过推进 release_ready；
    *  rework = 有失败走 M2 rework 路由。判定与执行成败（outcome）正交——
    *  rework 是验证器完成任务后的合法判定，不消耗失败预算。 */
@@ -354,11 +356,12 @@ export function writeFailureWindow(itemPath: string, since: string): void {
  * 预算计数（fix-round 裁定 #1）：从最新往回数 outcome==="failed" 且 digest
  * 匹配 且 claimedAt >= 窗口起点（缺失 = epoch）的 attempt；**遇到第一个
  * outcome==="submitted" 即停**（连胜断点——成功提交后重新起算）；
- * "interrupted" 不计也不断（中断不是设计成败信号）。按 claimedAt 降序走
- * （listAttempts 的 attemptId 序是文件名扫描序，须显式排序，attemptId 降序
- * 作并列 breaker）；缺 claimedAt 的坏记录跳过（无法定位时间线）。
- * maxStopsAt：计数一超过该值即提前收手（调用方只关心 count >= max 与否，
- * 返回值不超过 max+1）。 */
+ * "interrupted" / "asked" 不计也不断（中断不是设计成败信号；ask-a-human
+ * 澄清是合法轮次终局——不算失败也不算成功提交，final-arch step-2）。
+ * 按 claimedAt 降序走（listAttempts 的 attemptId 序是文件名扫描序，须显式排
+ * 序，attemptId 降序作并列 breaker）；缺 claimedAt 的坏记录跳过（无法定位时
+ * 间线）。maxStopsAt：计数一超过该值即提前收手（调用方只关心 count >= max
+ * 与否，返回值不超过 max+1）。 */
 export async function countRecentFailures(
   itemPath: string,
   requirementDigest: string,

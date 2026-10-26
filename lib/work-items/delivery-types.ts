@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { WorkItemValidationError } from "./errors.ts";
+import { isDeliveryRole, type DeliveryRole } from "./delivery-runner/roles.ts";
 
 export type DeliveryAction =
   | "start-design" | "confirm-design" | "start-development" | "submit-verification"
   | "record-verification" | "prepare-release" | "record-release"
-  | "rework" | "block" | "unblock" | "cancel";
+  | "rework" | "block" | "unblock" | "cancel"
+  // final-arch step-2：ask-a-human 升为一等轮次终局——词表先进（路由 slug 门与
+  // lastRequest 校验即刻合法），流转 case 由 Task 4 实现（此前 default 分支 400）。
+  | "answer-clarification";
 
 export interface DeliveryCandidate { repositoryId: string; commit: string }
 
@@ -57,6 +61,21 @@ export interface DeliveryReleaseRecord {
 
 export interface DeliveryReleasePlan { notes?: string; rollback?: string }
 
+/** 澄清问答（final-arch step-2：agent 的 ask-a-human 轮次产物，数据面）。
+ *  id 是写方（Task 2 claim 事务）的 ULID 约定——parse 只要求非空字串；
+ *  answer/answeredAt 同在同缺（未答 / 已答两态，半对即坏形）。 */
+export interface DeliveryClarification {
+  id: string;
+  role: DeliveryRole;
+  question: string;
+  options?: string[];
+  recommended?: string;
+  askedAt: string;
+  attemptId: string;
+  answer?: string;
+  answeredAt?: string;
+}
+
 export interface DeliveryMetadata {
   protocolVersion: 1;
   mode: "manual";
@@ -65,6 +84,8 @@ export interface DeliveryMetadata {
   verification?: DeliveryVerificationRecord;
   releasePlan?: DeliveryReleasePlan;
   release?: DeliveryReleaseRecord;
+  /** 澄清问答（追加式——answer 只补不删，历史保留审计）。 */
+  clarifications?: DeliveryClarification[];
   /** 幂等指纹（spec §9）：最近一次已受理的动作。同 requestId+action 重放直接返回现态。 */
   lastRequest?: { requestId: string; action: DeliveryAction; at: string };
 }
@@ -83,6 +104,7 @@ export const DELIVERY_ACTIONS: readonly DeliveryAction[] = [
   "block",
   "unblock",
   "cancel",
+  "answer-clarification",
 ];
 
 const VERIFICATION_OUTCOMES: readonly ("passed" | "failed" | "unverified")[] = [
@@ -261,6 +283,52 @@ function parseLastRequest(value: unknown): { requestId: string; action: Delivery
   };
 }
 
+/** 单条澄清：id/role/question/askedAt/attemptId 必填非空（role 走 roles.ts
+ *  词表守卫——delivery-types 与 runner 共享同一份合法值）；options 可选非空
+ *  字串数组；recommended 可选非空字串（刻意不与 options 交叉校验——parse 不
+ *  掐语义，推荐值自由）；answer/answeredAt 同在同缺。 */
+function parseClarification(entry: unknown, field: string): DeliveryClarification {
+  const record = requireObject(entry, field);
+  const role = record.role;
+  if (!isDeliveryRole(role)) {
+    throw new WorkItemValidationError(`${field}.role is not a delivery role`);
+  }
+  const hasAnswer = present(record.answer);
+  const hasAnsweredAt = present(record.answeredAt);
+  if (hasAnswer !== hasAnsweredAt) {
+    throw new WorkItemValidationError(
+      `${field}.answer and ${field}.answeredAt must be both present or both absent`,
+    );
+  }
+  const options = (() => {
+    if (!present(record.options)) return undefined;
+    if (!Array.isArray(record.options)) {
+      throw new WorkItemValidationError(`${field}.options must be an array of strings`);
+    }
+    return record.options.map((option, index) => requireText(option, `${field}.options[${index}]`));
+  })();
+  return {
+    id: requireText(record.id, `${field}.id`),
+    role,
+    question: requireText(record.question, `${field}.question`),
+    ...(options !== undefined ? { options } : {}),
+    ...(present(record.recommended)
+      ? { recommended: requireText(record.recommended, `${field}.recommended`) }
+      : {}),
+    askedAt: requireText(record.askedAt, `${field}.askedAt`),
+    attemptId: requireText(record.attemptId, `${field}.attemptId`),
+    ...(hasAnswer ? { answer: requireText(record.answer, `${field}.answer`) } : {}),
+    ...(hasAnsweredAt ? { answeredAt: requireText(record.answeredAt, `${field}.answeredAt`) } : {}),
+  };
+}
+
+function parseClarifications(value: unknown, field: string): DeliveryClarification[] {
+  if (!Array.isArray(value)) {
+    throw new WorkItemValidationError(`${field} must be an array`);
+  }
+  return value.map((entry, index) => parseClarification(entry, `${field}[${index}]`));
+}
+
 /** Validate an unknown value as protocol-v1 manual DeliveryMetadata. Every
  *  nested block is field-by-field checked (same idioms as parseWorkItem);
  *  unknown protocolVersion / non-manual mode are hard errors so a future
@@ -285,6 +353,9 @@ export function parseDelivery(value: unknown): DeliveryMetadata {
     ...(present(record.verification) ? { verification: parseVerification(record.verification) } : {}),
     ...(present(record.releasePlan) ? { releasePlan: parseReleasePlan(record.releasePlan) } : {}),
     ...(present(record.release) ? { release: parseRelease(record.release) } : {}),
+    ...(present(record.clarifications)
+      ? { clarifications: parseClarifications(record.clarifications, "delivery.clarifications") }
+      : {}),
     ...(present(record.lastRequest) ? { lastRequest: parseLastRequest(record.lastRequest) } : {}),
   };
 }

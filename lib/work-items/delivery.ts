@@ -96,6 +96,9 @@ const DELIVERY_ACTION_SET: ReadonlySet<string> = new Set([
   "block",
   "unblock",
   "cancel",
+  // 词表已进（delivery-types DELIVERY_ACTIONS；路由 slug 门放行）——流转 case
+  // 由 step-2 Task 4 实现，此前落到 switch default 的干净 400。
+  "answer-clarification",
 ]);
 
 /** Display-only actions that stay legal on a released baseline (spec §7.3). */
@@ -413,6 +416,11 @@ export function planDeliveryTransition(
         eventData: { phase: item.phase, ...(reason !== undefined ? { reason } : {}) },
       };
     }
+    // 词表与实现解耦的保险（controller ruling）：进词表但流转 case 未实现的
+    // slug（如 Task 4 前的 answer-clarification）必须是干净 400，而非 undefined
+    // 返回静默产出坏 plan。
+    default:
+      throw new WorkItemValidationError(`Unknown delivery action: ${String(action)}`);
   }
 }
 
