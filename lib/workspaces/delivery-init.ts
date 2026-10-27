@@ -2,7 +2,8 @@
 // 永不执行命令）+ 就绪清单投影。spec §13.2/§13.3/§13.5.1——「Nth project」的
 // 故事：新建与导入一视同仁，重跑幂等：
 //
-//   initializeDelivery(workspacePath, input) 六步：
+//   initializeDelivery(workspacePath, input) 六步（from 给定时第 0 步先做布局
+//   前置校验——任何写副作用之前，坏 from 纯 400 零落盘）：
 //     1. 仓库：触发一次扫描登记（syncRepositoriesFromScan——与仓库列表同一对
 //        账；不走 listWorkspaceRepositories 的 TTL 缓存与每仓 git 子进程，init
 //        只需要对账结果）。
@@ -151,15 +152,40 @@ function parseStageToggle(
   };
 }
 
+/** from 布局前置校验（backlog-clearing T2，2026-10-27）：`<from>/.pi` 在场且为
+ *  目录 → 返回 .pi 绝对路径；否则 Validation（→ 400）。initializeDelivery 在
+ *  任何写副作用之前调用——此前布局校验晚在 copyFromSource（config 写入与播种
+ *  之后），坏 from 的 init 已落盘默认配置才 400，重跑语义被污染；copyFromSource
+ *  复用同一检查作 TOCTOU 深防。 */
+async function assertFromPiLayout(from: string): Promise<string> {
+  const fromPi = join(resolve(from), ".pi");
+  let piStat;
+  try {
+    piStat = await stat(fromPi);
+  } catch {
+    throw new WorkItemValidationError(`from must be a directory with a .pi/ layout: ${from}`);
+  }
+  if (!piStat.isDirectory()) {
+    throw new WorkItemValidationError(`from must be a directory with a .pi/ layout: ${from}`);
+  }
+  return fromPi;
+}
+
 /**
  * 交付初始化：只补缺、只建议——重跑幂等（每步要么「缺失才写」要么纯跳过）。
  * 永不翻 enabled、永不执行任何命令；探测与 from 草稿只进响应 suggestedChecks。
+ * from 给定时先做布局前置校验（assertFromPiLayout——任何写副作用之前，坏 from
+ * 纯 400 零落盘）。
  */
 export async function initializeDelivery(
   workspacePath: string,
   input: DeliveryInitInput,
 ): Promise<DeliveryInitResponse> {
   const actions: string[] = [];
+
+  // 0) from 布局前置校验（backlog-clearing T2）：先于仓库对账 / config 写入 /
+  //    播种的唯一入口校验。
+  if (input.from !== undefined) await assertFromPiLayout(input.from);
 
   // 1) 仓库：触发一次扫描登记（扫描为事实——新目录自动登记、消失目录自动停用）。
   const scanChanged = await withWorkspaceWriteLock(workspacePath, async () => {
@@ -248,16 +274,9 @@ async function copyFromSource(
   from: string,
   actions: string[],
 ): Promise<DeliverySuggestedCheck[]> {
-  const fromPi = join(resolve(from), ".pi");
-  let piStat;
-  try {
-    piStat = await stat(fromPi);
-  } catch {
-    throw new WorkItemValidationError(`from must be a directory with a .pi/ layout: ${from}`);
-  }
-  if (!piStat.isDirectory()) {
-    throw new WorkItemValidationError(`from must be a directory with a .pi/ layout: ${from}`);
-  }
+  // 布局校验与 initializeDelivery 入口同一 helper（入口已校验——这里是 TOCTOU
+  // 深防：两步之间源目录可能被动过）。
+  const fromPi = await assertFromPiLayout(from);
 
   let copied = 0;
   let provided = 0; // 源侧实际提供的可复制项（角色文件 / integrate.sh）

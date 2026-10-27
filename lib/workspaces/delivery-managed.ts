@@ -93,8 +93,15 @@ export async function updateManagedDeliveryInstructions(workspacePath: string): 
     let current: string;
     try {
       current = await readFile(agentsPath, "utf8");
-    } catch {
-      return; // no AGENTS.md to maintain — never created here
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return; // no AGENTS.md to maintain — never created here
+      }
+      // backlog-clearing T2（2026-10-27）：catch 收窄——ENOENT 是常态 no-op；
+      // 其他读错误（EACCES 等）不静默：console.error 后照样放行（块同步永不
+      // 打死保存，但失败必须可诊断）。
+      console.error("[delivery-runner] managed AGENTS.md read failed:", error);
+      return;
     }
     if (!current.includes(DELIVERY_MANAGED_START) || !current.includes(DELIVERY_MANAGED_END)) {
       return; // markers absent or removed by the user → silently stop

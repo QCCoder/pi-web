@@ -29,7 +29,8 @@ const ACTION_LABELS: Record<DeliveryAction, string> = {
   unblock: "解除阻塞",
   cancel: "取消",
   // final-arch step-2：词表扩了 answer-clarification（Record 穷尽性要求此键）；
-  // legalActionBarActions 尚不产出它（Task 4 接流转），标签先行占位。
+  // 动作条永不渲染它——legalActionBarActions 刻意滤掉（答复由详情页
+  // ClarificationPanel 触发，问题全文在动作条无处展示），此键仅保标签完备。
   "answer-clarification": "答复澄清",
 };
 

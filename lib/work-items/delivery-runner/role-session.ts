@@ -1,6 +1,7 @@
-// Seam-repositioning Task 2（2026-10-26）：角色会话装配终形——引擎不变式合同 +
-// 工作区剧本正文。旧的角色专属合同段删除（当时四角色 designer/developer/
-// verifier/release-preparer——verifier 后退役、reviewer 同骨架接替）：角色差异全部下沉到 `<ws>/.pi/agents/<profile>.md` 剧本（默认
+// 角色会话装配终形（Seam-repositioning Task 2 立，2026-10-26）——引擎不变式
+// 合同 + 工作区剧本正文。四活角色 designer/developer/reviewer/release-preparer
+//（verifier 已退役、仅存于 legacy 记录——永可读；reviewer 以同骨架接替其检查
+// 位）：角色差异全部下沉到 `<ws>/.pi/agents/<profile>.md` 剧本（默认
 // 剧本名 = 角色名，config.roles[role].profile 可覆写；正文经 appendSystemPrompt
 // 注入，frontmatter 的 model 作模型覆写来源），引擎只保留对四角色一致的回合
 // 不变式（AGENT_INVARIANT_CONTRACT，spec §4.3.1 六条：领取纪律 / 写域隔离 /
