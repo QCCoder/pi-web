@@ -339,6 +339,8 @@ dispatcher 每拍遍历 `discoverWorkspaces`、每工作区独立配置与单槽
 - **WorkspaceManager PUT 携带 `attention` 块**（防手设 nudge/park 阈值被存盘重置为 3/7）。
 - 小项：init 的 `from` 布局在输入解析期前置校验；`updateManagedDeliveryInstructions` 的 catch 收窄到 ENOENT（其余记日志）；WorkItemActionbar/AttentionBar 过时注释清理。
 
+**收尾步已落地 2026-10-27**（e4e07d48..1ed66368；计划 `plans/2026-10-27-final-arch-7-backlog-clearing.md`）。终审修正一处：`checks_start_failed` 的 attention 锚点对 **open 项**同样生效（启动失败零状态、status 不会变 blocked——按事件的 candidateDigest 新鲜度判定，换候选即消失）；AgentsConfig 角色徽标已实现（`workspaceId` 接线在 ConfigCenterPage/SettingsPanel）。至此终局架构 §11 六步 + 收尾步全部完成；遗留人工项 = cargoware 切换演练（按 runbook）。
+
 ### 13.6 明确不做
 
 工作区间隐式继承或全局可变剧本源；init 自动启用 / 自动执行探测命令 / 自动复制项目事实；工作区自定义角色集合或阶段（§2）。
