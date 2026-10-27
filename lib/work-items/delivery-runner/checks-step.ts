@@ -52,6 +52,17 @@
 //   并恢复」）后原样重抛（dispatcher catch 记日志）。宿主关停/崩溃的残留
 //   system claim 由既有超时清道夫回收（probeSession null → 只记中断）——不设
 //   第二套机制。
+//
+//   启动失败表面化（step-7 backlog-clearing T1，2026-10-27）：startChecksRun 在
+//   claim 写入之前抛（如候选 sha 解析不开——prepareVerifyCheckouts 零状态失败
+//   面）时，错误原本只在 dispatcher stderr 里、每 30s 静默重试永不可见。此路
+//   径改在锁外追加 delivery.checks_start_failed（actor system，data {reason =
+//   错误消息首 300 字符, candidateDigest? = 当前候选摘要（可算则带）}）——不改
+//   重试语义（无状态落盘、无 status 变化，只是让失败可见）。去重 = 项 events
+//   最后一条已是该类型且 data.candidateDigest 相同则跳过（一条连续失败串只记
+//   一条；digest 变化或任何其他事件再武装）；events 读不出（fs 容错）= 无法
+//   去重 → 跳过追加——fail-safe：表面化不改写失败路径本身的行为，原错误照抛
+//   给 dispatcher。
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
@@ -636,6 +647,41 @@ async function settleIntegrateFailure(
   });
 }
 
+/** 启动失败表面化（step-7 backlog-clearing T1，见模块头）：claim 写入前失败的
+ *  锁外记账。读项（readWorkItem 是纯读、不走工作区写锁——本路径锁不在手）取
+ *  events 末条做去重 + 当前候选算 digest；events 读不出 = 无法去重 → 跳过追加。
+ *  永不抛：本函数跑在 catch 路径、rethrow 之前——表面化自身的任何失败都不得
+ *  吞掉或替换原错误。 */
+async function recordChecksStartFailure(
+  workspacePath: string,
+  key: string,
+  error: unknown,
+): Promise<void> {
+  try {
+    const detail: WorkItemDetail = await readWorkItem(workspacePath, key);
+    const candidates = detail.item.delivery?.candidates ?? [];
+    const candidateDigest = candidates.length > 0 ? candidatesDigest(candidates) : undefined;
+    const last = detail.events[detail.events.length - 1];
+    if (
+      last !== undefined &&
+      last.type === "delivery.checks_start_failed" &&
+      last.data?.candidateDigest === candidateDigest
+    ) {
+      return; // 同一连续失败串（同候选摘要）只记一条
+    }
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+    await appendEvent(
+      detail.path,
+      eventFor("delivery.checks_start_failed", "system", undefined, {
+        reason,
+        ...(candidateDigest !== undefined ? { candidateDigest } : {}),
+      }),
+    );
+  } catch {
+    // fs 容错（fail-safe）：读不出 events（无法去重）或追加失败 → 静默跳过。
+  }
+}
+
 /**
  * 系统检查步入口（dispatcher 每拍对首个 due 项调用，fire-and-forget）。返回
  * 终局词（"skipped" = 锁内复验/守卫判定本轮不开跑或不结算——不是错误）。
@@ -643,7 +689,8 @@ async function settleIntegrateFailure(
  * 锁外逐候选仓跑集成命令（runIntegrateSegment），任一失败 → settleIntegrate-
  * Failure（"integrate-failed"）；全成功 → 结算照旧（verified/rework/unverified
  * 分支零变化）。任何异常：recordInterruption 清 claim + 记 needsAttention 中断
- * 后原样重抛。
+ * 后原样重抛；claim 写入前的失败（startChecksRun 抛——无 claim 可清）改走
+ * recordChecksStartFailure 表面化（delivery.checks_start_failed，见模块头）。
  */
 export async function runChecksStep(
   workspacePath: string,
@@ -680,6 +727,10 @@ export async function runChecksStep(
       // 失败不再包裹——原错误才是要抛给 dispatcher 的现场。
       await recordInterruption(workspacePath, key, sessionId, "checks step failed")
         .catch(() => {});
+    } else {
+      // claim 写入前的失败（startChecksRun 抛）：无 claim 可清、无中断可记——
+      // 表面化成 checks_start_failed 让静默重试可见（语义零变化，见模块头）。
+      await recordChecksStartFailure(workspacePath, key, error);
     }
     throw error;
   }

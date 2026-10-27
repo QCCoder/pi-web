@@ -24,13 +24,15 @@
 //                 config 的 stages.acceptance.enabled——纯投影不读 config，标志
 //                 由调用方传入（digests/acceptanceRequired 的注入同款）；匹配的
 //                 验收记录落地（record-acceptance）即消失，候选换过则重现。
-//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 五事件最新者：
+//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 六事件最新者：
 //                 delivery.block（detail=block 原因）/ delivery.checks_unverified
 //                 （system 检查步环境未就绪写点，detail=未过检查名，缺名
 //                 「环境未就绪待修复」）/ delivery.integrate_failed
 //                 （final-arch step-4 集成段失败写点——spec §5.3 第四步与
 //                 checks_unverified 同走 blocked 类，detail=「集成失败（仓）」，
-//                 缺仓回落「集成失败」）/ delivery.automation_paused
+//                 缺仓回落「集成失败」）/ delivery.checks_start_failed
+//                 （step-7 T1 检查步 claim 写入前失败写点，detail=事件 reason，
+//                 缺 reason 回落「检查启动失败」）/ delivery.automation_paused
 //                 （detail=「自动化已暂停待恢复」——暂停 reason 文本只在
 //                 automation-paused.json，纯投影输入只有 key 集）/ 
 //                 delivery.exec_interrupted（detail=「执行中断待恢复」，
@@ -38,7 +40,12 @@
 //                 静态文案）。
 //     nudged/parked = events 中 at 严格晚于 since 且 data.kind === kind 的
 //     delivery.nudged / delivery.parked（dispatcher 写点；旧事件不算——跨 kind
-//     与跨轮次都不串）。排序 P0→P3→key（同 pool），同项多 kind 再按 kind 定序。
+//     与跨轮次都不串）。blocked 的 parked 例外（step-7 T1 泊车抑制）：按
+//     「任意 kind 的 delivery.parked 晚于 since」判定（hasAnyParkedSince）——
+//     attend 写点的 kind 随投影条目走，人工对整项的泊车决策与派生 blocked
+//     条目的 kind 天然不同；parked 翻真即让 attend 的催办/泊车两分支双双跳过
+//     （attend 的门就是 !parked）。排序 P0→P3→key（同 pool），同项多 kind 再按
+//     kind 定序。
 //
 //   collectAttention —— 读取端装配：managed 项才付详情读（readWorkItem：events
 //     已随读，无需单独 reader）+ readPaused + listPendingInterruptions（与
@@ -127,6 +134,16 @@ function hasKindMarker(
   );
 }
 
+/** 是否存在晚于 sinceMs 的任意 kind 泊车事件（step-7 T1 泊车抑制，见模块头）：
+ *  只给 blocked 条目用——人工泊车写点的 kind 随当时的投影条目走（question /
+ *  confirm…），与派生 blocked 条目的 kind 天然不同，同 kind 判定会漏掉人工已
+ *  做过的泊车决策 → attend 对同一项的每种派生 kind 重复泊车。 */
+function hasAnyParkedSince(events: WorkItemEvent[], sinceMs: number): boolean {
+  return events.some(
+    (event) => event.type === "delivery.parked" && Date.parse(event.at) > sinceMs,
+  );
+}
+
 function entry(
   item: WorkItemRecord,
   kind: AttentionKind,
@@ -144,7 +161,11 @@ function entry(
     since,
     ageDays: Math.floor((now.getTime() - sinceMs) / DAY_MS),
     nudged: hasKindMarker(events, "delivery.nudged", kind, sinceMs),
-    parked: hasKindMarker(events, "delivery.parked", kind, sinceMs),
+    // blocked 的泊车位跨 kind（含同 kind——任意 parked 晚于 since 即真）：
+    // attend 的催办/泊车两分支都以 !parked 为门，翻真即双跳过（泊车抑制）。
+    parked: kind === "blocked"
+      ? hasAnyParkedSince(events, sinceMs)
+      : hasKindMarker(events, "delivery.parked", kind, sinceMs),
     detail,
     ...(clarificationId !== undefined ? { clarificationId } : {}),
   };
@@ -155,7 +176,9 @@ function entry(
  *  system 检查步的 blocked 不写 delivery.block——checks_unverified 同为锚点
  *  （detail = 未过检查名，缺名回落固定文案）；integrate 集成段失败同样落
  *  blocked——delivery.integrate_failed 也是锚点（detail = 集成失败（首败仓），
- *  缺仓回落固定文案），同一「最新者胜出」候选列表。 */
+ *  缺仓回落固定文案）；检查步 claim 写入前的启动失败是 checks_start_failed
+ *  （step-7 T1，detail = 事件 reason 原文，缺 reason 回落固定文案），同一
+ *  「最新者胜出」候选列表。 */
 function blockedSinceDetail(
   item: WorkItemRecord,
   events: WorkItemEvent[],
@@ -187,6 +210,14 @@ function blockedSinceDetail(
         detail: typeof repositoryId === "string" && repositoryId !== ""
           ? `集成失败（${repositoryId}）`
           : "集成失败",
+      });
+    }
+    const checksStartFailed = latestEvent(events, "delivery.checks_start_failed");
+    if (checksStartFailed !== undefined) {
+      const reason = checksStartFailed.data?.reason;
+      candidates.push({
+        at: checksStartFailed.at,
+        detail: typeof reason === "string" && reason !== "" ? reason : "检查启动失败",
       });
     }
   }

@@ -391,6 +391,8 @@ function parseLastRequest(value: unknown): { requestId: string; action: Delivery
 
 /** 单条澄清：id/role/question/askedAt/attemptId 必填非空（role 走 roles.ts
  *  的 AnyDeliveryRole 守卫——活值 ∪ legacy verifier，旧数据永可解析）；
+ *  askedAt 与 answeredAt（在场的）须可解析为日期（step-7 T1——askedAt 是
+ *  attention question 条目的 since 锚点，坏串会把条目锚成 NaN 天龄）；
  *  options 可选非空字串数组；recommended 可选非空字串（刻意不与 options 交叉
  *  校验——parse 不掐语义，推荐值自由）；answer/answeredAt 同在同缺。 */
 function parseClarification(entry: unknown, field: string): DeliveryClarification {
@@ -405,6 +407,17 @@ function parseClarification(entry: unknown, field: string): DeliveryClarificatio
     throw new WorkItemValidationError(
       `${field}.answer and ${field}.answeredAt must be both present or both absent`,
     );
+  }
+  const askedAt = requireText(record.askedAt, `${field}.askedAt`);
+  if (!Number.isFinite(Date.parse(askedAt))) {
+    throw new WorkItemValidationError(`${field}.askedAt is not a valid ISO date`);
+  }
+  let answeredAt: string | undefined;
+  if (hasAnsweredAt) {
+    answeredAt = requireText(record.answeredAt, `${field}.answeredAt`);
+    if (!Number.isFinite(Date.parse(answeredAt))) {
+      throw new WorkItemValidationError(`${field}.answeredAt is not a valid ISO date`);
+    }
   }
   const options = (() => {
     if (!present(record.options)) return undefined;
@@ -421,10 +434,10 @@ function parseClarification(entry: unknown, field: string): DeliveryClarificatio
     ...(present(record.recommended)
       ? { recommended: requireText(record.recommended, `${field}.recommended`) }
       : {}),
-    askedAt: requireText(record.askedAt, `${field}.askedAt`),
+    askedAt,
     attemptId: requireText(record.attemptId, `${field}.attemptId`),
     ...(hasAnswer ? { answer: requireText(record.answer, `${field}.answer`) } : {}),
-    ...(hasAnsweredAt ? { answeredAt: requireText(record.answeredAt, `${field}.answeredAt`) } : {}),
+    ...(answeredAt !== undefined ? { answeredAt } : {}),
   };
 }
 
