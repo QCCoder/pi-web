@@ -24,7 +24,11 @@
 //                 config 的 stages.acceptance.enabled——纯投影不读 config，标志
 //                 由调用方传入（digests/acceptanceRequired 的注入同款）；匹配的
 //                 验收记录落地（record-acceptance）即消失，候选换过则重现。
-//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 → 六事件最新者：
+//       blocked   status==="blocked" ∨ paused 集 ∨ interrupted 集 ∨ 检查步启动
+//                 失败在场（fix round 1：checks_start_failed 零状态不改
+//                 status——open 的 verification 项也出条目；新鲜 = 事件无
+//                 digest 或 digest 合当前候选，且该候选集此后未验证通过
+//                 〔checks-done 同源门〕）→ 六事件最新者：
 //                 delivery.block（detail=block 原因）/ delivery.checks_unverified
 //                 （system 检查步环境未就绪写点，detail=未过检查名，缺名
 //                 「环境未就绪待修复」）/ delivery.integrate_failed
@@ -171,6 +175,34 @@ function entry(
   };
 }
 
+/** 检查步启动失败是否仍「在场」（step-7 fix round 1，spec §13.7 可见性）：
+ *  启动失败零状态不改 status（checks-step 的设计保证）——open 的 verification
+ *  项也必须出 blocked 条目，否则事件只躺在 events.jsonl 里、30s 静默重试不可
+ *  见。新鲜 ⇔ 事件无 digest（无候选的失败）或 digest 与当前候选摘要一致
+ *  （两侧都在且不同 = 候选已换，失败属旧候选——不 surfacing）∧ 该候选集此后
+ *  未验证通过（verification 绑定当前摘要 = checks-done，与 checksDue 的
+ *  checks-done 门同源——失败已被一次成功跑次了结）。取最新一条判定：同候选
+ *  的失败串由写侧去重成一条（recordChecksStartFailure），digest 变化会另起新
+ *  事件——最新者即当前串。 */
+function currentStartFailure(
+  item: WorkItemRecord,
+  events: WorkItemEvent[],
+): WorkItemEvent | undefined {
+  const startFailed = latestEvent(events, "delivery.checks_start_failed");
+  if (startFailed === undefined) return undefined;
+  const candidates = item.delivery?.candidates ?? [];
+  const currentDigest = candidatesDigest(candidates);
+  const eventDigest = startFailed.data?.candidateDigest;
+  if (eventDigest !== undefined && eventDigest !== currentDigest) return undefined;
+  if (
+    item.delivery?.verification !== undefined &&
+    item.delivery.verification.candidateDigest === currentDigest
+  ) {
+    return undefined;
+  }
+  return startFailed;
+}
+
 /** blocked 的 since/detail：各信号的事件锚点取最新，detail 跟随胜出信号；
  *  零事件回落 updatedAt + 按信号静态文案（block 优先，与任务书列举序一致）。
  *  system 检查步的 blocked 不写 delivery.block——checks_unverified 同为锚点
@@ -178,12 +210,14 @@ function entry(
  *  blocked——delivery.integrate_failed 也是锚点（detail = 集成失败（首败仓），
  *  缺仓回落固定文案）；检查步 claim 写入前的启动失败是 checks_start_failed
  *  （step-7 T1，detail = 事件 reason 原文，缺 reason 回落固定文案），同一
- *  「最新者胜出」候选列表。 */
+ *  「最新者胜出」候选列表——且这一锚不拘 status（fix round 1：在场性/新鲜度
+ *  由 currentStartFailure 判定后经 startFailure 传入）。 */
 function blockedSinceDetail(
   item: WorkItemRecord,
   events: WorkItemEvent[],
   paused: Set<string>,
   interrupted: Set<string>,
+  startFailure: WorkItemEvent | undefined,
 ): { since: string; detail: string } {
   const candidates: Array<{ at: string; detail: string }> = [];
   if (item.status === "blocked") {
@@ -212,14 +246,16 @@ function blockedSinceDetail(
           : "集成失败",
       });
     }
-    const checksStartFailed = latestEvent(events, "delivery.checks_start_failed");
-    if (checksStartFailed !== undefined) {
-      const reason = checksStartFailed.data?.reason;
-      candidates.push({
-        at: checksStartFailed.at,
-        detail: typeof reason === "string" && reason !== "" ? reason : "检查启动失败",
-      });
-    }
+  }
+  // 检查步启动失败（step-7 fix round 1）：在 status 门外——open 的 verification
+  // 项同样出条目；在场性/新鲜度已由 currentStartFailure 判定，此处只并入同一
+  // latest-wins（blocked 项上与其他锚点照常竞胜）。
+  if (startFailure !== undefined) {
+    const reason = startFailure.data?.reason;
+    candidates.push({
+      at: startFailure.at,
+      detail: typeof reason === "string" && reason !== "" ? reason : "检查启动失败",
+    });
   }
   if (paused.has(item.key)) {
     const automationPaused = latestEvent(events, "delivery.automation_paused");
@@ -290,8 +326,17 @@ function projectItem(
     const anchor = latestEventWhere(events, enteredReleaseReady);
     entries.push(entry(item, "acceptance", anchor?.at ?? item.updatedAt, "待人工验收", now, events));
   }
-  if (item.status === "blocked" || paused.has(item.key) || interrupted.has(item.key)) {
-    const { since, detail } = blockedSinceDetail(item, events, paused, interrupted);
+  // blocked：显式信号（status blocked / paused / interrupted）之外，检查步
+  // 启动失败（step-7 fix round 1）零状态不改 status——open 的 verification 项
+  // 同样出条目（在场性/新鲜度见 currentStartFailure；spec §13.7 可见性）。
+  const startFailure = currentStartFailure(item, events);
+  if (
+    item.status === "blocked"
+    || paused.has(item.key)
+    || interrupted.has(item.key)
+    || startFailure !== undefined
+  ) {
+    const { since, detail } = blockedSinceDetail(item, events, paused, interrupted, startFailure);
     entries.push(entry(item, "blocked", since, detail, now, events));
   }
   return entries;
