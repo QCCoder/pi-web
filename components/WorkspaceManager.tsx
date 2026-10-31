@@ -22,7 +22,20 @@ import type {
   WorkItemType,
 } from "@/lib/work-items/types";
 import { sourceLabel } from "@/lib/work-items/source-labels";
-import type { SkillInfo } from "@/lib/api-types";
+import type {
+  DeliveryInitResponse,
+  DeliveryReadinessResponse,
+  DeliveryRolePreviewResponse,
+  DeliveryRolePromptPreview,
+  DeliveryRolesResponse,
+  DeliveryRoleSummary,
+  DeliverySuggestedCheck,
+} from "@/lib/api-types";
+// 交付角色词表：零依赖叶子模块（不 import 任何 node 内建），可安全进浏览器
+// bundle——角色表按 DELIVERY_ROLES 序渲染、PUT 体按词表拼 roles 四键。
+import { DELIVERY_ROLES, type DeliveryRole } from "@/lib/work-items/delivery-runner/roles";
+import { setLastSettingsSection, setLastSettingsSelection } from "@/lib/settings-navigation";
+import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 // 工作项共用件（M2 T9 抽取）：创建表单 / 事件时间线 / 来源行与仓库 chips /
 // fetch 帮手。本面板与中央 WorkItemsPage 两处引用同一实现。
 import { WorkItemCreateForm, type WorkItemCreateFormValues } from "./work-items/WorkItemCreateForm";
@@ -40,14 +53,17 @@ interface RepositoryListResponse {
 }
 
 /** 交付自动化配置的客户端结构镜像（lib/work-items/delivery-runner/config.ts
- *  的 DeliveryRunnerConfig——该模块是服务端 fs/yaml 层，不能进浏览器 bundle）。 */
+ *  的 DeliveryRunnerConfig——该模块是服务端 fs/yaml 层，不能进浏览器 bundle）。
+ *  Seam-repositioning T1/T4：schemaVersion v2、roles 四键同形（词表从零依赖的
+ *  roles.ts 直引——DeliveryRole 词表与 DELIVERY_ROLES 序服务端同源）。 */
 interface DeliveryRoleConfigState {
   profile?: string;
   model?: { provider?: string; modelId: string };
 }
 
-/** DeliveryCheckConfig 的客户端镜像：verifier 的验证命令清单（Phase-4）——
- *  人维护（本编辑器），agent 只能触发不能自造。 */
+/** DeliveryCheckConfig 的客户端镜像：验证命令清单（Phase-4）——人维护
+ *  （本编辑器），agent 只能触发不能自造。final-arch step-3：执行者是引擎
+ *  system 检查步（verifier 角色已退役），清单语义不变。 */
 interface DeliveryCheckConfigState {
   name: string;
   repositoryId?: string;
@@ -56,14 +72,30 @@ interface DeliveryCheckConfigState {
 }
 
 interface DeliveryRunnerConfigState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   enabled: boolean;
-  /** 角色显式双字段（Phase-3 T5）：designer/developer 同形、各自可选。 */
-  roles: { designer?: DeliveryRoleConfigState; developer?: DeliveryRoleConfigState };
+  /** 角色配置四键同形（v2，词表 roles.ts）：designer/developer/reviewer/
+   *  release-preparer 各自可选——角色表按 DELIVERY_ROLES 序拼 PUT 体。 */
+  roles: Partial<Record<DeliveryRole, DeliveryRoleConfigState>>;
   budget: { maxAttemptsPerInput: number; maxExecutionMinutes: number };
-  /** 验证命令（Phase-4）：可选缺省 undefined = 无配置（verifier 池按空清单
+  /** attention 队列阈值（final-arch step-2，服务端 parse 后必有——缺块回填
+   *  3/7）：nudgeAfterDays / parkAfterDays。PUT 必须原样回传（backlog-clearing
+   *  T2）——不带 attention 的保存会被服务端 parse 打回缺省 3/7，手设阈值
+   *  即丢。UI 无编辑控件，纯 round-trip 保真。 */
+  attention: { nudgeAfterDays: number; parkAfterDays: number };
+  /** 验证命令（Phase-4）：可选缺省 undefined = 无配置（system 检查步按空清单
    *  处理）；空数组合法、等同无配置。 */
   verification?: { checks: DeliveryCheckConfigState[] };
+  /** 流程阶段开关（final-arch step-3/4，服务端解析后必有——缺块回填全关）：
+   *  review = 先审后跑；integrate = 集成命令（enabled 时 command 必填非空，
+   *  客户端先行拦截——文案与服务端 parseStages 一致；关闭时 command 可选保留，
+   *  回开免重写）；acceptance = 验收门（release 前须人工验收记录）。PUT 必须
+   *  原样回传——UI 保存不得丢手设的开关。 */
+  stages: {
+    review: { enabled: boolean };
+    integrate: { enabled: boolean; command?: string };
+    acceptance: { enabled: boolean };
+  };
 }
 
 /** checks 编辑器的草稿行：可选字段用空串表达「缺省」，保存时剥键（round-trip
@@ -122,11 +154,36 @@ function checksPayload(
  *  时按此播种表单——不是错误，否则刚开齐 capabilities 的工作区永远无法从
  *  UI 启用自动化。 */
 const DEFAULT_DELIVERY_RUNNER_CONFIG: DeliveryRunnerConfigState = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   enabled: false,
   roles: {},
   budget: { maxAttemptsPerInput: 3, maxExecutionMinutes: 30 },
+  attention: { nudgeAfterDays: 3, parkAfterDays: 7 },
+  stages: {
+    review: { enabled: false },
+    integrate: { enabled: false },
+    acceptance: { enabled: false },
+  },
 };
+
+/** 角色表标签（角色列 + 预览抽屉标题；词表序 = DELIVERY_ROLES）。从词表派生
+ *  （final-arch step-3 T1 增 reviewer 后保持任意词表可编译）——查表缺省回退
+ *  角色名。 */
+const DELIVERY_ROLE_LABEL_LOOKUP: Partial<Record<DeliveryRole, string>> = {
+  designer: "设计师",
+  developer: "开发者",
+  reviewer: "评审者",
+  "release-preparer": "发布准备者",
+};
+const DELIVERY_ROLE_LABELS = Object.fromEntries(
+  DELIVERY_ROLES.map((role) => [role, DELIVERY_ROLE_LABEL_LOOKUP[role] ?? role]),
+) as Record<DeliveryRole, string>;
+
+/** 角色表全角色空 profile 草稿（"" = 同名剧本缺省——不写 profile 键）。
+ *  从词表派生（任意词表可编译，同上）。 */
+const EMPTY_ROLE_PROFILE_DRAFTS = Object.fromEntries(
+  DELIVERY_ROLES.map((role) => [role, ""]),
+) as Record<DeliveryRole, string>;
 
 type ManagerSection = "workspaces" | "work-items";
 
@@ -189,6 +246,12 @@ interface Props {
    *  新轮会话开成 workspace 的 chat tab（SSE 实时观看）；409（本轮已在跑）
    *  等错误在 handler 内 alert 直陈。 */
   onRunLoopRound?: (workspace: WorkspaceSummary, item: WorkItemRecord, loopName: string) => void;
+  /** 角色表「编辑剧本」（Seam-repositioning Task 4）：宿主接此回调切到
+   *  设置 › Agents 面板（desktop = openCenterPage({kind:"agents"})，mobile =
+   *  设置页 agents 分区）。回调前本组件已写 settings-navigation 的
+   *  Agents 选中记录（project:<name>，cwd = 工作区路径）——未接线时记录仍生效
+   *  （AgentsConfig 打开时按 cwd 读出并预选该剧本），只是不自动跳页。 */
+  onOpenAgentsSettings?: (profile: { name: string; workspacePath: string }) => void;
   /** Open one of the item's linked conversation sessions by id (locate
    * pipeline) — renders the `conversations` list as clickable entries. */
   onOpenConversation?: (sessionId: string) => void;
@@ -315,6 +378,7 @@ export function WorkspaceManager({
   onOpenWorkItemConversation,
   onRunContract,
   onRunLoopRound,
+  onOpenAgentsSettings,
   onOpenConversation,
   onOpenWorkItemsPage,
   onWorkspaceDeleted,
@@ -325,7 +389,6 @@ export function WorkspaceManager({
   const [workspaceData, setWorkspaceData] = useState<WorkspaceListResponse | null>(null);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [repositories, setRepositories] = useState<WorkspaceRepositoryState[]>([]);
-  const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
   const [selectedWorkItem, setSelectedWorkItem] = useState<WorkItemDetail | null>(null);
   const [filter, setFilter] = useState<WorkItemFilter>("all");
   const [showArchived, setShowArchived] = useState(false);
@@ -342,8 +405,6 @@ export function WorkspaceManager({
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryRemote, setRepositoryRemote] = useState("");
   const [repositoryPath, setRepositoryPath] = useState("");
-  const [skillSelectionOpen, setSkillSelectionOpen] = useState(false);
-  const [skillDraft, setSkillDraft] = useState<string[]>([]);
   // 基本信息：改名草稿（随选中工作区重置；空/未变时保存禁用）。
   const [nameDraft, setNameDraft] = useState("");
   // 列表拖拽排序（HTML5 DnD，同 SessionTabBar 模式：拖到目标上 = 插到它前面）。
@@ -381,19 +442,63 @@ export function WorkspaceManager({
   // 「立即跑一轮」多 active loop 时的手动选择（未绑定且无唯一默认时出现）。
   const [runLoopPick, setRunLoopPick] = useState("");
   // 交付自动化配置（Phase-2 Task 9；Phase-3 T5 增 developer 行；Phase-4 T5 增
-  //  verification.checks 编辑器）：`.pi/delivery.yaml` 的 GET/PUT——仅
-  //  work-items+workflows 双开的 workspaces 可见（PUT 的服务端门同款）。配置
-  //  结构是 delivery-runner/config.ts DeliveryRunnerConfig 的客户端镜像（该
-  //  模块 import node:fs，不能进浏览器 bundle——kitLoops 同款手法）。UI 编辑
-  //  enabled + designer/developer profile + 验证命令清单；budget 只读展示。
+  //  verification.checks 编辑器；Seam-repositioning Task 4 增角色表 + 组合预览）：
+  //  `.pi/delivery.yaml` 的 GET/PUT——仅 work-items+workflows 双开的 workspaces
+  //  可见（PUT 的服务端门同款）。配置结构是 delivery-runner/config.ts
+  //  DeliveryRunnerConfig 的客户端镜像（v2 四键，该模块 import node:fs 不能进
+  //  浏览器 bundle）。UI 编辑 enabled + 流程阶段开关（stages——review 先审后
+  //  跑 / integrate 集成命令 / acceptance 验收门，final-arch step-3/4）+
+  //  角色表（剧本下拉 / 模型覆写 / 状态）+ 验证命令清单；budget 只读展示。
   const [deliveryConfig, setDeliveryConfig] = useState<DeliveryRunnerConfigState | null>(null);
   const [deliveryEnabled, setDeliveryEnabled] = useState(false);
-  const [deliveryDesignerProfile, setDeliveryDesignerProfile] = useState("");
-  const [deliveryDeveloperProfile, setDeliveryDeveloperProfile] = useState("");
+  // 评审阶段开关草稿（final-arch step-3：stages.review.enabled——PUT 原样回传，
+  // 否则 UI 保存会丢手设的开关）。
+  const [deliveryReviewEnabled, setDeliveryReviewEnabled] = useState(false);
+  // 集成阶段草稿（final-arch step-4：stages.integrate.{enabled,command}——命令
+  // 输入以空串表达「未配置」；enabled 而无命令在保存前客户端拦截，文案与服务端
+  // parseStages 一致）与验收门开关（stages.acceptance.enabled）。PUT 原样回传。
+  const [deliveryIntegrateEnabled, setDeliveryIntegrateEnabled] = useState(false);
+  const [deliveryIntegrateCommand, setDeliveryIntegrateCommand] = useState("");
+  const [deliveryAcceptanceEnabled, setDeliveryAcceptanceEnabled] = useState(false);
+  // 角色表剧本草稿（per-role；"" = 同名缺省，不写 roles.<role>.profile 键）。
+  const [deliveryRoleProfiles, setDeliveryRoleProfiles] = useState<Record<DeliveryRole, string>>(
+    EMPTY_ROLE_PROFILE_DRAFTS,
+  );
   const [deliveryChecks, setDeliveryChecks] = useState<DeliveryCheckDraft[]>([]);
   const [deliverySaving, setDeliverySaving] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [deliverySaved, setDeliverySaved] = useState(false);
+  // 角色表状态列（GET …/delivery/roles 只读投影；保存后重取——播种会落新文件）。
+  const [deliveryRoleSummaries, setDeliveryRoleSummaries] = useState<DeliveryRoleSummary[] | null>(null);
+  // 剧本下拉选项：`/api/subagents/profiles?cwd=<工作区路径>` 的 project 作用域名。
+  const [deliveryProfileOptions, setDeliveryProfileOptions] = useState<string[]>([]);
+  // 模型覆写下拉选项（ModelSelector；`/api/models?cwd=`，AgentsConfig 同款）。
+  const [deliveryModelOptions, setDeliveryModelOptions] = useState<ModelSelectorOption[]>([]);
+  const [deliveryModelsLoading, setDeliveryModelsLoading] = useState(true);
+  // 保存成功后的播种提示（seeded.written 非空才出现；二次保存空转不显示）；
+  // final-fix B：播种失败 → seeded:null + seedingError 的非阻断警告。
+  const [deliverySeededNotice, setDeliverySeededNotice] = useState<string | null>(null);
+  const [deliverySeedWarning, setDeliverySeedWarning] = useState<string | null>(null);
+  // 「预览 prompt」抽屉：目标角色 + 投影数据（GET …/delivery/roles/[role]/preview）。
+  const [deliveryPreviewRole, setDeliveryPreviewRole] = useState<DeliveryRole | null>(null);
+  const [deliveryPreview, setDeliveryPreview] = useState<DeliveryRolePromptPreview | null>(null);
+  const [deliveryPreviewLoading, setDeliveryPreviewLoading] = useState(false);
+  // 初始化向导（final-arch step-6 Task 3，spec §13.2/§13.3）：from 同布局源目录
+  // 草稿 + 检查草稿行（可编辑；运行后预填最近一次 init 响应的 suggestedChecks）
+  // + 运行结果（actions 清单 + suggestedChecks 表）。POST …/delivery/init——
+  // 只补缺、只建议：永不翻 enabled、永不执行命令；stages 三开关取当前表单值
+  // （与保存同源）。就绪清单投影（GET …/delivery/readiness）常驻显示——无新
+  // 定时器，load/保存成功/init 成功三个时机刷新（与页面既有刷新节奏同拍）。
+  const [deliveryInitFrom, setDeliveryInitFrom] = useState("");
+  const [deliveryInitChecks, setDeliveryInitChecks] = useState<Array<{ name: string; command: string }>>([]);
+  const [deliveryInitRunning, setDeliveryInitRunning] = useState(false);
+  const [deliveryInitResult, setDeliveryInitResult] = useState<DeliveryInitResponse | null>(null);
+  const [deliveryInitError, setDeliveryInitError] = useState<string | null>(null);
+  const [deliveryReadiness, setDeliveryReadiness] = useState<DeliveryReadinessResponse | null>(null);
+  // 模板另存（漂移行按钮）：进行中的角色（防双击）+ 结果提示（成功带副本路径；
+  // 409 = 副本已存在，永不覆盖）。
+  const [deliveryTemplateSavingRole, setDeliveryTemplateSavingRole] = useState<DeliveryRole | null>(null);
+  const [deliveryTemplateNotice, setDeliveryTemplateNotice] = useState<string | null>(null);
 
   const selectedWorkspace = workspaceData?.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
@@ -535,28 +640,6 @@ export function WorkspaceManager({
     onSelectedWorkspaceChange?.(selectedWorkspace);
   }, [onSelectedWorkspaceChange, selectedWorkspace]);
 
-  useEffect(() => {
-    if ((!open && !embedded) || !selectedWorkspace) {
-      setAvailableSkills([]);
-      return;
-    }
-    let cancelled = false;
-    void fetch(`/api/skills?cwd=${encodeURIComponent(selectedWorkspace.path)}`)
-      .then(async (response) => {
-        if (!response.ok) return { skills: [] as SkillInfo[] };
-        return response.json() as Promise<{ skills?: SkillInfo[] }>;
-      })
-      .then((data) => {
-        if (!cancelled) setAvailableSkills(data.skills ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setAvailableSkills([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [embedded, open, selectedWorkspace]);
-
   // Kit-declared loops of the selected workspace (read-only GET /loops —
   // pure file discovery, no capability involved). Stores the full list
   // (incl. paused); the 开始对话/收养续跑 button gate derives from it
@@ -583,21 +666,36 @@ export function WorkspaceManager({
     };
   }, [embedded, open, selectedWorkspaceId]);
 
-  // 交付自动化配置加载（Phase-2 Task 9）：GET /delivery → 播种 enabled /
-  // designer·developer profile 草稿（budget 只读不进草稿）。门控 = 面板打开 +
-  // 双 capability；切换工作区/门控失效即清空。运行态 advisory——加载失败只降
-  // 级为块内提示，不打断设置页其它分区。
+  // 交付自动化配置加载（Phase-2 Task 9；Task 4 增角色表投影）：GET /delivery →
+  // 播种 enabled / 四角色 profile 草稿（budget 只读不进草稿）。门控 = 面板
+  // 打开 + 双 capability；切换工作区/门控失效即清空。运行态 advisory——加载
+  // 失败只降级为块内提示，不打断设置页其它分区。
   useEffect(() => {
     if ((!open && !embedded) || !selectedWorkspaceId || !deliveryAutomationCapable) {
       setDeliveryConfig(null);
+      setDeliveryReviewEnabled(false);
+      setDeliveryIntegrateEnabled(false);
+      setDeliveryIntegrateCommand("");
+      setDeliveryAcceptanceEnabled(false);
+      setDeliveryRoleProfiles(EMPTY_ROLE_PROFILE_DRAFTS);
       setDeliveryChecks([]);
       setDeliveryError(null);
       setDeliverySaved(false);
+      setDeliverySeededNotice(null);
+      setDeliverySeedWarning(null);
+      setDeliveryInitFrom("");
+      setDeliveryInitChecks([]);
+      setDeliveryInitResult(null);
+      setDeliveryInitError(null);
+      setDeliveryReadiness(null);
+      setDeliveryTemplateNotice(null);
       return;
     }
     let cancelled = false;
     setDeliveryError(null);
     setDeliverySaved(false);
+    setDeliverySeededNotice(null);
+    setDeliverySeedWarning(null);
     void fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery`)
       .then(async (response) => {
         const fallback = { error: `HTTP ${response.status}` };
@@ -620,8 +718,18 @@ export function WorkspaceManager({
         const config = data.config ?? DEFAULT_DELIVERY_RUNNER_CONFIG;
         setDeliveryConfig(config);
         setDeliveryEnabled(config.enabled);
-        setDeliveryDesignerProfile(config.roles.designer?.profile ?? "");
-        setDeliveryDeveloperProfile(config.roles.developer?.profile ?? "");
+        // 评审/集成/验收阶段开关（final-arch step-3/4）：服务端 parse 后 stages
+        // 必有——缺块回填三开关全关，这里直读；integrate.command 缺省映射空串。
+        setDeliveryReviewEnabled(config.stages.review.enabled);
+        setDeliveryIntegrateEnabled(config.stages.integrate.enabled);
+        setDeliveryIntegrateCommand(config.stages.integrate.command ?? "");
+        setDeliveryAcceptanceEnabled(config.stages.acceptance.enabled);
+        setDeliveryRoleProfiles({
+          designer: config.roles.designer?.profile ?? "",
+          developer: config.roles.developer?.profile ?? "",
+          reviewer: config.roles.reviewer?.profile ?? "",
+          "release-preparer": config.roles["release-preparer"]?.profile ?? "",
+        });
         setDeliveryChecks(checksDraftFromConfig(config));
       })
       .catch(() => {
@@ -631,6 +739,113 @@ export function WorkspaceManager({
       cancelled = true;
     };
   }, [deliveryAutomationCapable, embedded, open, selectedWorkspaceId]);
+
+  // 角色表状态列（Task 4）：GET /delivery/roles 只读投影——存在/缺失、播种
+  // 标记（模板 vN）、有效模型与来源。保存成功后重取（播种会落新文件）。
+  // 失败静默降级（状态列显示占位），不打断配置块。
+  const loadDeliveryRoleSummaries = useCallback(async (workspaceId: string) => {
+    try {
+      const data = await responseJson<DeliveryRolesResponse>(
+        await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/delivery/roles`),
+      );
+      setDeliveryRoleSummaries(data.roles);
+    } catch {
+      setDeliveryRoleSummaries(null);
+    }
+  }, []);
+
+  // 就绪清单（final-arch step-6 Task 3）：GET /delivery/readiness 只读投影——
+  // 常驻显示，非门禁；响应带 currentTemplateVersion（角色表漂移提示的对照值）。
+  // 无新定时器：与角色摘要同一组时机刷新（load / 保存成功 / init 成功）。
+  const loadDeliveryReadiness = useCallback(async (workspaceId: string) => {
+    try {
+      const data = await responseJson<DeliveryReadinessResponse>(
+        await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/delivery/readiness`),
+      );
+      setDeliveryReadiness(data);
+    } catch {
+      setDeliveryReadiness(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if ((!open && !embedded) || !selectedWorkspaceId || !deliveryAutomationCapable) {
+      setDeliveryRoleSummaries(null);
+      setDeliveryReadiness(null);
+      setDeliveryProfileOptions([]);
+      return;
+    }
+    void loadDeliveryRoleSummaries(selectedWorkspaceId);
+    void loadDeliveryReadiness(selectedWorkspaceId);
+  }, [deliveryAutomationCapable, embedded, loadDeliveryReadiness, loadDeliveryRoleSummaries, open, selectedWorkspaceId]);
+
+  // 剧本下拉选项（Task 4）：`/api/subagents/profiles?cwd=<工作区路径>` 过滤
+  // scope === "project"（.pi/agents 是交付剧本唯一合法作用域——别名剧本必须
+  // 住工作区）。失败静默降级（下拉只剩同名缺省项）。
+  useEffect(() => {
+    if ((!open && !embedded) || !selectedWorkspace?.path || !deliveryAutomationCapable) {
+      setDeliveryProfileOptions([]);
+      return;
+    }
+    let cancelled = false;
+    void fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(selectedWorkspace.path)}`)
+      .then(async (response) => {
+        if (!response.ok) return { profiles: [] as Array<{ name: string; scope: string }> };
+        return (await response.json()) as { profiles?: Array<{ name: string; scope: string }> };
+      })
+      .then((data) => {
+        if (!cancelled) {
+          setDeliveryProfileOptions(
+            (data.profiles ?? [])
+              .filter((profile) => profile.scope === "project")
+              .map((profile) => profile.name),
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDeliveryProfileOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deliveryAutomationCapable, embedded, open, selectedWorkspace]);
+
+  // 模型覆写选项（Task 4）：`/api/models?cwd=`（AgentsConfig 同款）→
+  // ModelSelector；失败/离线 → 空选项（下拉禁用，占位仍显示摘要的有效模型）。
+  useEffect(() => {
+    if ((!open && !embedded) || !selectedWorkspace?.path || !deliveryAutomationCapable) {
+      setDeliveryModelOptions([]);
+      setDeliveryModelsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setDeliveryModelsLoading(true);
+    void fetch(`/api/models?cwd=${encodeURIComponent(selectedWorkspace.path)}`)
+      .then(async (response) => {
+        if (!response.ok) return { modelList: [] as Array<{ id: string; name: string; provider: string }> };
+        return (await response.json()) as { modelList?: Array<{ id: string; name: string; provider: string }>; modelError?: string };
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setDeliveryModelOptions(
+          (data.modelList ?? []).map((model) => ({
+            provider: model.provider,
+            modelId: model.id,
+            name: model.name,
+          })),
+        );
+        setDeliveryModelsLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDeliveryModelOptions([]);
+          setDeliveryModelsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deliveryAutomationCapable, embedded, open, selectedWorkspace]);
 
   useEffect(() => {
     if ((!open && !embedded) || !createWorkItemRequest) return;
@@ -813,41 +1028,29 @@ export function WorkspaceManager({
     }
   }, [loadRepositories, loadWorkspaces, selectedWorkspaceId]);
 
-  const saveSkillSelection = useCallback(async () => {
-    if (!selectedWorkspace) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await responseJson(
-        await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspace.id)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expectedUpdatedAt: selectedWorkspace.updatedAt,
-            skills: skillDraft,
-          }),
-        }),
-      );
-      setSkillSelectionOpen(false);
-      await loadWorkspaces();
-    } catch (saveSkillsError) {
-      setError(saveSkillsError instanceof Error ? saveSkillsError.message : String(saveSkillsError));
-    } finally {
-      setSaving(false);
-    }
-  }, [loadWorkspaces, selectedWorkspace, skillDraft]);
-
   /** 保存交付自动化配置（Phase-2 Task 9；T5 增 developer；Phase-4 T5 增
-   *  verification.checks）：PUT /delivery 全量 config——UI 编辑 enabled +
-   *  designer/developer profile + 验证命令清单，budget 与既有 model 覆写原样
-   *  回传（round-trip 保真）。checks 草稿行内校验（名称/命令必填、timeout
-   *  整数 1–3600）失败 → 块内错误提示且不发 PUT。成功以响应回填（服务端
-   *  parse 后的规范化值），「已保存」内联提示；失败（含 capability 门 400）
-   *  走块内错误提示。 */
+   *  verification.checks；Task 4 增角色表 + 播种提示；final-arch step-3 增
+   *  评审阶段开关；final-arch step-4 增集成命令与验收门）：PUT /delivery 全量
+   *  config（v2）——UI 编辑 enabled + stages 三开关（review 先审后跑 /
+   *  integrate 集成命令 / acceptance 验收门）+ 角色表（剧本下拉草稿）+ 验证
+   *  命令清单，budget 与未触碰角色的既有 profile/model 原样回传（round-trip
+   *  保真）。checks 草稿行内校验（名称/命令必填、timeout 整数 1–3600）与
+   *  integrate 开启而命令空白（文案与服务端 parseStages 一致）失败 → 块内
+   *  错误提示且不发 PUT。成功以响应回填（服务端 parse 后的规范化值），「已
+   *  保存」内联提示；保存成功即重取角色摘要（模型覆写/别名切换也改投影），
+   *  响应 seeded.written 非空才加「已播种 N 份剧本到 .pi/agents/」提示；失败
+   *  （含 capability 门 400）走块内错误提示。 */
   const saveDeliveryConfig = useCallback(async () => {
     if (!selectedWorkspaceId || !deliveryConfig) return;
     setDeliveryError(null);
     setDeliverySaved(false);
+    setDeliverySeededNotice(null);
+    // 集成阶段客户端守卫（final-arch step-4）：enabled 而命令空白 → 拦截不发
+    // PUT（服务端 parseStages 同款文案；提前拦省一次 400 往返）。
+    if (deliveryIntegrateEnabled && !deliveryIntegrateCommand.trim()) {
+      setDeliveryError("stages.integrate.command is required when integrate is enabled");
+      return;
+    }
     const checksResult = checksPayload(deliveryChecks);
     if ("error" in checksResult) {
       setDeliveryError(checksResult.error);
@@ -856,8 +1059,9 @@ export function WorkspaceManager({
     const verification = checksResult.checks !== undefined ? { checks: checksResult.checks } : undefined;
     setDeliverySaving(true);
     try {
-      // 角色 round-trip 习语（designer/developer 同款）：profile 草稿 + 既有
-      // model 覆写合并；两者皆空 → 该角色键整体剥掉（不写空对象）。
+      // 角色 round-trip 习语（四键同形）：profile 草稿 + 既有 model 覆写合并；
+      // 两者皆空 → 该角色键整体剥掉（不写空对象）。未触碰角色的 profile/model
+      // 从 GET 到 PUT 原样回传（草稿由加载/上次保存播种，字节保真）。
       const rolePayload = (
         profile: string,
         existing?: DeliveryRoleConfigState,
@@ -868,38 +1072,228 @@ export function WorkspaceManager({
             ...(existing?.model ? { model: existing.model } : {}),
           }
           : undefined;
-      const existingDesigner = deliveryConfig.roles.designer;
-      const existingDeveloper = deliveryConfig.roles.developer;
-      const designer = rolePayload(deliveryDesignerProfile.trim(), existingDesigner);
-      const developer = rolePayload(deliveryDeveloperProfile.trim(), existingDeveloper);
-      const data = await responseJson<{ config: DeliveryRunnerConfigState }>(
+      const roles: Partial<Record<DeliveryRole, DeliveryRoleConfigState>> = {};
+      for (const role of DELIVERY_ROLES) {
+        const entry = rolePayload(deliveryRoleProfiles[role].trim(), deliveryConfig.roles[role]);
+        if (entry) roles[role] = entry;
+      }
+      const data = await responseJson<{
+        config: DeliveryRunnerConfigState;
+        /** final-fix B：播种失败降级 null + seedingError（配置已保存）。 */
+        seeded: { written: string[] } | null;
+        seedingError?: string;
+      }>(
         await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            schemaVersion: 1,
+            schemaVersion: 2,
             enabled: deliveryEnabled,
-            roles: {
-              ...(designer ? { designer } : {}),
-              ...(developer ? { developer } : {}),
-            },
+            roles,
             budget: deliveryConfig.budget,
+            // attention 阈值原样回传（backlog-clearing T2）：不带 attention 的
+            // PUT 被服务端 parseAttention 打回缺省 3/7——手设 nudge/park 即丢。
+            attention: deliveryConfig.attention,
+            // stages 三开关原样回传（final-arch step-3/4）：不带 stages 的 PUT
+            // 会把手设的开关打回缺省 false——save 即丢失。integrate.command
+            // 关闭时也保留（服务端同款语义——回开免重写）。
+            stages: {
+              review: { enabled: deliveryReviewEnabled },
+              integrate: {
+                enabled: deliveryIntegrateEnabled,
+                ...(deliveryIntegrateCommand.trim()
+                  ? { command: deliveryIntegrateCommand.trim() }
+                  : {}),
+              },
+              acceptance: { enabled: deliveryAcceptanceEnabled },
+            },
             ...(verification ? { verification } : {}),
           }),
         }),
       );
       setDeliveryConfig(data.config);
       setDeliveryEnabled(data.config.enabled);
-      setDeliveryDesignerProfile(data.config.roles.designer?.profile ?? "");
-      setDeliveryDeveloperProfile(data.config.roles.developer?.profile ?? "");
+      setDeliveryReviewEnabled(data.config.stages.review.enabled);
+      setDeliveryIntegrateEnabled(data.config.stages.integrate.enabled);
+      setDeliveryIntegrateCommand(data.config.stages.integrate.command ?? "");
+      setDeliveryAcceptanceEnabled(data.config.stages.acceptance.enabled);
+      setDeliveryRoleProfiles({
+        designer: data.config.roles.designer?.profile ?? "",
+        developer: data.config.roles.developer?.profile ?? "",
+        reviewer: data.config.roles.reviewer?.profile ?? "",
+        "release-preparer": data.config.roles["release-preparer"]?.profile ?? "",
+      });
       setDeliveryChecks(checksDraftFromConfig(data.config));
       setDeliverySaved(true);
+      // 播种提示（Task 3 契约；final-fix B null 防御）：seeded.written 非空
+      // （首次保存 / 新角色剧本）才显示；二次保存全 skipped 不显示；播种失败
+      // → seeded:null + seedingError——配置已落盘，只出非阻断警告不报错。
+      if (data.seeded && data.seeded.written.length > 0) {
+        setDeliverySeededNotice(`已播种 ${data.seeded.written.length} 份剧本到 .pi/agents/`);
+      }
+      if (data.seedingError) {
+        setDeliverySeedWarning(`剧本播种失败：${data.seedingError}（配置已保存）`);
+      }
+      // 保存成功即重取角色摘要（不只播种——清模型覆写 / 切别名同样改投影：
+      // 状态列与模型占位立刻跟随新配置；review fix round 1：从播种分支提出）。
+      void loadDeliveryRoleSummaries(selectedWorkspaceId);
+      // 就绪清单同步跟随（final-arch step-6 Task 3）：保存可能补 checks /
+      // 剧本——缺项投影立即收敛。
+      void loadDeliveryReadiness(selectedWorkspaceId);
     } catch (saveDeliveryError) {
       setDeliveryError(saveDeliveryError instanceof Error ? saveDeliveryError.message : String(saveDeliveryError));
     } finally {
       setDeliverySaving(false);
     }
-  }, [deliveryChecks, deliveryConfig, deliveryDesignerProfile, deliveryDeveloperProfile, deliveryEnabled, selectedWorkspaceId]);
+  }, [deliveryAcceptanceEnabled, deliveryChecks, deliveryConfig, deliveryEnabled, deliveryIntegrateCommand, deliveryIntegrateEnabled, deliveryReviewEnabled, deliveryRoleProfiles, loadDeliveryReadiness, loadDeliveryRoleSummaries, selectedWorkspaceId]);
+
+  /** 角色表「预览 prompt」（Task 4）：GET …/delivery/roles/[role]/preview →
+   *  抽屉三段（AGENTS.md 折叠 / 不变式锁定段 / 剧本正文）；composed 与 launch
+   *  同一函数产出。失败只提示不占位。 */
+  const openDeliveryPreview = useCallback(async (role: DeliveryRole) => {
+    if (!selectedWorkspaceId) return;
+    setDeliveryPreviewRole(role);
+    setDeliveryPreview(null);
+    setDeliveryPreviewLoading(true);
+    try {
+      const data = await responseJson<DeliveryRolePreviewResponse>(
+        await fetch(
+          `/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery/roles/${encodeURIComponent(role)}/preview`,
+        ),
+      );
+      setDeliveryPreview(data.preview);
+    } catch (previewError) {
+      setDeliveryError(previewError instanceof Error ? previewError.message : String(previewError));
+      setDeliveryPreviewRole(null);
+    } finally {
+      setDeliveryPreviewLoading(false);
+    }
+  }, [selectedWorkspaceId]);
+
+  /** 角色表「编辑剧本」（Task 4）：写 settings-navigation 的 Agents 选中记录
+   *  （project:<name>，cwd = 工作区路径——AgentsConfig 打开该工作区时读出并
+   *  预选）+ 分区记忆，再请宿主切到设置 › Agents（onOpenAgentsSettings 未
+   *  接线时只完成记录，不自动跳页）。 */
+  const editRoleProfile = useCallback((role: DeliveryRole) => {
+    const profileName = deliveryRoleProfiles[role].trim() || role;
+    if (!selectedWorkspace) return;
+    setLastSettingsSelection("agents", `project:${profileName}`, selectedWorkspace.path);
+    setLastSettingsSection("agents");
+    onOpenAgentsSettings?.({ name: profileName, workspacePath: selectedWorkspace.path });
+  }, [deliveryRoleProfiles, onOpenAgentsSettings, selectedWorkspace]);
+
+  /** 「运行初始化」（final-arch step-6 Task 3，spec §13.2/§13.3）：POST
+   *  …/delivery/init——from 目录 + 检查草稿（空行丢弃、半行客户端拦截）+
+   *  stages 三开关取当前表单值（与保存同源）。响应 actions 清单 +
+   *  suggestedChecks 草稿渲染待确认；草稿跟随最近一次响应预填；init 可能播种
+   *  剧本/写默认配置——就绪清单与角色摘要立即跟随。 */
+  const runDeliveryInit = useCallback(async () => {
+    if (!selectedWorkspaceId) return;
+    setDeliveryInitError(null);
+    // 集成开启而命令空白：与服务端 parseDeliveryRunnerConfig 同拒（提前拦省一次 400）。
+    if (deliveryIntegrateEnabled && !deliveryIntegrateCommand.trim()) {
+      setDeliveryInitError("stages.integrate.command is required when integrate is enabled");
+      return;
+    }
+    const checks: Array<{ name: string; command: string }> = [];
+    for (const [index, row] of deliveryInitChecks.entries()) {
+      const name = row.name.trim();
+      const command = row.command.trim();
+      if (!name && !command) continue; // 空行丢弃
+      if (!name || !command) {
+        setDeliveryInitError(`初始化检查草稿第 ${index + 1} 行：名称与命令必填。`);
+        return;
+      }
+      checks.push({ name, command });
+    }
+    setDeliveryInitRunning(true);
+    try {
+      const data = await responseJson<DeliveryInitResponse>(
+        await fetch(`/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery/init`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...(deliveryInitFrom.trim() ? { from: deliveryInitFrom.trim() } : {}),
+            ...(checks.length > 0 ? { checks } : {}),
+            stagesReview: deliveryReviewEnabled,
+            integrate: {
+              enabled: deliveryIntegrateEnabled,
+              ...(deliveryIntegrateCommand.trim()
+                ? { command: deliveryIntegrateCommand.trim() }
+                : {}),
+            },
+            acceptance: { enabled: deliveryAcceptanceEnabled },
+          }),
+        }),
+      );
+      setDeliveryInitResult(data);
+      // 草稿预填跟随最近一次 init 响应的 suggestedChecks（可编辑、不自动保存）。
+      setDeliveryInitChecks(
+        (data.suggestedChecks ?? []).map((check) => ({ name: check.name, command: check.command })),
+      );
+      void loadDeliveryReadiness(selectedWorkspaceId);
+      void loadDeliveryRoleSummaries(selectedWorkspaceId);
+    } catch (initError) {
+      setDeliveryInitError(initError instanceof Error ? initError.message : String(initError));
+    } finally {
+      setDeliveryInitRunning(false);
+    }
+  }, [
+    deliveryAcceptanceEnabled,
+    deliveryInitChecks,
+    deliveryInitFrom,
+    deliveryIntegrateCommand,
+    deliveryIntegrateEnabled,
+    deliveryReviewEnabled,
+    loadDeliveryReadiness,
+    loadDeliveryRoleSummaries,
+    selectedWorkspaceId,
+  ]);
+
+  /** 「采用为验证命令」（final-arch step-6 Task 3）：把 init 响应的
+   *  suggestedChecks 复制进 checks 编辑器（追加，不覆盖已填行）——只是草稿，
+   *  不自动保存；repositoryId 跟随（探测草稿带仓绑定），timeout 留空 = 服务端
+   *  缺省 600s。 */
+  const adoptSuggestedChecks = useCallback((suggested: DeliverySuggestedCheck[]) => {
+    setDeliveryChecks((current) => [
+      ...current,
+      ...suggested.map((check) => ({
+        name: check.name,
+        repositoryId: check.repositoryId ?? "",
+        command: check.command,
+        timeout: "",
+      })),
+    ]);
+    setDeliverySaved(false);
+  }, []);
+
+  /** 「另存新模板」（final-arch step-6 Task 3）：POST …/delivery/roles/[role]/
+   *  template——把当前内置模板写到 <role>.template.md。成功 toast 带副本路径；
+   *  409（副本已存在）按 brief 文案提示，永不覆盖。 */
+  const saveRoleTemplateCopy = useCallback(async (role: DeliveryRole) => {
+    if (!selectedWorkspaceId) return;
+    setDeliveryTemplateNotice(null);
+    setDeliveryTemplateSavingRole(role);
+    try {
+      const data = await responseJson<{ path: string }>(
+        await fetch(
+          `/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/delivery/roles/${encodeURIComponent(role)}/template`,
+          { method: "POST" },
+        ),
+      );
+      setDeliveryTemplateNotice(`已另存新模板副本：${data.path}`);
+    } catch (templateError) {
+      if (templateError instanceof Error && "status" in templateError && templateError.status === 409) {
+        setDeliveryTemplateNotice(`副本已存在（${role}.template.md）——不覆盖既有副本`);
+      } else {
+        setDeliveryTemplateNotice(
+          `另存失败：${templateError instanceof Error ? templateError.message : String(templateError)}`,
+        );
+      }
+    } finally {
+      setDeliveryTemplateSavingRole(null);
+    }
+  }, [selectedWorkspaceId]);
 
   const saveWorkspaceName = useCallback(async () => {
     if (!selectedWorkspace) return;
@@ -1171,7 +1565,6 @@ export function WorkspaceManager({
   const compactStyles = `
           .workspace-form-grid { grid-template-columns: 1fr; }
           .repository-row { grid-template-columns: minmax(0, 1fr) auto; }
-          .skill-selection-list { grid-template-columns: 1fr; }
           .capability-checklist { grid-template-columns: 1fr; }
           .repository-row > code { grid-column: 1 / -1; grid-row: 2; }
           .repository-actions { grid-column: 1 / -1; grid-row: 3; }
@@ -1308,27 +1701,6 @@ export function WorkspaceManager({
         }
         .repository-section { margin-top: 16px; }
         .workspace-settings-section { margin-top: 16px; }
-        .skill-selection-list {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 6px;
-          max-height: 220px;
-          overflow: auto;
-          margin-top: 10px;
-        }
-        .skill-selection-item {
-          display: flex;
-          align-items: flex-start;
-          gap: 7px;
-          border: 1px solid var(--border);
-          border-radius: 7px;
-          padding: 8px;
-          background: var(--bg);
-          color: var(--text);
-          font-size: 11px;
-        }
-        .skill-selection-item input { margin-top: 2px; }
-        .skill-selection-item span { min-width: 0; }
         .capability-checklist {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1347,14 +1719,6 @@ export function WorkspaceManager({
           font-size: 12px;
         }
         .capability-check-item input { margin: 0; }
-        .skill-selection-item small {
-          display: block;
-          margin-top: 2px;
-          color: var(--text-dim);
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
         .repository-section-header {
           display: flex;
           align-items: center;
@@ -1839,7 +2203,7 @@ export function WorkspaceManager({
                       <button
                         className="workspace-action"
                         onClick={() => onOpenWorkItemsPage(selectedWorkspace.id)}
-                        title="在中央区打开完整工作项管理页（列表/看板/筛选/回收站）"
+                        title="打开完整工作项管理弹窗（列表/看板/卡片——卡片可拖拽改状态）"
                       >
                         打开完整管理
                       </button>
@@ -2199,82 +2563,11 @@ export function WorkspaceManager({
                           <div>{selectedWorkspace.capabilities.join(", ")}</div>
                         </div>
                         <div>
-                          <div className="workspace-rail-meta">Skills</div>
-                          <div>{selectedWorkspace.skills.join(", ") || "未选择"}</div>
-                        </div>
-                        <div>
                           <div className="workspace-rail-meta">最近更新</div>
                           <div>{formatDate(selectedWorkspace.updatedAt)}</div>
                         </div>
                       </div>
                     </div>
-                    <section className="workspace-settings-section">
-                      <div className="repository-section-header">
-                        <h3>工作区可用 Skills</h3>
-                        <button
-                          className="workspace-action"
-                          onClick={() => {
-                            setSkillDraft(selectedWorkspace.skills);
-                            setSkillSelectionOpen((value) => !value);
-                          }}
-                        >
-                          {skillSelectionOpen ? "收起" : "选择"}
-                        </button>
-                      </div>
-                      <div className="workspace-summary-card">
-                        <div>
-                          {selectedWorkspace.skills.length > 0
-                            ? selectedWorkspace.skills.join(", ")
-                            : "遵循 Pi 默认：使用 ResourceLoader 发现的全部 skills"}
-                        </div>
-                        <div className="workspace-rail-meta" style={{ marginTop: 6 }}>
-                          安装、更新和删除仍由 Pi 原生 Skills / Packages 管理；这里只选择新会话可用的 skills。
-                        </div>
-                        {skillSelectionOpen && (
-                          <>
-                            <div className="skill-selection-list">
-                              {availableSkills.map((skill) => (
-                                <label className="skill-selection-item" key={skill.filePath}>
-                                  <input
-                                    type="checkbox"
-                                    checked={skillDraft.includes(skill.name)}
-                                    onChange={(event) => {
-                                      setSkillDraft((current) => event.target.checked
-                                        ? [...new Set([...current, skill.name])]
-                                        : current.filter((name) => name !== skill.name));
-                                    }}
-                                  />
-                                  <span>
-                                    <strong>{skill.name}</strong>
-                                    <small title={skill.description}>{skill.description}</small>
-                                  </span>
-                                </label>
-                              ))}
-                            </div>
-                            {availableSkills.length === 0 && (
-                              <div className="workspace-rail-meta" style={{ marginTop: 8 }}>
-                                Pi 尚未发现可用 skill。可先在侧边栏的“技能”中安装。
-                              </div>
-                            )}
-                            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 10 }}>
-                              <button
-                                className="workspace-action"
-                                onClick={() => setSkillDraft([])}
-                              >
-                                使用 Pi 默认
-                              </button>
-                              <button
-                                className="workspace-action"
-                                disabled={saving}
-                                onClick={() => void saveSkillSelection()}
-                              >
-                                {saving ? "保存中…" : "保存选择"}
-                              </button>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </section>
                     {/* 交付自动化配置（Phase-2 Task 9；T5 增 developer 行）：
                         work-items+workflows 双开才显示（服务端 PUT 同款门）。
                         enabled 开关 + designer/developer profile 文本 + 预算
@@ -2300,47 +2593,282 @@ export function WorkspaceManager({
                                   />
                                   <span className="workspace-rail-meta">
                                     {deliveryEnabled
-                                      ? "开启：满足领取条件的工作项由 designer/developer/verifier 角色自动领取执行"
+                                      ? "开启：满足领取条件的工作项由 designer/developer/reviewer/release-preparer 角色自动领取执行，检查由引擎系统步自动运行"
                                       : "关闭：标准交付流程仅人工推进"}
                                   </span>
                                 </div>
                               </div>
-                              <div className="workspace-form-grid">
-                                <label className="workspace-field">
-                                  <span>Designer Profile</span>
-                                  <input
-                                    value={deliveryDesignerProfile}
-                                    disabled={deliverySaving}
-                                    placeholder="subagent profile 名（可选；未配置模型时从 .pi/agents/<名>.md 解析 model 覆写）"
-                                    onChange={(event) => {
-                                      setDeliveryDesignerProfile(event.target.value);
+                              {/* 评审阶段开关（final-arch step-3，stages.review.enabled
+                                  ——先审后跑）：开 = developer 提交候选后先进 reviewer
+                                  人工评审（pass 才放行跑检查，rework 按源头打回）；
+                                  关 = 候选直接进系统检查步（旧流程零变化，缺省）。 */}
+                              <div className="workspace-field">
+                                <span>评审阶段</span>
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", minHeight: 32 }}>
+                                  <CapabilityToggle
+                                    enabled={deliveryReviewEnabled}
+                                    loading={deliverySaving}
+                                    onToggle={(next) => {
+                                      setDeliveryReviewEnabled(next);
                                       setDeliverySaved(false);
                                     }}
                                   />
-                                </label>
-                                <label className="workspace-field">
-                                  <span>Developer Profile</span>
-                                  <input
-                                    value={deliveryDeveloperProfile}
-                                    disabled={deliverySaving}
-                                    placeholder="subagent profile 名（可选；未配置模型时从 .pi/agents/<名>.md 解析 model 覆写）"
-                                    onChange={(event) => {
-                                      setDeliveryDeveloperProfile(event.target.value);
-                                      setDeliverySaved(false);
-                                    }}
-                                  />
-                                </label>
+                                  <span className="workspace-rail-meta">
+                                    {deliveryReviewEnabled
+                                      ? "开启：候选先进 reviewer 人工评审，通过后才运行检查（先审后跑）"
+                                      : "关闭：候选直接由系统检查步执行验证命令（不评审）"}
+                                  </span>
+                                </div>
                               </div>
-                              {/* 验证命令清单（Phase-4 T5）：verifier 自动验证按此执行并
-                                  留存证据——agent 只能触发，不能自造命令。四列
+                              {/* 集成阶段（final-arch step-4，stages.integrate）：
+                                  checks 全过后的延伸段——开 = 在候选 checkout 内逐仓
+                                  执行集成命令（{repositoryId}/{branch} 占位符，
+                                  单仓上限 10 分钟），失败即 blocked 待人工解锁
+                                  （unblock 后整回合重跑）。enabled 而命令空白在
+                                  保存前客户端拦截（文案与服务端 parseStages 一致）；
+                                  关闭时命令保留（回开免重写）。 */}
+                              <div className="workspace-field">
+                                <span>集成命令</span>
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", minHeight: 32, flexWrap: "wrap" }}>
+                                  <CapabilityToggle
+                                    enabled={deliveryIntegrateEnabled}
+                                    loading={deliverySaving}
+                                    onToggle={(next) => {
+                                      setDeliveryIntegrateEnabled(next);
+                                      setDeliverySaved(false);
+                                    }}
+                                  />
+                                  <input
+                                    value={deliveryIntegrateCommand}
+                                    disabled={deliverySaving}
+                                    placeholder="如 npm run integrate（{repositoryId}/{branch} 占位符）"
+                                    aria-label="集成命令"
+                                    onChange={(event) => {
+                                      setDeliveryIntegrateCommand(event.target.value);
+                                      setDeliverySaved(false);
+                                    }}
+                                    style={{ flex: "1 1 220px", minWidth: 0, fontFamily: "var(--font-mono)" }}
+                                  />
+                                  <span className="workspace-rail-meta">
+                                    {deliveryIntegrateEnabled
+                                      ? "开启：检查全过后在候选 checkout 内逐仓执行，失败即阻塞待解锁"
+                                      : "关闭：检查通过后直接进入后续阶段（不集成）"}
+                                  </span>
+                                </div>
+                              </div>
+                              {/* 验收门开关（final-arch step-4，stages.acceptance.
+                                  enabled）：开 = release_ready → released 前须人工
+                                  record-acceptance（摘要与当前候选绑定——attention
+                                  出「待人工验收」待办）；关 = 直接放行（缺省）。 */}
+                              <div className="workspace-field">
+                                <span>验收门</span>
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", minHeight: 32 }}>
+                                  <CapabilityToggle
+                                    enabled={deliveryAcceptanceEnabled}
+                                    loading={deliverySaving}
+                                    onToggle={(next) => {
+                                      setDeliveryAcceptanceEnabled(next);
+                                      setDeliverySaved(false);
+                                    }}
+                                  />
+                                  <span className="workspace-rail-meta">
+                                    {deliveryAcceptanceEnabled
+                                      ? "开启：发布前须人工登记验收（先完成验收才能放行发布）"
+                                      : "关闭：发布准备完成即可直接登记发布（不验收）"}
+                                  </span>
+                                </div>
+                              </div>
+                              {/* 角色表（Seam-repositioning Task 4，spec §13.5）：四行
+                                  （DELIVERY_ROLES 序）× 四列——剧本下拉（选项 =
+                                  .pi/agents 的 project 作用域剧本，首项「同名」=
+                                  不写 profile 键）/ ModelSelector 模型覆写（占位 =
+                                  摘要的有效模型与来源；清空 = 删键）/ 状态（只读
+                                  投影：存在〔模板 vN〕/ 缺失 + 播种或创建提示）/
+                                  操作（编辑剧本 → 设置›Agents；预览 prompt → 抽屉）。
+                                  不另建状态存储——投影来自 GET …/delivery/roles。 */}
+                              <div className="workspace-field" style={{ marginTop: 6 }}>
+                                <span>交付角色（剧本 / 模型 / 状态）</span>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                  {DELIVERY_ROLES.map((role) => {
+                                    const summary = deliveryRoleSummaries?.find((row) => row.role === role) ?? null;
+                                    const roleModel = deliveryConfig.roles[role]?.model;
+                                    // 模型占位：摘要的有效模型 + 来源（无解析 → 工作区默认）。
+                                    const sourceLabel = summary?.model.source === "override"
+                                      ? "覆写"
+                                      : summary?.model.source === "profile"
+                                        ? "剧本默认"
+                                        : "工作区默认";
+                                    const effectiveLabel = summary?.model.effective
+                                      ? `${sourceLabel}：${summary.model.effective.provider ? `${summary.model.effective.provider}/` : ""}${summary.model.effective.modelId}`
+                                      : "工作区默认模型";
+                                    // 模板漂移（final-arch step-6 Task 3）：剧本由模板播种
+                                    // （seeded_from = "<role>@<n>"）且 n < 当前内置模板版本
+                                    //（readiness 响应携带）→ 提示 + 「另存新模板」（副本写
+                                    // <role>.template.md，永不覆盖 <role>.md 与既有副本）。
+                                    const seededFrom = summary?.profile.seededFrom;
+                                    const atSign = seededFrom?.lastIndexOf("@") ?? -1;
+                                    const seededVersion = atSign >= 0 ? Number(seededFrom?.slice(atSign + 1)) : NaN;
+                                    const templateDrift = Boolean(
+                                      summary?.profile.exists
+                                      && Number.isInteger(seededVersion)
+                                      && deliveryReadiness
+                                      && seededVersion < deliveryReadiness.currentTemplateVersion,
+                                    );
+                                    return (
+                                      <div
+                                        key={role}
+                                        style={{
+                                          display: "flex",
+                                          gap: 8,
+                                          flexWrap: "wrap",
+                                          alignItems: "flex-end",
+                                          border: "1px solid var(--border)",
+                                          borderRadius: 8,
+                                          padding: "8px 10px",
+                                        }}
+                                      >
+                                        <div className="workspace-field" style={{ flex: "0 1 96px" }}>
+                                          <span>{DELIVERY_ROLE_LABELS[role]}</span>
+                                          <span className="workspace-rail-meta" style={{ fontFamily: "var(--font-mono)" }}>{role}</span>
+                                        </div>
+                                        <label className="workspace-field" style={{ flex: "1 1 150px" }}>
+                                          <span>剧本</span>
+                                          <select
+                                            value={deliveryRoleProfiles[role]}
+                                            disabled={deliverySaving}
+                                            onChange={(event) => {
+                                              setDeliveryRoleProfiles((current) => ({
+                                                ...current,
+                                                [role]: event.target.value,
+                                              }));
+                                              setDeliverySaved(false);
+                                            }}
+                                          >
+                                            <option value="">同名（{role}.md）</option>
+                                            {deliveryProfileOptions.map((name) => (
+                                              <option key={name} value={name}>{name}</option>
+                                            ))}
+                                          </select>
+                                        </label>
+                                        <div className="workspace-field" style={{ flex: "1 1 190px" }}>
+                                          <span>模型</span>
+                                          <ModelSelector
+                                            options={deliveryModelOptions}
+                                            value={roleModel
+                                              ? { provider: roleModel.provider ?? "", modelId: roleModel.modelId }
+                                              : null}
+                                            onChange={(provider, modelId) => {
+                                              setDeliveryConfig((current) => current && ({
+                                                ...current,
+                                                roles: {
+                                                  ...current.roles,
+                                                  [role]: {
+                                                    ...(current.roles[role] ?? {}),
+                                                    model: provider ? { provider, modelId } : { modelId },
+                                                  },
+                                                },
+                                              }));
+                                              setDeliverySaved(false);
+                                            }}
+                                            onClear={() => {
+                                              // 清空 = 删 model 键；profile 也空 → 整个角色键剥掉。
+                                              setDeliveryConfig((current) => {
+                                                if (!current) return current;
+                                                const existing = current.roles[role];
+                                                if (!existing?.model) return current;
+                                                const rest = { ...existing };
+                                                delete rest.model;
+                                                const nextRoles = { ...current.roles };
+                                                if (rest.profile) nextRoles[role] = rest;
+                                                else delete nextRoles[role];
+                                                return { ...current, roles: nextRoles };
+                                              });
+                                              setDeliverySaved(false);
+                                            }}
+                                            emptyLabel={effectiveLabel}
+                                            aria-label={`${DELIVERY_ROLE_LABELS[role]}模型覆写`}
+                                            disabled={deliverySaving}
+                                            busy={deliveryModelsLoading}
+                                            variant="field"
+                                            placement="auto"
+                                          />
+                                        </div>
+                                        <div className="workspace-field" style={{ flex: "1 1 150px" }}>
+                                          <span>状态</span>
+                                          {summary ? (
+                                            summary.profile.exists ? (
+                                              <>
+                                                <span className="workspace-rail-meta">
+                                                  存在{summary.profile.seededFrom?.includes("@")
+                                                    ? ` · 模板 v${summary.profile.seededFrom.split("@").pop()}`
+                                                    : ""}
+                                                </span>
+                                                {templateDrift && deliveryReadiness && (
+                                                  <>
+                                                    <span
+                                                      className="workspace-rail-meta"
+                                                      style={{ color: "#b45309" }}
+                                                      title={`内置模板已升级到 v${deliveryReadiness.currentTemplateVersion}；另存得到参考副本，是否采用由你改后决定`}
+                                                    >
+                                                      模板已更新 v{seededVersion}→v{deliveryReadiness.currentTemplateVersion}
+                                                    </span>
+                                                    <button
+                                                      type="button"
+                                                      className="workspace-action"
+                                                      disabled={deliveryTemplateSavingRole !== null}
+                                                      onClick={() => void saveRoleTemplateCopy(role)}
+                                                    >
+                                                      {deliveryTemplateSavingRole === role ? "另存中…" : "另存新模板"}
+                                                    </button>
+                                                  </>
+                                                )}
+                                              </>
+                                            ) : (
+                                              <span className="workspace-rail-meta">
+                                                缺失 · {summary.profile.explicit ? "请在 Agents 面板创建" : "保存后自动播种"}
+                                              </span>
+                                            )
+                                          ) : (
+                                            <span className="workspace-rail-meta">加载中…</span>
+                                          )}
+                                        </div>
+                                        <div className="workspace-field" style={{ flex: "0 0 auto", flexDirection: "row", gap: 6 }}>
+                                          <button
+                                            type="button"
+                                            className="workspace-action"
+                                            disabled={deliverySaving}
+                                            onClick={() => editRoleProfile(role)}
+                                            title="定位到 设置 › Agents 的该剧本（打开 Agents 面板后自动选中）"
+                                          >
+                                            编辑剧本
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="workspace-action"
+                                            disabled={deliverySaving}
+                                            onClick={() => void openDeliveryPreview(role)}
+                                          >
+                                            预览 prompt
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                              {/* 验证命令清单（Phase-4 T5）：系统检查步按此执行并
+                                  留存证据（final-arch step-3 起执行者是引擎
+                                  system 步，原 verifier 角色已退役）——agent
+                                  只能触发，不能自造命令。四列
                                   name/仓库/命令/超时（秒）+ 行删除；空清单 = 无配置
-                                  （verifier 池按空处理）。保存前 checksPayload 行内
+                                  （检查步按空处理，项以 checks-empty 可见）。
+                                  保存前 checksPayload 行内
                                   校验（名称/命令必填、timeout 整数 1–3600）。 */}
                               <div className="workspace-field" style={{ marginTop: 6 }}>
-                                <span>验证命令（verifier）</span>
+                                <span>验证命令（系统检查）</span>
                                 {deliveryChecks.length === 0 && (
                                   <span className="workspace-rail-meta">
-                                    尚未配置验证命令——开启后 verifier 领取验证时将按此清单在候选上执行命令并留存证据（agent 只能触发，不能自造命令）；空清单即不执行任何检查。
+                                    尚未配置验证命令——开启后系统检查步将按此清单在候选上执行命令并留存证据（agent 只能触发，不能自造命令）；空清单即不执行任何检查。
                                   </span>
                                 )}
                                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -2455,6 +2983,157 @@ export function WorkspaceManager({
                                   </button>
                                 </div>
                               </div>
+                              {/* 初始化向导（final-arch step-6 Task 3，spec §13.2/§13.3）：
+                                  「Nth project」故事——新建与导入一视同仁，重跑幂等。
+                                  init 只补缺（缺 delivery.yaml 才写默认、enabled 恒 false、
+                                  缺剧本才播种、from 的剧本/integrate.sh 缺文件才复制）、
+                                  只建议（探测与 from 的检查只作草稿，不落盘不执行）。
+                                  stages 三开关取当前表单值（与保存同源）；from 的检查
+                                  草稿剥 repositoryId（仓绑定待面板重绑）。 */}
+                              <div className="workspace-field" style={{ marginTop: 6 }}>
+                                <span>初始化</span>
+                                <span className="workspace-rail-meta">
+                                  只补缺、只建议：缺配置才写默认（自动执行恒为关闭，启用是人的手）；缺剧本才播种；探测与 from 的检查命令只作草稿建议，不执行、不自动保存。
+                                </span>
+                                <label className="workspace-field">
+                                  <span>from 同布局源目录（可选——须含 .pi/，绝对路径；复制剧本与 integrate.sh，缺文件才写）</span>
+                                  <input
+                                    value={deliveryInitFrom}
+                                    disabled={deliveryInitRunning}
+                                    placeholder="/absolute/path/to/source-workspace"
+                                    onChange={(event) => setDeliveryInitFrom(event.target.value)}
+                                    style={{ fontFamily: "var(--font-mono)" }}
+                                  />
+                                </label>
+                                {deliveryInitChecks.length > 0 && (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                    {deliveryInitChecks.map((check, index) => (
+                                      <div
+                                        key={index}
+                                        style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}
+                                      >
+                                        <label className="workspace-field" style={{ flex: "1 1 110px" }}>
+                                          <span>草稿名称 {index + 1}</span>
+                                          <input
+                                            value={check.name}
+                                            disabled={deliveryInitRunning}
+                                            onChange={(event) => {
+                                              setDeliveryInitChecks((current) => current.map((row, rowIndex) =>
+                                                rowIndex === index ? { ...row, name: event.target.value } : row,
+                                              ));
+                                            }}
+                                          />
+                                        </label>
+                                        <label className="workspace-field" style={{ flex: "2 1 220px" }}>
+                                          <span>命令</span>
+                                          <input
+                                            value={check.command}
+                                            disabled={deliveryInitRunning}
+                                            style={{ fontFamily: "var(--font-mono)" }}
+                                            onChange={(event) => {
+                                              setDeliveryInitChecks((current) => current.map((row, rowIndex) =>
+                                                rowIndex === index ? { ...row, command: event.target.value } : row,
+                                              ));
+                                            }}
+                                          />
+                                        </label>
+                                        <button
+                                          type="button"
+                                          className="workspace-action"
+                                          aria-label={`删除初始化检查草稿 ${index + 1}`}
+                                          disabled={deliveryInitRunning}
+                                          onClick={() => {
+                                            setDeliveryInitChecks((current) => current.filter((_, rowIndex) => rowIndex !== index));
+                                          }}
+                                        >
+                                          删除
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                  <button
+                                    type="button"
+                                    className="workspace-action"
+                                    disabled={deliveryInitRunning}
+                                    onClick={() => {
+                                      setDeliveryInitChecks((current) => [...current, { name: "", command: "" }]);
+                                    }}
+                                  >
+                                    + 添加检查草稿
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="workspace-action"
+                                    disabled={deliveryInitRunning}
+                                    onClick={() => void runDeliveryInit()}
+                                  >
+                                    {deliveryInitRunning ? "初始化中…" : "运行初始化"}
+                                  </button>
+                                </div>
+                                {deliveryInitResult && (
+                                  <div
+                                    role="status"
+                                    style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}
+                                  >
+                                    <span className="workspace-rail-meta">初始化动作清单：</span>
+                                    {deliveryInitResult.actions.map((action, index) => (
+                                      <span key={index} className="workspace-rail-meta">· {action}</span>
+                                    ))}
+                                    {(deliveryInitResult.suggestedChecks?.length ?? 0) > 0 && (
+                                      <>
+                                        <span className="workspace-rail-meta">
+                                          建议的检查命令（草稿——确认后才进上方验证命令清单；未自动保存）：
+                                        </span>
+                                        {deliveryInitResult.suggestedChecks?.map((check, index) => (
+                                          <span
+                                            key={`${check.name}:${index}`}
+                                            className="workspace-rail-meta"
+                                            style={{ fontFamily: "var(--font-mono)" }}
+                                          >
+                                            {check.name}：{check.command}
+                                          </span>
+                                        ))}
+                                        <div>
+                                          <button
+                                            type="button"
+                                            className="workspace-action"
+                                            disabled={deliveryInitRunning}
+                                            onClick={() => adoptSuggestedChecks(deliveryInitResult.suggestedChecks ?? [])}
+                                          >
+                                            采用为验证命令
+                                          </button>
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                                {deliveryInitError && (
+                                  <div role="alert" className="workspace-rail-meta" style={{ color: "#dc2626" }}>
+                                    {deliveryInitError}
+                                  </div>
+                                )}
+                              </div>
+                              {/* 就绪清单（final-arch step-6 Task 3，常驻只读投影非门禁）：
+                                  五类缺项 {kind, detail} 逐行 muted；空 = 已就绪。
+                                  无新定时器——load / 保存成功 / init 成功三个时机刷新。 */}
+                              <div className="workspace-field" style={{ marginTop: 6 }}>
+                                <span>就绪清单</span>
+                                {deliveryReadiness === null ? (
+                                  <span className="workspace-rail-meta">加载中…</span>
+                                ) : deliveryReadiness.items.length === 0 ? (
+                                  <span className="workspace-rail-meta" role="status">已就绪</span>
+                                ) : (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                    {deliveryReadiness.items.map((item, index) => (
+                                      <span key={`${item.kind}:${index}`} className="workspace-rail-meta">
+                                        · {item.detail}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
                               <div className="workspace-rail-meta" style={{ marginTop: 6 }}>
                                 预算（只读，.pi/delivery.yaml）：失败上限 {deliveryConfig.budget.maxAttemptsPerInput} 次 · 执行上限 {deliveryConfig.budget.maxExecutionMinutes} 分钟
                               </div>
@@ -2465,6 +3144,33 @@ export function WorkspaceManager({
                                   style={{ marginTop: 6, color: "#dc2626" }}
                                 >
                                   {deliveryError}
+                                </div>
+                              )}
+                              {deliverySeededNotice && (
+                                <div
+                                  role="status"
+                                  className="workspace-rail-meta"
+                                  style={{ marginTop: 6 }}
+                                >
+                                  {deliverySeededNotice}
+                                </div>
+                              )}
+                              {deliverySeedWarning && (
+                                <div
+                                  role="status"
+                                  className="workspace-rail-meta"
+                                  style={{ marginTop: 6, color: "#b45309" }}
+                                >
+                                  {deliverySeedWarning}
+                                </div>
+                              )}
+                              {deliveryTemplateNotice && (
+                                <div
+                                  role="status"
+                                  className="workspace-rail-meta"
+                                  style={{ marginTop: 6, color: deliveryTemplateNotice.startsWith("另存失败") ? "#dc2626" : undefined }}
+                                >
+                                  {deliveryTemplateNotice}
                                 </div>
                               )}
                               <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "flex-end", marginTop: 10 }}>
@@ -2486,6 +3192,120 @@ export function WorkspaceManager({
                             </div>
                           )}
                         </div>
+                        {/* 「预览 prompt」抽屉（Task 4）：三段只读——AGENTS.md（默认
+                            折叠，pi 从 cwd 注入、仅展示）▸ 不变式（引擎锁定段：
+                            灰底 + 锁 + spec §4.3.1 出处，不可编辑）▸ 剧本正文；
+                            顶部一行有效模型 + 来源 + 剧本路径。 */}
+                        {deliveryPreviewRole && createPortal(
+                          <div
+                            role="dialog"
+                            aria-modal="true"
+                            aria-label={`${DELIVERY_ROLE_LABELS[deliveryPreviewRole]} prompt 预览`}
+                            onClick={(event) => {
+                              if (event.target === event.currentTarget) {
+                                setDeliveryPreviewRole(null);
+                                setDeliveryPreview(null);
+                              }
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") {
+                                setDeliveryPreviewRole(null);
+                                setDeliveryPreview(null);
+                              }
+                            }}
+                            style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.35)" }}
+                          >
+                            <div style={{ width: 680, maxWidth: "calc(100vw - 16px)", height: "min(640px, calc(100dvh - 16px))", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 8px 32px rgba(0,0,0,0.18)" }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0, padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
+                                <div style={{ minWidth: 0, flex: 1 }}>
+                                  <div style={{ color: "var(--text)", fontWeight: 700, fontSize: 14 }}>
+                                    {DELIVERY_ROLE_LABELS[deliveryPreviewRole]} · 组合预览
+                                  </div>
+                                  {deliveryPreview && (
+                                    <div className="workspace-rail-meta" style={{ fontFamily: "var(--font-mono)", marginTop: 2 }}>
+                                      {deliveryPreview.model.effective
+                                        ? `模型：${deliveryPreview.model.effective.provider ? `${deliveryPreview.model.effective.provider}/` : ""}${deliveryPreview.model.effective.modelId}（${
+                                          deliveryPreview.model.source === "override" ? "覆写" : "剧本默认"
+                                        }）`
+                                        : "模型：工作区默认"}
+                                      {" · "}
+                                      <span title={deliveryPreview.profile.path}>{deliveryPreview.profile.path}</span>
+                                    </div>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setDeliveryPreviewRole(null);
+                                    setDeliveryPreview(null);
+                                  }}
+                                  title="关闭"
+                                  aria-label="关闭"
+                                  style={{ padding: "2px 6px", border: 0, background: "none", color: "var(--text-muted)", fontSize: 20, lineHeight: 1, cursor: "pointer" }}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                              <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+                                {deliveryPreviewLoading && (
+                                  <div className="workspace-rail-meta">加载预览…</div>
+                                )}
+                                {deliveryPreview && (
+                                  <>
+                                    <details>
+                                      <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-muted)" }}>
+                                        AGENTS.md（pi 从工作区注入，仅展示——不进组合 prompt）
+                                      </summary>
+                                      <div style={{ marginTop: 6 }}>
+                                        <button
+                                          type="button"
+                                          className="workspace-action"
+                                          style={{ marginBottom: 6 }}
+                                          title={selectedWorkspace ? `${selectedWorkspace.path}/AGENTS.md` : undefined}
+                                          onClick={() => {
+                                            if (selectedWorkspace) void navigator.clipboard?.writeText(`${selectedWorkspace.path}/AGENTS.md`);
+                                          }}
+                                        >
+                                          复制文件路径
+                                        </button>
+                                        <pre style={{ margin: 0, padding: 10, borderRadius: 8, background: "var(--bg-panel)", border: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 11.5, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 220, overflowY: "auto" }}>
+                                          {deliveryPreview.agentsMd ?? "（工作区没有 AGENTS.md）"}
+                                        </pre>
+                                      </div>
+                                    </details>
+                                    <section>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                                        <span aria-hidden style={{ color: "var(--text-dim)" }}>
+                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+                                        </span>
+                                        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)" }}>引擎不变式（锁定，不可编辑）</span>
+                                        <span
+                                          className="workspace-rail-meta"
+                                          title="docs/superpowers/specs/2026-10-26-delivery-engine-final-architecture-design.md §4.3.1"
+                                          style={{ fontFamily: "var(--font-mono)" }}
+                                        >
+                                          spec §4.3.1
+                                        </span>
+                                      </div>
+                                      <pre style={{ margin: 0, padding: 10, borderRadius: 8, background: "var(--bg-panel)", border: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11.5, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", wordBreak: "break-word", userSelect: "none" }}>
+                                        {deliveryPreview.invariant}
+                                      </pre>
+                                    </section>
+                                    <section>
+                                      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 6 }}>
+                                        剧本正文（{deliveryPreview.profile.name}.md{deliveryPreview.profile.exists ? "" : " · 文件缺失"}）
+                                      </div>
+                                      <pre style={{ margin: 0, padding: 10, borderRadius: 8, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 11.5, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                                        {deliveryPreview.body || "（剧本正文为空——会话仅带不变式开场）"}
+                                      </pre>
+                                    </section>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>,
+                          document.body,
+                        )}
                       </section>
                     )}
                     {selectedWorkspace.capabilities.includes("repositories") && (

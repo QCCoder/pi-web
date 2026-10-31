@@ -194,6 +194,9 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
 // Wraps AgentSession with the same interface the rest of the app expects
 // ============================================================================
 
+/** Cap for touchActivity's walk up parentSessionId links. */
+const MAX_ACTIVITY_PROPAGATION_DEPTH = 8;
+
 export class AgentSessionWrapper {
   // A Set, not an array: an SSE stream unsubscribes from inside emit() when it
   // closes on session_shutdown, and splicing an array mid-iteration made the
@@ -225,6 +228,13 @@ export class AgentSessionWrapper {
    *  that claims `running` but has been silent past STALL_KILL_MS — the
    *  4-hour-zombie class nothing else notices. */
   private lastActivityAt = Date.now();
+  /** Built-in subagent children carry their parent's id so their activity
+   *  propagates up the chain (see touchActivity): a parent blocked in
+   *  `get_subagent_result {wait}` for an hour is not a zombie while its child
+   *  is streaming — without this the heartbeat monitor (and the loop
+   *  spawner's stall check) would kill every orchestrator with a long-running
+   *  builder. Set at registration; plain interactive sessions leave it unset. */
+  parentSessionId?: string;
 
   constructor(
     public readonly inner: AgentSessionLike,
@@ -254,7 +264,7 @@ export class AgentSessionWrapper {
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
-      this.lastActivityAt = Date.now();
+      this.touchActivity();
       if (event.type === "agent_start") this.agentRunNeedsCompletion = true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
@@ -753,6 +763,16 @@ export class AgentSessionWrapper {
   /** ms since the last sign of life (see lastActivityAt). */
   activityIdleMs(): number {
     return Date.now() - this.lastActivityAt;
+  }
+
+  /** Mark this session alive now and propagate up the subagent parent chain
+   *  (depth-capped: a cycle in parentSessionId must never spin). Activity is
+   *  transitive on purpose — a parent awaiting a working child is working. */
+  touchActivity(depth = 0): void {
+    this.lastActivityAt = Date.now();
+    if (depth >= MAX_ACTIVITY_PROPAGATION_DEPTH || !this.parentSessionId) return;
+    const parent = getRegistry().get(this.parentSessionId);
+    if (parent && parent !== this) parent.touchActivity(depth + 1);
   }
 
   /** Emit a synthetic prompt_error to live viewers WITHOUT persisting it — used
@@ -1310,7 +1330,7 @@ function startSessionHeartbeatMonitor(): void {
       // interruption), recovery belongs to the parent's delegation tools
       // (abort/steer), and killing a quiet builder mid-run is exactly the
       // community-package timeout philosophy this fork moved away from
-      // (docs/subagent.md). The 10-min idle teardown still applies once a
+      // (knowledge/designs/subagent.md). The 10-min idle teardown still applies once a
       // child settles — that is ordinary registry cleanup, not a kill.
       if (isSubagentChildSession({ id: session.sessionId || key })) continue;
       const idleMs = session.activityIdleMs();
@@ -1472,7 +1492,6 @@ export async function startRpcSession(
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
     const workspace = await findWorkspaceForPath(cwd);
-    const selectedWorkspaceSkills = new Set(workspace?.manifest.skills ?? []);
     // `subagent` is a global capability: every session gets the built-in
     // delegation tools (Agent / get_subagent_result / steer_subagent)
     // regardless of workspace or capability toggles. Profiles come from
@@ -1487,14 +1506,6 @@ export async function startRpcSession(
     const resourceLoaderOptions: Record<string, unknown> = workspace
       ? {
           extensionFactories: [...extensionFactories, ...buildWorkspaceExtensions(workspace.manifest, workspace.path)],
-          ...(selectedWorkspaceSkills.size > 0
-            ? {
-                skillsOverride: (base: { skills: Array<{ name: string }> }) => ({
-                  ...base,
-                  skills: base.skills.filter((skill) => selectedWorkspaceSkills.has(skill.name)),
-                }),
-              }
-            : {}),
         }
       : { extensionFactories };
     if (options?.appendSystemPrompt) {
@@ -1603,11 +1614,12 @@ export async function startRpcSession(
 // hiding and the locate/open path work unchanged.
 // ----------------------------------------------------------------------------
 
-function registerSubagentChild(inner: AgentSessionLike): void {
+function registerSubagentChild(inner: AgentSessionLike, parentSessionId?: string): void {
   // The exact prompt / chatOnly pinning lives in the session file
   // (resourceSnapshot) and is re-applied on every reopen by the guard in
   // startRpcSession, so no live-wrapper state is needed here (the runtime's
-  // registerSession options are intentionally ignored).
+  // other registerSession options are intentionally ignored). parentSessionId
+  // is the one live fact kept: it routes the child's activity to the parent.
   const wrapper = new AgentSessionWrapper(inner, (completedSessionId) => {
     // Subagent children are internal work — completing them is not a
     // "your session is done" moment for the human.
@@ -1616,6 +1628,7 @@ function registerSubagentChild(inner: AgentSessionLike): void {
       console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
     });
   });
+  wrapper.parentSessionId = parentSessionId;
   wrapper.start();
   if (inner.sessionFile) cacheSessionPath(inner.sessionId, inner.sessionFile);
   wrapper.onDestroy(() => getRegistry().delete(inner.sessionId));
@@ -1636,7 +1649,7 @@ function getSubagentControllerSingleton() {
   if (!g.__piSubagentController) {
     g.__piSubagentController = createSubagentController({
       getSession: (sessionId) => getRegistry().get(sessionId),
-      registerSession: (inner) => registerSubagentChild(inner),
+      registerSession: (inner, options) => registerSubagentChild(inner, options?.parentSessionId),
       reopenSession: reopenSubagentSession,
       resolveSessionPath,
       invalidateSessionList: invalidateSessionListCache,

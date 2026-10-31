@@ -6,21 +6,22 @@ import { computeMenuLayout, readViewportWindow } from "@/lib/dropdown-layout";
 import { contextCloseTargetIds, type SessionTabState } from "@/lib/session-tabs";
 
 /**
- * 会话 tab 条（docs/session-tabs-design.md Phase 1）：顶栏 tab = 会话/占位/
- * 工作区家 tab，跨工作区混排（工作区色点标识）。替换旧的 WorkspaceTabBar，
- * 桌面/移动两 shell 共用（无 isMobile 分支——移动端就是一排可横滚的紧凑 chips）。
+ * 会话 tab 条（knowledge/designs/session-tabs-design.md Phase 1）：顶栏 tab = 会话/占位，
+ * 跨工作区混排。替换旧的 WorkspaceTabBar；现仅桌面 DesktopShell 使用（移动端
+ * 2026-09 树抽屉重构后不再渲染 chips 行）。
  *
- * 右端按钮区（P1）：＋ = 在当前 tab 的工作区开新会话 tab（无活动 tab 时隐藏——
- * 首页有自己的 composer）。⊞ 工作区选择器已删除（2026-09 移动端反馈：
- * tab 条只留 chips + ＋；工作区切换走 设置›工作区，桌面走项目树）；「首页」
- * chip 桌面保留、移动端经 showHomeTab=false 退役（移动端的家 tab 即首页，
- * MobileShell 空态自动落回家 tab）。
+ * 2026-10 单栏合并（用户反馈「打开会话就出现两个栏」）：原 32px 工作区工具行
+ * 「🏠 工作区名 ⌄」整行删除，其内容以 `leading` 槽嵌到本条最左——根节点因此
+ * 分两段：[leading（固定、不随 tab 滚动、下拉面板可溢出）] [tablist 滚动区]。
+ * 旧「首页」chip（showHomeTab）随之退役：桌面首页已退役，首页 chip 早已
+ * 永远 false。
  *
- * 右键菜单（桌面主路径；移动端无 isMobile 分支——Android 长按若触发
- * contextmenu 事件同样受益）：关闭 / 关闭其他 / 关闭左侧 / 关闭右侧。
- * 目标集合由纯函数 contextCloseTargetIds 计算；草稿合并确认在
- * useAppShellState.closeTabs。定位复用 computeMenuLayout（锚 = tab chip
- * 本身，与 ⊞ 选择器同一套 portal + 遮罩关闭模式）。
+ * 右端按钮区（P1）：＋ = 在当前工作区开新会话 tab；由宿主按「有工作区上下文」
+ * 传入 onNewSession，无上下文（纯首页）不传即隐藏。
+ *
+ * 右键菜单：关闭 / 关闭其他 / 关闭左侧 / 关闭右侧。目标集合由纯函数
+ * contextCloseTargetIds 计算；草稿合并确认在 useAppShellState.closeTabs。
+ * 定位复用 computeMenuLayout（锚 = tab chip 本身，portal + 遮罩关闭）。
  */
 
 interface Props {
@@ -29,22 +30,19 @@ interface Props {
   /** 全局 running 集会话级徽章，无需每会话 SSE（M1）。 */
   runningIds: ReadonlySet<string>;
   completedIds: ReadonlySet<string>;
-  /** 家 tab 上的工作区级聚合活动（沿用旧 tab 条的 ActivityIndicator）。 */
-  workspaceActivity: Record<string, "running" | "completed" | undefined>;
-  /** 「首页」chip 是否渲染：桌面保留（首页 composer 页的锚点）；移动端
-   *  退役（2026-09：家 tab 即首页，空态由 MobileShell 自动落回家 tab）。 */
-  showHomeTab?: boolean;
-  onSelectHome: () => void;
+  /** 条最左的固定槽（桌面 = 「🏠 工作区名 ⌄」工作区 chip + 切换面板）；不随
+   *  tab 横滚，其下拉可向下溢出。缺省不渲染。 */
+  leading?: React.ReactNode;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
   /** 右键菜单批量关闭（关闭其他/左侧/右侧）：目标 id 集合（不含锚 tab）。 */
   onCloseTabs: (ids: string[]) => void;
   onReorder: (ids: string[]) => void;
-  onNewSession: () => void;
+  /** ＋ 新会话；不传 = 无工作区上下文，按钮不渲染。 */
+  onNewSession?: () => void;
 }
 
 function tabLabel(tab: SessionTabState): string {
-  if (tab.kind === "workspace-home") return tab.workspace.name;
   if (tab.kind === "new-session") return "新会话";
   const name = tab.session?.name?.trim();
   if (name) return name;
@@ -53,7 +51,6 @@ function tabLabel(tab: SessionTabState): string {
 }
 
 function tabTitle(tab: SessionTabState): string {
-  if (tab.kind === "workspace-home") return `${tab.workspace.name}（总览）\n${tab.workspace.path}`;
   if (tab.kind === "new-session") return `新会话\n${tab.workspace.name} · ${tab.workspace.path}`;
   return `${tabLabel(tab)}\n${tab.workspace.name} · ${tab.workspace.path}`;
 }
@@ -63,9 +60,7 @@ export function SessionTabBar({
   activeTabId,
   runningIds,
   completedIds,
-  workspaceActivity,
-  showHomeTab = true,
-  onSelectHome,
+  leading,
   onSelectTab,
   onCloseTab,
   onCloseTabs,
@@ -114,46 +109,46 @@ export function SessionTabBar({
 
   return (
     <div
-      ref={containerRef}
-      className="hide-scrollbar"
-      role="tablist"
-      aria-label="会话"
-      onWheel={(event) => {
-        if (ctxMenu) setCtxMenu(null);
-        if (!containerRef.current || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-        containerRef.current.scrollLeft += event.deltaY;
-      }}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => {
-        event.preventDefault();
-        if (!draggedId) return;
-        onReorder([...tabs.map((t) => t.id).filter((id) => id !== draggedId), draggedId]);
-        setDraggedId(null);
-      }}
       style={{
         display: "flex",
         alignItems: "stretch",
         height: 36,
         flexShrink: 0,
-        overflowX: "auto",
-        overflowY: "hidden",
-        scrollPaddingRight: 36,
+        minWidth: 0,
         background: "var(--bg-panel)",
         borderBottom: "1px solid var(--border)",
       }}
     >
-      {showHomeTab && (
-        <div
-          ref={activeTabId === null ? activeRef : undefined}
-          role="tab"
-          aria-selected={activeTabId === null}
-          onClick={onSelectHome}
-          style={tabStyle(activeTabId === null, true)}
-        >
-          <HomeIcon />
-          <span>首页</span>
-        </div>
-      )}
+      {/* 固定 leading 槽：不在滚动容器内（它的下拉面板要向下溢出，而滚动容器
+          overflowY:hidden 会裁掉）；tab 多到溢出时它也不会被滚走。 */}
+      {leading}
+      <div
+        ref={containerRef}
+        className="hide-scrollbar"
+        role="tablist"
+        aria-label="会话"
+        onWheel={(event) => {
+          if (ctxMenu) setCtxMenu(null);
+          if (!containerRef.current || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+          containerRef.current.scrollLeft += event.deltaY;
+        }}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault();
+          if (!draggedId) return;
+          onReorder([...tabs.map((t) => t.id).filter((id) => id !== draggedId), draggedId]);
+          setDraggedId(null);
+        }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          alignItems: "stretch",
+          overflowX: "auto",
+          overflowY: "hidden",
+          scrollPaddingRight: 36,
+        }}
+      >
       {tabs.map((tab) => {
         const active = tab.id === activeTabId;
         const running = tab.kind === "session" && tab.session
@@ -162,7 +157,6 @@ export function SessionTabBar({
         const completed = tab.kind === "session" && tab.session && !active
           ? completedIds.has(tab.session.id)
           : false;
-        const workspaceStatus = tab.kind === "workspace-home" ? workspaceActivity[tab.workspace.id] : undefined;
         return (
           <div
             key={tab.id}
@@ -201,7 +195,6 @@ export function SessionTabBar({
             style={{ ...tabStyle(active), opacity: draggedId === tab.id ? 0.55 : 1 }}
           >
             {(running || completed) && <ActivityIndicator status={running ? "running" : "completed"} />}
-            {workspaceStatus && <ActivityIndicator status={workspaceStatus} />}
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
               {tabLabel(tab)}
             </span>
@@ -235,10 +228,10 @@ export function SessionTabBar({
           </div>
         );
       })}
-      {/* ＋ 在当前 tab 的工作区开新会话 tab（P1：无活动 tab = 首页上下文时隐藏，
-          首页有自己的 composer）。sticky right：tab 多到溢出时吸附在条的最右
-          （不透明背景，chips 从底下滚过），不溢出时紧跟最后一个 tab。 */}
-      {activeTabId !== null && (
+      {/* ＋ 在当前工作区开新会话 tab（宿主有工作区上下文才传 onNewSession；纯
+          首页不传即隐藏）。sticky right：tab 多到溢出时吸附在条的最右（不透明
+          背景，chips 从底下滚过），不溢出时紧跟最后一个 tab。 */}
+      {onNewSession && (
         <button
           type="button"
           title="新会话"
@@ -299,6 +292,7 @@ export function SessionTabBar({
         </>,
         document.body,
       )}
+      </div>
     </div>
   );
 }
@@ -339,15 +333,15 @@ function ContextMenuItem({ label, hint, disabled, onClick }: {
   );
 }
 
-function tabStyle(active: boolean, pinned = false): React.CSSProperties {
+function tabStyle(active: boolean): React.CSSProperties {
   return {
     display: "flex",
     alignItems: "center",
     gap: 6,
-    minWidth: pinned ? 72 : 140,
-    maxWidth: pinned ? 72 : 140,
+    minWidth: 140,
+    maxWidth: 140,
     height: 36,
-    padding: pinned ? "0 12px" : "0 4px 0 10px",
+    padding: "0 4px 0 10px",
     flexShrink: 0,
     borderRight: "1px solid var(--border)",
     borderTop: active ? "2px solid var(--accent)" : "2px solid transparent",
@@ -426,13 +420,5 @@ function ActivityIndicator({ status }: { status: "running" | "completed" | undef
         background: "var(--accent)",
       }}
     />
-  );
-}
-
-function HomeIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
-      <path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5" />
-    </svg>
   );
 }

@@ -7,7 +7,7 @@
  * `ls`, and `grep` over the bundle directory are sufficient — that tool-free access
  * is called "L0" and it is always built-in.
  *
- * See `docs/workspace-redesign.md` §4 (知识库专题 OKF) for the rationale and the
+ * See `knowledge/designs/workspace-redesign.md` §4 (知识库专题 OKF) for the rationale and the
  * OKF → design mapping table.
  *
  * This module only owns the *structure convention* + the *seed generator* for newly

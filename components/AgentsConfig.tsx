@@ -3,10 +3,19 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/api-types";
+import type {
+  DeliveryRolePromptPreview,
+  DeliveryRolesResponse,
+  SubagentProfilesResponse,
+  SubagentSettingsResponse,
+} from "@/lib/api-types";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ModelsData } from "@/lib/models-cache";
-import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
+import {
+  overridingSubagentScope,
+  SUBAGENT_SCOPE_ORDER,
+} from "@/lib/subagent-profile-precedence";
+import { subagentScopeDirectory, subagentTargetPath } from "@/lib/subagent-scope-paths";
 import type { SubagentProfile, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
 import {
   getLastSettingsSelection,
@@ -29,6 +38,7 @@ import {
   ConfigSidebarItem,
   ConfigSidebarList,
   ConfigSidebarText,
+  ConfigSectionTitle,
   ConfigSplitView,
   ConfigStatusDot,
   ConfigSwitch,
@@ -123,28 +133,21 @@ function displayProfilePath(profile: SubagentProfile, cwd: string): string | nul
   return shortenPath(profile.filePath);
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <ConfigField label={label}>{children}</ConfigField>;
-}
-
-function Toggle({ checked, disabled, label, onChange }: { checked: boolean; disabled: boolean; label: string; onChange: (checked: boolean) => void }) {
-  return (
-    <label style={{ display: "flex", alignItems: "center", gap: 7, color: disabled ? "var(--text-dim)" : "var(--text-muted)", fontSize: 12, cursor: disabled ? "default" : "pointer" }}>
-      <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
-      {label}
-    </label>
-  );
-}
-
 export function AgentsConfig({
   cwd,
   sessionId = null,
+  workspaceId = null,
   onClose,
   onReloaded,
   embedded = false,
 }: {
   cwd: string;
   sessionId?: string | null;
+  /** 登记工作区 id（可选，final-arch step-6 Task 3）。交付感知（不变式锁定段
+   *  + 组合预览）只在宿主显式给出时启用：本组件只有 cwd（路径，且可能来自
+   *  会话而非登记工作区），不发明「路径→id」查找。宿主未传时面板整体不渲染，
+   *  行为与从前一致。 */
+  workspaceId?: string | null;
   onClose?: () => void;
   onReloaded?: () => void;
   embedded?: boolean;
@@ -164,6 +167,8 @@ export function AgentsConfig({
   const [savedOk, setSavedOk] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 保存冲突（spec §13.5.1）：PUT 返回 409 → 内联提示 + 重载（重新拉列表取新哈希）。
+  const [conflict, setConflict] = useState<string | null>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(10);
   const [settingsLoading, setSettingsLoading] = useState(true);
@@ -185,6 +190,7 @@ export function AgentsConfig({
   const loadProfiles = useCallback(async (preferredKey?: string) => {
     setLoading(true);
     setError(null);
+    setConflict(null);
     try {
       const response = await fetch(`/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
       const data = await response.json() as Partial<SubagentProfilesResponse> & { error?: string };
@@ -265,12 +271,59 @@ export function AgentsConfig({
     return () => controller.abort();
   }, [cwd]);
 
+  // 交付感知（final-arch step-6 Task 3，spec §13.5）：workspaceId 在场才拉
+  // GET …/delivery/roles（只读投影，失败静默降级 = 无交付感知）。绑定判定：
+  // profile 被 roles.<r>.profile 显式绑定，或与角色同名（缺省同名绑定）——
+  // 两种都算「这份剧本是交付角色 r 的剧本」。角色徽标（backlog-clearing
+  // fix round 1）：deliveryRoleByProfileKey + 列表侧栏渲染（agents-id-tag
+  // 小标）；选中详情侧的交付角色感知在下方 deliveryRoleForSelected。
+  const [deliveryRoles, setDeliveryRoles] = useState<DeliveryRolesResponse["roles"] | null>(null);
+  const [deliveryPreview, setDeliveryPreview] = useState<DeliveryRolePromptPreview | null>(null);
+  const [deliveryPreviewLoading, setDeliveryPreviewLoading] = useState(false);
+
+  // 角色徽标（backlog-clearing fix round 1）：project 作用域剧本 → 绑定的交付
+  // 角色（判定与 deliveryRoleForSelected 同源：explicit 显式绑定 ∨ 与角色同名
+  // 缺省绑定）。roles 未拉到（无 workspaceId / 拉取失败）→ 空表 = 零徽标。
+  const deliveryRoleByProfileKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const row of deliveryRoles ?? []) {
+      if (!row.profile?.name) continue;
+      if (!row.profile.explicit && row.role !== row.profile.name) continue;
+      map.set(`project:${row.profile.name}`, row.role);
+    }
+    return map;
+  }, [deliveryRoles]);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      setDeliveryRoles(null);
+      return;
+    }
+    let cancelled = false;
+    void fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/delivery/roles`)
+      .then(async (response) => (response.ok ? response.json() : { roles: [] }) as Partial<DeliveryRolesResponse>)
+      .then((data) => {
+        if (!cancelled) setDeliveryRoles(data.roles ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setDeliveryRoles(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  // 当前选中剧本对应的交付角色（非创建态 + project 作用域 + 绑定命中）与
+  // 组合预览拉取在下方 creating 声明之后（deliveryRoleForSelected memo 依赖
+  // creating，组合预览 effect 依赖 memo 结果——顺序即 TDZ 约束）。
+
   const selectProfile = (profile: SubagentProfile) => {
     setSelectedKey(profileKey(profile));
     setDraft(editableProfile(profile));
     setMode(isWritableScope(profile.scope) ? "edit" : "view");
     if (isWritableScope(profile.scope)) setTargetScope(profile.scope);
     setError(null);
+    setConflict(null);
   };
 
   const beginCreate = () => {
@@ -301,14 +354,31 @@ export function AgentsConfig({
   const save = async () => {
     setSaving(true);
     setError(null);
+    setConflict(null);
     setSavedOk(false);
     try {
+      // 哈希乐观并发（spec §13.5.1）：编辑既有 profile 时携带列表态 contentHash；
+      // 创建 / 改名 / 换作用域 / global 不带（服务端对这些本就不设防）。
+      const expectedContentHash = !creating && selected
+        && selected.scope === targetScope && selected.name === draft.name
+        && selected.contentHash
+        ? selected.contentHash
+        : undefined;
       const response = await fetch("/api/subagents/profiles", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope: targetScope, profile: draft }),
+        body: JSON.stringify({
+          cwd,
+          scope: targetScope,
+          profile: draft,
+          ...(expectedContentHash ? { expectedContentHash } : {}),
+        }),
       });
       const data = await response.json() as { profile?: SubagentProfile; error?: string };
+      if (response.status === 409) {
+        setConflict(t("agents.conflictModified"));
+        return;
+      }
       if (!response.ok || data.error || !data.profile) throw new Error(data.error ?? `HTTP ${response.status}`);
       await loadProfiles(profileKey(data.profile));
       setSavedOk(true);
@@ -343,12 +413,59 @@ export function AgentsConfig({
 
   const editing = mode !== "view";
   const creating = mode === "create";
+  // 当前选中剧本对应的交付角色（final-arch step-6 Task 3）：project 作用域 +
+  // 绑定命中——roles.<r>.profile 显式指向该名，或与角色同名（缺省同名绑定）。
+  // 无 workspaceId（deliveryRoles null）→ 恒 null（交付感知整体不启用）。
+  const deliveryRoleForSelected = useMemo(() => {
+    if (!deliveryRoles || creating || selected?.scope !== "project") return null;
+    const binding = deliveryRoles.find((row) =>
+      row.profile.name === selected.name
+      && (row.profile.explicit || row.role === selected.name),
+    );
+    return binding?.role ?? null;
+  }, [creating, deliveryRoles, selected]);
+
+  // 组合预览（GET …/delivery/roles/[role]/preview）：invariant 与 composed 和
+  // launch 同一函数产出（previewRolePrompt）——预览即真相。切换角色即重取。
+  useEffect(() => {
+    if (!workspaceId || !deliveryRoleForSelected) {
+      setDeliveryPreview(null);
+      setDeliveryPreviewLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setDeliveryPreviewLoading(true);
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/delivery/roles/${encodeURIComponent(deliveryRoleForSelected)}/preview`,
+          { signal: controller.signal },
+        );
+        const data = await response.json() as { preview?: DeliveryRolePromptPreview; error?: string };
+        if (controller.signal.aborted) return;
+        setDeliveryPreview(response.ok ? data.preview ?? null : null);
+      } catch {
+        if (!controller.signal.aborted) setDeliveryPreview(null);
+      } finally {
+        if (!controller.signal.aborted) setDeliveryPreviewLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [deliveryRoleForSelected, workspaceId]);
+  const readOnlySelected = Boolean(selected && !isWritableScope(selected.scope));
   const disabled = !editing || saving || toggling;
+  const dirty = useMemo(() => {
+    if (!selected || creating) return false;
+    return JSON.stringify(editableProfile(selected)) !== JSON.stringify(draft);
+  }, [selected, creating, draft]);
   const displayedScope = creating ? targetScope : selected?.scope;
+  const overriddenBy = useMemo(
+    () => (selected && !creating ? overridingSubagentScope(selected, profiles) : null),
+    [selected, creating, profiles],
+  );
+  const scopeLabel = (scope: SubagentScope) => t(`agents.scope.${scope}`);
   const displayedPath = creating
-    ? targetScope === "global"
-      ? `~/.pi/agent/agents/${draft.name || "..."}.md`
-      : `./.pi/agents/${draft.name || "..."}.md`
+    ? subagentTargetPath(targetScope, draft.name, profiles, cwd)
     : selected
       ? displayProfilePath(selected, cwd) ?? t("agents.builtinPath")
       : "";
@@ -364,6 +481,9 @@ export function AgentsConfig({
   const controlStyle = disabled ? { ...inputStyle, ...disabledInputStyle } : inputStyle;
   const update = <K extends keyof EditableProfile>(key: K, value: EditableProfile[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
+  };
+  const toggleTool = (tool: string, checked: boolean) => {
+    update("tools", checked ? [...draft.tools, tool] : draft.tools.filter((item) => item !== tool));
   };
 
   const toggleEnabled = async (enabled: boolean) => {
@@ -448,62 +568,42 @@ export function AgentsConfig({
 
   return (
     <ConfigPanelShell embedded={embedded} title={t("common.agents")} subtitle={shortenPath(cwd)} closeLabel={t("agents.close")} onClose={onClose ?? (() => {})}>
-      <div className="agents-feature-setting">
-        <div className="agents-feature-copy">
-          <strong>{t("agents.builtInTitle")}</strong>
-          <span>{t("agents.builtInDescription")}</span>
-          {reloadNeeded && <span role="status" className="agents-feature-reload-notice">{t("agents.reloadRequired")}</span>}
-        </div>
-        <div className="agents-feature-actions">
-          {reloadNeeded && sessionId && (
-            <ConfigButton size="small" onClick={() => void reloadSession()} disabled={reloading || settingsSaving}>
-              {reloading ? t("agents.reloading") : t("agents.reloadSession")}
-            </ConfigButton>
-          )}
-          <label className="agents-concurrency-control" title={t("agents.maxConcurrentDescription")}>
-            <span>{t("agents.maxConcurrent")}</span>
-            <input
-              aria-label={t("agents.maxConcurrent")}
-              type="number"
-              min={1}
-              max={32}
-              value={maxConcurrent}
-              disabled={settingsLoading || settingsSaving}
-              onChange={(event) => setMaxConcurrent(Number(event.target.value))}
-              onBlur={() => void updateMaxConcurrent(maxConcurrent)}
-            />
-          </label>
-          <ConfigSwitch
-            checked={builtInEnabled}
-            disabled={settingsLoading || reloading}
-            loading={settingsSaving}
-            label={t("agents.builtInTitle")}
-            onChange={(enabled) => void toggleBuiltInSubagents(enabled)}
-          />
-        </div>
-      </div>
       <ConfigSplitView>
         <ConfigSidebar>
           <ConfigSidebarList>
               {loading ? (
                 <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</div>
-              ) : (["project", "global", "workspace", "builtin"] as const).map((scope) => {
+              ) : SUBAGENT_SCOPE_ORDER.map((scope) => {
                 const scopedProfiles = profiles.filter((profile) => profile.scope === scope);
                 if (scopedProfiles.length === 0) return null;
+                const hint = subagentScopeDirectory(scope, profiles, cwd);
                 return (
                   <div key={scope} className="config-sidebar-group">
-                    <ConfigSidebarGroupLabel>{t(`agents.scope.${scope}`)}</ConfigSidebarGroupLabel>
+                    <ConfigSidebarGroupLabel>
+                      {scopeLabel(scope)}
+                      {hint && <span className="agents-group-path">{hint}</span>}
+                    </ConfigSidebarGroupLabel>
                     {scopedProfiles.map((profile) => {
-                      const overridden = isSubagentProfileOverridden(profile, profiles);
+                      const overriding = overridingSubagentScope(profile, profiles);
+                      const overriddenLabel = overriding
+                        ? t("agents.overriddenBy", { scope: scopeLabel(overriding) })
+                        : null;
+                      // 角色徽标（backlog-clearing fix round 1）：绑定了交付角色
+                      // 的 project 剧本在名旁出一枚小角色标（复用 agents-id-tag）。
+                      const deliveryRole = profile.scope === "project"
+                        ? deliveryRoleByProfileKey.get(profileKey(profile))
+                        : undefined;
                       return (
                         <ConfigSidebarItem
                           key={profileKey(profile)}
                           active={selectedKey === profileKey(profile) && !creating}
                           onClick={() => selectProfile(profile)}
+                          title={overriddenLabel ?? undefined}
                         >
                           <ConfigStatusDot active={profile.enabled} />
-                          <ConfigSidebarText className={`is-grow${profile.enabled ? "" : " is-muted"}`}>{profile.displayName}</ConfigSidebarText>
-                          {overridden && <span className="agents-overridden-label">{t("agents.overridden")}</span>}
+                          <ConfigSidebarText className={`is-grow${profile.enabled && !overriding ? "" : " is-muted"}`}>{profile.displayName}</ConfigSidebarText>
+                          {deliveryRole !== undefined && <span className="agents-id-tag">{deliveryRole}</span>}
+                          {overriddenLabel && <span className="agents-overridden-label">{overriddenLabel}</span>}
                         </ConfigSidebarItem>
                       );
                     })}
@@ -517,6 +617,40 @@ export function AgentsConfig({
               >
                 {t("agents.new")}
           </ConfigListAction>
+          <div className="agents-sidebar-footer">
+            <div className="agents-sidebar-footer-row">
+              <span title={t("agents.builtInDescription")}>{t("agents.builtInShort")}</span>
+              <ConfigSwitch
+                checked={builtInEnabled}
+                disabled={settingsLoading || reloading}
+                loading={settingsSaving}
+                label={t("agents.builtInTitle")}
+                onChange={(enabled) => void toggleBuiltInSubagents(enabled)}
+              />
+            </div>
+            <div className="agents-sidebar-footer-row">
+              <span title={t("agents.maxConcurrentDescription")}>{t("agents.maxConcurrent")}</span>
+              <input
+                aria-label={t("agents.maxConcurrent")}
+                className="agents-concurrency-input"
+                type="number"
+                min={1}
+                max={32}
+                value={maxConcurrent}
+                disabled={settingsLoading || settingsSaving}
+                onChange={(event) => setMaxConcurrent(Number(event.target.value))}
+                onBlur={() => void updateMaxConcurrent(maxConcurrent)}
+              />
+            </div>
+            {reloadNeeded && sessionId && (
+              <div className="agents-sidebar-reload">
+                <span>{t("agents.reloadRequired")}</span>
+                <ConfigButton size="small" onClick={() => void reloadSession()} disabled={reloading || settingsSaving}>
+                  {reloading ? t("agents.reloading") : t("agents.reloadSession")}
+                </ConfigButton>
+              </div>
+            )}
+          </div>
         </ConfigSidebar>
 
         <ConfigDetail>
@@ -529,112 +663,259 @@ export function AgentsConfig({
                     <ConfigDetailHeaderInfo>
                       {displayedScope && (
                         <span className={`config-scope-tag${displayedScope === "project" ? " is-project" : ""}`}>
-                          {t(`agents.scope.${displayedScope}`)}
+                          {scopeLabel(displayedScope)}
                         </span>
+                      )}
+                      {!creating && <span className="agents-id-tag">{draft.name}</span>}
+                      <span
+                        className={`agents-status-pill${draft.enabled ? " is-on" : " is-off"}`}
+                        title={fullPath}
+                      >
+                        {draft.enabled ? t("agents.statusEnabled") : t("agents.statusDisabled")}
+                      </span>
+                      {overriddenBy && (
+                        <span className="agents-overridden-label">{t("agents.overriddenBy", { scope: scopeLabel(overriddenBy) })}</span>
                       )}
                       <span title={fullPath} className="config-detail-path">
                         {displayedPath}
                       </span>
                     </ConfigDetailHeaderInfo>
                     <ConfigDetailActions>
-                      {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
+                      {selected && (mode === "view" || mode === "edit") && !readOnlySelected && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
                       {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling}>{t("agents.delete")}</ConfigButton>}
-                      <ConfigSwitch checked={draft.enabled} disabled={disabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
+                      {!readOnlySelected && (
+                        <ConfigSwitch checked={draft.enabled} disabled={disabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
+                      )}
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
 
+                  {readOnlySelected && selected && (
+                    <div className="agents-readonly-notice">
+                      <span>{t("agents.readonlyNotice", { scope: scopeLabel(selected.scope) })}</span>
+                      <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>
+                    </div>
+                  )}
+
+                  {/* 查看态标题块：显示名 + 描述（可写配置的编辑走「基本」段，不重复渲染）。 */}
+                  {mode === "view" && selected && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <div style={{ color: "var(--text)", fontSize: 15, fontWeight: 600, lineHeight: 1.35 }}>{selected.displayName}</div>
+                      {selected.description && (
+                        <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.55 }}>{selected.description}</p>
+                      )}
+                    </div>
+                  )}
+
                   {creating && (
-                    <Field label={t("agents.saveScope")}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
-                        {(["global", "project"] as const).map((scope) => (
+                    <>
+                      <ConfigSectionTitle>{t("agents.saveScope")}</ConfigSectionTitle>
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+                        <div role="radiogroup" aria-label={t("agents.saveScope")} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, minWidth: 180, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
+                          {(["global", "project"] as const).map((scope) => (
+                            <button
+                              key={scope}
+                              type="button"
+                              role="radio"
+                              aria-checked={targetScope === scope}
+                              onClick={() => setTargetScope(scope)}
+                              disabled={saving}
+                              style={{ height: 28, border: "none", borderRadius: 4, background: targetScope === scope ? "var(--bg-selected)" : "transparent", color: targetScope === scope ? "var(--text)" : "var(--text-muted)", cursor: saving ? "default" : "pointer", fontSize: 11, fontWeight: targetScope === scope ? 600 : 400 }}
+                            >
+                              {scopeLabel(scope)}
+                            </button>
+                          ))}
+                        </div>
+                        <span title={displayedPath} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                          {t("agents.targetPath")}：{displayedPath}
+                        </span>
+                      </div>
+                    </>
+                  )}
+
+                  {mode === "edit" && (
+                    <>
+                      <ConfigSectionTitle>{t("agents.basic")}</ConfigSectionTitle>
+                      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(0, 1.5fr)", gap: 12 }}>
+                        <Field label={t("agents.displayName")}>
+                          <input aria-label={t("agents.displayName")} value={draft.displayName} disabled={disabled} onChange={(event) => update("displayName", event.target.value)} style={controlStyle} />
+                        </Field>
+                        <Field label={t("agents.description")}>
+                          <input aria-label={t("agents.description")} value={draft.description} disabled={disabled} onChange={(event) => update("description", event.target.value)} style={controlStyle} />
+                        </Field>
+                      </div>
+                    </>
+                  )}
+
+                  {creating && (
+                    <>
+                      <ConfigSectionTitle>{t("agents.basic")}</ConfigSectionTitle>
+                      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
+                        <Field label={t("agents.name")}>
+                          <input aria-label={t("agents.name")} value={draft.name} disabled={disabled} onChange={(event) => update("name", event.target.value)} style={inputStyle} />
+                        </Field>
+                        <Field label={t("agents.displayName")}>
+                          <input aria-label={t("agents.displayName")} value={draft.displayName} disabled={disabled} onChange={(event) => update("displayName", event.target.value)} style={controlStyle} />
+                        </Field>
+                      </div>
+                      <Field label={t("agents.description")}>
+                        <input aria-label={t("agents.description")} value={draft.description} disabled={disabled} onChange={(event) => update("description", event.target.value)} style={controlStyle} />
+                      </Field>
+                    </>
+                  )}
+
+                  <ConfigSectionTitle>{t("agents.prompt")}</ConfigSectionTitle>
+                  {/* 交付角色剧本（workspaceId 在场 + 绑定命中）：system prompt 编辑区上方
+                      锁定渲染引擎不变式——launch 时逐字前置，本编辑器改不到它（灰底只读，
+                      出处链到设计稿 §4.3）。 */}
+                  {deliveryRoleForSelected && deliveryPreview && (
+                    <div className="agents-delivery-invariant" role="group" aria-label={t("agents.deliveryInvariant")}>
+                      <div className="agents-delivery-invariant-head">
+                        <span>🔒 {t("agents.deliveryInvariant")}</span>
+                        <a
+                          href="docs/superpowers/specs/2026-10-26-delivery-engine-final-architecture-design.md#43"
+                          target="_blank"
+                          rel="noreferrer"
+                          title={t("agents.deliveryInvariantHint")}
+                        >
+                          §4.3
+                        </a>
+                      </div>
+                      <pre className="agents-delivery-invariant-body">{deliveryPreview.invariant}</pre>
+                    </div>
+                  )}
+                  {deliveryPreviewLoading && deliveryRoleForSelected && (
+                    <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</span>
+                  )}
+                  {mode === "view" ? (
+                    <pre className="agents-prompt-readonly">{draft.systemPrompt}</pre>
+                  ) : (
+                    <textarea className="agents-system-prompt" aria-label={t("agents.prompt")} value={draft.systemPrompt} disabled={disabled} onChange={(event) => update("systemPrompt", event.target.value)} style={{ ...controlStyle, height: 195, minHeight: 195, maxHeight: "60vh", padding: 9, overflow: "auto", resize: disabled ? "none" : "vertical", lineHeight: 1.5 }} />
+                  )}
+                  {/* 组合预览（交付角色剧本，折叠段）：composed 与 launch 的
+                      appendSystemPrompt 同一函数产出——AGENTS.md（pi 从 cwd 注入，
+                      不在内）▸ 不变式（锁定）▸ 剧本正文，预览即真相。 */}
+                  {deliveryRoleForSelected && deliveryPreview && (
+                    <details className="agents-delivery-composed">
+                      <summary title={t("agents.deliveryComposedHint")}>{t("agents.deliveryComposed")}</summary>
+                      <pre className="agents-delivery-composed-body">{deliveryPreview.composed}</pre>
+                    </details>
+                  )}
+
+                  <ConfigSectionTitle>{t("agents.capabilities")}</ConfigSectionTitle>
+                  <Field label={t("agents.tools")}>
+                    {mode === "view" ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {draft.tools.map((tool) => <span key={tool} className="agents-static-chip">{tool}</span>)}
+                        {draft.tools.length === 0 && <span style={{ color: "var(--text-dim)", fontSize: 12 }}>—</span>}
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {TOOL_OPTIONS.map((tool) => (
                           <button
-                            key={scope}
+                            key={tool}
                             type="button"
-                            onClick={() => setTargetScope(scope)}
-                            disabled={saving}
-                            style={{ height: 28, border: "none", borderRadius: 4, background: targetScope === scope ? "var(--bg-selected)" : "transparent", color: targetScope === scope ? "var(--text)" : "var(--text-muted)", cursor: saving ? "default" : "pointer", fontSize: 11, fontWeight: targetScope === scope ? 600 : 400 }}
+                            className="agents-chip"
+                            aria-pressed={draft.tools.includes(tool)}
+                            disabled={disabled}
+                            onClick={() => toggleTool(tool, !draft.tools.includes(tool))}
                           >
-                            {t(`agents.scope.${scope}`)}
+                            {tool}
                           </button>
                         ))}
                       </div>
-                    </Field>
+                    )}
+                  </Field>
+                  <Field label={t("agents.resources")}>
+                    {mode === "view" ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {draft.loadSkills && <span className="agents-static-chip">{t("agents.loadSkills")}</span>}
+                        {draft.loadExtensions && <span className="agents-static-chip">{t("agents.loadExtensions")}</span>}
+                        {!draft.loadSkills && !draft.loadExtensions && <span style={{ color: "var(--text-dim)", fontSize: 12 }}>—</span>}
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        <button type="button" className="agents-chip" aria-pressed={draft.loadSkills} disabled={disabled} onClick={() => update("loadSkills", !draft.loadSkills)}>{t("agents.loadSkills")}</button>
+                        <button type="button" className="agents-chip" aria-pressed={draft.loadExtensions} disabled={disabled} onClick={() => update("loadExtensions", !draft.loadExtensions)}>{t("agents.loadExtensions")}</button>
+                      </div>
+                    )}
+                  </Field>
+
+                  <ConfigSectionTitle>{t("agents.run")}</ConfigSectionTitle>
+                  {mode === "view" ? (
+                    <dl className="agents-kv-grid">
+                      <dt>{t("agents.model")}</dt>
+                      <dd className={draft.model ? undefined : "is-dim"}>{draft.model ?? t("agents.inherit")}</dd>
+                      <dt>{t("agents.thinking")}</dt>
+                      <dd className={draft.thinking ? undefined : "is-dim"}>{draft.thinking ?? t("agents.inherit")}</dd>
+                      <dt>{t("agents.maxTurns")}</dt>
+                      <dd className={draft.maxTurns ? undefined : "is-dim"}>{draft.maxTurns ?? "—"}</dd>
+                      <dt>{t("agents.inheritContext")}</dt>
+                      <dd className={draft.inheritContext ? undefined : "is-dim"}>{draft.inheritContext ? t("agents.on") : t("agents.off")}</dd>
+                      <dt>{t("agents.background")}</dt>
+                      <dd className={draft.runInBackground ? undefined : "is-dim"}>{draft.runInBackground ? t("agents.on") : t("agents.off")}</dd>
+                    </dl>
+                  ) : (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
+                        <Field label={t("agents.model")}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <ModelSelector
+                              options={modelSelectorOptions}
+                              value={selectedModel}
+                              onChange={(provider, modelId) => update("model", `${provider}/${modelId}`)}
+                              onClear={() => update("model", undefined)}
+                              emptyLabel={modelsLoading ? t("agents.modelsLoading") : t("agents.inherit")}
+                              selectedLabel={draft.model && !selectedModelAvailable ? t("agents.modelUnavailable", { model: draft.model }) : undefined}
+                              disabled={disabled || modelsLoading || (modelOptions.length === 0 && !draft.model)}
+                              ariaLabel={t("agents.model")}
+                              variant="field"
+                              placement="auto"
+                            />
+                            {modelsError && <span style={{ color: "#ef4444", fontSize: 10 }}>{modelsError}</span>}
+                          </div>
+                        </Field>
+                        <Field label={t("agents.thinking")}>
+                          <select aria-label={t("agents.thinking")} value={draft.thinking ?? ""} disabled={disabled} onChange={(event) => update("thinking", (event.target.value || undefined) as EditableProfile["thinking"])} style={controlStyle}>
+                            {THINKING_OPTIONS.map((value) => <option key={value || "default"} value={value}>{value || t("agents.inherit")}</option>)}
+                          </select>
+                        </Field>
+                        <Field label={t("agents.maxTurns")}>
+                          <input aria-label={t("agents.maxTurns")} type="number" min={1} value={draft.maxTurns ?? ""} disabled={disabled} onChange={(event) => update("maxTurns", event.target.value ? Number(event.target.value) : undefined)} style={controlStyle} />
+                        </Field>
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        <button type="button" className="agents-chip" aria-pressed={draft.inheritContext} disabled={disabled} onClick={() => update("inheritContext", !draft.inheritContext)}>{t("agents.inheritContext")}</button>
+                        <button type="button" className="agents-chip" aria-pressed={draft.runInBackground} disabled={disabled} onClick={() => update("runInBackground", !draft.runInBackground)}>{t("agents.background")}</button>
+                      </div>
+                    </>
                   )}
 
-                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
-                    <Field label={t("agents.name")}>
-                      {creating ? (
-                        <input aria-label={t("agents.name")} value={draft.name} disabled={disabled} onChange={(event) => update("name", event.target.value)} style={inputStyle} />
-                      ) : (
-                        <code style={{ minHeight: 34, display: "flex", alignItems: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12 }}>
-                          {draft.name}
-                        </code>
-                      )}
-                    </Field>
-                    <Field label={t("agents.displayName")}>
-                      <input aria-label={t("agents.displayName")} value={draft.displayName} disabled={disabled} onChange={(event) => update("displayName", event.target.value)} style={controlStyle} />
-                    </Field>
-                  </div>
-                  <Field label={t("agents.description")}>
-                    <input aria-label={t("agents.description")} value={draft.description} disabled={disabled} onChange={(event) => update("description", event.target.value)} style={controlStyle} />
-                  </Field>
-                  <Field label={t("agents.prompt")}>
-                    <textarea className="agents-system-prompt" aria-label={t("agents.prompt")} value={draft.systemPrompt} disabled={disabled} onChange={(event) => update("systemPrompt", event.target.value)} style={{ ...controlStyle, height: 195, minHeight: 195, maxHeight: "60vh", padding: 9, overflow: "auto", resize: disabled ? "none" : "vertical", lineHeight: 1.5 }} />
-                  </Field>
-
-                  <Field label={t("agents.tools")}>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px" }}>
-                      {TOOL_OPTIONS.map((tool) => (
-                        <Toggle key={tool} label={tool} disabled={disabled} checked={draft.tools.includes(tool)} onChange={(checked) => update("tools", checked ? [...draft.tools, tool] : draft.tools.filter((item) => item !== tool))} />
-                      ))}
-                    </div>
-                  </Field>
-
-                  <Field label={t("agents.resources")}>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
-                      <Toggle label={t("agents.loadSkills")} disabled={disabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />
-                      <Toggle label={t("agents.loadExtensions")} disabled={disabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />
-                    </div>
-                  </Field>
-
-                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
-                    <Field label={t("agents.model")}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <ModelSelector
-                          options={modelSelectorOptions}
-                          value={selectedModel}
-                          onChange={(provider, modelId) => update("model", `${provider}/${modelId}`)}
-                          onClear={() => update("model", undefined)}
-                          emptyLabel={modelsLoading ? t("agents.modelsLoading") : t("agents.inherit")}
-                          selectedLabel={draft.model && !selectedModelAvailable ? t("agents.modelUnavailable", { model: draft.model }) : undefined}
-                          disabled={disabled || modelsLoading || (modelOptions.length === 0 && !draft.model)}
-                          ariaLabel={t("agents.model")}
-                          variant="field"
-                          placement="auto"
-                        />
-                        {modelsError && <span style={{ color: "#ef4444", fontSize: 10 }}>{modelsError}</span>}
-                      </div>
-                    </Field>
-                    <Field label={t("agents.thinking")}>
-                      <select aria-label={t("agents.thinking")} value={draft.thinking ?? ""} disabled={disabled} onChange={(event) => update("thinking", (event.target.value || undefined) as EditableProfile["thinking"])} style={controlStyle}>
-                        {THINKING_OPTIONS.map((value) => <option key={value || "default"} value={value}>{value || t("agents.inherit")}</option>)}
-                      </select>
-                    </Field>
-                    <Field label={t("agents.maxTurns")}>
-                      <input aria-label={t("agents.maxTurns")} type="number" min={1} value={draft.maxTurns ?? ""} disabled={disabled} onChange={(event) => update("maxTurns", event.target.value ? Number(event.target.value) : undefined)} style={controlStyle} />
-                    </Field>
-                  </div>
-
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 20px" }}>
-                    <Toggle label={t("agents.inheritContext")} disabled={disabled} checked={draft.inheritContext} onChange={(checked) => update("inheritContext", checked)} />
-                    <Toggle label={t("agents.background")} disabled={disabled} checked={draft.runInBackground} onChange={(checked) => update("runInBackground", checked)} />
-                  </div>
+                  {!creating && (
+                    <>
+                      <ConfigSectionTitle>{t("agents.source")}</ConfigSectionTitle>
+                      <dl className="agents-kv-grid">
+                        <dt>{t("agents.source")}</dt>
+                        <dd>{displayedScope ? scopeLabel(displayedScope) : "—"}</dd>
+                        <dt>{t("agents.location")}</dt>
+                        <dd style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{displayedPath || "—"}</dd>
+                      </dl>
+                    </>
+                  )}
                 </ConfigDetailStack>
               )}
           </ConfigDetailStack>
         </ConfigDetail>
       </ConfigSplitView>
-      <ConfigFooter status={(settingsError || error) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error}</span>}>
+      <ConfigFooter status={(settingsError || error || conflict || (dirty && !saving && !savedOk)) && (
+        <span role="status" style={{ display: "inline-flex", alignItems: "center", gap: 8, color: settingsError || error || conflict ? "#ef4444" : "var(--text-dim)" }}>
+          {settingsError || error || conflict || t("agents.unsaved")}
+          {conflict && !settingsError && !error && (
+            <ConfigButton size="small" onClick={() => void loadProfiles()} disabled={saving}>
+              {t("agents.conflictReload")}
+            </ConfigButton>
+          )}
+        </span>
+      )}>
         {editing && (
           <ConfigButton
             variant="primary"
@@ -653,4 +934,8 @@ export function AgentsConfig({
       </ConfigFooter>
     </ConfigPanelShell>
   );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return <ConfigField label={label}>{children}</ConfigField>;
 }

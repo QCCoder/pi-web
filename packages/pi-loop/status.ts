@@ -4,7 +4,7 @@ import { nextDue } from "./cron.ts";
 import { readRoundLock, isRoundLockStale } from "./round-lock.ts";
 
 export interface LoopStatusEntry {
-  name: string; pattern: string; level: string; cron: string; timezone: string; maxMinutes: number;
+  name: string; pattern: string; level: string; cron: string; timezone: string; maxMinutes: number; stallMinutes: number;
   paused: boolean; running: boolean; lastRun?: string; nextDue?: string;
 }
 
@@ -19,6 +19,7 @@ export function collectStatus(root: string): LoopStatusEntry[] {
     return {
       name: declaration.loopName, pattern: declaration.pattern, level: declaration.level,
       cron: declaration.cron, timezone: declaration.timezone, maxMinutes: declaration.maxMinutes,
+      stallMinutes: declaration.stallMinutes,
       paused: declaration.paused ?? false, running,
       lastRun: last?.toISOString(), nextDue: next?.toISOString(),
     };

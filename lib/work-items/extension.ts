@@ -1,5 +1,6 @@
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { invalidateSessionListCache } from "../session-reader.ts";
 import {
   createWorkItem,
   listWorkItems,
@@ -136,12 +137,15 @@ export function createWorkspaceWorkItemExtension(
         name: "workspace_update_work_item",
         label: "Update Workspace Work Item",
         description:
-          "Revision-safely update Work Item status, phase, priority, scope, or title. Items on the standard "
-          + "delivery flow (managed) reject phase/status updates here — those change only via delivery actions.",
+          "Revision-safely update Work Item status, phase, priority, scope, title, or the registered "
+          + "development branches. Items on the standard delivery flow (managed) reject phase/status "
+          + "updates here — those change only via delivery actions.",
         promptGuidelines: [
           "Read the Work Item first and pass its current revision as expected_revision.",
           "Record only meaningful workflow changes; detailed reasoning belongs in README.md or the Conversation.",
           "For managed items (managed: true from list/get) do not set phase or status — the update is rejected; the delivery flow owns them.",
+          "After creating/switching the development branch, register it via branches (one entry per repository, "
+          + "repositoryId from the item's repositories) so merge status to develop/master is tracked.",
         ],
         parameters: Type.Object({
           key: Type.String(),
@@ -171,6 +175,12 @@ export function createWorkspaceWorkItemExtension(
             Type.Literal("P3"),
           ])),
           repositories: Type.Optional(Type.Array(Type.String())),
+          branches: Type.Optional(Type.Array(Type.Object({
+            repositoryId: Type.String(),
+            branch: Type.String(),
+          }), {
+            description: "开发分支登记（每仓库一条，空数组清除）；repositoryId 必须属于该项 repositories",
+          })),
           tags: Type.Optional(Type.Array(Type.String())),
           archived: Type.Optional(Type.Boolean()),
           loop: Type.Optional(Type.Union([Type.String(), Type.Null()], {
@@ -188,6 +198,7 @@ export function createWorkspaceWorkItemExtension(
             ...(params.phase !== undefined ? { phase: params.phase as WorkItemPhase } : {}),
             ...(params.priority !== undefined ? { priority: params.priority as WorkItemPriority } : {}),
             ...(params.repositories !== undefined ? { repositories: params.repositories } : {}),
+            ...(params.branches !== undefined ? { branches: params.branches } : {}),
             ...(params.tags !== undefined ? { tags: params.tags } : {}),
             ...(params.archived !== undefined ? { archived: params.archived } : {}),
             ...(params.loop !== undefined ? { loop: params.loop } : {}),
@@ -218,6 +229,29 @@ export function createWorkspaceWorkItemExtension(
             data: { summary: params.summary },
           }),
         ),
+      });
+
+      pi.registerTool({
+        name: "workspace_set_session_title",
+        label: "Set Session Title",
+        description:
+          "Rename the current session's display title in the session list. "
+          + "Use it when this session starts working a concrete Work Item "
+          + "(e.g. after picking one up in a loop round), titling it "
+          + "\"<KEY> <title>\" so the human can see at a glance which item the session serves.",
+        promptGuidelines: [
+          "Call once per adopted item, not on every update — the title tracks the item, not the phase.",
+        ],
+        parameters: Type.Object({
+          title: Type.String({ description: "New display title, for example \"REQ-0050 委托放号撤回后修改装箱信息保存无法覆盖旧数据\"" }),
+        }),
+        execute: async (_callId, params) => {
+          const name = params.title.trim();
+          if (!name) throw new Error("Session title cannot be empty");
+          pi.setSessionName(name);
+          invalidateSessionListCache();
+          return result({ title: name });
+        },
       });
     },
   };

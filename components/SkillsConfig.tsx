@@ -10,7 +10,6 @@ import type {
   SkillsResponse,
   SkillUpdateResult,
 } from "@/lib/api-types";
-import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 function shortenPath(p: string): string {
   // Match common home dir patterns: /Users/xxx, /home/xxx
@@ -101,9 +100,8 @@ function SkillDetail({
 }: {
   skill: Skill;
   cwd: string;
-  /** Whether this skill is enabled for the current scope. In workspace mode
-   *  this reflects workspace.yaml skills-whitelist membership; in global mode
-   *  it reflects the absence of the disable-model-invocation frontmatter. */
+  /** Whether this skill is enabled for the current scope: the absence of the
+   *  disable-model-invocation frontmatter (global effect). */
   enabled: boolean;
   onToggle: (skill: Skill) => void;
   toggling: boolean;
@@ -499,13 +497,14 @@ function SkillMarketCard({
 
 function AddSkillPanel({
   cwd,
-  globalOnly,
+  projectInstallAvailable,
   installedPackages,
   projectResourcesLoaded,
   onInstalled,
 }: {
   cwd: string;
-  globalOnly: boolean;
+  /** project 安装档位门控：锚定工作区时开放（安装位置即作用域）。 */
+  projectInstallAvailable: boolean;
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   projectResourcesLoaded: boolean;
   onInstalled: () => void;
@@ -655,7 +654,7 @@ function AddSkillPanel({
               flexShrink: 0,
             }}
           >
-            {(globalOnly ? ["global"] as const : ["global", "project"] as const).map((s) => (
+            {(projectInstallAvailable ? ["global", "project"] as const : ["global"] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => {
@@ -844,22 +843,15 @@ function AddSkillPanel({
 
 export function SkillsConfig({
   cwd,
-  globalOnly = false,
-  workspace = null,
-  onWorkspaceSkillsChange,
+  projectInstallAvailable = false,
   onClose,
   embedded = false,
   inline = false,
   market = false,
 }: {
   cwd: string;
-  globalOnly?: boolean;
-  /** When set, the enable/disable toggle controls this workspace's
-   *  `workspace.yaml` skills whitelist (the real source of which skills the
-   *  workspace agent can invoke). When null, falls back to the global
-   *  `disable-model-invocation` frontmatter toggle. */
-  workspace?: WorkspaceSummary | null;
-  onWorkspaceSkillsChange?: (workspace: WorkspaceSummary) => void;
+  /** project 安装档位门控：锚定工作区时开放（安装位置即作用域）。 */
+  projectInstallAvailable?: boolean;
   onClose?: () => void;
   /** Embedded (middle-column panel) mode: fill container, no overlay/header. */
   embedded?: boolean;
@@ -874,7 +866,6 @@ export function SkillsConfig({
   market?: boolean;
 }) {
   const isMobile = useIsMobile();
-  const workspaceMode = workspace !== null;
   const { t } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
@@ -902,29 +893,16 @@ export function SkillsConfig({
   // 市场布局专用：卡片搜索词 + 详情弹窗（skill.filePath）。
   const [marketQuery, setMarketQuery] = useState("");
   const [marketDetailKey, setMarketDetailKey] = useState<string | null>(null);
-  // Workspace skills whitelist (workspace.yaml `skills`). Owned locally so the
-  // toggle can update optimistically; re-seeded from the workspace prop.
-  const [workspaceSkills, setWorkspaceSkills] = useState<Set<string>>(
-    () => new Set(workspace?.skills ?? []),
-  );
-  useEffect(() => {
-    setWorkspaceSkills(new Set(workspace?.skills ?? []));
-  }, [workspace]);
 
-  // The toggle's enabled state has two meanings depending on scope:
-  //  - workspace mode: skill name is in the workspace.yaml skills whitelist
-  //  - global mode: skill's SKILL.md does NOT set disable-model-invocation
-  // All discoverable skills (global dir, with a SKILL.md) are toggleable in
-  // workspace mode regardless of install/lock info.
-  const isEnabled = (skill: Skill) =>
-    workspaceMode ? workspaceSkills.has(skill.name) : !skill.disableModelInvocation;
+  // 启用 ⇔ SKILL.md 未设 disable-model-invocation（全局 frontmatter 开关；
+  // 2026-10 收敛：工作区 skills 白名单已拆除，生效面只有全局一档）。
+  const isEnabled = (skill: Skill) => !skill.disableModelInvocation;
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const scopeQuery = globalOnly ? "&scope=global" : "";
-      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}${scopeQuery}`);
+      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
       const d = (await res.json()) as Partial<SkillsResponse> & { error?: string };
       if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
       const list = d.skills ?? [];
@@ -938,13 +916,13 @@ export function SkillsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd, globalOnly, selected]);
+  }, [cwd, selected]);
 
   useEffect(() => {
     setUpdateStatuses({});
     setUpdateError(null);
     void loadSkills();
-  }, [cwd, globalOnly]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const checkForUpdates = useCallback(async (skill?: Skill) => {
     const targets = skill
@@ -966,7 +944,7 @@ export function SkillsConfig({
           cwd,
           package: skill?.install?.package,
           scope: skill?.install?.scope,
-          contextScope: globalOnly ? "global" : "project",
+          contextScope: "project",
         }),
       });
       const data = (await res.json()) as {
@@ -991,7 +969,7 @@ export function SkillsConfig({
       });
       if (!skill) setCheckingAll(false);
     }
-  }, [cwd, globalOnly, skills]);
+  }, [cwd, skills]);
 
   const updateInstalledSkill = useCallback(async (skill: Skill) => {
     if (!skill.install) return;
@@ -1006,7 +984,7 @@ export function SkillsConfig({
           cwd,
           package: skill.install.package,
           scope: skill.install.scope,
-          contextScope: globalOnly ? "global" : "project",
+          contextScope: "project",
         }),
       });
       const data = (await res.json()) as {
@@ -1034,52 +1012,14 @@ export function SkillsConfig({
     } finally {
       setUpdatingSkill(null);
     }
-  }, [cwd, globalOnly, loadSkills]);
+  }, [cwd, loadSkills]);
 
   const toggle = useCallback(async (skill: Skill) => {
     setToggling((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
 
-    // Workspace mode: persist to the workspace.yaml skills whitelist. This is
-    // the ONLY change that controls which skills the workspace agent can
-    // actually invoke (see lib/rpc-manager.ts skillsOverride). We do not pass
-    // expectedUpdatedAt: the service serializes read-modify-write under a
-    // per-workspace lock, so quick consecutive toggles stay consistent.
-    if (workspaceMode && workspace) {
-      const current = new Set(workspaceSkills);
-      if (current.has(skill.name)) current.delete(skill.name);
-      else current.add(skill.name);
-      try {
-        const res = await fetch(`/api/workspaces/${encodeURIComponent(workspace.id)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ skills: [...current] }),
-        });
-        const d = (await res.json()) as { workspace?: WorkspaceSummary; error?: string };
-        if (!res.ok || d.error) {
-          setSaveError(d.error ?? `HTTP ${res.status}`);
-          return;
-        }
-        const updated = d.workspace;
-        if (updated) {
-          setWorkspaceSkills(new Set(updated.skills));
-          onWorkspaceSkillsChange?.(updated);
-        } else {
-          setWorkspaceSkills(current);
-        }
-      } catch (e) {
-        setSaveError(String(e));
-      } finally {
-        setToggling((s) => {
-          const n = new Set(s);
-          n.delete(skill.filePath);
-          return n;
-        });
-      }
-      return;
-    }
-
-    // Global mode: flip the disable-model-invocation frontmatter on SKILL.md.
+    // Flip the disable-model-invocation frontmatter on SKILL.md (global
+    // effect; 2026-10: the per-workspace whitelist was removed).
     const next = !skill.disableModelInvocation;
     try {
       const res = await fetch("/api/skills", {
@@ -1111,7 +1051,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, [workspaceMode, workspace, workspaceSkills, onWorkspaceSkillsChange]);
+  }, []);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
@@ -1132,25 +1072,23 @@ export function SkillsConfig({
     (status) => status.state === "update-available",
   ).length;
 
-  // Context banners (workspace whitelist hint + project-trust notice) — they
+  // Context banners (toggle-semantics hint + project-trust notice) — they
   // explain the detail pane's toggle semantics, so in page mode they travel
   // with the detail into the right column.
   const contextBanners = (
     <>
-        {workspaceMode && (
-          <div
-            style={{
-              padding: "6px 18px 7px",
-              borderBottom: "1px solid var(--border)",
-              background: "var(--bg-panel)",
-              color: "var(--text-muted)",
-              fontSize: 11,
-              lineHeight: 1.5,
-            }}
-          >
-            开关 = 该工作区 <code style={{ fontFamily: "var(--font-mono)" }}>.pi/workspace.yaml</code> 的 skills 白名单（决定哪些 skill 注入本工作区 agent）；版本 / 来源仅表示已安装包信息。
-          </div>
-        )}
+        <div
+          style={{
+            padding: "6px 18px 7px",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+            fontSize: 11,
+            lineHeight: 1.5,
+          }}
+        >
+          开关 = SKILL.md frontmatter 的 disable-model-invocation（全局生效：停用即从模型视野抹掉）；版本 / 来源仅表示已安装包信息。
+        </div>
 
         {!projectResourcesLoaded && (
           <div
@@ -1446,7 +1384,7 @@ export function SkillsConfig({
             {addMode ? (
               <AddSkillPanel
                 cwd={cwd}
-                globalOnly={globalOnly}
+                projectInstallAvailable={projectInstallAvailable}
                 projectResourcesLoaded={projectResourcesLoaded}
                 installedPackages={{
                   global: new Set(
@@ -1472,7 +1410,7 @@ export function SkillsConfig({
                 enabled={isEnabled(selectedSkill)}
                 onToggle={toggle}
                 toggling={
-                  workspaceMode ? toggling.size > 0 : toggling.has(selectedSkill.filePath)
+                  toggling.has(selectedSkill.filePath)
                 }
                 saveError={saveError}
                 updateStatus={
@@ -1668,7 +1606,7 @@ export function SkillsConfig({
           <div style={{ margin: "14px 22px 0", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", flexShrink: 0, background: "var(--bg)" }}>
             <AddSkillPanel
               cwd={cwd}
-              globalOnly={globalOnly}
+              projectInstallAvailable={projectInstallAvailable}
               projectResourcesLoaded={projectResourcesLoaded}
               installedPackages={{
                 global: new Set(
@@ -1717,7 +1655,7 @@ export function SkillsConfig({
                   key={skill.filePath}
                   skill={skill}
                   enabled={isEnabled(skill)}
-                  toggling={workspaceMode ? toggling.size > 0 : toggling.has(skill.filePath)}
+                  toggling={toggling.has(skill.filePath)}
                   saveError={saveError}
                   updateStatus={updateKey(skill) ? updateStatuses[updateKey(skill)!] : undefined}
                   checkingUpdate={updateKey(skill) ? checkingUpdates.has(updateKey(skill)!) : false}
@@ -1793,7 +1731,7 @@ export function SkillsConfig({
                 cwd={cwd}
                 enabled={isEnabled(marketDetailSkill)}
                 onToggle={toggle}
-                toggling={workspaceMode ? toggling.size > 0 : toggling.has(marketDetailSkill.filePath)}
+                toggling={toggling.has(marketDetailSkill.filePath)}
                 saveError={saveError}
                 updateStatus={
                   updateKey(marketDetailSkill)
@@ -1898,7 +1836,7 @@ export function SkillsConfig({
                 whiteSpace: "nowrap",
               }}
             >
-              {globalOnly ? "全局" : shortenPath(cwd)}
+              {shortenPath(cwd)}
             </code>
           </div>
           <button

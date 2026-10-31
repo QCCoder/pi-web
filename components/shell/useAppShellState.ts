@@ -34,12 +34,9 @@ import {
   type SessionTabState,
   createSessionTab,
   createNewSessionTab,
-  createHomeTab,
   sessionTabId,
-  homeTabId,
   newSessionTabId,
   resolveOpenSessionTarget,
-  resolveNewSessionTarget,
   findReusableNewSessionTab,
   nextActiveTabId,
   nextActiveAfterBatchClose,
@@ -48,6 +45,7 @@ import {
   parseStoredTabs,
   restoreTabs,
 } from "@/lib/session-tabs";
+
 
 type SessionCopyField = "file" | "id";
 
@@ -59,30 +57,34 @@ type SessionCopyField = "file" | "id";
  * 到聊天；从不持久化。归档是工作区作用域，带 workspaceId。
  * 2026-10 M2 T8：新增工作项管理整页 `work-items`（spec §6.1）——工作区
  * 作用域 + 深链 `?workspace=<id>&page=work-items&item=<key>`（lib/work-items-page-url.ts
- * 是唯一解析/生成协议）；页面身份显式绑定 workspaceId，不用 activeWorkspace。 */
+ * 是唯一解析/生成协议）；页面身份显式绑定 workspaceId，不用 activeWorkspace。
+ * 2026-10 总览整页化（knowledge/designs/overview-center-page-design.md）：工作区总览从
+ * 「家 tab」改为 `overview` 整页——它是桌面事实首页 + 模块枢纽，所以**不遮
+ * chrome**（tab 条[最左 = 工作区 chip，总览态即 chip 高亮] 与右坞保持可见，
+ * 与其它 kind 不同），打开时
+ * activeTabId 置空（无会话 tab 选中），并反向成为 activeWorkspace 的来源。 */
 export type CenterPage =
   | { kind: "settings" }
   | { kind: "models" }
   | { kind: "agents" }
   | { kind: "plugins" }
   | { kind: "archive"; workspaceId: string }
-  | { kind: "work-items"; workspaceId: string };
+  | { kind: "work-items"; workspaceId: string }
+  | { kind: "overview"; workspaceId: string };
 
-/** 两次打开指向同一页（归档/工作项比 workspaceId）→ 导航入口再点一次 = 关闭
+/** 手机壳（<768px，MobileTabShell）底部 tab：会话 / Skill / 设置。 */
+export type MobileTab = "sessions" | "skills" | "settings";
+
+/** 两次打开指向同一页（归档/工作项/总览比 workspaceId）→ 导航入口再点一次 = 关闭
  * （toggle）。 */
 function sameCenterPage(current: CenterPage | null, next: CenterPage): boolean {
   if (current == null || current.kind !== next.kind) return false;
-  if (current.kind === "archive" && next.kind === "archive") {
-    return current.workspaceId === next.workspaceId;
-  }
-  if (current.kind === "work-items" && next.kind === "work-items") {
+  if ("workspaceId" in current && "workspaceId" in next) {
     return current.workspaceId === next.workspaceId;
   }
   return true;
 }
 
-/** 工作区家 tab（总览）内的 hub 子视图：overview 仪表盘 / 工作项管理面 /
- * 知识库浏览（W-中收敛，docs/session-tabs-design.md Phase 2）。 */
 type AutoNameStatus =
   | { kind: "idle" }
   | { kind: "naming" }
@@ -98,16 +100,18 @@ const SIDEBAR_DEFAULT_WIDTH = 300;
 const SIDEBAR_MAX_WIDTH = 560;
 const SIDEBAR_WIDTH_KEY = "pi-sidebar-width";
 
-// Right (file) panel resize — same shape as the sidebar, but the DEFAULT is
-// the CSS 42% fallback (rightPanelWidth === null → no --pi-right-panel-width
-// override); dragging stores a px width. The max keeps the center chat area
-// usable (≥620px for toolbar + tabs + composer). 2026-10 rail 改版：宽度语义
-// = 整个右坞（44px 图标列 + 展开面板），min 相应为 344（44 + 面板 300）。
-const RIGHT_PANEL_MIN_WIDTH = 344;
+// Right (file) panel resize — same shape as the sidebar. 2026-10 rail 改版 +
+// 用户反馈：宽度语义 = 整个右坞（36px 图标列 + 展开面板），**默认 = 最小宽
+// 336（36 + 面板 300）**——rightPanelWidth === null → 不写 --pi-right-panel-
+// width 内联变量，CSS fallback 即 336px；拖拽存 px；双击重置 = 删键回最小。
+// 上限保持中间聊天区 ≥620px。
+const RIGHT_PANEL_MIN_WIDTH = 336;
 const RIGHT_PANEL_WIDTH_KEY = "pi-right-panel-width";
 
-// 右坞 rail（2026-10 改版）：激活模块 + 展开态按工作区持久化。
-const DOCK_RAIL_KEY = "pi-dock-rail";
+// 右坞 rail（2026-10 改版）：激活模块 + 展开态按工作区持久化。v2（2026-10
+// 用户反馈「默认关闭」）：换键一次性丢弃旧偏好（旧条目全是 expanded:true，
+// 不换键默认收起对存量用户永远不可见）；新缺省 = 收起（只剩图标列）。
+const DOCK_RAIL_KEY = "pi-dock-rail-v2";
 
 // R2：会话 tab 条持久化（身份 + 顺序 + active；fileTabs/右栏开合不持久化，
 // 重载后为默认态）。失效 id（会话已删/归档、工作区不可用）在恢复时静默跳过。
@@ -134,11 +138,12 @@ export function useAppShellState(seed?: {
   const seedWorkspaces = seed?.initialWorkspaces ?? null;
   const seedSessions = seed?.initialSessions ?? null;
   // ---- Session tabs ----------------------------------------------------------
-  // Each open tab (session / new-session placeholder / workspace home) is one
-  // entry in `tabs`; the active one is `activeTabId`. Per-tab view state is
-  // read directly off the active tab (no snapshot dance), and the URL is a
-  // write-only projection of it. The workspace context (`activeWorkspace`)
-  // follows the ACTIVE tab — the same chain the old workspace-tab model used.
+  // Each open tab (session / new-session placeholder) is one entry in `tabs`;
+  // the active one is `activeTabId`. Per-tab view state is read directly off
+  // the active tab (no snapshot dance), and the URL is a write-only projection
+  // of it. The workspace context (`activeWorkspace`) follows the ACTIVE tab —
+  // or, while the overview center page is open, that page's workspace (2026-10
+  // 总览整页化：家 tab 退役后「当前工作区上下文载体」的职责由总览页接管)。
   const [tabs, setTabs] = useState<SessionTabState[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   // MRU of WORKSPACE ids (for the home composer's default workspace pick) —
@@ -165,18 +170,26 @@ export function useAppShellState(seed?: {
   // False until the initial URL→tab restore has run, to avoid flashing the
   // "select a session" placeholder while the addressed tab is still loading.
   const [navReady, setNavReady] = useState(false);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>(() => seedWorkspaces ?? []);
+  const [workspacesLoaded, setWorkspacesLoaded] = useState(() => seedWorkspaces != null);
+  // 中央区整页（CenterPage）：设置/模型/插件/Skills/归档/工作项/总览。会话 tab
+  // 的任何激活（activateTab）都会把它清空——页面只是盖在聊天之上的一层，点
+  // tab 即回。从不持久化（总览由 URL 深链承载）；toggle 语义由 sameCenterPage
+  // 提供（同页再点关）。声明在派生值之前：activeWorkspace 要读它。
+  const [centerPage, setCenterPage] = useState<CenterPage | null>(null);
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
-  const activeWorkspace = activeTab?.workspace ?? null;
+  // 总览整页打开 ⇒ 它的工作区就是当前上下文（此时 activeTab 为 null——这是
+  // 「activeTab 空、activeWorkspace 非空」唯一合法的组合）。
+  const overviewWorkspace = centerPage?.kind === "overview"
+    ? workspaces.find((w) => w.id === centerPage.workspaceId) ?? null
+    : null;
+  const activeWorkspace = overviewWorkspace ?? activeTab?.workspace ?? null;
   const selectedSession = activeTab?.kind === "session" ? activeTab.session : null;
   const newSessionCwd = activeTab?.kind === "new-session" ? activeTab.workspace.path : null;
   const fileTabs = activeTab?.fileTabs ?? [];
   const activeFileTabId = activeTab?.activeFileTabId ?? null;
   const rightPanelOpen = activeTab?.rightPanelOpen ?? false;
-  const activeCwd = activeTab?.workspace.path ?? null;
-  // 中央区整页（CenterPage）：设置/模型/插件/Skills/归档。会话 tab 的任何
-  // 激活（activateTab）都会把它清空——配置页只是盖在聊天之上的一层，点
-  // tab 即回。从不持久化；toggle 语义由 sameCenterPage 提供（同页再点关）。
-  const [centerPage, setCenterPage] = useState<CenterPage | null>(null);
+  const activeCwd = activeWorkspace?.path ?? null;
   // 工作项中央页的深链选中项（M2 T8）：openWorkItemsPage / applyUrlToTabs 的
   // work-items 分支写入，WorkItemsPage 消费后经 onConsumedInitialItem 清空。
   // 一次性意图，非持久视图状态（同 loopFilesReveal 的信号模式）。
@@ -253,8 +266,6 @@ export function useAppShellState(seed?: {
   const [importPickerOpen, setImportPickerOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>(() => seedWorkspaces ?? []);
-  const [workspacesLoaded, setWorkspacesLoaded] = useState(() => seedWorkspaces != null);
   const [createWorkItemRequest, setCreateWorkItemRequest] = useState<{
     type: "requirement" | "bug";
     id: number;
@@ -286,10 +297,10 @@ export function useAppShellState(seed?: {
   // shell-agnostic.
   const [chatFocusKey, setChatFocusKey] = useState(0);
   const focusChat = useCallback(() => setChatFocusKey((key) => key + 1), []);
-  // 移动端树抽屉开合（docs/mobile-drawer-design.md §6）。放共享状态层（无
-  // isMobile 分支）：ChatToolbar 的 ☰ 在手机切换它，MobileShell 消费渲染
-  // 抽屉；桌面此状态闲置。
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  // 手机壳底部 tab（2026-10 底部 tab 改版，knowledge/designs/mobile-drawer-design.md 文末
+  // 补充记录）。放共享状态层：跨 768px 断点往返（手机壳 ↔ 平板壳）不丢当前
+  // tab；推入栈留在 MobileTabShell 局部。桌面与平板壳此状态闲置。
+  const [mobileTab, setMobileTab] = useState<MobileTab>("sessions");
 
   // ---- Desktop sidebar resize -------------------------------------------------
   // Default width until localStorage hydrates (SSR-safe: no localStorage in the
@@ -343,8 +354,9 @@ export function useAppShellState(seed?: {
 
   // ---- Desktop right (file) panel resize --------------------------------------
   // Mirrors the sidebar resize: `rightPanelWidthRef` mirrors state so mouseup
-  // can persist the final value; null width = CSS 42% default (double-click
-  // reset removes the stored key). Clamp keeps the chat area ≥620px wide.
+  // can persist the final value; null width = CSS 336px min default (2026-10
+  // 用户反馈「打开默认最小」；double-click reset removes the stored key → 回
+  // 最小). Clamp keeps the chat area ≥620px wide.
   const [rightPanelWidth, setRightPanelWidth] = useState<number | null>(null);
   const [rightPanelResizing, setRightPanelResizing] = useState(false);
   const rightPanelWidthRef = useRef<number | null>(null);
@@ -469,12 +481,13 @@ export function useAppShellState(seed?: {
   }, []);
 
   // ---- 右坞 rail（2026-10 改版：反转 2026-09-27「模块 tab 按需打开」）----
-  // 右坞 = 44px 常驻图标列（文件/Loops/工作项/知识库/终端）+ 展开面板；
-  // 点未激活图标 = 切模块并展开，点已激活图标 = 收起到只剩 rail。激活模块
-  // + 展开态是 per-workspace 的 shell 级 UI 状态（dockRailMap，localStorage
-  // `pi-dock-rail` 持久化；切工作区回来恢复原样）；每个会话 tab 自己的
-  // activeFileTabId 只管「文件」模块内部选中哪个文件 tab（FILES_TAB_ID = 树）。
-  // 这里只提供原语；rail 点击语义（toggle 收起）由 DesktopShell 组装。
+  // 右坞 = 36px 常驻图标列（文件/Loops/工作项/知识库/终端，纯 icon）+ 展开面
+  // 板；点未激活图标 = 切模块并展开，点已激活图标 = 收起。激活模块 + 展开态
+  // 是 per-workspace 的 shell 级 UI 状态（dockRailMap，localStorage
+  // `pi-dock-rail-v2` 持久化；切工作区回来恢复原样）；**缺省 = 收起**（2026-10
+  // 用户反馈「默认关闭」——新工作区/无偏好时只剩图标列）；每个会话 tab 自己
+  // 的 activeFileTabId 只管「文件」模块内部选中哪个文件 tab（FILES_TAB_ID =
+  // 树）。这里只提供原语；rail 点击语义（toggle 收起）由 DesktopShell 组装。
   const [dockRailMap, setDockRailMap] = useState<Record<string, { module: ModuleTabId; expanded: boolean }>>({});
   // 恢复持久化的 rail 偏好（挂载后读，避免 SSR/水合不一致；损坏条目丢弃）
   useEffect(() => {
@@ -497,12 +510,12 @@ export function useAppShellState(seed?: {
     try { localStorage.setItem(DOCK_RAIL_KEY, JSON.stringify(dockRailMap)); } catch { /* ignore */ }
   }, [dockRailMap]);
   const dockRailFor = useCallback((wsId: string | null | undefined): { module: ModuleTabId; expanded: boolean } =>
-    (wsId && dockRailMap[wsId]) || { module: FILES_TAB_ID, expanded: true }, [dockRailMap]);
+    (wsId && dockRailMap[wsId]) || { module: FILES_TAB_ID, expanded: false }, [dockRailMap]);
   /** 激活某模块并展开（rail 图标点击的「非 toggle」分支、所有深链入口）。 */
   const openDockModule = useCallback((wsId: string | null | undefined, id: ModuleTabId) => {
     if (!wsId) return;
     setDockRailMap((prev) => {
-      const cur = prev[wsId] ?? { module: FILES_TAB_ID, expanded: true };
+      const cur = prev[wsId] ?? { module: FILES_TAB_ID, expanded: false };
       if (cur.module === id && cur.expanded) return prev;
       return { ...prev, [wsId]: { module: id, expanded: true } };
     });
@@ -511,7 +524,7 @@ export function useAppShellState(seed?: {
   const setDockExpanded = useCallback((wsId: string | null | undefined, expanded: boolean) => {
     if (!wsId) return;
     setDockRailMap((prev) => {
-      const cur = prev[wsId] ?? { module: FILES_TAB_ID, expanded: true };
+      const cur = prev[wsId] ?? { module: FILES_TAB_ID, expanded: false };
       if (cur.expanded === expanded) return prev;
       return { ...prev, [wsId]: { ...cur, expanded } };
     });
@@ -568,24 +581,13 @@ export function useAppShellState(seed?: {
     if (activeTabId) updateTab(activeTabId, patch);
   }, [activeTabId, updateTab]);
 
-  /** 家 tab（U1：每工作区一个）：已开则返回既有 id，未开则追加。同时同步
-   *  workspaces 主列表（capability/仓库等在 tab 打开期间会变）。 */
-  const ensureHomeTab = useCallback((workspace: WorkspaceSummary): string => {
-    setWorkspaces((current) => current.some((w) => w.id === workspace.id)
-      ? current.map((w) => (w.id === workspace.id ? workspace : w))
-      : [...current, workspace]);
-    const id = homeTabId(workspace.id);
-    setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, createHomeTab(workspace)]));
-    return id;
-  }, []);
-
   // Make a tab active (or go home with null). Closes overlays and clears the
   // per-session UI that ChatWindow will re-populate for the new session.
   const activateTab = useCallback((id: string | null) => {
     setWorkspaceManagerOpen(false);
     setProjectTrustDialogOpen(false);
     setActiveTopPanel(null);
-    // 中央区整页让位：任何 tab 激活（含点当前 tab）都回到聊天/总览。
+    // 中央区整页让位：任何 tab 激活（含点当前 tab）都回到聊天（总览整页亦随之关闭）。
     setCenterPage(null);
     if (id) {
       // MRU 记的是工作区 id（首页 composer 默认工作区的选源）；新 tab 尚未
@@ -603,6 +605,20 @@ export function useAppShellState(seed?: {
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
   }, []);
+
+  /** 总览整页落地（knowledge/designs/overview-center-page-design.md D3）：无会话 tab 选中
+   *  + centerPage overview + MRU 推该工作区 + 同步 workspaces 主列表（capability/
+   *  仓库等在页面打开期间会变）。不写 URL——调用方决定 push / replace / 不写
+   *  （applyUrlToTabs 读端）。activateTab(null) 做全部重置（含清 centerPage），
+   *  再设 overview：同一批次内后者胜出。 */
+  const landOnOverview = useCallback((workspace: WorkspaceSummary) => {
+    setWorkspaces((current) => current.some((w) => w.id === workspace.id)
+      ? current.map((w) => (w.id === workspace.id ? workspace : w))
+      : [...current, workspace]);
+    activateTab(null);
+    setMruIds((ids) => [workspace.id, ...ids.filter((x) => x !== workspace.id)]);
+    setCenterPage({ kind: "overview", workspaceId: workspace.id });
+  }, [activateTab]);
 
   // The URL is a write-only projection of the active tab. We push via the
   // History API (no Next.js navigation → no Suspense churn); popstate is the
@@ -687,7 +703,7 @@ export function useAppShellState(seed?: {
     return id;
   }, [activateTab, navigateUrl, focusChat, freshNewSessionTabId, isNewSessionDraftEmpty]);
 
-  /** 移动端抽屉上下文锚定（docs/mobile-drawer-design.md §4.2「上下文跟着
+  /** 移动端抽屉上下文锚定（knowledge/designs/mobile-drawer-design.md §4.2「上下文跟着
    *  屏幕走」）：把抽屉里以工作区 W 为目标的动作（模块行/归档）放进 W 的
    *  上下文——幂等地建/激活 W 锚定的占位 tab（去重复用空草稿占位）。与
    *  openNewSessionTab 的差别：纯状态，不 focusChat、不 bump sessionKey——
@@ -714,7 +730,7 @@ export function useAppShellState(seed?: {
   /** X1 关 tab：草稿确认（会话 tab 用 session.id 键，占位 tab 用 tab.id 键）
    *  → 邻居规则回落（先左后右；一个不剩 → 首页）。会话删除/归档的自动关
    *  闭路径传 skipDraftConfirm（草稿已无意义）。返回是否真的关了（草稿确认
-   *  取消 = false）——移动端用它决定要不要接「关最后一个 tab → 落家 tab」的
+   *  取消 = false）——桌面用它决定要不要接「关最后一个 tab → 落总览整页」的
    *  回退，取消时不动。 */
   const closeTab = useCallback((id: string, options?: { skipDraftConfirm?: boolean }): boolean => {
     const tab = tabs.find((t) => t.id === id) ?? null;
@@ -788,16 +804,14 @@ export function useAppShellState(seed?: {
   }, [closeTab]);
 
   /** tab 条点击：激活既有 tab + URL 投影 + ChatWindow 重建信号（M1：切 tab =
-   *  与切会话同构的重建）。家 tab 不需要重建信号（无 ChatWindow）。 */
+   *  与切会话同构的重建）。 */
   const handleSelectTab = useCallback((id: string) => {
     const tab = tabsRef.current.find((t) => t.id === id);
     if (!tab) return;
     activateTab(id);
-    if (tab.kind !== "workspace-home") {
-      setSessionKey((k) => k + 1);
-      setSystemPrompt(null);
-      focusChat();
-    }
+    setSessionKey((k) => k + 1);
+    setSystemPrompt(null);
+    focusChat();
     navigateUrl(tabQuery(tab));
   }, [activateTab, navigateUrl, focusChat]);
 
@@ -860,8 +874,9 @@ export function useAppShellState(seed?: {
       navigateUrl(cleaned.toString() || null, true);
     } else {
       // URL 驱动导航到达非页面 URL：中央区整页让位。配置页从不写 URL，
-      // 到达这里的 URL 一定指向某个聊天/首页目标——popstate 后退/前进
-      // 离开 work-items 页面 URL 时由此关闭页面（activateTab 内亦有兜底）。
+      // 到达这里的 URL 指向聊天/首页/总览目标——popstate 后退/前进离开
+      // work-items 页面 URL 时由此关闭页面（activateTab 内亦有兜底）；总览
+      // URL 在下方由 landOnOverview 重新设回 overview（同批次后者胜出）。
       setCenterPage(null);
     }
     if (params.get("tab") === "home" || !params.get("workspace")) {
@@ -942,10 +957,9 @@ export function useAppShellState(seed?: {
       activateTab(id);
       return;
     }
-    // 家 tab（overview 落地）。
-    const homeId = ensureHomeTab(workspace);
-    activateTab(homeId);
-  }, [workspaces, sessionActivity.sessions, ensureHomeTab, activateTab, navigateUrl]);
+    // 总览整页落地（workspace=<id> / …&view=overview）：URL 已是总览地址，不再写。
+    landOnOverview(workspace);
+  }, [workspaces, sessionActivity.sessions, landOnOverview, activateTab, navigateUrl]);
 
   // Initial restore: once workspaces are loaded, (a) R2 恢复 tab 条全量（URL
   // 深链优先决定 active；URL 为首页则停在首页；URL 为空才用恢复的 active），
@@ -1039,11 +1053,14 @@ export function useAppShellState(seed?: {
 
   useEffect(() => {
     void loadWorkspaces();
+    // 设置页无工作区/会话时的兜底锚 = agent 目录，不是 homedir：homedir 是所有
+    // 白名单根的父目录，拿它当 cwd 会让 Agents/Skills/Plugins 全部 403
+    //（见 /api/home 与 getAllowedFileRoots）；home 字段只服务侧栏路径缩短显示。
     void fetch("/api/home")
       .then(async (response) => response.ok
-        ? response.json() as Promise<{ home?: string }>
+        ? response.json() as Promise<{ home?: string; agentDir?: string }>
         : null)
-      .then((data) => setGlobalSettingsCwd(data?.home ?? null))
+      .then((data) => setGlobalSettingsCwd(data?.agentDir ?? data?.home ?? null))
       .catch(() => {});
   }, [loadWorkspaces]);
 
@@ -1055,8 +1072,9 @@ export function useAppShellState(seed?: {
   }, [openSessionTab]);
 
   const handleSelectSession = useCallback((session: SessionInfo) => {
-    // 首页（无活动 tab）点会话 = 跨工作区直达，委托给首页管道，不再静默吞掉。
-    if (!activeTabId) {
+    // C1 from-home：无活动 tab（首页上下文 / 总览整页打开）点会话 = 开新会话
+    // tab（跨工作区直达，总览不被导航吃掉），委托给首页管道。
+    if (resolveOpenSessionTarget(activeTab) === "from-home") {
       handleOpenSessionFromHome(session);
       return;
     }
@@ -1069,12 +1087,6 @@ export function useAppShellState(seed?: {
       focusChat();
       const tab = tabs.find((t) => t.id === existingId);
       if (tab) navigateUrl(tabQuery(tab));
-      return;
-    }
-    const target = resolveOpenSessionTarget(activeTab);
-    // 家 tab 是枢纽锚点：列表点击开新会话 tab，不吃掉家 tab。
-    if (target === "new-tab") {
-      handleOpenSessionFromHome(session);
       return;
     }
     // C1 morph：当前会话/占位 tab 原地变身（保留 F1 文件 tab 状态）。
@@ -1108,61 +1120,35 @@ export function useAppShellState(seed?: {
       .catch(() => {});
   }, [openSessionTab]);
 
-  /** P1：开工作区 = 开/激活它的家 tab（总览落地；会话 tab 模型下「进入工作区」
-   *  与「看它的总览」是同一件事）。options.replace：自动导航（如移动端空态
-   *  落回家 tab）用 replace 写 URL，不给浏览器历史埋 tab=home 陷阱。 */
+  /** P1：开工作区 = 落它的总览整页（会话 tab 模型下「进入工作区」与「看它的
+   *  总览」是同一件事；2026-10 总览整页化前是开/激活家 tab）。options.replace：
+   *  自动导航（如桌面空态落回总览）用 replace 写 URL，不给浏览器历史埋
+   *  tab=home 陷阱。 */
   const handleOpenWorkspace = useCallback((workspace: WorkspaceSummary, options?: { replace?: boolean }) => {
-    const id = ensureHomeTab(workspace);
-    activateTab(id);
+    landOnOverview(workspace);
     navigateUrl(`workspace=${encodeURIComponent(workspace.id)}&view=overview`, options?.replace === true);
-  }, [ensureHomeTab, activateTab, navigateUrl]);
+  }, [landOnOverview, navigateUrl]);
 
-  /** Overview（家 tab）的回头路：工作台 PanelHeader「总览」按钮 → 开/激活当前
-   *  工作区的家 tab；移动端由 MobileShell 用本地栈接管（onShowOverview prop）。 */
+  /** 工具行「🏠 工作区名」→ 回当前工作区总览整页；移动端由 MobileShell 用
+   *  本地目的地页接管（mobilePage:"overview"），不经此。 */
   const handleShowOverview = useCallback(() => {
     if (!activeWorkspace) return;
-    const id = ensureHomeTab(activeWorkspace);
-    activateTab(id);
+    landOnOverview(activeWorkspace);
     navigateUrl(`workspace=${encodeURIComponent(activeWorkspace.id)}&view=overview`);
-  }, [activeWorkspace, ensureHomeTab, activateTab, navigateUrl]);
+  }, [activeWorkspace, landOnOverview, navigateUrl]);
 
-  /** 新建会话（中栏 header ＋ / 家 tab 快捷按钮 / 移动端工作区菜单 /
-   *  Ctrl+Alt+N）：活动 tab 是家 tab（= 工作区详情页）→ 原地变身
-   *  （resolveNewSessionTarget；2026-09 用户反馈：详情页点「新建会话」
-   *  不新增 tab）——家 tab 同位置换成 composer 占位，F1 文件 tab/右栏状态
-   *  保留，首条消息后按现有 handleSessionCreated 转正；回头路 =「总览」/⊞
-   *  走 ensureHomeTab 重建家 tab。活动 tab 是会话/占位 → 开新占位 tab
-   *  （U1 豁免：同工作区可并存多个 composer，不吃掉正在看的会话）。 */
+  /** 新建会话（侧栏「新建任务」/ 总览主按钮 / 移动端工作区菜单 / Ctrl+Alt+N）：
+   *  永远开新占位 tab（openNewSessionTab 自带空草稿占位去重——U1 豁免：同工作
+   *  区可并存多个 composer，不吃掉正在看的会话）。2026-10 总览整页化前这里有
+   *  「家 tab 原地变身」分支（详情页点新建会话不新增 tab）；总览不再占 tab 位，
+   *  原诉求直接满足，分支随家 tab 一起退役。 */
   const handleWorkspaceNewSession = useCallback(() => {
     if (!activeWorkspace) return;
-    // 家 tab 变身前先看去重：已有空草稿占位 → 直接激活它（不变身、不多开）。
-    if (findReusableNewSessionTab(tabsRef.current, activeWorkspace.id, isNewSessionDraftEmpty)) {
-      openNewSessionTab(activeWorkspace);
-      return;
-    }
-    if (activeTab && resolveNewSessionTarget(activeTab) === "morph") {
-      const id = freshNewSessionTabId();
-      setTabs((prev) => prev.map((t) => (t.id === activeTab.id
-        ? {
-            ...createNewSessionTab(activeTab.workspace, id),
-            fileTabs: t.fileTabs,
-            activeFileTabId: t.activeFileTabId,
-            rightPanelOpen: t.rightPanelOpen,
-          }
-        : t)));
-      activateTab(id);
-      setSessionKey((k) => k + 1);
-      setBranchTree([]);
-      setBranchActiveLeafId(null);
-      setSystemPrompt(null);
-      focusChat();
-      navigateUrl(`workspace=${encodeURIComponent(activeWorkspace.id)}&view=chat`);
-      return;
-    }
     openNewSessionTab(activeWorkspace);
-  }, [activeWorkspace, activeTab, activateTab, navigateUrl, focusChat, freshNewSessionTabId, openNewSessionTab, isNewSessionDraftEmpty]);
+  }, [activeWorkspace, openNewSessionTab]);
 
-  /** tab 条「＋」：显式的加 tab 按钮——永远开新占位 tab，不做家 tab 原地变身。 */
+  /** tab 条「＋」：显式的加 tab 按钮——永远开新占位 tab（与 handleWorkspaceNewSession
+   *  同构，分开命名以保留入口语义）。 */
   const handleTabBarNewSession = useCallback(() => {
     if (!activeWorkspace) return;
     openNewSessionTab(activeWorkspace);
@@ -1228,8 +1214,11 @@ export function useAppShellState(seed?: {
 
   const handleWorkspaceDeleted = useCallback((workspace: WorkspaceSummary) => {
     setWorkspaces((current) => current.filter((item) => item.id !== workspace.id));
-    // 关掉该工作区的全部 tab（家 tab + 会话/占位 tab）；活动 tab 在其中则落到
-    // 移除块位置的最近残留 tab，一个不剩 → 首页。工作区删除无需草稿确认。
+    // 正在看它的总览整页 → 关页（activeTab 本就为空；随后桌面空态 effect 落
+    // MRU 工作区总览 / 移动端落占位 composer，URL 由其 replace 修正）。
+    setCenterPage((current) => (current?.kind === "overview" && current.workspaceId === workspace.id ? null : current));
+    // 关掉该工作区的全部 tab（会话/占位 tab）；活动 tab 在其中则落到移除块
+    // 位置的最近残留 tab，一个不剩 → 首页。工作区删除无需草稿确认。
     const index = tabs.findIndex((t) => t.workspace.id === workspace.id);
     const remaining = tabs.filter((t) => t.workspace.id !== workspace.id);
     setTabs(remaining);
@@ -1946,8 +1935,8 @@ export function useAppShellState(seed?: {
     setTopPanelPos,
     handleWorkspaceSettingsSelection,
     focusChat,
-    mobileNavOpen,
-    setMobileNavOpen,
+    mobileTab,
+    setMobileTab,
     ensureWorkspaceContext,
     sidebarWidthRef,
     sidebarContainerRef,
@@ -1981,7 +1970,7 @@ export function useAppShellState(seed?: {
     handleFileLineMention,
     updateTab,
     updateActiveTab,
-    ensureHomeTab,
+    landOnOverview,
     openSessionTab,
     openNewSessionTab,
     closeTab,

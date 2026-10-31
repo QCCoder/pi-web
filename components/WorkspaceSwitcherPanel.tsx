@@ -20,8 +20,11 @@ import type { WorkspaceSummary } from "@/lib/workspaces/types";
  *   ☑ 工作项  📚 知识库      capability 门控与 active 高亮都由宿主计算
  *   🔁 Loops
  *
- * 宿主形态：桌面 = 32px 工作区工具行「工作区名 ▾」下方弹出（点外部关闭）；
- * 移动端 = 抽屉/常驻树头部的「工作区名 ▾」内联展开。本组件只渲染内容。
+ * 宿主形态（历史）：桌面 = 32px 工作区工具行「工作区名 ▾」下方弹出；移动端 =
+ * 抽屉/常驻树头部内联展开。**2026-10 起无宿主**：移动端切换器 2026-09-27 撤下，
+ * 桌面入口 2026-10 删除（knowledge/designs/overview-center-page-design.md D14——侧栏「项目」
+ * 分区已覆盖切换/排序/新建导入）。目前仅 `SwitcherModuleEntry` 类型被 MobileShell
+ * 引用；手机壳改版（MobileTabShell）落地后整体清理。本组件只渲染内容。
  */
 
 /** 模块入口行（宿主组装：桌面 = 右坞开合语义；手机 = mobilePage 目的地）。 */

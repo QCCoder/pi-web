@@ -7,7 +7,7 @@ import type { GitFileStatus } from "@/lib/git-types";
 import type { WorkspaceSummary } from "@/lib/workspaces/types";
 
 /**
- * 知识库浏览（W-中收敛，docs/session-tabs-design.md Phase 2）：原中栏知识库
+ * 知识库浏览（W-中收敛，knowledge/designs/session-tabs-design.md Phase 2）：原中栏知识库
  * 模块视图的提升版，现在挂在工作区家 tab（总览 hub）的 knowledge 子视图里
  * （移动端 = 工作台 tab 的 overview 栈页）。内容不变：知识库 chips 选择器 +
  * OKF bundle 的 FileExplorer（L0：read/ls/grep 常驻，open index.md 为入口提示）。

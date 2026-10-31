@@ -66,7 +66,6 @@ export interface WorkspaceManifest {
   id: string;
   slug: string;
   name: string;
-  skills: string[];
   repositories: WorkspaceRepository[];
   agent: WorkspaceAgentSettings;
   /** Enabled capabilities for this workspace (capability-driven). REQUIRED —
@@ -100,7 +99,6 @@ export interface WorkspaceSummary {
    *  (directory health): a disabled workspace can still be selected in the
    *  settings list to re-enable or edit it. */
   disabled: boolean;
-  skills: string[];
   repositories: WorkspaceRepository[];
   repositoryCount: number;
   createdAt: string;
@@ -147,7 +145,6 @@ export interface ImportWorkspaceInput {
 export interface UpdateWorkspaceInput {
   expectedUpdatedAt?: string;
   name?: string;
-  skills?: string[];
   /** Replace the workspace's capability set. Used to toggle modules on/off. */
   capabilities?: WorkspaceCapability[];
   /** Temporarily disable/enable the workspace (picker visibility only — see

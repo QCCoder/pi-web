@@ -3,7 +3,7 @@
 import type { WorkItemRecord } from "@/lib/work-items/types";
 import { sourceLabel } from "@/lib/work-items/source-labels";
 import { formatRelativeTime } from "@/lib/format-time";
-import { TYPE_LABELS, PHASE_LABELS, isHistoricalComplete } from "./work-item-phases";
+import { TYPE_LABELS, PHASE_LABELS, STATUS_LABELS, STATUS_DOT_COLORS, isHistoricalComplete } from "./work-item-phases";
 import { isItemFlagged } from "./work-item-queries";
 
 /**
@@ -105,6 +105,26 @@ export function WorkItemRow({
       >
         {PHASE_LABELS[item.phase]}
       </span>
+      {item.branches && item.branches.length > 0 && (
+        <span
+          title={`开发分支：${item.branches.map((entry) => entry.branch).join("、")}（合并状态见详情）`}
+          style={{
+            flexShrink: 0,
+            maxWidth: 150,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            padding: "1px 6px",
+            borderRadius: 4,
+            border: "1px solid var(--border)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            color: "var(--text-muted)",
+          }}
+        >
+          {item.branches[0].branch}
+        </span>
+      )}
       <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: PRIORITY_COLORS[item.priority] ?? "var(--text-muted)" }}>
         {item.priority}
       </span>
@@ -123,6 +143,24 @@ export function WorkItemRow({
           {item.status === "blocked" ? "阻塞" : "待确认"}
         </span>
       )}
+      <span
+        style={{
+          flexShrink: 0,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          padding: "1px 7px",
+          borderRadius: 999,
+          background: "var(--bg-hover)",
+          fontSize: 10.5,
+          color: "var(--text-muted)",
+          whiteSpace: "nowrap",
+        }}
+        title={`状态：${STATUS_LABELS[item.status]}`}
+      >
+        <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_DOT_COLORS[item.status], flexShrink: 0 }} />
+        {STATUS_LABELS[item.status]}
+      </span>
       <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
         {formatRelativeTime(item.updatedAt)}
       </span>

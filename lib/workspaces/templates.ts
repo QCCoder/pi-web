@@ -147,6 +147,9 @@ export function renderWorkspaceAgents(
     lines.push(`- Bug branches use \`${bugBranch}\`.`);
     lines.push("- Create implementation branches only after the plan is approved.");
     lines.push("- Never delete or force-push a remote branch without explicit user approval.");
+    lines.push("- After creating or switching a Work Item's development branch, register it via "
+      + "`workspace_update_work_item` `branches` (one entry per repository) so its merge status "
+      + "to develop/master is tracked.");
     lines.push("<!-- workspace-managed:git:end -->");
     lines.push("");
   }

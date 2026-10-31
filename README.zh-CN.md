@@ -47,9 +47,9 @@ API 请求仅接受 loopback 名称、IP 字面量、当前监听主机名，以
 Pi Web 的服务端模型请求和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
 
 远程 Linux 私网部署请使用仓库内的 Docker Compose 配置，步骤见
-[Pi Workspace 私网部署](./docs/deployment.zh-CN.md)。服务没有应用层登录，不能直接暴露到公网。
+[Pi Workspace 私网部署](./knowledge/guides/deployment.zh-CN.md)。服务默认没有应用层登录（可选 `PI_WEB_PASSWORD`），不能直接暴露到公网。
 上游 MIT 许可和未来客户端打包边界见
-[上游许可与客户端边界](./docs/upstream-license-and-clients.zh-CN.md)。
+[上游许可与客户端边界](./knowledge/guides/upstream-license-and-clients.zh-CN.md)。
 
 macOS 或 Linux：
 
@@ -73,7 +73,6 @@ npx @agegr/pi-web@latest
 
 - **把历史工作接回来**：打开网页就能按项目找到以前的 pi 对话，不必在终端里翻文件或记住会话路径。
 - **放心试不同方向**：可以从某条历史消息重新开始，也可以复制出一条独立的新路线，探索方案时不怕弄乱原来的对话。
-- **跨分支工作**：在侧边栏切换 Git worktree，让新会话和 Explorer 跟随你选择的 checkout。
 - **边聊边看项目文件**：左侧浏览项目文件，右侧打开源码、文档、图片、音频和 PDF；文件变化会自动刷新，适合边让 agent 改边检查结果。
 - **随时掌握会话状态**：在顶部就能看到上下文占用、花费、压缩结果和系统提示，长会话不再像黑箱。
 - **少离开当前界面**：模型、登录/API key、模型测试和技能开关都能在网页里处理，配置 agent 时不用在多个工具之间来回切换。
@@ -84,7 +83,6 @@ npx @agegr/pi-web@latest
 - **会话文件**：路径形如 `~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`。
 - **模型配置**：Models 面板读写 pi agent 目录下的 `models.json`，模型列表和默认模型由 pi 的配置解析得到。
 - **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。
-- **Git worktree**：什么时候显示切换器、新建目录在哪里、删除会影响什么，见 [Pi Web 里的 Worktree](./docs/worktrees.zh-CN.md)。
 - **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
 
 ## 开发

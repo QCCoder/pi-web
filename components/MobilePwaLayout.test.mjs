@@ -6,8 +6,9 @@ import test from "node:test";
 // Only the overflow-containment subset applies to this fork: the rest of the
 // upstream file asserts the upstream viewport hook (--app-viewport-height),
 // black-translucent standalone chrome, and mobile drawer safe-area CSS — this
-// fork deliberately uses useVisualViewportKeyboard (--app-height/--app-lift),
-// the default status bar, and MobileShell bottom tabs instead (t6-report.md).
+// fork deliberately uses useVisualViewportKeyboard (--app-height/--app-lift)
+// and its own shell navigation (2026-10: MobileTabShell bottom tabs on phones,
+// MobileShell permanent tree on tablets; see knowledge/designs/mobile-drawer-design.md).
 
 const cssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const chatWindowSource = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");

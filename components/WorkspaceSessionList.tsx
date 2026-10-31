@@ -18,21 +18,29 @@ import { useIsMobile } from "@/hooks/useIsMobile";
  * 跨工作区列表住首页/桌面中栏（HomeSessionGroups）。
  */
 const SESSION_PREVIEW_COUNT = 20;
+/** 总览卡片内嵌模式的默认条数（2026-10 用户反馈：20 条把会话卡撑成一根柱子，
+ *  瀑布流里压过所有其它卡）。超出收进「显示全部」。 */
+const EMBEDDED_PREVIEW_COUNT = 8;
 
 // ── 展开态窗口化（upstream 5f8f47b 技术移植，共识 #11）────────────────────────
-// 行高固定：11px 上下 padding + 2px 边框 + 行内最高元素 28px（删除钮）= 52px，
-// 行距 8 → 节距 60。只挂载可见窗口 + overscan；焦点行强制保留在窗口内
-// （删除确认两步的行滚出窗口不能丢状态——对应上游 inline rename 的保留）。
+// 行高固定：独立列表 11px 上下 padding + 2px 边框 + 行内最高元素 28px（删除钮）
+// = 52px，行距 8 → 节距 60；卡片内嵌（embedded）行 8px 上下 padding + 2px 透明
+// 边框 + 28px = 46px，行距 2 → 节距 48（与其它卡片的行密度一致）。只挂载可见
+// 窗口 + overscan；焦点行强制保留在窗口内（删除确认两步的行滚出窗口不能丢
+// 状态——对应上游 inline rename 的保留）。
 const SESSION_ROW_HEIGHT = 52;
 const SESSION_ROW_PITCH = SESSION_ROW_HEIGHT + 8;
+const EMBEDDED_ROW_HEIGHT = 46;
+const EMBEDDED_ROW_PITCH = EMBEDDED_ROW_HEIGHT + 2;
 /** 展开但行数不多时窗口化纯属开销，超过该阈值才启用。 */
 const WINDOWING_THRESHOLD = 60;
 
-/** 纯函数：给定总数/滚动位置/视口高，返回应挂载的下标（含焦点行钉住）。 */
-export function getSessionListIndices(count: number, scrollTop: number, viewportHeight: number, focusedIndex = -1): number[] {
+/** 纯函数：给定总数/滚动位置/视口高，返回应挂载的下标（含焦点行钉住）。
+ *  pitch = 行节距（独立列表 60 / 卡片内嵌 48）。 */
+export function getSessionListIndices(count: number, scrollTop: number, viewportHeight: number, focusedIndex = -1, pitch = SESSION_ROW_PITCH): number[] {
   const overscan = 8;
-  const visibleCount = Math.ceil((viewportHeight || 600) / SESSION_ROW_PITCH) + overscan * 2;
-  const start = Math.max(0, Math.min(Math.floor(scrollTop / SESSION_ROW_PITCH) - overscan, count - visibleCount));
+  const visibleCount = Math.ceil((viewportHeight || 600) / pitch) + overscan * 2;
+  const start = Math.max(0, Math.min(Math.floor(scrollTop / pitch) - overscan, count - visibleCount));
   const end = Math.min(count, start + visibleCount);
   const indices = Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset);
   if (focusedIndex >= 0 && focusedIndex < start) indices.unshift(focusedIndex);
@@ -49,6 +57,16 @@ interface Props {
   onSessionDeleted?: (id: string) => void;
   /** 是否渲染「会话 (N)」小节头（总览区块 true / 移动端全屏子页 false，PanelHeader 已有标题）。 */
   showHeader?: boolean;
+  /** 宿主已有的全量会话列表（shell 的 sessionActivity——与侧栏/首页同一份）。
+   *  传入 = 不再自拉 /api/sessions（打开总览零额外请求、即时渲染，2026-10
+   *  用户反馈「总览会话不秒出」）；缺省 = 组件自拉（独立宿主兜底）。 */
+  sessions?: SessionInfo[];
+  /** 总览卡片内嵌模式（2026-10 总览瀑布流：会话成为第一张卡）：无外边距、
+   *  小节头改为卡片头样式（12.5px muted + 计数 chip）、默认只预览
+   *  {@link EMBEDDED_PREVIEW_COUNT} 条（20 条会把卡撑成一根柱子）、行扁平化且
+   *  更紧（46px 行 / 48 节距，与其它卡片行密度一致；展开态窗口化按同一组几何
+   *  计算）、空态去虚线框。移动端全屏子页不传。 */
+  embedded?: boolean;
 }
 
 export function WorkspaceSessionList({
@@ -57,9 +75,11 @@ export function WorkspaceSessionList({
   onSelectSession,
   onSessionDeleted,
   showHeader = true,
+  sessions: sessionsFromHost,
+  embedded = false,
 }: Props) {
   const isMobile = useIsMobile();
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [fetchedSessions, setFetchedSessions] = useState<SessionInfo[]>([]);
   const [showAllSessions, setShowAllSessions] = useState(false);
   // 展开态窗口化（仅 showAll 且行数超阈值时激活）：内嵌滚动容器 + ResizeObserver
   // 测视口，onScroll 经 rAF 节流更新窗口（upstream 5f8f47b 手法）。
@@ -89,15 +109,30 @@ export function WorkspaceSessionList({
   // 切工作区时重置展开态（宿主也以 key=workspace.id 挂载，这里兜底）。
   useEffect(() => {
     setShowAllSessions(false);
+    setHiddenIds(new Set());
   }, [workspace.id]);
 
+  // 删除行的乐观移除：宿主注入模式下不能改宿主数组——本地 hiddenIds 隐藏
+  //（宿主 refresh 追上后仍不复活）；自拉模式顺带真删本地列表。
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set());
+  const handleRowRemoved = useCallback((id: string) => {
+    setHiddenIds((prev) => new Set([...prev, id]));
+    setFetchedSessions((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  // 宿主注入（shell sessionActivity）时零请求；独立宿主兜底自拉。
+  const sessions = useMemo(
+    () => (sessionsFromHost ?? fetchedSessions).filter((session) => !hiddenIds.has(session.id)),
+    [sessionsFromHost, fetchedSessions, hiddenIds],
+  );
   useEffect(() => {
+    if (sessionsFromHost) return;
     const controller = new AbortController();
     fetch("/api/sessions", { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) return;
         const data = await response.json() as { sessions?: SessionInfo[] };
-        setSessions(data.sessions ?? []);
+        setFetchedSessions(data.sessions ?? []);
       })
       .catch((error) => {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -105,7 +140,7 @@ export function WorkspaceSessionList({
         }
       });
     return () => controller.abort();
-  }, [workspace.id]);
+  }, [workspace.id, sessionsFromHost]);
 
   const workspaceSessions = useMemo(() => {
     const path = workspace.path;
@@ -120,10 +155,30 @@ export function WorkspaceSessionList({
       })
       .sort((a, b) => b.modified.localeCompare(a.modified));
   }, [sessions, workspaces, workspace.id, workspace.path]);
+  const previewCount = embedded ? EMBEDDED_PREVIEW_COUNT : SESSION_PREVIEW_COUNT;
 
   return (
-    <section style={{ marginTop: 26 }}>
-      {showHeader && (
+    <section style={{ marginTop: embedded ? 0 : 26 }}>
+      {showHeader && (embedded ? (
+        <h2
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            margin: 0,
+            padding: "8px 10px 6px",
+            fontSize: 12.5,
+            fontWeight: 600,
+            color: "var(--text-muted)",
+            userSelect: "none",
+          }}
+        >
+          会话
+          <span style={{ fontSize: 10.5, fontWeight: 500, color: "var(--text-dim)", background: "var(--bg-hover)", borderRadius: 999, padding: "1px 7px" }}>
+            {workspaceSessions.length}
+          </span>
+        </h2>
+      ) : (
         <h2
           style={{
             margin: "0 0 12px",
@@ -137,30 +192,40 @@ export function WorkspaceSessionList({
           会话
           <span style={{ color: "var(--text-dim)", fontSize: 12, fontWeight: 400 }}>{workspaceSessions.length}</span>
         </h2>
-      )}
+      ))}
       {workspaceSessions.length === 0 ? (
-        <div
-          style={{
-            padding: "22px 16px",
-            textAlign: "center",
-            color: "var(--text-dim)",
-            fontSize: 13,
-            border: "1px dashed var(--border)",
-            borderRadius: 10,
-          }}
-        >
-          还没有会话。点击「新建会话」开始。
-        </div>
+        embedded ? (
+          <div style={{ padding: "18px 10px 14px", textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
+            还没有会话。点击「新建会话」开始。
+          </div>
+        ) : (
+          <div
+            style={{
+              padding: "22px 16px",
+              textAlign: "center",
+              color: "var(--text-dim)",
+              fontSize: 13,
+              border: "1px dashed var(--border)",
+              borderRadius: 10,
+            }}
+          >
+            还没有会话。点击「新建会话」开始。
+          </div>
+        )
       ) : (
         <div>
           {(() => {
-            // 窗口化仅展开态 + 行数超阈值时激活（共识 #11-i：默认 20 条预览零改动）。
+            // 窗口化仅展开态 + 行数超阈值时激活（共识 #11-i：默认预览零改动）。
+            // 行几何按宿主形态取：内嵌卡片行更紧（EMBEDDED_*）。
+            const rowHeight = embedded ? EMBEDDED_ROW_HEIGHT : SESSION_ROW_HEIGHT;
+            const rowPitch = embedded ? EMBEDDED_ROW_PITCH : SESSION_ROW_PITCH;
             if (showAllSessions && workspaceSessions.length > WINDOWING_THRESHOLD) {
               const virtualIndices = getSessionListIndices(
                 workspaceSessions.length,
                 listScrollTop,
                 listViewportH,
                 workspaceSessions.findIndex((session) => session.id === focusedSessionId),
+                rowPitch,
               );
               return (
                 <div
@@ -168,7 +233,7 @@ export function WorkspaceSessionList({
                   onScroll={handleListScroll}
                   style={{ overflowY: "auto", maxHeight: "min(70vh, 640px)" }}
                 >
-                  <div style={{ position: "relative", height: workspaceSessions.length * SESSION_ROW_PITCH }}>
+                  <div style={{ position: "relative", height: workspaceSessions.length * rowPitch }}>
                     {virtualIndices.map((index) => {
                       const session = workspaceSessions[index];
                       return (
@@ -176,13 +241,14 @@ export function WorkspaceSessionList({
                           key={session.id}
                           onFocus={() => setFocusedSessionId(session.id)}
                           onBlur={() => setFocusedSessionId(null)}
-                          style={{ position: "absolute", top: index * SESSION_ROW_PITCH, left: 0, right: 0, height: SESSION_ROW_HEIGHT }}
+                          style={{ position: "absolute", top: index * rowPitch, left: 0, right: 0, height: rowHeight }}
                         >
                           <RecentSessionRow
                             session={session}
                             isMobile={isMobile}
+                            flat={embedded}
                             onOpen={() => onSelectSession(session)}
-                            onRemoved={(id) => setSessions((prev) => prev.filter((item) => item.id !== id))}
+                            onRemoved={handleRowRemoved}
                             onDeleted={onSessionDeleted}
                           />
                         </div>
@@ -192,18 +258,19 @@ export function WorkspaceSessionList({
                 </div>
               );
             }
-            return (showAllSessions ? workspaceSessions : workspaceSessions.slice(0, SESSION_PREVIEW_COUNT)).map((session) => (
+            return (showAllSessions ? workspaceSessions : workspaceSessions.slice(0, previewCount)).map((session) => (
               <RecentSessionRow
                 key={session.id}
                 session={session}
                 isMobile={isMobile}
+                flat={embedded}
                 onOpen={() => onSelectSession(session)}
-                onRemoved={(id) => setSessions((prev) => prev.filter((item) => item.id !== id))}
+                onRemoved={handleRowRemoved}
                 onDeleted={onSessionDeleted}
               />
             ));
           })()}
-          {!showAllSessions && workspaceSessions.length > SESSION_PREVIEW_COUNT && (
+          {!showAllSessions && workspaceSessions.length > previewCount && (
             <button
               onClick={() => setShowAllSessions(true)}
               style={{
@@ -242,12 +309,15 @@ function formatRelativeTime(dateStr: string): string {
 function RecentSessionRow({
   session,
   isMobile,
+  flat = false,
   onOpen,
   onRemoved,
   onDeleted,
 }: {
   session: SessionInfo;
   isMobile: boolean;
+  /** 扁平行（总览卡片内嵌）：边框透明保住几何、底色透明、hover 才上色。 */
+  flat?: boolean;
   onOpen: () => void;
   onRemoved: (id: string) => void;
   onDeleted?: (id: string) => void;
@@ -294,11 +364,13 @@ function RecentSessionRow({
         display: "flex",
         alignItems: "center",
         gap: 12,
-        padding: "11px 12px",
-        marginBottom: 8,
-        border: "1px solid var(--border)",
-        borderRadius: 10,
-        background: hovered && !confirming ? "var(--bg-hover)" : "var(--bg-panel)",
+        padding: flat ? "8px 10px" : "11px 12px",
+        marginBottom: flat ? 2 : 8,
+        border: flat ? "1px solid transparent" : "1px solid var(--border)",
+        borderRadius: flat ? 8 : 10,
+        background: hovered && !confirming
+          ? "var(--bg-hover)"
+          : (flat ? "transparent" : "var(--bg-panel)"),
         cursor: confirming ? "default" : "pointer",
         transition: "background 0.12s",
       }}
@@ -310,7 +382,7 @@ function RecentSessionRow({
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
-          fontSize: 13,
+          fontSize: flat ? 12.5 : 13,
           color: "var(--text)",
         }}
       >

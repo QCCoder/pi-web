@@ -21,6 +21,7 @@ import {
   WorkItemExecution,
 } from "./WorkItemExecution";
 import { SourceRefValue, WorkItemRepositoryChips } from "./WorkItemMeta";
+import { WorkItemGitSection } from "./WorkItemGitSection";
 import { PHASE_LABELS, STATUS_LABELS, TYPE_LABELS } from "./work-item-phases";
 
 /** 中央工作项详情视图（M2 T9，spec §6.2/§7）：概况（只读非空 + 编辑模式）、
@@ -105,8 +106,9 @@ const OUTCOME_LABELS: Record<string, string> = {
   unverified: "未验证",
 };
 
-/** 交付证据只读块（spec §7.3）：候选 / 验证记录（含 checks）/ 发布计划 /
- *  发布登记。结构化数据来自 item.delivery，UI 只展示不改写。 */
+/** 交付证据只读块（spec §7.3）：候选 / 评审判定（final-arch step-3 先审后跑）/
+ *  验证记录（含 checks）/ 验收记录（final-arch step-4）/ 发布计划 / 发布登记。
+ *  结构化数据来自 item.delivery，UI 只展示不改写。 */
 function DeliveryEvidence({ item, repositories }: {
   item: WorkItemRecord;
   repositories: WorkspaceRepository[];
@@ -179,6 +181,63 @@ function DeliveryEvidence({ item, repositories }: {
           ))}
         </div>
       )}
+      {/* 评审判定（final-arch step-3 先审后跑）：delivery.review 在场才渲染——
+          outcome 徽章（评审通过 / 返工（code|spec））+ 候选摘要短码（完整 digest
+          进 title）+ 意见全文（pre-wrap——rework 的返工意见必填，人要看缺什么）。 */}
+      {delivery.review && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          <strong style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            评审 {formatRelativeTime(delivery.review.at)}
+          </strong>
+          <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+            <span
+              style={{
+                padding: "1px 6px",
+                borderRadius: 5,
+                fontSize: 10.5,
+                fontWeight: 700,
+                color: delivery.review.outcome === "pass" ? "#16a34a" : "#b45309",
+                background: delivery.review.outcome === "pass"
+                  ? "rgba(22,163,74,0.12)"
+                  : "rgba(180,83,9,0.12)",
+              }}
+            >
+              {delivery.review.outcome === "pass" ? "评审通过" : `返工（${delivery.review.source}）`}
+            </span>
+            <span
+              title={delivery.review.candidateDigest}
+              style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}
+            >
+              候选摘要 {delivery.review.candidateDigest.slice(0, 8)}
+            </span>
+          </div>
+          {delivery.review.notes && (
+            <div style={{ color: "var(--text-muted)", whiteSpace: "pre-wrap" }}>
+              {delivery.review.notes}
+            </div>
+          )}
+        </div>
+      )}
+      {/* 验收记录（final-arch step-4）：delivery.acceptance 在场才渲染——人工
+          record-acceptance 的验收意见（pre-wrap）+ 候选摘要短码（完整 digest 进
+          title）+ 时间；摘要绑定验收时的候选集（stages.acceptance.enabled 开启
+          时 record-release 门校验，候选换过即拒）。 */}
+      {delivery.acceptance && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          <strong style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            验收 {formatRelativeTime(delivery.acceptance.at)}
+          </strong>
+          <span
+            title={delivery.acceptance.candidateDigest}
+            style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}
+          >
+            候选摘要 {delivery.acceptance.candidateDigest.slice(0, 8)}
+          </span>
+          <div style={{ color: "var(--text-muted)", whiteSpace: "pre-wrap" }}>
+            {delivery.acceptance.notes}
+          </div>
+        </div>
+      )}
       {delivery.releasePlan && (delivery.releasePlan.notes || delivery.releasePlan.rollback) && (
         <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
           <strong style={{ fontSize: 11, color: "var(--text-dim)" }}>发布计划</strong>
@@ -226,6 +285,7 @@ export function WorkItemDetailView({
   onResumeAutomation,
   onChanged,
   onClose,
+  hideClose = false,
   onRestored,
   onDirtyChange,
 }: {
@@ -253,6 +313,8 @@ export function WorkItemDetailView({
   onChanged?: () => void;
   /** 清除选中（× / 移入回收站后）。 */
   onClose?: () => void;
+  /** 不渲染头部 ✕（手机详情子页的返回由页头 ‹ 承担；onClose 仍用于移入回收站后回列表）。 */
+  hideClose?: boolean;
   /** 从回收站恢复成功 → 宿主切回活动范围并选中原 key。 */
   onRestored?: (key: string) => void;
   /** 草稿态上报（概况编辑 / 正文编辑 / 设计编辑）——宿主在切项/切工作区前 confirm。 */
@@ -275,6 +337,8 @@ export function WorkItemDetailView({
   const [designDraft, setDesignDraft] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [interruptionPending, setInterruptionPending] = useState(false);
+  // Git 分支区块的「刷新」信号（递增 → 子组件穿透缓存重算合并状态）。
+  const [gitRefreshKey, setGitRefreshKey] = useState(0);
 
   // —— 详情拉取（revision 感知：动作/编辑成功 → invalidate → 快照新 revision
   // → 本 effect 重跑拿新详情）。 ——
@@ -590,7 +654,7 @@ export function WorkItemDetailView({
         </span>
         <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>{item.priority}</span>
         <span style={{ flex: 1 }} />
-        {onClose && (
+        {onClose && !hideClose && (
           <button type="button" style={buttonStyle} onClick={onClose} aria-label="关闭详情">✕</button>
         )}
       </div>
@@ -799,6 +863,32 @@ export function WorkItemDetailView({
               </MetaRow>
             )}
           </div>
+        </Section>
+      )}
+
+      {/* Git 分支（实时合并状态）：概况之后、证据块之前；回收站范围不渲染。 */}
+      {!trashed && item.repositories.length > 0 && (
+        <Section
+          title="Git 分支"
+          actions={
+            <button
+              type="button"
+              style={buttonStyle}
+              title="穿透缓存，重新实时计算合并状态"
+              onClick={() => setGitRefreshKey((key) => key + 1)}
+            >
+              刷新
+            </button>
+          }
+        >
+          <WorkItemGitSection
+            workspaceId={workspaceId}
+            item={item}
+            repositories={repositories}
+            frozen={item.phase === "released"}
+            onChanged={onChanged}
+            refreshKey={gitRefreshKey}
+          />
         </Section>
       )}
 

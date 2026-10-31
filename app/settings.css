@@ -206,6 +206,99 @@
   color: var(--text-dim);
 }
 
+/* Agents 侧栏页脚：内置子代理总开关 + 并发数（全局设置，不与单个配置混排）。 */
+.agents-sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 7px;
+  padding: 10px 12px 11px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.agents-sidebar-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.agents-sidebar-footer-row > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agents-sidebar-reload {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #d97706;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.agents-concurrency-input {
+  width: 50px;
+  height: 26px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* 侧栏组标题下的目录 hint（mono 小字，保持组标题大写样式只作用于主文案）。 */
+.agents-group-path {
+  display: block;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* 详情头：显示名标题 + ID mono + 状态胶囊。 */
+.agents-id-tag {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-subtle);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.agents-status-pill {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.agents-status-pill.is-on {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.agents-status-pill.is-off {
+  background: var(--bg-subtle);
+  color: var(--text-dim);
+}
+
+/* 被覆盖标注（侧栏行尾 / 详情）：指出赢家作用域。 */
 .agents-overridden-label {
   flex: 0 0 auto;
   color: var(--text-dim);
@@ -214,62 +307,191 @@
   white-space: nowrap;
 }
 
-.agents-feature-setting {
+/* 只读作用域（内置 / 工作区）的说明条 + 出路。 */
+.agents-readonly-notice {
   display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  min-height: 68px;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-.agents-feature-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-  color: var(--text);
-  font-size: 12px;
-}
-
-.agents-feature-copy > span {
-  color: var(--text-muted);
-  line-height: 1.4;
-}
-
-.agents-feature-copy > .agents-feature-reload-notice {
-  color: #d97706;
-}
-
-.agents-feature-actions {
-  display: flex;
-  flex-shrink: 0;
   align-items: center;
   gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
-.agents-concurrency-control {
-  display: flex;
-  align-items: center;
-  gap: 5px;
+.agents-readonly-notice > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.agents-readonly-notice .config-button {
+  flex-shrink: 0;
+}
+
+/* 工具 / 资源切换芯片（pressed 态 = accent 淡底）。 */
+.agents-chip {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
   color: var(--text-muted);
+  font-family: inherit;
   font-size: 11px;
+  cursor: pointer;
   white-space: nowrap;
 }
 
-.agents-concurrency-control input {
-  width: 52px;
-  height: 28px;
-  padding: 0 6px;
+.agents-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.agents-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.agents-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* 静态芯片（只读配置的工具清单，不可点）。 */
+.agents-static-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+/* 只读系统指令：可读文本块，不是灰掉的 textarea。 */
+.agents-prompt-readonly {
+  margin: 0;
+  max-height: 60vh;
+  padding: 9px 10px;
+  overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
+  border-radius: 5px;
+  background: var(--bg-panel);
   color: var(--text);
-  font: inherit;
-  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 交付角色剧本的引擎不变式锁定段（final-arch step-6 Task 3）：launch 逐字
+   前置、编辑器改不到——灰底只读 + 锁标 + §4.3 出处链。 */
+.agents-delivery-invariant {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+
+.agents-delivery-invariant-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.agents-delivery-invariant-head a {
+  color: var(--text-dim);
+  font-weight: 400;
+  text-decoration: none;
+}
+
+.agents-delivery-invariant-head a:hover {
+  color: var(--text-muted);
+  text-decoration: underline;
+}
+
+.agents-delivery-invariant-body {
+  margin: 0;
+  max-height: 30vh;
+  overflow: auto;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* 组合预览折叠段：composed 与 launch 同一函数产出——默认收起，展开即真相。 */
+.agents-delivery-composed > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.agents-delivery-composed > summary:hover {
+  color: var(--text);
+}
+
+.agents-delivery-composed-body {
+  margin: 6px 0 0;
+  max-height: 40vh;
+  padding: 9px 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 只读配置的键值行（运行段等）。 */
+.agents-kv-grid {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) 1fr;
+  gap: 7px 16px;
+  font-size: 12px;
+}
+
+.agents-kv-grid > dt {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.agents-kv-grid > dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: break-word;
+}
+
+.agents-kv-grid > dd.is-dim {
+  color: var(--text-dim);
+}
+
+.agents-system-prompt {
+  /* 样式占位：并行会话写了一半的空规则曾让整个 CSS 编译失败
+     （unclosed block → 全局样式丢失，底部 tab 栏裸奔即此连锁），先闭合。 */
 }
 
 .config-sidebar-message {
@@ -1157,17 +1379,6 @@
     height: 190px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-  }
-
-  .agents-feature-setting {
-    align-items: flex-start;
-    gap: 10px;
-    padding: 10px 14px;
-  }
-
-  .agents-feature-actions {
-    flex-wrap: wrap;
-    justify-content: flex-end;
   }
 
   .config-detail {

@@ -278,10 +278,6 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
   if (record.schema_version !== WORKSPACE_SCHEMA_VERSION) {
     throw new WorkspaceValidationError(`Unsupported workspace schema: ${String(record.schema_version)}`);
   }
-  const skills = record.skills ?? [];
-  if (!Array.isArray(skills) || skills.some((skill) => typeof skill !== "string" || !skill.trim())) {
-    throw new WorkspaceValidationError("skills must be an array of non-empty strings");
-  }
   const agent = record.agent ?? {};
   if (!agent || typeof agent !== "object" || Array.isArray(agent)) {
     throw new WorkspaceValidationError("agent must be an object");
@@ -329,7 +325,6 @@ export function parseWorkspaceManifest(value: unknown): WorkspaceManifest {
     id: requireNonEmptyString(record.id, "id"),
     slug,
     name: requireNonEmptyString(record.name, "name"),
-    skills: [...new Set((skills as string[]).map((skill) => skill.trim()))],
     repositories: parseRepositories(record.repositories),
     agent: {
       ...(optionalString(agentRecord.default_model, "agent.default_model")
@@ -363,7 +358,6 @@ export function serializeWorkspaceManifest(manifest: WorkspaceManifest): string 
     id: manifest.id,
     slug: manifest.slug,
     name: manifest.name,
-    skills: manifest.skills,
     repositories: manifest.repositories.map((repository) => ({
       id: repository.id,
       alias: repository.alias,
@@ -465,7 +459,6 @@ export function workspaceSummary(workspacePath: string, manifest: WorkspaceManif
     available: true,
     configStatus: "ready",
     disabled: manifest.disabled === true,
-    skills: [...manifest.skills],
     repositories: manifest.repositories.map((repository) => ({ ...repository })),
     repositoryCount: manifest.repositories.filter((repository) => repository.status === "active").length,
     createdAt: manifest.createdAt,
@@ -640,12 +633,39 @@ export async function syncRepositoriesFromScan(
   return true;
 }
 
-export async function listWorkspaceRepositories(
+// ---- 仓库列表读缓存（2026-10 用户反馈「项目首页仓库/会话不秒出」）----------
+// GET 的全量重算 = discover + 写锁内扫描对账 + 每仓 4 个 git 子进程（15 仓
+// 实测 ~0.7s），此前每次打开页面都重跑。这里加 per-workspace 进程内 TTL 缓存
+// （ZCode 同款心智：状态常驻内存、视图读内存，磁盘是事实源但不必每次重读）：
+// 窗口内直读上次结果（in-flight 合并）；扫描对账至多每 TTL 跑一次——外部
+// clone 进来的新目录最多 TTL 后自动登记，app 内增/删/恢复走写路径显式失效、
+// 即时可见。失败不缓存（下次重算）；TTL 0 = 关闭（测试用）；
+// PI_REPO_LIST_TTL_MS 可调，缺省 30s；路由 ?refresh=1 绕过。
+const DEFAULT_REPO_LIST_TTL_MS = 30_000;
+function repoListTtlMs(): number {
+  const raw = Number(process.env.PI_REPO_LIST_TTL_MS);
+  return Number.isSafeInteger(raw) && raw >= 0 ? raw : DEFAULT_REPO_LIST_TTL_MS;
+}
+interface RepoListCacheEntry {
+  at: number;
+  version: number;
+  promise: Promise<WorkspaceRepositoryState[]>;
+}
+const repoListCache = new Map<string, RepoListCacheEntry>();
+let repoListCacheVersion = 0;
+/** 仓库集写路径（增/删/恢复）显式失效：热读窗口内不再重算，写后立即可见。 */
+function invalidateRepositoryListCache(): void {
+  repoListCacheVersion += 1;
+  repoListCache.clear();
+}
+
+async function computeListWorkspaceRepositories(
   idOrSlug: string,
   root?: string,
 ): Promise<WorkspaceRepositoryState[]> {
   const workspace = await findWorkspace(idOrSlug, root);
-  // 先对账（扫描为事实）：列表/设置页打开即自动登记新目录、停用消失目录。
+  // 先对账（扫描为事实）：列表/设置页打开即自动登记新目录、停用消失目录
+  // （2026-10 读缓存后 = 至多每 TTL 对账一次）。
   await withWorkspaceWriteLock(workspace.path, async () => {
     const manifest = await readWorkspaceManifest(workspace.path);
     await syncRepositoriesFromScan(workspace.path, manifest);
@@ -680,11 +700,35 @@ export async function listWorkspaceRepositories(
   }));
 }
 
+export async function listWorkspaceRepositories(
+  idOrSlug: string,
+  root?: string,
+  options?: { refresh?: boolean },
+): Promise<WorkspaceRepositoryState[]> {
+  const key = `${root ?? ""}|${idOrSlug}`;
+  if (!options?.refresh) {
+    const hit = repoListCache.get(key);
+    if (hit && hit.version === repoListCacheVersion && Date.now() - hit.at < repoListTtlMs()) {
+      return hit.promise;
+    }
+  }
+  const version = repoListCacheVersion;
+  const entry: RepoListCacheEntry = { at: Date.now(), version, promise: Promise.resolve([]) };
+  entry.promise = computeListWorkspaceRepositories(idOrSlug, root).catch((error: unknown) => {
+    // 失败不缓存：同 key 的下一次调用重算。
+    if (repoListCache.get(key) === entry) repoListCache.delete(key);
+    throw error;
+  });
+  repoListCache.set(key, entry);
+  return entry.promise;
+}
+
 export async function addWorkspaceRepository(
   idOrSlug: string,
   input: AddWorkspaceRepositoryInput,
   root?: string,
 ): Promise<WorkspaceRepository> {
+  invalidateRepositoryListCache();
   const workspace = await findWorkspace(idOrSlug, root);
   const alias = validateRepositoryAlias(requireNonEmptyString(input.alias, "alias"));
   const kind = validateRepositoryKind(input.kind);
@@ -820,6 +864,7 @@ export async function removeWorkspaceRepository(
   repositoryId: string,
   root?: string,
 ): Promise<{ repository: WorkspaceRepository }> {
+  invalidateRepositoryListCache();
   const workspace = await findWorkspace(idOrSlug, root);
   return withWorkspaceWriteLock(workspace.path, async () => {
     const manifest = await readWorkspaceManifest(workspace.path);
@@ -845,6 +890,7 @@ export async function restoreWorkspaceRepository(
   repositoryId: string,
   root?: string,
 ): Promise<{ repository: WorkspaceRepository }> {
+  invalidateRepositoryListCache();
   const workspace = await findWorkspace(idOrSlug, root);
   return withWorkspaceWriteLock(workspace.path, async () => {
     const manifest = await readWorkspaceManifest(workspace.path);
@@ -1024,7 +1070,6 @@ function unavailableWorkspaceSummary(
     available: false,
     configStatus: status,
     disabled: false,
-    skills: [],
     repositories: [],
     repositoryCount: 0,
     createdAt: entry.addedAt,
@@ -1197,7 +1242,6 @@ export async function createWorkspace(
     id: createUlid(),
     slug,
     name,
-    skills: [],
     repositories: [],
     agent: {},
     capabilities,
@@ -1275,14 +1319,7 @@ export async function updateWorkspace(
       // `false` strips the key entirely — old manifests stay byte-compatible.
       if (input.disabled) latest.disabled = true;
       else delete latest.disabled;
-    }
-    if (input.skills !== undefined) {
-      if (!Array.isArray(input.skills) || input.skills.some((skill) => typeof skill !== "string" || !skill.trim())) {
-        throw new WorkspaceValidationError("skills must be an array of non-empty strings");
-      }
-      latest.skills = [...new Set(input.skills.map((skill) => skill.trim()))];
-    }
-    if (input.capabilities !== undefined) {
+    }    if (input.capabilities !== undefined) {
       latest.capabilities = normalizeUpdateCapabilities(parseCapabilities(input.capabilities));
     }
     latest.updatedAt = new Date().toISOString();
@@ -1374,7 +1411,6 @@ export async function importWorkspace(
       // Capability-driven: imported directories without a manifest get the bare
       // mandatory minimum and no template (consistent with createWorkspace).
       capabilities: ["sessions", "explorer"] as WorkspaceCapability[],
-      skills: [],
       repositories: [],
       agent: {},
       workItems: {

@@ -49,9 +49,7 @@ interface Props {
    *  （该组件 prop 面很宽，由宿主注入）。 */
   workspaceSlot: ReactNode;
   /** 工作区分区 header 的 meta（选中工作区名，WorkspaceManager 上报）。 */
-  workspaceMeta?: string | null;
-  onWorkspaceSkillsChange?: (workspace: WorkspaceSummary) => void;
-  onPluginsReloaded?: () => void;
+  workspaceMeta?: string | null;  onPluginsReloaded?: () => void;
   onModelsSaved?: () => void;
   sessionId: string | null;
   /** ✕ close — 中央区整页（点任何会话 tab 也会关闭）。 */
@@ -193,7 +191,6 @@ export function ConfigCenterPage({
   settingsCwd,
   workspaceSlot,
   workspaceMeta = null,
-  onWorkspaceSkillsChange,
   onPluginsReloaded,
   onModelsSaved,
   sessionId,
@@ -231,9 +228,7 @@ export function ConfigCenterPage({
       <SkillsConfig
         market
         cwd={settingsCwd}
-        globalOnly={!workspace}
-        workspace={workspace}
-        onWorkspaceSkillsChange={onWorkspaceSkillsChange}
+        projectInstallAvailable={Boolean(workspace)}
       />
     ) : null;
   } else if (kind === "plugins") {
@@ -247,11 +242,14 @@ export function ConfigCenterPage({
     ) : null;
   } else {
     content = settingsCwd ? (
+      // 交付感知（final-arch step-6 T3 → backlog-clearing T2 接线）：激活工作区
+      // id 透传——无激活工作区（home）= null → 面板整体不渲染。
       <AgentsConfig
         embedded
         key={settingsCwd}
         cwd={settingsCwd}
         sessionId={sessionId}
+        workspaceId={workspace?.id ?? null}
         onClose={onClose}
         onReloaded={onPluginsReloaded}
       />

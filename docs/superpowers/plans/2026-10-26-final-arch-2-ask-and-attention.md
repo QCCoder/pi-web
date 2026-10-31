@@ -189,9 +189,9 @@ export async function collectAttention(workspacePath: string, now?: Date): Promi
 - Modify: 详情视图挂载点（`WorkItemsPage.tsx` DetailView 或既有执行卡旁——实施者按现有结构选）
 - Modify: `components/work-items/work-item-execution.test.mjs` 或新组件测试（若仓内有组件测试惯例；否则手测清单）
 - Modify: `AGENTS.md`（「工作项 / 交付流」增两条：① ask 是一等回合结果——清 claim、phase 不变、不计预算；答复是人的手（`answer-clarification` 刻意不做 LLM 工具）；② 工具面恰六件（list / claim / submit / fail / ask / run_check）；catch-all 「催办/泊车只落事件 + paused，不加运行态文件」）
-- Modify: `docs/reference/work-items.md`（Delivery 自动执行节：ask 事务、clarifications 数据面、池 `awaiting-answer`、任务包问答段、attention 投影与 dispatcher attend、UI 两组件）
-- Modify: `docs/reference/file-map.md`（`attention.ts`、attention 路由、两组件）
-- Modify: `docs/architecture.md`（人工门一句话旁加「人的通道 = attention 队列」一行）
+- Modify: `knowledge/reference/work-items.md`（Delivery 自动执行节：ask 事务、clarifications 数据面、池 `awaiting-answer`、任务包问答段、attention 投影与 dispatcher attend、UI 两组件）
+- Modify: `knowledge/reference/file-map.md`（`attention.ts`、attention 路由、两组件）
+- Modify: `knowledge/architecture.md`（人工门一句话旁加「人的通道 = attention 队列」一行）
 
 - [ ] **Step 1: 失败测试 / 手测清单**——AttentionBar：四类分组计数正确、空队列不渲染、点击定位；ClarificationPanel：未答项显示 options/推荐值、提交走正确 payload、成功后变已答、已答只读；文档守卫同第一步（grep 旧规则 3 文本「二者之一」在 lib/docs 中为空）。
 - [ ] **Step 2–4 同前** → **Step 5: Commit** `feat: attention bar and clarification answer panel with docs`

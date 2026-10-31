@@ -27,30 +27,36 @@ import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 import { useShell } from "./context";
 import { ChatToolbar } from "./ChatToolbar";
+import { MobileTabShell } from "./MobileTabShell";
+import { WorkspaceModuleIcon, workspaceModuleEntries } from "./workspace-modules";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { getFileName } from "@/lib/file-paths";
 
 /**
- * 移动端壳（2026-09 树抽屉重构，docs/mobile-drawer-design.md；2026-09-27
- * 侧栏瘦身：抽屉树 + 模块行退役，抽屉头「工作区名 ▾」面板（工作区切换 +
- * 模块入口）+ 当前工作区会话清单，切工作区两端统一「落总览」）：
+ * 平板壳（≥768px；2026-10 底部 tab 改版后本组件只负责宽视口形态，窄视口
+ * <768px 整体委托给 MobileTabShell——见 knowledge/designs/mobile-drawer-design.md 文末补充
+ * 记录）。历史：2026-09 树抽屉重构 + 2026-09-27 侧栏瘦身把它定型为「抽屉 +
+ * 目的地页」，抽屉形态只在 <768px 存在，所以此次把窄屏交给 tab 壳后，抽屉
+ * JSX / Android 返回陷阱 / 边缘右滑三段随之删除，≥768px 行为零改动。
  *
- *   手机（<768px）：ChatToolbar（☰ 开抽屉 + 居中标题 + 统计 + ⋯）+ 全屏主区 +
- *   抽屉（ProjectSidebar：头部工作区切换块 + 当前工作区会话 + 搜索 + 设置条）。
- *   聊天永远是主区默认态；总览/文件/工作项/知识库/Loops/设置/归档是带 ‹返回 的
- *   全屏目的地页，返回永远 = 回聊天（扁平导航，深层导航留在各面板内部）。
- *   底部 tab 栏与头部会话 chips 行均已删除——抽屉是唯一定期导航。
+ *   ≥768px（平板/横屏/折叠展开）：ProjectSidebar 常驻贴左（推挤内容，不覆盖，
+ *   头部模块条 总览/文件/工作项/知识库/Loops 作用于当前工作区）+ ChatToolbar
+ *   （☰ 隐藏 + 居中标题 + 统计 + ⋯）+ 全屏主区。聊天永远是主区默认态；
+ *   总览/文件/工作项/知识库/Loops/设置/归档是带 ‹返回 的全屏目的地页，返回
+ *   永远 = 回聊天（扁平导航，深层导航留在各面板内部）。
  *
- *   ≥768px（平板/横屏/折叠展开）：同一侧栏常驻贴左（推挤内容，不覆盖），
- *   抽屉形态关闭、☰ 隐藏。跨断点切换不丢 mobilePage 与会话状态。
+ *   <768px：`return <MobileTabShell />`（在全部 hooks 之后；本组件 mobilePage
+ *   相关 effect 在窄屏下照跑但不渲染，无副作用）。跨 768 断点往返：共享层的
+ *   会话/tab/工作区状态与 mobileTab 保留，两壳各自的局部页态（mobilePage /
+ *   pushStack）重置。
  *
  * 上下文规则（§4.2「跟着屏幕走」）：面板里以工作区 W 为目标的动作 =
  *   ensureWorkspaceContext(W)（幂等建/激活 W 锚定占位 tab，纯状态）+ 目的地；
  *   会话行点击走 handleSelectSession（自带 focusChat → 关目的地页）。切工作区
  *   与 PC 对齐 = 落该工作区总览（mobilePage:"overview"，2026-09-27）。
  *
- * 聊天持久挂载（display:none 不卸载）保证 SSE 与流式气泡跨页面切换不断；
- * HomeLanding 只剩一个职责：零可用工作区时的创建/重启用引导。
+ * 聊天持久挂载（目的地页以不透明层覆盖其上，不卸载）保证 SSE 与流式气泡跨
+ * 页面切换不断；HomeLanding 只剩一个职责：零可用工作区时的创建/重启用引导。
  */
 
 type MobilePage = "overview" | "files" | "work-items" | "knowledge" | "loops" | "settings" | "archive";
@@ -89,8 +95,6 @@ export function MobileShell() {
     settingsPage,
     setSettingsPage,
     settingsCwd,
-    mobileNavOpen,
-    setMobileNavOpen,
     ensureWorkspaceContext,
     openNewSessionTab,
     handleSessionRemoved,
@@ -163,6 +167,24 @@ export function MobileShell() {
     navigateUrl(activeTab ? tabQuery(activeTab) : "tab=home");
   }, [setCenterPage, navigateUrl, activeTab]);
 
+  // ---- overview 深链 → 目的地页映射（2026-10 总览整页化）---------------------
+  // applyUrlToTabs 对 ?workspace=<id>[&view=overview] 写 centerPage
+  // {kind:"overview"}（桌面 = 总览整页，knowledge/designs/overview-center-page-design.md
+  // D11）；移动端的总览是 mobilePage:"overview" 目的地页。presence→destination：
+  // 进入该工作区上下文（ensureWorkspaceContext 幂等建/激活占位 tab）+ 落总览
+  // 目的地页 + 清 centerPage（ensureWorkspaceContext 已在上下文时不 activateTab，
+  // 需显式清，否则 overview centerPage 滞留压住状态）。工作区不可用 → 只清。
+  const overviewDeeplinkWorkspaceId = centerPage?.kind === "overview" ? centerPage.workspaceId : null;
+  useEffect(() => {
+    if (!overviewDeeplinkWorkspaceId) return;
+    const workspace = workspaces.find((w) => w.id === overviewDeeplinkWorkspaceId);
+    if (workspace && isWorkspaceSelectable(workspace)) {
+      ensureWorkspaceContext(workspace);
+      setMobilePage("overview");
+    }
+    setCenterPage(null);
+  }, [overviewDeeplinkWorkspaceId, workspaces, ensureWorkspaceContext, setCenterPage]);
+
   // ---- 会话全文搜索深跳转（与 DesktopShell 同机制，壳自有）----------------
   // 搜索结果行选择会话时先记下 entryId/blockIndex，再走常规
   // handleSelectSession 打开会话；ChatWindow 定位完成后经
@@ -172,10 +194,10 @@ export function MobileShell() {
     setSearchTarget((current) => (current === target ? null : current));
   }, []);
 
-  // 宽视口（≥768px）且存在工作区 → 树常驻贴左；窄屏 → 抽屉形态。
+  // 宽视口（≥768px）且存在工作区 → 树常驻贴左；<768px 整体委托 MobileTabShell
+  // （见组件文档；委托 return 放在全部 hooks 之后）。
   const wide = useMediaQuery("(min-width: 768px)");
   const showPermanentTree = wide && workspaces.length > 0;
-  const drawerOpen = mobileNavOpen && !showPermanentTree;
 
   // 共享焦点信号 → 导航反应：打开会话/新建会话（focusChat）= 离开目的地页。
   useEffect(() => {
@@ -192,67 +214,14 @@ export function MobileShell() {
     if (mobilePage !== "settings") clearWorkspaceSettingsRequest();
   }, [mobilePage, clearWorkspaceSettingsRequest]);
 
-  // ---- Android 返回键关抽屉（docs/mobile-drawer-design.md §6 / M2）--------
-  // 抽屉打开时压入一个陷阱 history 态；popstate（Android 返回键/返回手势）
-  // 只关抽屉不退页；抽屉经遮罩/目标关闭时在 cleanup 里消费掉陷阱态（栈顶
-  // 仍是陷阱才 history.back()——返回键路径已由系统消费过，不会二次退）。
-  useEffect(() => {
-    if (!drawerOpen) return;
-    try { history.pushState({ piMobileNavDrawer: true }, ""); } catch { /* ignore */ }
-    const onPopState = () => setMobileNavOpen(false);
-    window.addEventListener("popstate", onPopState);
-    return () => {
-      window.removeEventListener("popstate", onPopState);
-      if (history.state && (history.state as { piMobileNavDrawer?: boolean }).piMobileNavDrawer) {
-        history.back();
-      }
-    };
-  }, [drawerOpen, setMobileNavOpen]);
-
-  // ---- 边缘右滑开抽屉（M2 增强，窄屏 only）--------------------------------
-  // document 级 passive touch 跟踪：起点距左缘 <28px、横向位移 >56px 且明显
-  // 横向（|dx| > 1.5|dy|）→ 开抽屉。不 preventDefault、不劫内容滚动；iOS
-  // Safari 的系统边缘返回手势通常在 web 触摸之前就被系统消费，Android
-  // Chrome/PWA 无冲突。关抽屉仍走遮罩/目标点击（Q8）。
-  useEffect(() => {
-    if (showPermanentTree || mobileNavOpen) return;
-    let startX = 0;
-    let startY = 0;
-    let tracking = false;
-    const onTouchStart = (event: TouchEvent) => {
-      const touch = event.touches[0];
-      if (!touch) return;
-      startX = touch.clientX;
-      startY = touch.clientY;
-      tracking = startX < 28;
-    };
-    const onTouchMove = (event: TouchEvent) => {
-      if (!tracking) return;
-      const touch = event.touches[0];
-      if (!touch) return;
-      const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
-      if (dx > 56 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-        tracking = false;
-        setMobileNavOpen(true);
-      }
-    };
-    const onTouchEnd = () => { tracking = false; };
-    document.addEventListener("touchstart", onTouchStart, { passive: true });
-    document.addEventListener("touchmove", onTouchMove, { passive: true });
-    document.addEventListener("touchend", onTouchEnd, { passive: true });
-    return () => {
-      document.removeEventListener("touchstart", onTouchStart);
-      document.removeEventListener("touchmove", onTouchMove);
-      document.removeEventListener("touchend", onTouchEnd);
-    };
-  }, [showPermanentTree, mobileNavOpen, setMobileNavOpen]);
-
-  // ---- 空态自动落回（首页退役语义的抽屉版）--------------------------------
+  // ---- 空态自动落回（首页退役语义）------------------------------------------
   // 没有任何 tab（冷启动 / 会话删除自动关掉最后一个）→ 给默认工作区开一个
   // 占位 composer 作为上下文锚（= 事实首页）。replace 写 URL，不给浏览器
   // 历史埋可 popstate 回跳的陷阱。零可用工作区时不动：HomeLanding 引导接手。
+  // 窄屏由 MobileTabShell 自带同义 effect（它用 ensureWorkspaceContext 不落聊天），
+  // 本 effect 只在宽视口生效，避免两壳抢着写 URL。
   useEffect(() => {
+    if (!wide) return;
     if (!navReady || activeTabId !== null) return;
     // 中央区整页（如 work-items 深链）打开时不做空态自动落 composer——
     // openNewSessionTab 会清 centerPage 并改写 URL，吃掉深链。
@@ -262,109 +231,58 @@ export function MobileShell() {
     const target = workspaces.find((w) => w.id === targetId);
     if (!target || !isWorkspaceSelectable(target)) return;
     openNewSessionTab(target, { replace: true });
-  }, [navReady, activeTabId, s.centerPage, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, openNewSessionTab]);
+  }, [wide, navReady, activeTabId, s.centerPage, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, openNewSessionTab]);
 
-  // ---- 抽屉 / 常驻树头部的模块条（2026-09-27 晚：工作区切换器撤下——分组
-  // 会话清单已列全部项目，点会话即切上下文；模块入口保留为紧凑图标条）------
-  const closeDrawer = useCallback(() => setMobileNavOpen(false), [setMobileNavOpen]);
+  // ---- 常驻树头部的模块条（2026-09-27 晚：工作区切换器撤下——分组会话清单
+  // 已列全部项目，点会话即切上下文；模块入口保留为紧凑图标条）--------------
   const handleNavNewSession = useCallback(() => {
-    closeDrawer();
     setMobilePage(null);
     if (activeWorkspace) handleWorkspaceNewSession();
-  }, [closeDrawer, activeWorkspace, handleWorkspaceNewSession]);
+  }, [activeWorkspace, handleWorkspaceNewSession]);
   const handleNavSelectSession = useCallback((session: SessionInfo) => {
-    closeDrawer();
     handleSelectSession(session);
-  }, [closeDrawer, handleSelectSession]);
+  }, [handleSelectSession]);
   const handleNavSelectSearchHit = useCallback((session: SessionInfo, entryId?: string, blockIndex?: number) => {
-    closeDrawer();
     setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
     handleSelectSession(session);
-  }, [closeDrawer, handleSelectSession]);
+  }, [handleSelectSession]);
   const handleNavModule = useCallback((workspace: WorkspaceSummary, module: "files" | "work-items" | "knowledge" | "loops") => {
-    closeDrawer();
     ensureWorkspaceContext(workspace);
     // 用户自驱进入工作项目的地页 = 深链自动态让位：ensureWorkspaceContext 的
     // activateTab 会清 centerPage，若不摘 deeplink-auto 标记，深链映射 effect
     // 的 absence 分支会把用户刚点开的工作项页误收回聊天。
     if (module === "work-items") workItemsDeeplinkAutoRef.current = false;
     setMobilePage(module);
-  }, [closeDrawer, ensureWorkspaceContext]);
+  }, [ensureWorkspaceContext]);
   const handleNavArchive = useCallback((workspace: WorkspaceSummary) => {
-    closeDrawer();
     ensureWorkspaceContext(workspace);
     setMobilePage("archive");
-  }, [closeDrawer, ensureWorkspaceContext]);
+  }, [ensureWorkspaceContext]);
   const handleNavCenterPage = useCallback((page: CenterPage) => {
-    closeDrawer();
-    // 移动端没有中央区整页（2026-09 配置页拆分是桌面侧的改版）：四个配置
+    // 平板没有中央区整页（2026-09 配置页拆分是桌面侧的改版）：四个配置
     // 导航统一落设置目的地页的对应子页——设置=工作区，模型/插件/Agents=同名
     // 子页（插件&技能页的技能分区经设置页索引进入）。
     if (page.kind === "settings" || page.kind === "models" || page.kind === "agents" || page.kind === "plugins") {
       setMobilePage("settings");
       setSettingsPage(page.kind === "settings" ? "workspace" : page.kind);
     }
-  }, [closeDrawer, setSettingsPage]);
+  }, [setSettingsPage]);
 
-  // ---- 模块条条目（抽屉/常驻树头部，作用于当前工作区）：目的地页语义，
-  // active 高亮跟 mobilePage。工作项/知识库 capability 门控。
-  const switcherModuleEntries: SwitcherModuleEntry[] = activeWorkspace ? [
-    {
-      id: "overview",
-      label: "总览",
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M3 9.5 12 3l9 6.5" /><path d="M5 8.5V21h14V8.5" />
-        </svg>
-      ),
-      active: mobilePage === "overview",
-      onClick: () => { closeDrawer(); setMobilePage("overview"); },
-    },
-    {
-      id: "files",
-      label: "文件",
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-        </svg>
-      ),
-      active: mobilePage === "files",
-      onClick: () => handleNavModule(activeWorkspace, "files"),
-    },
-    ...(activeWorkspace.capabilities.includes("work-items") ? [{
-      id: "work-items",
-      label: "工作项",
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <polyline points="9 11 12 14 22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-        </svg>
-      ),
-      active: mobilePage === "work-items",
-      onClick: () => handleNavModule(activeWorkspace, "work-items"),
-    }] : []),
-    ...(activeWorkspace.capabilities.includes("knowledge") ? [{
-      id: "knowledge",
-      label: "知识库",
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-        </svg>
-      ),
-      active: mobilePage === "knowledge",
-      onClick: () => handleNavModule(activeWorkspace, "knowledge"),
-    }] : []),
-    {
-      id: "loops",
-      label: "Loops",
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M21 12a9 9 0 1 1-3.8-7.4" /><path d="M21 3v5h-5" />
-        </svg>
-      ),
-      active: mobilePage === "loops",
-      onClick: () => handleNavModule(activeWorkspace, "loops"),
-    },
-  ] : [];
+  // ---- 模块条条目（常驻树头部，作用于当前工作区）：目的地页语义，active 高亮
+  // 跟 mobilePage。条目出自 workspaceModuleEntries 注册表（图标/门控唯一出处——
+  // 与手机壳聊天页/工作区页两处 ⋯ 菜单同一份；overview 仅平板模块条需要）。
+  const switcherModuleEntries: SwitcherModuleEntry[] = activeWorkspace
+    ? workspaceModuleEntries(activeWorkspace, { overview: true }).map((entry) => ({
+        id: entry.id,
+        label: entry.label,
+        icon: <WorkspaceModuleIcon kind={entry.id} size={14} />,
+        active: mobilePage === entry.id,
+        onClick: () => {
+          if (entry.id === "overview") setMobilePage("overview");
+          else handleNavModule(activeWorkspace, entry.id as "files" | "work-items" | "knowledge" | "loops");
+        },
+      }))
+    : [];
 
   const mobileSwitcherSlot = activeWorkspace ? (
     <div role="tablist" aria-label="工作区模块" style={{ display: "flex", gap: 2, padding: "8px 8px 2px", flexShrink: 0 }}>
@@ -422,6 +340,14 @@ export function MobileShell() {
     headerSlot: mobileSwitcherSlot,
     onNewSession: handleNavNewSession,
     onOpenArchive: handleNavArchive,
+    // 项目分组行长按拖拽排序（与桌面同处理器：全量 PATCH + 重拉）。
+    onReorderWorkspaces: s.handleReorderWorkspaces,
+    // 分组头项目头像 → 项目首页：切上下文 + 落总览目的地页（与顶部模块条
+    // 「总览」同语义）。
+    onOpenWorkspaceHome: (workspace: WorkspaceSummary) => {
+      ensureWorkspaceContext(workspace);
+      setMobilePage("overview");
+    },
     onSelectSession: handleNavSelectSession,
     onSelectSearchHit: handleNavSelectSearchHit,
     sessionListVersion: sessionActivity.listVersion,
@@ -489,6 +415,7 @@ export function MobileShell() {
               <WorkspaceOverview
                 workspace={activeWorkspace}
                 workspaces={workspaces}
+                sessions={sessionActivity.sessions}
                 onNewSession={() => { setMobilePage(null); handleWorkspaceNewSession(); }}
                 onOpenSettings={() => {
                   requestWorkspaceSettings(activeWorkspace);
@@ -649,6 +576,10 @@ export function MobileShell() {
       workspace={activeWorkspace}
       settingsCwd={settingsCwd ?? ""}
       workspaceSlot={(
+        /* 角色表「编辑剧本」（Task 4）经 onOpenAgentsSettings 落设置目的地页的
+           Agents 子页——复用 handleNavCenterPage 的既有映射（关抽屉 +
+           setMobilePage("settings") + setSettingsPage("agents")）；剧本预选记录
+           由 WorkspaceManager 写 settings-navigation。 */
         <WorkspaceManager
           open
           embedded
@@ -663,17 +594,13 @@ export function MobileShell() {
           onOpenWorkItemConversation={handleOpenWorkItemConversation}
           onRunLoopRound={handleRunLoopRound}
           onRunContract={handleRunContract}
+          onOpenAgentsSettings={() => handleNavCenterPage({ kind: "agents" })}
           onOpenConversation={handleOpenConversation}
           onWorkspaceDeleted={handleWorkspaceDeleted}
           onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
         />
       )}
       onOpenArchive={activeWorkspace ? () => setMobilePage("archive") : undefined}
-      onWorkspaceSkillsChange={(updated) => {
-        s.setWorkspaces((current: WorkspaceSummary[]) =>
-          current.map((w) => (w.id === updated.id ? updated : w)),
-        );
-      }}
       onModelsSaved={() => s.setModelsRefreshKey((key) => key + 1)}
       onPluginsReloaded={() => s.setSessionKey((key) => key + 1)}
       sessionId={selectedSession?.id ?? null}
@@ -681,13 +608,19 @@ export function MobileShell() {
     />
   );
 
+  // <768px：手机壳（底部 tab / 会话首页 / 工作区页 / 聊天推入），整体委托。
+  // 放在全部 hooks 之后（React hooks 顺序对本组件所有渲染分支一致）。
+  if (!wide) {
+    return <MobileTabShell />;
+  }
+
   return (
     <div
       style={{
         display: "flex", flexDirection: "row",
         height: "var(--app-vh)", overflow: "hidden", background: "var(--bg)",
-        // black-translucent 沉浸式状态栏：根容器统一让出安全区（底部无 tab 栏，
-        // 抽屉/面板各自的 safe-area 自理）。
+        // black-translucent 沉浸式状态栏：根容器统一让出安全区（平板壳无底部
+        // tab 栏，面板各自的 safe-area 自理；手机壳的 tab 栏见 MobileTabShell）。
         paddingTop: "env(safe-area-inset-top)",
         paddingLeft: "env(safe-area-inset-left)",
         paddingRight: "env(safe-area-inset-right)",
@@ -707,7 +640,7 @@ export function MobileShell() {
       )}
 
       <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, height: "100%" }}>
-        <ChatToolbar navToggle={showPermanentTree ? "hidden" : "drawer"} />
+        <ChatToolbar navToggle="hidden" />
 
         {/* Main area — 聊天持久挂载（SSE 跨页切换不断），目的地页全屏覆盖其上，
             文件 overlay 再其上（z40，现有机制不变）。 */}
@@ -854,33 +787,6 @@ export function MobileShell() {
           )}
         </div>
       </div>
-
-      {/* 抽屉（窄屏 only；宽屏树常驻、无抽屉）：scrim + 滑入面板。点目标即关
-          （各 handler 内 closeDrawer）/ 点遮罩即关。 */}
-      {drawerOpen && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 1000 }}>
-          <div
-            aria-hidden="true"
-            onClick={closeDrawer}
-            className="mobile-nav-scrim"
-            style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)" }}
-          />
-          <aside
-            role="dialog"
-            aria-label="导航"
-            className="mobile-nav-drawer"
-            style={{
-              position: "absolute", top: 0, bottom: 0, left: 0,
-              width: "min(300px, 85vw)",
-              background: "var(--bg)", borderRight: "1px solid var(--border)",
-              boxShadow: "0 0 30px rgba(0,0,0,0.3)",
-              paddingTop: "env(safe-area-inset-top, 0px)",
-            }}
-          >
-            <ProjectSidebar {...projectSidebarProps} />
-          </aside>
-        </div>
-      )}
     </div>
   );
 }

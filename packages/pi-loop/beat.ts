@@ -1,4 +1,4 @@
-/** beat 宿主轮 runner + 心跳入口（design: docs/pi-loop-host-design.md §4/§5）。
+/** beat 宿主轮 runner + 心跳入口（design: knowledge/designs/pi-loop-host-design.md §4/§5）。
  *  spawn `pi --name "<loop> · <slot>" -p --approve "<合同>"` 的一次性轮进程
  *  （cwd=工作区根，detached 自成进程组）；`max_minutes` 超时 → 组 SIGTERM → 3s → SIGKILL。
  *  锁的 acquire/release 由 fire.ts 包住，runner 只负责把 .round.lock 指向真实子 pid ——

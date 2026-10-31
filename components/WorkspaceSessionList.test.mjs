@@ -43,3 +43,14 @@ test("short lists clamp to the full range", () => {
   assert.deepEqual(getSessionListIndices(5, 0, 600), [0, 1, 2, 3, 4]);
   assert.deepEqual(getSessionListIndices(0, 0, 600), []);
 });
+
+test("embedded (card) geometry: pitch 48 drives the window math (2026-10 总览卡片内嵌模式)", () => {
+  // 视口 480 / 节距 48 = 10 行可见 + 2×8 overscan = 26 行；滚过 10 行再回退 8 → 从 2 起。
+  const win = getSessionListIndices(100, 480, 480, -1, 48);
+  assert.equal(win[0], 2);
+  assert.equal(win.length, 26);
+  // 缺省节距仍是独立列表的 60（独立宿主零改动）。
+  const legacy = getSessionListIndices(100, 480, 480);
+  assert.equal(legacy[0], 0);
+  assert.equal(legacy.length, Math.ceil(480 / 60) + 16);
+});

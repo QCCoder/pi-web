@@ -19,8 +19,12 @@ import { MobileShell } from "./shell/MobileShell";
  *
  * - `DesktopShell` — the three-column layout (activity rail + resizable
  *   middle column + center/right columns).
- * - `MobileShell` — bottom tab navigation (工作台/会话/capability modules/
- *   设置) with per-tab secondary stacks; no drawer.
+ * - `MobileShell` — the tablet form (≥768px: permanent left tree + chat +
+ *   full-screen destination pages). Below 768px it delegates wholesale to
+ *   `MobileTabShell` — the phone form: bottom tab bar 会话/Skill/设置 as the
+ *   only recurring navigation, a cross-workspace grouped session home, and
+ *   pushed-in workspace / chat pages (2026-10 底部 tab 改版,
+ *   knowledge/designs/mobile-drawer-design.md 文末补充记录). No drawer.
  *
  * The viewport breakpoint decides which shell renders; the state layer is
  * shell-agnostic so the flip loses nothing. `initialIsMobile` is the

@@ -1,5 +1,5 @@
-/** pi-loop kit 协议的纯解析层（design: docs/pi-loop-host-design.md §5 纯逻辑层；
- *  协议契约见 docs/pi-loop-kit-design.md §4）。
+/** pi-loop kit 协议的纯解析层（design: knowledge/designs/pi-loop-host-design.md §5 纯逻辑层；
+ *  协议契约见 knowledge/designs/pi-loop-kit-design.md §4）。
  *  纯 fs + yaml，无 daemon 依赖 —— web 进程（kit-loops 列表路由）亦可导入。 */
 import { existsSync, readFileSync, readdirSync, type Dirent } from "node:fs";
 import { basename, join } from "node:path";
@@ -18,7 +18,11 @@ export interface LoopDeclaration {
   cron: string;
   timezone: string;
   level: LoopLevel;
+  /** 单轮硬天花板（分钟）：到点无论在干什么都 destroy——成本保险，不是正常收尾路径。 */
   maxMinutes: number;
+  /** 停滞阈值（分钟）：轮会话及其子代理整棵树连续静默超过此时长即判停滞 → destroy。
+   *  健康轮的进展（模型吐 token / 工具调用）会持续刷新活性，所以这是真正的「卡死」判定。 */
+  stallMinutes: number;
   /** frontmatter 之下的正文 — 开场合同（人类/模型可读）。 */
   body: string;
   /** 仅 includePaused 发现路径置 true（PAUSED 标记存在）。 */
@@ -26,6 +30,7 @@ export interface LoopDeclaration {
 }
 
 export const DEFAULT_MAX_MINUTES = 30;
+export const DEFAULT_STALL_MINUTES = 15;
 
 export function localTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -57,9 +62,11 @@ export function parseLoopDeclaration(
   const level: LoopLevel = rawLevel === "L2" || rawLevel === "L3" ? rawLevel : "L1";
   const maxMinutes = typeof record.max_minutes === "number" && record.max_minutes > 0
     ? record.max_minutes : DEFAULT_MAX_MINUTES;
+  const stallMinutes = typeof record.stall_minutes === "number" && record.stall_minutes > 0
+    ? record.stall_minutes : DEFAULT_STALL_MINUTES;
   const timezone = typeof record.timezone === "string" && record.timezone.trim()
     ? record.timezone.trim() : localTimezone();
-  return { workspacePath, loopName, dir, pattern, cron, timezone, level, maxMinutes, body: match[2].trim() };
+  return { workspacePath, loopName, dir, pattern, cron, timezone, level, maxMinutes, stallMinutes, body: match[2].trim() };
 }
 
 export function discoverKitLoops(

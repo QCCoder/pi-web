@@ -10,7 +10,6 @@ import { ArchiveModal } from "../ArchiveModal";
 import { WorkspaceManager } from "../WorkspaceManager";
 import { WorkspaceOverview } from "../WorkspaceOverview";
 import { ProjectSidebar } from "../ProjectSidebar";
-import { WorkspaceSwitcherPanel } from "../WorkspaceSwitcherPanel";
 import { PanelHeader } from "../PanelHeader";
 import { ConfigCenterPage } from "../ConfigCenterPage";
 import { LoopsDockPanel } from "../LoopsDockPanel";
@@ -31,6 +30,7 @@ import { useShell } from "./context";
 import type { SessionTabState } from "@/lib/session-tabs";
 import { createNewSessionTab, tabQuery } from "@/lib/session-tabs";
 import { ChatToolbar } from "./ChatToolbar";
+
 
 /** 右坞模块 tab 的标签与图标（工作区工具行 + dock tab 条共用）。 */
 const DOCK_MODULE_META: Record<ModuleTabId, { label: string; icon: React.ReactNode }> = {
@@ -129,7 +129,6 @@ export function DesktopShell() {
     startRightPanelResize,
     resetRightPanelWidth,
     workspaces,
-    setWorkspaces,
     navReady,
     workspaceSettingsName,
     workspaceActivity,
@@ -207,9 +206,6 @@ export function DesktopShell() {
   // Loop 配置变更 → 总览 Loops 区块刷新信号（创建/删除/frontmatter 保存后 bump）。
   const [loopsRefreshKey, setLoopsRefreshKey] = useState(0);
 
-  // 工作区切换面板（32px 工具行「工作区名 ▾」）开合；点选工作区/模块/外部即关。
-  const [switcherOpen, setSwitcherOpen] = useState(false);
-
   // ---- 会话全文搜索深跳转（上游 1cbd96f）------------------------------------
   // searchTarget 归 DesktopShell 自有（不进 useAppShellState）：搜索结果行选择
   // 会话时先记下 entryId/blockIndex，再走常规 handleSelectSession 打开会话；
@@ -242,13 +238,13 @@ export function DesktopShell() {
 
   // ---- 首页退役（2026-09 用户反馈，桌面同步移动端）--------------------------
   // 空态（冷启动无恢复 tab / 关光 tab / 旧 tab=home 深链 / 侧栏「新建任务」在
-  // 无工作区时回首页）自动落回当前（MRU/最近会话所属）工作区的家 tab——桌面
-  // 家 tab = 总览，即事实首页。URL 用 replace 写入，不给历史埋 tab=home 陷阱。
-  // 没有任何可用工作区时不动：HomeNewSession 首页页接手（创建/选工作区引导）。
+  // 无工作区时回首页）自动落回当前（MRU/最近会话所属）工作区的总览整页——桌面
+  // 总览 = 事实首页（2026-10 总览整页化前是家 tab）。URL 用 replace 写入，不给
+  // 历史埋 tab=home 陷阱。没有任何可用工作区时不动：HomeNewSession 首页页接手。
   useEffect(() => {
     if (!navReady || activeTabId !== null) return;
-    // 中央区整页（配置/归档/工作项管理）打开时不做空态自动落 home——整页占
-    // 着中央区，深链直达（如 ?page=work-items）不应被家 tab 接管清掉。
+    // 中央区整页（配置/归档/工作项管理/总览自身）打开时不做空态自动落回——整页
+    // 占着中央区，深链直达（如 ?page=work-items）不应被总览接管清掉。
     if (centerPage) return;
     if (s.homeSession || s.homeNewSession.open) return;
     const targetId = defaultHomeNewSessionWorkspaceId(workspaces, s.sessionActivity.sessions, s.mruIds);
@@ -257,9 +253,24 @@ export function DesktopShell() {
     handleOpenWorkspace(target, { replace: true });
   }, [navReady, activeTabId, centerPage, s.homeSession, s.homeNewSession.open, workspaces, s.sessionActivity.sessions, s.mruIds, handleOpenWorkspace]);
 
+  // 总览整页指向的工作区不可用（被删/停用/目录丢失，或深链 id 无效）→ 关页，
+  // 让上面的空态 effect 落回 MRU 工作区。工作区列表加载完才判，避免冷启动
+  // 深链被误清。
+  useEffect(() => {
+    if (!workspacesLoaded || centerPage?.kind !== "overview") return;
+    if (workspaces.some((w) => w.id === centerPage.workspaceId && isWorkspaceSelectable(w))) return;
+    setCenterPage(null);
+  }, [workspacesLoaded, centerPage, workspaces, setCenterPage]);
+
+  // 总览整页是唯一**不遮 chrome** 的中央整页（knowledge/designs/overview-center-page-design.md
+  // D2）：会话 tab 条（最左 = 工作区 chip，总览态即 chip 高亮）与右坞保持可见
+  // ——它是事实首页 + 右坞模块枢纽。其它 kind（配置/归档/工作项管理）照旧整页
+  // 占满中央区，tab 条与右坞全隐藏。
+  const overviewOpen = centerPage?.kind === "overview";
+  const chromeHidden = Boolean(centerPage) && !overviewOpen;
+
   /** 关掉最后一个 tab ≠ 落首页空态：先关（草稿确认取消时 closeTab 返回 false，
-   *  不动），紧接着开/激活该工作区的家 tab 接住——同一事件内批处理，不闪首页页。
-   *  关的就是家 tab 时 = 重新激活（家 tab 即首页，不可关）。 */
+   *  不动），紧接着落该工作区的总览整页接住——同一事件内批处理，不闪首页页。 */
   const desktopCloseTab = useCallback((id: string) => {
     const closing = tabs.find((t) => t.id === id) ?? null;
     const closed = closeTab(id);
@@ -286,8 +297,9 @@ export function DesktopShell() {
       setComposerTabId(activeTabId);
     }
   }, [activeTab, activeTabId]);
-  // Right dock（2026-10 rail 改版，反转 2026-09-27「模块 tab 按需打开」）：
-  // 右坞 = 44px 常驻图标列（文件/Loops/工作项/知识库/终端）+ 展开面板。激活
+  // Right dock（2026-10 rail 改版 + 同月用户反馈微调）：右坞 = 36px 常驻纯
+  // icon 图标列（文件/Loops/工作项/知识库/终端，无文字标签）+ 展开面板；**缺
+  // 省 = 收起**（点图标展开；展开宽度默认最小 336px）。激活
   // 模块 + 展开态在 shell 状态层（dockRailMap，per-workspace 持久化，切工作
   // 区回来恢复原样）；activeFileTabId 回归纯文件语义——FILES_TAB_ID 是「文件
   // 树」伪 tab，只住在「文件」模块面板内的横条（旧会话状态里残留的其它模块
@@ -297,7 +309,7 @@ export function DesktopShell() {
   const panelWsId = panelWorkspace?.id ?? null;
   const railState = dockRailFor(panelWsId);
   const railModule = panelWsId ? railState.module : FILES_TAB_ID;
-  const panelOpen = Boolean(panelWsId) && railState.expanded && !centerPage;
+  const panelOpen = Boolean(panelWsId) && railState.expanded && !chromeHidden;
   const effFileTabId = isModuleTabId(panelActiveFileTabId) && panelActiveFileTabId !== FILES_TAB_ID ? null : panelActiveFileTabId;
   // ---- Workspace terminals（上游 #695 移植）--------------------------------
   // 终端 tab 由 DesktopShell 自有（不进 useAppShellState）：跨会话 tab/工程
@@ -455,6 +467,25 @@ export function DesktopShell() {
     workItemsItemKeyRef.current = null;
   }, [workItemsItemKeyRef]);
 
+  // ---- 工作项管理弹窗（2026-10 用户需求）------------------------------------
+  // 桌面「打开完整管理」（右坞快捷面板 + 总览工作项区）改开大弹窗——不离开
+  // 聊天上下文、不隐藏 tab 条；中央整页形态保留给 URL 深链与移动端目的地页
+  // （同一 WorkItemsPage 组件 + 同一 useWorkItems 缓存，两面即时互见）。弹窗
+  // 不写 URL（onReplaceUrl 不传——URL 投影属于中央页/深链形态）；Escape /
+  // 遮罩 / ✕ 关闭。
+  const [workItemsManager, setWorkItemsManager] = useState<{ workspaceId: string } | null>(null);
+  const openWorkItemsManager = useCallback((workspaceId: string) => {
+    setWorkItemsManager({ workspaceId });
+  }, []);
+  useEffect(() => {
+    if (!workItemsManager) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setWorkItemsManager(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [workItemsManager]);
+
   // 当前配置整页的页内分区（settingsPage 派生）：设置页 workspace/preferences、
   // 插件&技能页 plugins/skills；单分区页不消费，给个无害缺省。
   const configSection = centerPage?.kind === "plugins"
@@ -480,9 +511,51 @@ export function DesktopShell() {
     const page = centerPage;
     if (!page) return null;
 
+    // 总览整页（2026-10 总览整页化，knowledge/designs/overview-center-page-design.md）：原
+    // 家 tab 本体 WorkspaceOverview 原样搬入，workspace 绑定页面自己的
+    // workspaceId（= 此时的 activeWorkspace，见 useAppShellState 派生链）。本
+    // kind 不遮 chrome（chromeHidden 为 false）——tab 条（含工作区 chip）/右坞照常。
+    // 工作区不可用时由上面的 effect 关页，这里只做渲染兜底。
+    if (page.kind === "overview") {
+      const workspace = workspaces.find((w) => w.id === page.workspaceId);
+      if (!workspace) return null;
+      return (
+        <WorkspaceOverview
+          key={workspace.id}
+          workspace={workspace}
+          workspaces={workspaces}
+          sessions={sessionActivity.sessions}
+          onNewSession={newSessionDirect}
+          onOpenSettings={() => {
+            setOpenRepositoryFormRequest(undefined);
+            // 带工作区上下文（2026-09 反馈）：深链预选 + 详情优先——只看
+            // 当前工作区的设置，不再把全部工作区列表摆在面前。
+            requestWorkspaceSettings(workspace);
+            openCenterPage({ kind: "settings" });
+          }}
+          onOpenWorkItems={() => openRailModule(WORK_ITEMS_TAB_ID)}
+          onOpenWorkItemsPage={() => openWorkItemsManager(workspace.id)}
+          onCreateWorkItem={handleCreateWorkItem}
+          onSelectSession={handleSelectSession}
+          onSwitchSidebarView={(view) => {
+            // 仓库行 → 右坞「文件」模块；知识库行 → 右坞「知识库」模块
+            // （S2 收编：hub knowledge 子视图已退役）。
+            openRailModule(view === "knowledge" ? KNOWLEDGE_TAB_ID : FILES_TAB_ID);
+          }}
+          onAddRepository={() => {
+            openCenterPage({ kind: "settings" });
+            setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
+          }}
+          onSessionDeleted={handleSessionRemoved}
+          onOpenLoopsTab={() => openRailModule(LOOPS_TAB_ID)}
+          loopsRefreshKey={loopsRefreshKey}
+        />
+      );
+    }
+
     // 工作项管理整页（M2 T8，spec §6.1）：工作区作用域（页面绑定
     // workspaceId，不跟随 activeWorkspace）；聊天 chrome/右坞隐藏由外层
-    // `centerPage != null` 条件统一覆盖（本 kind 不例外）。
+    // `chromeHidden` 条件统一覆盖（本 kind 不例外）。
     if (page.kind === "work-items") {
       return (
         <WorkItemsPage
@@ -521,7 +594,10 @@ export function DesktopShell() {
           workspaceSlot={(
             <div style={{ flex: 1, minHeight: 0, padding: "10px 12px", display: "flex", flexDirection: "column" }}>
               {/* 工作区列表 + 单个详情并排（inline split）；「添加仓库」深链走
-                  openRepositoryFormRequest → 选中项自动开表单。 */}
+                  openRepositoryFormRequest → 选中项自动开表单。角色表「编辑剧本」
+                  （Task 4）经 onOpenAgentsSettings 切到 Agents 配置整页（导航
+                  入口同款 openCenterPage——设置页已开时 kind 不同即切换，无
+                  toggle 误关；剧本预选记录由 WorkspaceManager 写 settings-navigation）。 */}
               <WorkspaceManager
                 open
                 embedded
@@ -536,17 +612,13 @@ export function DesktopShell() {
                 onOpenWorkItemConversation={handleOpenWorkItemConversation}
                 onRunLoopRound={handleRunLoopRound}
                 onRunContract={handleRunContract}
+                onOpenAgentsSettings={() => openCenterPage({ kind: "agents" })}
                 onOpenConversation={handleOpenConversation}
                 onWorkspaceDeleted={handleWorkspaceDeleted}
                 onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
               />
             </div>
           )}
-          onWorkspaceSkillsChange={(updated) => {
-            setWorkspaces((current) =>
-              current.map((w) => (w.id === updated.id ? updated : w)),
-            );
-          }}
           onPluginsReloaded={() => setSessionKey((k) => k + 1)}
           onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
           sessionId={selectedSession?.id ?? null}
@@ -610,6 +682,8 @@ export function DesktopShell() {
             else handleReturnHome();
           }}
           onOpenArchive={(workspace) => openCenterPage({ kind: "archive", workspaceId: workspace.id })}
+          onReorderWorkspaces={handleReorderWorkspaces}
+          onOpenWorkspaceHome={handleOpenWorkspace}
           onSelectSession={handleSelectSession}
           onSelectSearchHit={handleSelectSearchHit}
           sessionListVersion={sessionActivity.listVersion}
@@ -636,179 +710,82 @@ export function DesktopShell() {
     <div className="app-shell-center" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
       <ChatToolbar />
 
-      {/* 会话 tab 条只在聊天/总览视图显示；中央区整页（配置/归档）打开时隐藏
-          ——整页占满中央区（ZCode 市场页/设置页同款整页心智，2026-09 用户反馈
-          「点击插件和技能的时候为什么还有顶部 tab」）。tab 条隐藏后回聊天 =
-          页头 ✕ / 侧栏点会话 / 再点同导航入口（toggle）。 */}
-      {!centerPage && (
+      {/* 会话 tab 条 = 工作区上下文下的唯一一条横栏（2026-10 单栏合并，用户反馈
+          「打开会话就出现两个栏」）：最左固定 chip「🏠 工作区名」（一个按钮一个
+          动作 = 回总览；总览打开时按活动 tab 样式高亮）+ 会话 tab + ＋。
+          原 32px 独立工具行整行删除；chip 旁的 ⌄ 工作区切换面板也删了（用户追问
+          「为什么要一个下拉」——它是 2026-09-27 侧栏砍掉工作区树时的权宜入口，
+          侧栏「项目」分区长回头像→总览 / 拖拽排序 / ＋新建导入后，桌面上已全部
+          重复；停用工作区重启用走 设置›工作区，切换面板组件自此无宿主、仅其类型
+          被 MobileShell 引用，待手机壳改版落地后清理）。遮 chrome 的中央区整页（配置/归档/工作项管理）打开时整条
+          隐藏（ZCode 市场页/设置页同款整页心智，2026-09 用户反馈「点击插件和技能
+          的时候为什么还有顶部 tab」）；总览整页不遮——它就是 chip 高亮的那一态。
+          无工作区上下文且无 tab（纯首页）时不渲染空条。 */}
+      {!chromeHidden && (activeWorkspace !== null || tabs.length > 0) && (
         <SessionTabBar
           tabs={tabs}
           activeTabId={activeTabId}
           runningIds={sessionActivity.runningIds}
           completedIds={sessionActivity.completedIds}
-          workspaceActivity={workspaceActivity}
-          onSelectHome={handleReturnHome}
-          showHomeTab={false}
+          leading={activeWorkspace ? (
+            <button
+              type="button"
+              onClick={handleShowOverview}
+              title="总览"
+              aria-current={overviewOpen ? "page" : undefined}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                height: 36, padding: "0 12px", maxWidth: 220, minWidth: 0, flexShrink: 0,
+                border: 0, borderRight: "1px solid var(--border)",
+                borderTop: overviewOpen ? "2px solid var(--accent)" : "2px solid transparent",
+                background: overviewOpen ? "var(--bg)" : "transparent",
+                color: overviewOpen ? "var(--text)" : "var(--text-muted)",
+                cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", boxSizing: "border-box",
+                transition: "color 0.1s, background 0.1s",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = overviewOpen ? "var(--text)" : "var(--text-muted)"; }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+                <path d="M3 9.5 12 3l9 6.5" /><path d="M5 8.5V21h14V8.5" />
+              </svg>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{activeWorkspace.name}</span>
+              {(() => {
+                const activity = workspaceActivity[activeWorkspace.id];
+                if (activity === "running") {
+                  return (
+                    <span title="有会话正在运行" style={{ display: "inline-flex", flexShrink: 0, color: "var(--text-muted)" }}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+                        <g>
+                          <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
+                          <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
+                        </g>
+                      </svg>
+                    </span>
+                  );
+                }
+                if (activity === "completed") {
+                  return <span title="有会话已完成" style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--accent)" }} />;
+                }
+                return null;
+              })()}
+            </button>
+          ) : undefined}
           onSelectTab={(id: string) => {
             if (id !== activeTabId) handleSelectTab(id);
           }}
           onCloseTab={desktopCloseTab}
           onCloseTabs={closeTabs}
           onReorder={(ids: string[]) => setTabs((prev) => ids.map((id) => prev.find((t) => t.id === id)).filter((t): t is SessionTabState => Boolean(t)))}
-          onNewSession={handleTabBarNewSession}
+          onNewSession={activeWorkspace ? handleTabBarNewSession : undefined}
         />
       )}
 
-      {/* 工作区工具行（2026-10 rail 改版后精简，共识 Q7）：左 = 「工作区名 ▾」
-          切换器——点击展开 WorkspaceSwitcherPanel（纯工作区管理：列表[拖拽
-          排序/运行徽章/新建/导入/停用行]；模块入口已随右坞 rail 常驻而移除）；
-          右 = 🏠总览 高频捷径。无活动工作区（首页）或中央区整页打开时整行隐藏。 */}
-      {!centerPage && activeWorkspace && (
-        <div
-          style={{
-            height: 32, flexShrink: 0, position: "relative",
-            display: "flex", alignItems: "center", gap: 4,
-            paddingLeft: 10, paddingRight: 6,
-            background: "var(--bg-panel)", borderBottom: "1px solid var(--border)",
-          }}
-        >
-          <button
-            type="button"
-            onClick={() => setSwitcherOpen((open) => !open)}
-            aria-label="切换工作区"
-            aria-haspopup="menu"
-            aria-expanded={switcherOpen}
-            title="切换工作区"
-            style={{
-              display: "flex", alignItems: "center", gap: 5,
-              height: 24, padding: "0 8px", maxWidth: 260,
-              background: switcherOpen ? "var(--bg-selected)" : "none",
-              border: "none", borderRadius: 4,
-              color: "var(--text)", cursor: "pointer", flexShrink: 1,
-              fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
-              transition: "background 0.1s",
-            }}
-            onMouseEnter={(e) => { if (!switcherOpen) e.currentTarget.style.background = "var(--bg-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = switcherOpen ? "var(--bg-selected)" : "transparent"; }}
-          >
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{activeWorkspace.name}</span>
-            {(() => {
-              const activity = workspaceActivity[activeWorkspace.id];
-              if (activity === "running") {
-                return (
-                  <span title="有会话正在运行" style={{ display: "inline-flex", flexShrink: 0, color: "var(--text-muted)" }}>
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
-                      <g>
-                        <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
-                        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
-                      </g>
-                    </svg>
-                  </span>
-                );
-              }
-              if (activity === "completed") {
-                return <span title="有会话已完成" style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: "var(--accent)" }} />;
-              }
-              return null;
-            })()}
-            <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, transform: switcherOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-              <polyline points="2 3.5 5 6.5 8 3.5" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={handleShowOverview}
-            title="总览"
-            aria-label="总览"
-            style={{
-              display: "flex", alignItems: "center", gap: 4,
-              height: 24, padding: "0 8px",
-              background: activeTab?.kind === "workspace-home" ? "var(--bg-selected)" : "none",
-              border: "none", borderRadius: 4,
-              color: activeTab?.kind === "workspace-home" ? "var(--text)" : "var(--text-muted)",
-              cursor: "pointer", flexShrink: 0, fontSize: 12, whiteSpace: "nowrap",
-              transition: "color 0.1s, background 0.1s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = activeTab?.kind === "workspace-home" ? "var(--text)" : "var(--text-muted)"; }}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M3 9.5 12 3l9 6.5" /><path d="M5 8.5V21h14V8.5" />
-            </svg>
-            总览
-          </button>
-          <div style={{ flex: 1 }} />
-
-          {/* 工作区切换面板（WorkspaceSwitcherPanel，两端共用）：行下方弹出，
-              点外部关闭；桌面不再传模块入口（rail 常驻后切换器回归纯工作区
-              管理，共识 Q7；移动端仍自传目的地页入口）。 */}
-          {switcherOpen && (
-            <>
-              <div aria-hidden="true" onClick={() => setSwitcherOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 1200 }} />
-              <div
-                role="menu"
-                aria-label="工作区切换"
-                style={{
-                  position: "absolute", top: "calc(100% + 4px)", left: 8,
-                  width: 300, zIndex: 1201,
-                  background: "var(--bg-panel)",
-                  border: "1px solid var(--border)", borderRadius: 10,
-                  boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
-                  maxHeight: "calc(100dvh - 140px)", overflowY: "auto",
-                }}
-              >
-                <WorkspaceSwitcherPanel
-                  workspaces={workspaces}
-                  currentWorkspaceId={activeWorkspace.id}
-                  workspaceActivity={workspaceActivity}
-                  onSelectWorkspace={(workspace) => {
-                    setSwitcherOpen(false);
-                    handleOpenWorkspace(workspace);
-                  }}
-                  onCreateWorkspace={handleCreateWorkspace}
-                  onImportDirectory={() => setImportPickerOpen(true)}
-                  onReorderWorkspaces={handleReorderWorkspaces}
-                  onOpenWorkspaceSettings={handleOpenWorkspaceSettings}
-                />
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Main content: 中央区整页（CenterPage：设置（含全部配置分区）/归档
-          ——点任何会话 tab 即关闭）优先于 总览/聊天/首页。 */}
+      {/* Main content: 中央区整页（CenterPage：总览（不遮 chrome）/ 设置（含
+          全部配置分区）/ 归档 / 工作项管理——点任何会话 tab 即关闭）优先于
+          聊天/首页。 */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {centerPage ? renderCenterPage() : activeTab?.kind === "workspace-home" ? (
-          <WorkspaceOverview
-            workspace={activeTab.workspace}
-            workspaces={workspaces}
-            onNewSession={newSessionDirect}
-            onOpenSettings={() => {
-              setOpenRepositoryFormRequest(undefined);
-              // 带工作区上下文（2026-09 反馈）：深链预选 + 详情优先——只看
-              // 当前工作区的设置，不再把全部工作区列表摆在面前。
-              requestWorkspaceSettings(activeTab.workspace);
-              openCenterPage({ kind: "settings" });
-            }}
-            onOpenWorkItems={() => openRailModule(WORK_ITEMS_TAB_ID)}
-            onOpenWorkItemsPage={() => openWorkItemsPage(activeTab.workspace.id)}
-            onCreateWorkItem={handleCreateWorkItem}
-            onSelectSession={handleSelectSession}
-            onSwitchSidebarView={(view) => {
-              // 仓库行 → 右坞「文件」模块；知识库行 → 右坞「知识库」模块
-              // （S2 收编：hub knowledge 子视图已退役）。
-              openRailModule(view === "knowledge" ? KNOWLEDGE_TAB_ID : FILES_TAB_ID);
-            }}
-            onAddRepository={() => {
-              openCenterPage({ kind: "settings" });
-              setOpenRepositoryFormRequest((request) => (request ?? 0) + 1);
-            }}
-            onSessionDeleted={handleSessionRemoved}
-            onOpenLoopsTab={() => openRailModule(LOOPS_TAB_ID)}
-            loopsRefreshKey={loopsRefreshKey}
-          />
-        ) : showChat ? (
+        {centerPage ? renderCenterPage() : showChat ? (
           !selectedSession && activeTab?.kind === "new-session" && composerTabId !== activeTabId ? (
             /* ＋ 新占位 tab：首页内容（2026-09「都要变」，与移动端同款）——
              * 问候语/最近分组/工作区面板；点大输入卡展开 composer。 */
@@ -933,13 +910,16 @@ export function DesktopShell() {
       </div>
     </div>
 
-    {/* Right dock（2026-10 rail 改版，IDEA 形态）：图标列贴窗口最右缘，
-        面板从其左侧展开。容器 row-reverse + DOM [rail][panel]——rail 永远
-        钉在右缘，收起态（44px）被 overflow 裁掉的是面板左缘而非 rail。
-        点未激活图标 = 切模块并展开；点已激活图标 = 收起到只剩 rail。展开态宽度沿用
-        拖拽把手 + px 持久化 + 42% 默认；收起态不渲染把手（共识 Q8a）。配置
-        整页打开或无工作区上下文时整个右坞隐藏（共识 Q6）。 */}
-    {!centerPage && panelWorkspace && (
+    {/* Right dock（2026-10 rail 改版，IDEA 形态）：纯 icon 图标列（36px，无
+        文字标签——hover title 提示）贴窗口最右缘，面板从其左侧展开。容器
+        row-reverse + DOM [rail][panel]——rail 永远钉在右缘，收起态（36px）
+        被 overflow 裁掉的是面板左缘而非 rail。点未激活图标 = 切模块并展开；
+        点已激活图标 = 收起到只剩 rail。展开态宽度 = 拖拽把手 + px 持久化，
+        **默认 = 最小宽 336px**（2026-10 用户反馈：默认收起 + 打开默认最小，
+        CSS fallback 即 336）；收起态不渲染把手（共识 Q8a）。遮 chrome 的整页
+        （配置/归档/工作项管理）打开或无工作区上下文时整个右坞隐藏（共识 Q6）；
+        总览整页不遮——它的四张卡片就是右坞模块的入口。 */}
+    {!chromeHidden && panelWorkspace && (
       <>
         {panelOpen && (
           <div
@@ -975,7 +955,6 @@ export function DesktopShell() {
                   aria-pressed={active}
                 >
                   {entry.icon}
-                  <span className="dock-rail-icon-label">{entry.label}</span>
                 </button>
               );
             })}
@@ -1107,7 +1086,7 @@ export function DesktopShell() {
               onRunLoopRound={handleRunLoopRound}
               onRunContract={handleRunContract}
               onOpenConversation={handleOpenConversation}
-              onOpenWorkItemsPage={openWorkItemsPage}
+              onOpenWorkItemsPage={openWorkItemsManager}
               onWorkspaceDeleted={handleWorkspaceDeleted}
               onWorkItemsChanged={() => setRefreshKey((key) => key + 1)}
             />
@@ -1167,6 +1146,62 @@ export function DesktopShell() {
           </div>
         </div>
         </>
+      )}
+
+      {/* 工作项管理弹窗：盖在整套桌面布局之上（ProjectTrustDialog 同款遮罩
+          习语）。「查看会话」= 关弹窗 → locate 开聊天 tab + 右坞定位该工作区
+          快捷面板（与中央页 host 同款收尾）。 */}
+      {workItemsManager && (
+        <div
+          role="presentation"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            background: "rgba(0,0,0,0.45)",
+          }}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setWorkItemsManager(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="工作项管理"
+            style={{
+              width: "min(1280px, 96vw)",
+              height: "min(860px, 92vh)",
+              display: "flex",
+              flexDirection: "column",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              background: "var(--bg)",
+              boxShadow: "0 24px 64px rgba(0,0,0,0.32)",
+              overflow: "hidden",
+            }}
+          >
+            <WorkItemsPage
+              key={workItemsManager.workspaceId}
+              workspaceId={workItemsManager.workspaceId}
+              onOpenConversation={(sessionId) => {
+                setWorkItemsManager(null);
+                handleOpenConversation(sessionId);
+                openDockModule(workItemsManager.workspaceId, WORK_ITEMS_TAB_ID);
+              }}
+              onOpenLoopsRecovery={() => {
+                setWorkItemsManager(null);
+                openRailModule(LOOPS_TAB_ID);
+              }}
+              onClose={() => setWorkItemsManager(null)}
+              onOpenWorkItemsPage={(id) => setWorkItemsManager({ workspaceId: id })}
+              workspaces={workspaces}
+            />
+          </div>
+        </div>
       )}
   </div>
     </>

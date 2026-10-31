@@ -70,7 +70,6 @@ npx @agegr/pi-web@latest
 
 - **Pick work back up**: browse previous pi conversations by project without digging through terminal history or session paths.
 - **Try different directions safely**: continue from an earlier message or fork a session into a separate route.
-- **Work across branches**: switch Git worktrees from the sidebar so new sessions and the Explorer follow the checkout you choose.
 - **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
 - **Configure less from the terminal**: manage models, login/API keys, model tests, and skill switches from the web UI.
@@ -82,9 +81,8 @@ npx @agegr/pi-web@latest
 - **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
-- **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
-- **Internationalization**: see [Internationalization](./docs/i18n.md) for using translations and adding languages or UI text.
+- **Internationalization**: see [Internationalization](./knowledge/guides/i18n.md) for using translations and adding languages or UI text.
 
 ## Development
 
@@ -108,46 +106,16 @@ Avoid running `next build` / `npm run build` during local development. It writes
 ## Project Structure
 
 ```text
-app/
-  api/
-    agent/          # creates/drives AgentSession and exposes SSE events
-    auth/           # OAuth and API key management
-    cwd/browse/     # browsable server directory listing
-    cwd/validate/   # custom working directory validation
-    default-cwd/    # pi default working directory lookup
-    files/          # file listing, reading, preview, and watching
-    home/           # current user home directory
-    models/         # available models, default model, thinking levels
-    models-config/  # read/write models.json and test models
-    sessions/       # session reads, rename, delete, context, HTML export
-    skills/         # skill listing, search, install, enable/disable
-components/
-  AppShell.tsx        # main layout, URL state, top panels, file tabs
-  SessionSidebar.tsx  # project selector, session tree, Explorer
-  DirectoryPicker.tsx # browsable and editable working-directory picker
-  ChatWindow.tsx      # messages, SSE, image drag/drop, minimap
-  ChatInput.tsx       # input bar, model/tools/thinking/compact/slash controls
-  MessageView.tsx     # message, thinking, tool call/result rendering
-  ModelsConfig.tsx    # model and auth configuration panel
-  SkillsConfig.tsx    # skill management panel
-  FileExplorer.tsx    # file tree
-  FileViewer.tsx      # source, diff, image, audio, PDF, DOCX preview
-lib/
-  directory-browser.ts # directory normalization and safe listing helpers
-  http-dispatcher.ts  # HTTP(S) proxy setup for server-side fetch
-  rpc-manager.ts      # AgentSessionWrapper lifecycle and global registry
-  session-reader.ts   # parses .jsonl session files and branch contexts
-  normalize.ts        # normalizes toolCall field names
-  file-access.ts      # file read safety boundary
-  file-paths.ts       # path encoding and relative path helpers
-  markdown.ts         # Markdown/Mermaid/KaTeX plugin configuration
-  pi-types.ts         # pi-related types
-hooks/
-  useAgentSession.ts  # session loading, command sending, SSE state machine
-  useAudio.ts         # completion sound
-  useDragDrop.ts      # image drag/drop
-  useTheme.ts         # theme switching
-bin/
-  pi-web.js           # npm CLI entrypoint
-instrumentation.ts    # initializes the server HTTP dispatcher
+app/api/            HTTP surface: sessions / agent (SSE) / subagents / workspaces
+                    (manifest · repositories · work items · delivery · loops) / git / auth / skills / uploads
+lib/session-host/   the in-process session host: registry / facade / sse / heartbeat / HostJobs / loop-spawner
+lib/workspaces/     workspace manifest CRUD, capabilities, repository auto-registration, cross-process locks, kb_search
+lib/work-items/     work-item service + delivery state machine + delivery-runner (designer/developer/verifier/release-preparer)
+lib/loops/          loop management surface (rounds / executions / manage / contract prefill)
+packages/pi-loop/   pure loop protocol logic + beat CLI (npm workspace member, publishable)
+kit/                loop template library + protocol README (consumed by copy, not imported)
+components/         UI components (shell/ · work-items/ · config pages · chat window · sidebars)
+hooks/              shared hooks (useAgentSession / useWorkItems / useGitStatus / …)
 ```
+
+The single Next.js server process is the session host — every AgentSession (interactive, subagent children, loop rounds, delivery-role sessions) lives in it, with the Workspace subsystem layered on top. See [knowledge/architecture.md](./knowledge/architecture.md) for the architecture overview, [knowledge/reference/file-map.md](./knowledge/reference/file-map.md) for the fully annotated file map, and [AGENTS.md](./AGENTS.md) for agent working rules.

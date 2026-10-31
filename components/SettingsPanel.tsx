@@ -7,6 +7,7 @@ import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { AgentsConfig } from "./AgentsConfig";
 import { PanelHeader } from "./PanelHeader";
+import { MobileCard, MobileNote, MobilePageTitle, MobileRow, MobileSection } from "./shell/mobile-ui";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
 import { setupPushSubscription } from "@/lib/push-client";
@@ -40,6 +41,25 @@ const SUBPAGE_TITLES: Record<Exclude<SettingsPage, "index">, string> = {
   preferences: "偏好",
 };
 
+/** 设置 tab 的子页（index 之外的全部值域）——手机壳推入页 kind "settings-sub" 用。 */
+export type SettingsSubpage = Exclude<SettingsPage, "index">;
+
+/** 子页标题的单一出处（meta 仅平板壳 PanelHeader 用——手机导航栏是单标题，
+ *  2026-10-26 用户反馈撤下 meta）。 */
+export function settingsSubpageHeader(
+  page: SettingsSubpage,
+  settingsCwd: string,
+  workspaceMeta?: string | null,
+): { title: string; meta?: string } {
+  return {
+    title: SUBPAGE_TITLES[page],
+    meta: page === "workspace" ? workspaceMeta ?? undefined
+      : page === "models" ? "~/.pi/agent/models.json"
+      : page === "skills" || page === "plugins" || page === "agents" ? shortenPath(settingsCwd)
+      : undefined,
+  };
+}
+
 function shortenPath(path: string): string {
   const segments = path.split("/").filter(Boolean);
   return segments.length > 3 ? `…/${segments.slice(-3).join("/")}` : path;
@@ -60,13 +80,19 @@ interface Props {
   onOpenArchive?: () => void;
   /** 工作区子页 header 的 meta（选中工作区名，WorkspaceManager 上报）。 */
   workspaceMeta?: string | null;
-  onWorkspaceSkillsChange?: (workspace: WorkspaceSummary) => void;
   onPluginsReloaded?: () => void;
   /** Fired when the models config is saved so the owner can refresh model lists. */
   onModelsSaved?: () => void;
   sessionId: string | null;
   /** × close — mobile full-screen overlay. */
   onCloseOverlay?: () => void;
+  /** 手机壳（MobileTabShell）设置 tab 宿主：索引省略 工作区 / Skills / 归档
+   *  三行——工作区设置经会话首页 ⋯ 或工作区页 ⚙ 推入，Skills 升为一级 tab，
+   *  归档住工作区页底部。平板壳（MobileShell 设置目的地页）缺省 = 全量索引。 */
+  phoneTab?: boolean;
+  /** 不渲染任何页头（手机壳把子页推入 pushStack、由壳提供 MobileNavBar 时用；
+   *  2026-10-26 导航统一——手机设置子页并入推入栈，本面板只出正文）。 */
+  headerless?: boolean;
 }
 
 function IndexRow({
@@ -287,6 +313,64 @@ export function PreferencesPage() {
   );
 }
 
+const PHONE_ICON_PROPS = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
+
+/** 手机壳设置 tab 的索引（2026-10 底部 tab 改版 + 用户反馈「设置页不好看」）：
+ *  iOS 分组卡片 + 彩色图标瓷片 + 右侧当前值 hint。只放全局配置——偏好 / 模型 /
+ *  Agents / 插件；工作区设置住会话首页 ⋯ 与工作区页 ⚙，Skills 是一级 tab，归档
+ *  住工作区页。子页经壳推入栈（settings-sub，MobileNavBar ‹设置 返回）。 */
+function PhoneSettingsIndex({ onPageChange }: { onPageChange: (page: SettingsPage) => void }) {
+  const { isDark } = useTheme();
+  const { locale, supportedLocales } = useI18n();
+  const localeLabel = supportedLocales.find((item) => item.id === locale)?.label ?? locale;
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 28 }}>
+      <MobileSection title="外观与语言" />
+      <MobileCard>
+        <MobileRow
+          first
+          icon={<svg {...PHONE_ICON_PROPS}><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.4 5.4 0 0 1-7.54-7.54A9 9 0 0 0 12 3z" /></svg>}
+          iconTone="hsl(248 72% 60%)"
+          label="偏好"
+          sublabel="主题 · 语言 · 思考块 · 通知"
+          hint={`${isDark ? "深色" : "浅色"} · ${localeLabel}`}
+          onClick={() => onPageChange("preferences")}
+        />
+      </MobileCard>
+
+      <MobileSection title="模型与扩展" />
+      <MobileCard>
+        <MobileRow
+          first
+          icon={<svg {...PHONE_ICON_PROPS}><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" /></svg>}
+          iconTone="hsl(199 89% 48%)"
+          label="模型"
+          sublabel="API Key · 默认模型"
+          onClick={() => onPageChange("models")}
+        />
+        <MobileRow
+          icon={<svg {...PHONE_ICON_PROPS}><path d="M12 2 3 7v10l9 5 9-5V7z" /><path d="M12 22V12M3 7l9 5 9-5" /></svg>}
+          iconTone="hsl(32 95% 50%)"
+          label="Agents"
+          sublabel="子代理 · 角色剧本"
+          onClick={() => onPageChange("agents")}
+        />
+        <MobileRow
+          icon={<svg {...PHONE_ICON_PROPS}><path d="M20.2 12.8a2 2 0 0 0 0-1.6l1.3-1.3a1 1 0 0 0 0-1.4l-2-2a1 1 0 0 0-1.4 0L16.8 7.8a2 2 0 0 0-1.6 0L13.9 6.5a1 1 0 0 0-1.4 0l-2 2a1 1 0 0 0 0 1.4l1.3 1.3a2 2 0 0 0 0 1.6l-1.3 1.3a1 1 0 0 0 0 1.4l2 2a1 1 0 0 0 1.4 0l1.3-1.3a2 2 0 0 0 1.6 0l1.3 1.3a1 1 0 0 0 1.4 0l2-2a1 1 0 0 0 0-1.4z" /><path d="M3 21l6-6" /></svg>}
+          iconTone="hsl(160 84% 39%)"
+          label="插件"
+          sublabel="pi 插件启停 · 重载"
+          onClick={() => onPageChange("plugins")}
+        />
+      </MobileCard>
+
+      <MobileNote>
+        工作区设置在「会话」首页右上 ⋯ 或工作区页 ⚙；Skill 在底部「Skill」tab；已归档会话在各工作区页底部。
+      </MobileNote>
+    </div>
+  );
+}
+
 /**
  * The mobile settings destination page: an iOS-settings-style index page plus
  * push-in subpages（‹设置 返回）. Desktop renders `ConfigCenterPage` standalone
@@ -300,20 +384,19 @@ export function SettingsPanel({
   workspaceSlot,
   onOpenArchive,
   workspaceMeta = null,
-  onWorkspaceSkillsChange,
   onPluginsReloaded,
   onModelsSaved,
   sessionId,
   onCloseOverlay,
+  phoneTab = false,
+  headerless = false,
 }: Props) {
-  const title = page !== "index" ? SUBPAGE_TITLES[page] : "设置";
+  const { title, meta } = page !== "index"
+    ? settingsSubpageHeader(page, settingsCwd, workspaceMeta)
+    : { title: "设置" as const, meta: undefined };
   const back = page !== "index"
     ? { onBack: () => onPageChange("index"), backLabel: "设置" }
     : {};
-  const meta = page === "workspace" ? workspaceMeta ?? undefined
-    : page === "models" ? "~/.pi/agent/models.json"
-    : page === "skills" || page === "plugins" || page === "agents" ? shortenPath(settingsCwd)
-    : undefined;
 
   // 子页内容（推入式全屏页）。
   const sectionBody = (
@@ -333,9 +416,7 @@ export function SettingsPanel({
           <SkillsConfig
             embedded
             cwd={settingsCwd}
-            globalOnly={!workspace}
-            workspace={workspace}
-            onWorkspaceSkillsChange={onWorkspaceSkillsChange}
+            projectInstallAvailable={Boolean(workspace)}
           />
         </div>
       )}
@@ -351,11 +432,14 @@ export function SettingsPanel({
       )}
       {page === "agents" && settingsCwd && (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {/* 交付感知（backlog-clearing T2 接线）：激活工作区 id 透传——无激活
+              工作区 = null → 面板整体不渲染（行为与从前一致）。 */}
           <AgentsConfig
             embedded
             key={settingsCwd}
             cwd={settingsCwd}
             sessionId={sessionId}
+            workspaceId={workspace?.id ?? null}
             onClose={onCloseOverlay}
             onReloaded={onPluginsReloaded}
           />
@@ -369,16 +453,25 @@ export function SettingsPanel({
     </>
   );
 
-  // 移动端：全行索引 + 内嵌子页（推入式，‹设置 返回）。
+  // 移动端：全行索引 + 内嵌子页（推入式，‹设置 返回）。手机壳 tab 根页 =
+  // MobilePageTitle 大标题（与会话/Skill tab 同一视觉语言）；headerless（手机壳
+  // 推入子页宿主）不渲染任何页头——页头由壳的 MobileNavBar 提供。
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      <PanelHeader
-        title={title}
-        meta={meta}
-        onClose={onCloseOverlay}
-        {...back}
-      />
-      {page === "index" && (
+      {!headerless && (phoneTab && page === "index" ? (
+        <MobilePageTitle title="设置" />
+      ) : (
+        <PanelHeader
+          title={title}
+          meta={meta}
+          onClose={onCloseOverlay}
+          {...back}
+        />
+      ))}
+      {page === "index" && phoneTab && (
+        <PhoneSettingsIndex onPageChange={onPageChange} />
+      )}
+      {page === "index" && !phoneTab && (
         <div style={{
           flex: 1,
           minHeight: 0,
@@ -386,7 +479,9 @@ export function SettingsPanel({
           borderTop: "1px solid var(--border)",
         }}>
           {/* 工作区管理是全局的（列表+详情在中央内容区），首页也可见入口；
-              hint 显示当前工作区名（无则描述用途）。 */}
+              hint 显示当前工作区名（无则描述用途）。手机 tab 宿主（phoneTab）
+              走上面的 PhoneSettingsIndex：工作区设置经会话首页 ⋯ / 工作区页 ⚙
+              推入，Skills 升为一级 tab，归档住工作区页。 */}
           <IndexRow
             label="工作区"
             hint={workspace?.name ?? "管理全部工作区"}

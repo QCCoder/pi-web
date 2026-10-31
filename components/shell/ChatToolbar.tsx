@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 import { BranchNavigator } from "../BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -12,15 +12,18 @@ type SessionCopyField = "file" | "id";
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 
-export type ToolbarNavToggle = "sidebar" | "drawer" | "hidden";
+export type ToolbarNavToggle = "sidebar" | "hidden";
 
 /** A row of the mobile ⋯ overflow menu（全局组 + 会话组）。44px 触控行高。 */
-function MoreMenuRow({ icon, label, onClick, disabled = false, testColor }: {
+function MoreMenuRow({ icon, label, onClick, disabled = false, testColor, hint, hintColor }: {
   icon: React.ReactNode;
   label: string;
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
   testColor?: string;
+  /** 行尾摘要（如 会话信息 行的上下文用量「42% / 200k」），可带状态色。 */
+  hint?: React.ReactNode;
+  hintColor?: string;
 }) {
   return (
     <button
@@ -44,6 +47,11 @@ function MoreMenuRow({ icon, label, onClick, disabled = false, testColor }: {
     >
       <span style={{ display: "flex", alignItems: "center", flexShrink: 0, opacity: 0.85 }}>{icon}</span>
       <span style={{ flex: 1 }}>{label}</span>
+      {hint && (
+        <span style={{ fontSize: 11.5, color: hintColor ?? "var(--text-muted)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
+          {hint}
+        </span>
+      )}
     </button>
   );
 }
@@ -54,19 +62,37 @@ function MoreMenuRow({ icon, label, onClick, disabled = false, testColor }: {
  * panels (branches / system / session info / language menu / mobile ⋯ menu)
  * anchored to it.
  *
- * Rendered by BOTH shells: desktop puts it at the top of its center column
- * (36px), mobile at the top of the screen (44px touch height). The ☰ button
- * behavior comes from the `navToggle` prop: "sidebar" (default — desktop tree
- * collapse), "drawer" (mobile nav drawer + background-activity status dot) or
- * "hidden" (mobile wide layout: the tree is permanent, there is nothing to
- * toggle).
+ * Rendered by all three shells: desktop puts it at the top of its center
+ * column (36px); the tablet shell (MobileShell, ≥768px) and the phone shell
+ * (MobileTabShell, <768px) at the top of the screen (44px touch height). The
+ * leading slot comes from two props: `navToggle` — "sidebar" (default —
+ * desktop tree collapse) or "hidden" (tablet: the tree is permanent, nothing
+ * to toggle) — and `onBack` (phone chat page: ‹ back to the session list;
+ * when set it takes the leading slot and `navToggle` is ignored).
  *
- * Mobile (2026-09 重排，docs/mobile-drawer-design.md §5)：定位优先 ——
- * `☰ | 会话标题（居中，点击 → 会话信息面板）| 统计 | ⋯`。主题/语言/完整
- * 历史/自动命名/分支/系统提示词全部收进 ⋯ 菜单（全局组 + 会话组分隔），
- * 分支面板由隐藏触发钮的 BranchNavigator 承载。
+ * Mobile (2026-09 重排 → 2026-10 底部 tab 改版，knowledge/designs/mobile-drawer-design.md
+ * 文末补充记录)：定位优先 —— `‹ | 会话标题（居中，纯标签）| ⋯`。
+ * 会话信息（行尾带上下文用量）/主题/语言/完整历史/自动命名/分支/系统提示词全部收进 ⋯ 菜单；
+ * 统计按钮只在桌面/平板顶栏
+ * （全局组 + 会话组分隔），分支面板由隐藏触发钮的 BranchNavigator 承载。
+ * 旧 ☰ 抽屉开关与后台状态圆点随抽屉退役一并删除——后台活动改由会话首页的
+ * 行级运行/完成徽章承载。
  */
-export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavToggle } = {}) {
+/** 手机聊天页 ⋯ 菜单的「工作区」组条目（MobileTabShell 注入：文件 / 工作项 /
+ *  知识库 / Loops / 工作区设置，作用于当前会话所属工作区；点击 = 收起菜单 + 执行）。 */
+export interface ToolbarMenuExtra {
+  id: string;
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+}
+
+export function ChatToolbar({
+  navToggle = "sidebar",
+  onBack,
+  backLabel = "返回",
+  moreMenuExtras,
+}: { navToggle?: ToolbarNavToggle; onBack?: () => void; backLabel?: string; moreMenuExtras?: ToolbarMenuExtra[] } = {}) {
   const s = useShell();
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, t: translate, supportedLocales } = useI18n();
@@ -75,10 +101,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
   const {
     sidebarOpen,
     setSidebarOpen,
-    mobileNavOpen,
-    setMobileNavOpen,
     activeWorkspace,
-    sessionActivity,
     activeTopPanel,
     setActiveTopPanel,
     toggleTopPanel,
@@ -106,49 +129,51 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
   } = s;
 
   // The desktop middle-column toggle (VS Code collapse). Owned here so the ☰
-  // button sits next to its effect. On mobile the same button toggles the nav
-  // drawer instead.
+  // button sits next to its effect.
   const handleSidebarToggle = useCallback(() => {
     setSidebarOpen((open) => !open);
   }, [setSidebarOpen]);
 
-  // ---- 移动端 ☰ 状态圆点（docs/mobile-drawer-design.md §5）-----------------
-  // 后台会话运行中 → accent 点；有已完成未查看 → 次级点（抽屉打开即视为
-  // 已查看，同步清零）。chips 行删除后这是后台活动的唯一头部信号。
-  const [seenCompleted, setSeenCompleted] = useState<Set<string>>(() => new Set());
-  const drawerMode = navToggle === "drawer";
-  useEffect(() => {
-    if (!drawerMode || !mobileNavOpen) return;
-    setSeenCompleted(new Set(sessionActivity.completedIds));
-  }, [drawerMode, mobileNavOpen, sessionActivity.completedIds]);
-  const runningCount = sessionActivity.runningIds.size;
-  const hasUnseenCompleted = drawerMode
-    && [...sessionActivity.completedIds].some((id) => !seenCompleted.has(id));
-  // 查看已完成会话 = 该会话视为已读（圆点细粒度，M2）：只清单个，不动整体
-  // 「抽屉打开全清」的语义。
-  useEffect(() => {
-    const id = selectedSession?.id;
-    if (!id || !drawerMode) return;
-    setSeenCompleted((prev) => {
-      if (prev.has(id) || !sessionActivity.completedIds.has(id)) return prev;
-      const next = new Set(prev);
-      next.add(id);
-      return next;
-    });
-  }, [drawerMode, selectedSession?.id, sessionActivity.completedIds]);
+  // 上下文用量摘要（百分比 + 预警色）：桌面/平板显示在顶栏统计按钮里；手机顶栏
+  // 不放统计按钮（2026-10 用户反馈「也收进 ⋯」），改作 ⋯ 菜单「会话信息」行尾 hint。
+  const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
+  let ctxColor = "var(--text-muted)";
+  let ctxStr: string | null = null;
+  if (contextUsage?.contextWindow) {
+    const pct = contextUsage.percent;
+    if (pct !== null && pct > 90) ctxColor = "#ef4444";
+    else if (pct !== null && pct > 70) ctxColor = "rgba(234,179,8,0.95)";
+    ctxStr = pct !== null ? `${pct.toFixed(0)}% / ${fmtTokens(contextUsage.contextWindow)}` : `? / ${fmtTokens(contextUsage.contextWindow)}`;
+  }
 
   return (
 <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: isMobile ? 44 : 36, background: "var(--bg-panel)" }}>
-  {navToggle !== "hidden" && (
+  {onBack ? (
+  /* 手机聊天页（MobileTabShell 推入）：‹ 回上一页（会话首页 / 工作区页）。 */
   <button
-    onClick={navToggle === "drawer" ? () => setMobileNavOpen((open) => !open) : handleSidebarToggle}
-     title={navToggle === "drawer"
-       ? (mobileNavOpen ? translate("sidebar.hide") : translate("sidebar.show"))
-       : (sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show"))}
-     aria-label={navToggle === "drawer"
-       ? (mobileNavOpen ? translate("sidebar.hide") : translate("sidebar.show"))
-       : (sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show"))}
-     aria-expanded={navToggle === "drawer" ? mobileNavOpen : sidebarOpen}
+    type="button"
+    onClick={onBack}
+    title={backLabel}
+    aria-label={backLabel}
+    style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
+      background: "none", border: "none", borderRight: "1px solid var(--border)",
+      color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
+    }}
+    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+    onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+  >
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
+  </button>
+  ) : navToggle !== "hidden" && (
+  <button
+    onClick={handleSidebarToggle}
+     title={sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show")}
+     aria-label={sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show")}
+     aria-expanded={sidebarOpen}
     style={{
       display: "flex", alignItems: "center", justifyContent: "center",
       position: "relative",
@@ -159,7 +184,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
     onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
     onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
   >
-    {(navToggle === "drawer" ? mobileNavOpen : sidebarOpen) ? (
+    {sidebarOpen ? (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
       </svg>
@@ -167,16 +192,6 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
         <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
       </svg>
-    )}
-    {navToggle === "drawer" && (runningCount > 0 || hasUnseenCompleted) && (
-      <span
-        aria-hidden
-        style={{
-          position: "absolute", top: 4, right: 4, width: 7, height: 7, borderRadius: "50%",
-          background: runningCount > 0 ? "var(--accent)" : "var(--text-dim)",
-          boxShadow: runningCount > 0 ? "0 0 6px var(--accent)" : "none",
-        }}
-      />
     )}
   </button>
   )}
@@ -479,52 +494,33 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
       )}
     </div>
   )}
-  {/* 当前会话标题（移动端 only，docs/mobile-drawer-design.md §5）：chips 行
+  {/* 当前会话标题（移动端 only，knowledge/designs/mobile-drawer-design.md §5）：chips 行
       删除后的「我在哪」方位感。会话名优先（自动命名后的 name），回落首条
-      消息，无会话时显示当前工作区名。2026-09 重排：居中、主文字色、可点击
-      ——点击打开会话信息面板（与统计按钮同一 topPanel）。 */}
+      消息，无会话时显示当前工作区名。2026-09 重排：居中、主文字色；2026-10：
+      回归纯标签——「会话信息」入口移进 ⋯ 菜单（用户反馈），不再点标题弹面板。 */}
   {isMobile && (() => {
     const titleText = selectedSession ? (selectedSession.name || selectedSession.firstMessage) : (activeWorkspace?.name ?? "");
     return (
       <div
-        role="button"
-        tabIndex={0}
-        onClick={() => toggleTopPanel("session")}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            toggleTopPanel("session");
-          }
-        }}
-        aria-label={`${translate("session.title")}: ${titleText}`}
-        aria-expanded={activeTopPanel === "session"}
         title={titleText}
         style={{
           flex: 1, minWidth: 0, height: "100%",
           display: "flex", alignItems: "center", justifyContent: "center",
           padding: "0 8px", overflow: "hidden",
           fontSize: 13, fontWeight: 500, color: "var(--text)",
-          cursor: "pointer", userSelect: "none", outline: "none",
+          userSelect: "none",
         }}
       >
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleText}</span>
       </div>
     );
   })()}
-  {/* Session stats — right-aligned in top bar */}
-  {showChat && (sessionStats || contextUsage) && (() => {
+  {/* Session stats — right-aligned in top bar（桌面/平板；手机顶栏不放，见 ⋯ 会话信息行 hint）。 */}
+  {!isMobile && showChat && (sessionStats || contextUsage) && (() => {
      const tokens = sessionStats?.tokens;
     const c = sessionStats?.cost ?? 0;
-    const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
+    const fmt = fmtTokens;
     const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
-    let ctxColor = "var(--text-muted)";
-    let ctxStr: string | null = null;
-    if (contextUsage?.contextWindow) {
-      const pct = contextUsage.percent;
-      if (pct !== null && pct > 90) ctxColor = "#ef4444";
-      else if (pct !== null && pct > 70) ctxColor = "rgba(234,179,8,0.95)";
-      ctxStr = pct !== null ? `${pct.toFixed(0)}% / ${fmt(contextUsage.contextWindow)}` : `? / ${fmt(contextUsage.contextWindow)}`;
-    }
     const tooltipParts: string[] = [];
      if (tokens) {
        tooltipParts.push(`in: ${tokens.input.toLocaleString(locale)}`);
@@ -562,12 +558,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
         onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
         onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "session" ? "var(--text)" : "var(--text-muted)"; }}
       >
-        {isMobile && (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
-          </svg>
-        )}
-         {!isMobile && tokens && tokens.input > 0 && (
+         {tokens && tokens.input > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
@@ -575,7 +566,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
              {fmt(tokens.input)}
           </span>
         )}
-         {!isMobile && tokens && tokens.output > 0 && (
+         {tokens && tokens.output > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
@@ -583,7 +574,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
              {fmt(tokens.output)}
           </span>
         )}
-         {!isMobile && tokens && tokens.cacheRead > 0 && (
+         {tokens && tokens.cacheRead > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
@@ -591,7 +582,7 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
              {fmt(tokens.cacheRead)}
           </span>
         )}
-        {!isMobile && costStr && (
+        {costStr && (
           <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
             {costStr}
           </span>
@@ -607,9 +598,9 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
       </button>
     );
   })()}
-  {/* ⋯ 溢出菜单（移动端 only，2026-09 重排）：全局组（主题/语言）+ 会话组
-      （完整历史/生成标题/分支/系统提示词）——6 个从顶栏降级的控件统一收纳，
-      顶栏本体只留 定位（标题）+ 状态（统计）。 */}
+  {/* ⋯ 溢出菜单（移动端 only，2026-09 重排 → 2026-10 收口）：全局组（主题/语言）+
+      会话组（会话信息〔行尾上下文用量〕/完整历史/生成标题/分支/系统提示词）+ 工作区组
+      （手机壳注入）——顶栏本体只留 ‹ + 标题 + ⋯，统计按钮也收进来了。 */}
   {isMobile && (
     <button
       type="button"
@@ -755,6 +746,19 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
             {showChat && separator}
             {showChat && (
               <>
+                {/* 会话信息（2026-10：原「点居中标题弹面板」入口移到这里，标题回归纯标签）。 */}
+                <MoreMenuRow
+                  icon={(
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><circle cx="12" cy="8" r="0.6" fill="currentColor" />
+                    </svg>
+                  )}
+                  label={translate("session.info")}
+                  disabled={!selectedSession}
+                  onClick={() => toggleTopPanel("session")}
+                  hint={ctxStr ?? undefined}
+                  hintColor={ctxColor}
+                />
                 <MoreMenuRow
                   icon={(
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -812,6 +816,20 @@ export function ChatToolbar({ navToggle = "sidebar" }: { navToggle?: ToolbarNavT
                   label={translate("system.label")}
                   onClick={() => toggleTopPanel("system")}
                 />
+              </>
+            )}
+            {/* 工作区组（手机壳注入，2026-10）：当前会话所属工作区的模块入口。 */}
+            {moreMenuExtras && moreMenuExtras.length > 0 && (
+              <>
+                {separator}
+                {moreMenuExtras.map((extra) => (
+                  <MoreMenuRow
+                    key={extra.id}
+                    icon={extra.icon}
+                    label={extra.label}
+                    onClick={() => { setActiveTopPanel(null); extra.onClick(); }}
+                  />
+                ))}
               </>
             )}
           </div>

@@ -8,19 +8,23 @@ import { isWorkspaceSelectable, type WorkspaceSummary } from "@/lib/workspaces/t
 import type {
   WorkItemDetail,
   WorkItemImportOutcome,
+  WorkItemRecord,
+  WorkItemStatus,
   WorkItemType,
 } from "@/lib/work-items/types";
 import { PanelHeader } from "../PanelHeader";
 import { WorkItemsToolbar } from "./WorkItemsToolbar";
 import { WorkItemsList } from "./WorkItemsList";
 import { WorkItemsBoard } from "./WorkItemsBoard";
+import { WorkItemsStatusBoard } from "./WorkItemsStatusBoard";
 import { WorkItemDetailView } from "./WorkItemDetailView";
+import { AttentionBar } from "./AttentionBar";
 import {
   DeliveryExecutionState,
   ExecutionActionResult,
 } from "./WorkItemExecution";
 import { WorkItemCreateForm, type WorkItemCreateFormValues } from "./WorkItemCreateForm";
-import { responseJson, uploadWorkItemAttachments } from "./work-item-api";
+import { responseJson, uploadWorkItemAttachments, WorkItemRequestError } from "./work-item-api";
 import {
   defaultWorkItemFilters,
   filterWorkItems,
@@ -30,23 +34,26 @@ import {
 } from "./work-item-queries";
 
 /**
- * 中央工作项管理整页（M2 T8 页骨架 + T9 详情/创建/回收站接入，spec
- * §6.1/§6.2/§7）：页头（工作区选择器 + 列表|看板 分段 + ＋新建）+ 共享筛选栏
- * （活动|归档|回收站）+ 列表/看板 + 详情面板（WorkItemDetailView：概况/设计/
- * 证据/动作条/审计）。
+ * 中央工作项管理页（M2 T8 页骨架 + T9 详情/创建/回收站接入，spec
+ * §6.1/§6.2/§7；2026-10 增状态卡板与弹窗宿主）：页头（工作区选择器 +
+ * 列表|看板|卡片 分段 + ＋新建）+ 共享筛选栏（活动|归档|回收站）+
+ * 列表/阶段看板/状态卡板（卡片可拖拽换状态）+ 详情面板（WorkItemDetailView：
+ * 概况/设计/证据/动作条/审计）。
  *
  * 页面身份显式绑定 props.workspaceId（spec §6.1：不用 activeWorkspace 代替，
  * 防止打开另一工作区的管理页时误写项目）。视图/筛选按工作区持久化：
- * `pi-work-items-view:<wsId>`、`pi-work-items-filters:<wsId>`。数据来自共享
- * store 的 useWorkItems（与右坞快捷面板同缓存）；mutation 成功统一走
- * invalidate()。选中项变化由页面自己 replace URL（buildWorkItemsPageUrl，不埋
- * 历史陷阱）。移动端宿主（M2 T10）：本组件全响应式——窄屏（≤640px）隐藏
- * 页头工作区选择器/视图分段，看板回落为阶段筛选列表（toolbar 的阶段筛选
- * 即筛选器），详情以全屏覆盖层呈现（列表→详情导航语义）；`onBack` 是移动
- * 端 ‹返回（回聊天）的透传，`createRequest` 承接总览「新建工作项」深链。
+ * `pi-work-items-view:<wsId>`（list/board/cards）、`pi-work-items-filters:<wsId>`。
+ * 数据来自共享 store 的 useWorkItems（与右坞快捷面板同缓存）；mutation 成功
+ * 统一走 invalidate()。桌面弹窗宿主（DesktopShell 的 打开完整管理 弹窗）不传
+ * onReplaceUrl——URL 投影属于中央页/深链形态，弹窗不动浏览器历史；选中项
+ * 变化只在传了 onReplaceUrl 时才回写。移动端宿主（M2 T10）：本组件全响应式
+ * ——窄屏（≤640px）隐藏页头工作区选择器/视图分段，看板/卡板回落为列表
+ * （触屏不触发 HTML5 拖拽），详情以全屏覆盖层呈现（列表→详情导航语义）；
+ * `onBack` 是移动端 ‹返回（回聊天）的透传，`createRequest` 承接总览
+ * 「新建工作项」深链。
  */
 
-type WorkItemsView = "list" | "board";
+type WorkItemsView = "list" | "board" | "cards";
 
 interface WorkItemsPageProps {
   workspaceId: string;
@@ -228,6 +235,8 @@ export function WorkItemsPage({
   const [createFormType, setCreateFormType] = useState<WorkItemType>("bug");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // 状态卡板拖拽的结果提示（成功静默刷新；409/400 失败内联展示）。
+  const [moveError, setMoveError] = useState<string | null>(null);
   // 详情草稿态（概况/正文/设计编辑）——切项/切工作区前 confirm（spec §6.1）。
   const detailDirtyRef = useRef(false);
   // 交付自动执行状态（Phase-2 Task 9）：仅 managed 项拉取（GET
@@ -242,7 +251,8 @@ export function WorkItemsPage({
     let storedView: WorkItemsView = "list";
     let storedFilters = defaultWorkItemFilters();
     try {
-      storedView = localStorage.getItem(`pi-work-items-view:${workspaceId}`) === "board" ? "board" : "list";
+      const rawView = localStorage.getItem(`pi-work-items-view:${workspaceId}`);
+      storedView = rawView === "board" || rawView === "cards" ? rawView : "list";
       storedFilters = parseStoredWorkItemFilters(localStorage.getItem(`pi-work-items-filters:${workspaceId}`));
     } catch { /* localStorage unavailable — keep defaults */ }
     setView(storedView);
@@ -479,7 +489,7 @@ export function WorkItemsPage({
 
   /** 恢复自动领取（POST /delivery/resume {key}）：清暂停标记 + 重置失败窗口。 */
   const resumeAutomation = useCallback(async (): Promise<ExecutionActionResult> => {
-    if (!executionItemKey) return { ok: false, error: "当前没有暂停的自动领取" };
+    if (!executionItemKey) return { ok: false, error: "没有暂停的自动领取" };
     setExecutionBusy(true);
     try {
       await responseJson(
@@ -499,12 +509,48 @@ export function WorkItemsPage({
     }
   }, [executionItemKey, fetchExecutionState, invalidate, workspaceId]);
 
-  const viewButton = (value: WorkItemsView, label: string) => (
+  /** 状态卡板拖拽换状态：PATCH status（expectedRevision 乐观并发）。标准流程
+   *  项与「活动」范围外的卡片在板层已不可拖，这里再兜一道与服务层相同的门禁；
+   *  409（revision 冲突）→ 提示 + 刷新重试，其它失败原样内联。 */
+  const handleMoveStatus = useCallback(async (item: WorkItemRecord, toStatus: WorkItemStatus) => {
+    if (item.status === toStatus) return;
+    if (item.delivery?.protocolVersion === 1) {
+      setMoveError(`标准流程项 ${item.key} 的状态由交付动作管理，不能直接拖拽修改`);
+      return;
+    }
+    if (filters.scope !== "active") {
+      setMoveError("仅「活动」范围支持拖拽修改状态");
+      return;
+    }
+    try {
+      await responseJson<WorkItemDetail>(
+        await fetch(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/work-items/${encodeURIComponent(item.key)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ expectedRevision: item.revision, status: toStatus, actor: "user" }),
+          },
+        ),
+      );
+      setMoveError(null);
+      invalidate();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMoveError(error instanceof WorkItemRequestError && error.status === 409
+        ? `${item.key} 已被其它操作修改（${message}）——列表已刷新，请重试`
+        : `移动 ${item.key} 失败：${message}`);
+      invalidate();
+    }
+  }, [filters.scope, invalidate, workspaceId]);
+
+  const viewButton = (value: WorkItemsView, label: string, title?: string) => (
     <button
       key={value}
       type="button"
       onClick={() => setView(value)}
       aria-pressed={view === value}
+      title={title}
       style={{
         height: 26,
         padding: "0 10px",
@@ -644,6 +690,20 @@ export function WorkItemsPage({
             </div>
           ) : view === "board" && !narrow ? (
             <WorkItemsBoard items={visible} selectedKey={selectedKey} onSelect={handleSelect} />
+          ) : view === "cards" && !narrow ? (
+            visible.length === 0 ? (
+              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12.5, padding: 24, textAlign: "center" }}>
+                {emptyHint ?? "没有匹配的工作项"}
+              </div>
+            ) : (
+              <WorkItemsStatusBoard
+                items={visible}
+                scope={filters.scope}
+                selectedKey={selectedKey}
+                onSelect={handleSelect}
+                onMove={(item, status) => void handleMoveStatus(item, status)}
+              />
+            )
           ) : (
             <WorkItemsList items={visible} selectedKey={selectedKey} onSelect={handleSelect} emptyHint={emptyHint} />
           )}
@@ -678,7 +738,8 @@ export function WorkItemsPage({
             {!narrow && (
               <div role="tablist" aria-label="视图" style={{ display: "flex", gap: 2, padding: 2, background: "var(--bg-hover)", borderRadius: 7, flexShrink: 0 }}>
                 {viewButton("list", "列表")}
-                {viewButton("board", "看板")}
+                {viewButton("board", "看板", "按交付阶段的七列看板（只读，阶段走流程动作）")}
+                {viewButton("cards", "卡片", "按状态五列卡板——拖动卡片即可切换状态（标准流程项除外）")}
               </div>
             )}
             <button
@@ -720,30 +781,43 @@ export function WorkItemsPage({
           trashedCount={snapshot?.trashedItems.length ?? 0}
         />
       )}
-      {createError && (
-        <div
-          role="alert"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "6px 12px",
-            borderBottom: "1px solid var(--border)",
-            background: "color-mix(in srgb, #ef4444 6%, var(--bg))",
-            color: "#dc2626",
-            fontSize: 11.5,
-          }}
-        >
-          <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{createError}</span>
-          <button
-            type="button"
-            onClick={() => setCreateError(null)}
-            aria-label="关闭提示"
-            style={{ border: 0, background: "transparent", color: "inherit", cursor: "pointer", fontSize: 13, lineHeight: 1 }}
+      {[createError, moveError].map((message, index) =>
+        message ? (
+          <div
+            key={index}
+            role="alert"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "6px 12px",
+              borderBottom: "1px solid var(--border)",
+              background: "color-mix(in srgb, #ef4444 6%, var(--bg))",
+              color: "#dc2626",
+              fontSize: 11.5,
+            }}
           >
-            ×
-          </button>
-        </div>
+            <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{message}</span>
+            <button
+              type="button"
+              onClick={() => (index === 0 ? setCreateError(null) : setMoveError(null))}
+              aria-label="关闭提示"
+              style={{ border: 0, background: "transparent", color: "inherit", cursor: "pointer", fontSize: 13, lineHeight: 1 }}
+            >
+              ×
+            </button>
+          </div>
+        ) : null,
+      )}
+      {/* 待处理条（final-arch step-2 T6，spec §8）：attention 队列的 UI 面——
+          refreshToken 接共享快照 fetchedAt，复用既有 5s 轮询节拍（不自建 timer）；
+          点行经 handleSelect 定位详情（草稿守卫 + URL 回写同列表行）。 */}
+      {workspace && hasCapability && (
+        <AttentionBar
+          workspaceId={workspaceId}
+          onSelectItem={handleSelect}
+          refreshToken={snapshot?.fetchedAt}
+        />
       )}
       {body}
     </div>

@@ -58,6 +58,19 @@ export function releaseRoundLock(dir: string): void {
   try { unlinkSync(join(dir, LOCK_FILE)); } catch { /* ENOENT = 已释放 */ }
 }
 
+/** 条件释放：锁仍属于指定轮会话才删。手动轮 settle 监听用——turn 收尾时锁可能
+ *  已被 stale 抢占/他者重取，迟到的监听不得误清新轮的锁。 */
+export function releaseRoundLockIfOwner(dir: string, sessionId: string): boolean {
+  const current = readRoundLock(dir);
+  if (!current || current.sessionId !== sessionId) return false;
+  try {
+    unlinkSync(join(dir, LOCK_FILE));
+    return true;
+  } catch {
+    return false; // ENOENT = 已释放
+  }
+}
+
 export function updateRoundLock(dir: string, patch: Partial<RoundLockHolder>): void {
   const current = readRoundLock(dir);
   if (!current) return;

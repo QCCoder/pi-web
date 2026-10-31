@@ -193,9 +193,9 @@ export function previewRolePrompt(workspacePath: string, role: DeliveryRole, con
 
 **Files:**
 - Modify: `AGENTS.md`（「工作项 / 交付流」硬规则增两条：① 角色剧本住工作区 `.pi/agents/<role>.md`（缺省同名），lib 只持不变式合同 `AGENT_INVARIANT_CONTRACT`（全文钉于终局 spec §4.3.1，改文先改 spec）与模板，lib 内禁写干活指令与工作区专属事实；② 播种只在保存 delivery 配置时、缺文件才写、永不改写）
-- Modify: `docs/reference/work-items.md`（「Delivery 自动执行」节：合同描述 → 装配序（AGENTS.md / 不变式 / 剧本正文）+ profile 真接缝 + 播种 + v2 四键 + 默认同名；删除「designer 合同逐字节保留」类表述）
-- Modify: `docs/architecture.md`（工作区一节加一行：交付角色的剧本是工作区资源 `.pi/agents/<role>.md`）
-- Modify: `docs/reference/file-map.md`（新增 `roles.ts`、`role-templates.ts`、`role-preview.ts` 与两条 `delivery/roles` 路由条目；`role-session.ts` 注释更新）
+- Modify: `knowledge/reference/work-items.md`（「Delivery 自动执行」节：合同描述 → 装配序（AGENTS.md / 不变式 / 剧本正文）+ profile 真接缝 + 播种 + v2 四键 + 默认同名；删除「designer 合同逐字节保留」类表述）
+- Modify: `knowledge/architecture.md`（工作区一节加一行：交付角色的剧本是工作区资源 `.pi/agents/<role>.md`）
+- Modify: `knowledge/reference/file-map.md`（新增 `roles.ts`、`role-templates.ts`、`role-preview.ts` 与两条 `delivery/roles` 路由条目；`role-session.ts` 注释更新）
 
 - [ ] **Step 1: 文档更新** → **Step 2: 回归守卫**（全量 `npm test`、tsc、lint；`grep -rn "constraints.md\|budget.md" lib/work-items` 为空；`grep -rn "buildRoleContract\|DESIGNER_CONTRACT" lib app components` 为空；tools.test 工具恰五件断言续绿；dispatcher.test 零改动续绿）→ **Step 3: spec §10 差距 1/2/3/7 静态勾验** → **Step 4: Commit** `docs: baseline for workspace role profiles and invariant contract`
 

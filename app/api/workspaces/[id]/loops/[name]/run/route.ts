@@ -3,7 +3,7 @@ import { getWorkspace, WorkspaceNotFoundError } from "@/lib/workspaces/service";
 import { findKitLoopByName } from "@/lib/loops/lookup";
 import { launchManualRound, RoundBusyError, type LaunchRoundDeps } from "@/lib/loops/rounds";
 import { listPendingExecutionRecords } from "@/lib/loops/executions";
-import { createSession, destroySession, runningStatus, sendCommand, SessionHostError } from "@/lib/session-host/facade";
+import { createSession, destroySession, runningStatus, sendCommand, waitForSessionSettle, SessionHostError } from "@/lib/session-host/facade";
 import { markRoundActive } from "@/lib/session-host/background";
 import { allowFileRoot } from "@/lib/file-access";
 import { cacheSessionPath, invalidateSessionListCache } from "@/lib/session-reader";
@@ -46,6 +46,9 @@ export async function POST(
       destroySession: async (sessionId) => destroySession(sessionId),
       // 幽灵锁活性接管：锁里的 sessionId 不在宿主 running set 即可清锁重起
       runningSessionIds: async () => runningStatus().ids,
+      // 锁活性化：turn settle（prompt_done/destroy/错误/天花板超时）即放锁——
+      // 锁活 = turn 活，收养/新轮只发生在干净交接点，stale 窗只剩崩溃兜底
+      awaitSettle: (sessionId, timeoutMs) => waitForSessionSettle(sessionId, timeoutMs),
     };
     const result = await launchManualRound(
       declaration,

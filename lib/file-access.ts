@@ -4,7 +4,7 @@ import path from "path";
 import { parse } from "yaml";
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { isExistingPathWithinRoots } from "./path-security";
-import { listAllSessions } from "./session-reader";
+import { getAgentDir, listAllSessions } from "./session-reader";
 import { chatUploadsRoot } from "./uploads-root";
 export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
 
@@ -53,6 +53,14 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   // 聊天文件附件的家（lib/uploads-root.ts）——附件在消息里以绝对路径引用，
   // 点击打开/预览走 /api/files，所以这个根必须常驻白名单。
   roots.add(normalizeSlashes(chatUploadsRoot()));
+
+  // The agent dir is app-owned data (~/.pi/agent, or <repo>/.pi/agent once the
+  // pi home is adopted). Global settings pages anchor their cwd here when no
+  // workspace/session is active (GET /api/home's agentDir), and /api/skills
+  // scope=global already passes it as the effective cwd — so it must pass the
+  // allowlist on its own instead of relying on a session/workspace root that
+  // happens to cover it.
+  roots.add(normalizeSlashes(getAgentDir()));
 
   // Workspace-owned directories (repositories/* and knowledge/*, work-items, loops)
   // are owned by the workspace, so they are inherently readable via /api/files.

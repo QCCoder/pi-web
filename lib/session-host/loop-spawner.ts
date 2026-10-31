@@ -1,8 +1,8 @@
-/** pi-loop kit 心跳 spawner（design: docs/pi-loop-kit-design.md §5/§9）。
+/** pi-loop kit 心跳 spawner（design: knowledge/designs/pi-loop-kit-design.md §5/§9）。
  *  一轮 = 一次性 AgentSession：开场合同（含 /skill: 展开）→ settle → 事后钩子。
  *  无 RUNS.jsonl、无 orchestrator 索引 — 运行记录 = STATE.md + workspace git log。 */
 import { creationTimeoutSignal } from "../abort-race.ts";
-import { startRpcSession, type AgentSessionWrapper } from "./registry.ts";
+import { startRpcSession, getRunningRpcSessionIds, type AgentSessionWrapper } from "./registry.ts";
 import { markRoundActive, clearRoundMark } from "./background.ts";
 import type { HostJob } from "./jobs.ts";
 import { listWorkItems, readWorkItem, updateWorkItem } from "../work-items/service.ts";
@@ -10,28 +10,64 @@ import { discoverWorkspaces, readWorkspaceManifest } from "../workspaces/service
 import { archiveSession } from "../session-archive.ts";
 import { discoverKitLoops, isWorkspaceHalted, type LoopDeclaration } from "../../packages/pi-loop/protocol.ts";
 import { runDueRound } from "../../packages/pi-loop/fire.ts";
-import { updateRoundLock } from "../../packages/pi-loop/round-lock.ts";
+import { readRoundLock, releaseRoundLock, updateRoundLock } from "../../packages/pi-loop/round-lock.ts";
+import { isPhantomRoundLock } from "../loops/rounds.ts";
 import { buildRoundPrompt } from "../../packages/pi-loop/contract.ts";
 import { listPendingExecutionRecords } from "../loops/executions.ts";
 import { hostname } from "node:os";
 
-/** 跑一条 prompt 并等它 settle（prompt_done）。超时 / prompt_error / destroy 均 reject。
+/** 停滞检测轮询间隔（waitForRoundSettle）。 */
+export const STALL_CHECK_MS = 30_000;
+
+export interface RoundSettleOptions {
+  /** 停滞阈值：轮会话整棵树（子代理活性沿 parentSessionId 向上传递，见
+   *  AgentSessionWrapper.touchActivity）连续静默超过此时长 → reject（轮判死）。
+   *  缺省不检测——beat / 旧调用方语义不变。宿主级僵尸监视器（heartbeat.ts
+   *  STALL_KILL_MS，缺省 20min）仍是全局兜底，所以实际生效阈值 = 两者取小。 */
+  stallMs?: number;
+  /** 停滞轮询间隔（测试注入）。 */
+  stallCheckMs?: number;
+}
+
+/** 跑一条 prompt 并等它 settle（prompt_done）。超时 / 停滞 / prompt_error / destroy 均 reject。
+ *  timeoutMs 是硬天花板（max_minutes）：到点无论在干什么都算失败——成本保险，
+ *  不是正常收尾路径；真正的「卡死」判定是 opts.stallMs（stall_minutes）。
  *  模式承自 v3 引擎的 capturePrompt（随 v3 拆除迁入）。 */
 export function waitForRoundSettle(
   session: AgentSessionWrapper,
   prompt: string,
   timeoutMs: number,
+  opts: RoundSettleOptions = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => finish(new Error("kit round timed out")), timeoutMs);
+    const timer = setTimeout(
+      () => finish(new Error(`kit round timed out (max_minutes ceiling ${Math.round(timeoutMs / 60_000)}min reached)`)),
+      timeoutMs,
+    );
     timer.unref?.();
+    // 停滞检测：activityIdleMs 由 wrapper 维护（任何 agent 事件 / 子代理事件都刷新），
+    // 这里只轮询读。fake session（测试/beat）没有该方法则不检测。
+    let stallTimer: ReturnType<typeof setInterval> | undefined;
+    const stallMs = opts.stallMs ?? 0;
+    if (stallMs > 0 && typeof session.activityIdleMs === "function") {
+      stallTimer = setInterval(() => {
+        const idleMs = session.activityIdleMs();
+        if (idleMs < stallMs) return;
+        finish(new Error(
+          `kit round stalled: no activity for ${Math.round(idleMs / 60_000)}min `
+          + `(stall_minutes ${Math.round(stallMs / 60_000)})`,
+        ));
+      }, opts.stallCheckMs ?? STALL_CHECK_MS);
+      stallTimer.unref?.();
+    }
     // destroy 先于任何 prompt_done/error 事件触发 — 立即 reject 而非干等超时。
     const offDestroy = session.onDestroy(() => finish(new Error("session destroyed")));
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (stallTimer) clearInterval(stallTimer);
       offDestroy?.();
       unsubscribe?.();
       if (error) reject(error);
@@ -65,6 +101,8 @@ export interface RoundDeps {
    *  据此为在飞轮写中断记录（spec §5.4）。 */
   markActive?: (sessionId: string, info: { loopName: string; workspacePath: string; dir: string; startedAt: number }) => void;
   clearActive?: (sessionId: string) => void;
+  /** 停滞轮询间隔（测试注入；缺省 STALL_CHECK_MS）。 */
+  stallCheckMs?: number;
 }
 
 /** 起一轮：一次性会话（cwd=workspace 根 → rpc-manager 自动装 workspace 扩展；
@@ -100,9 +138,14 @@ export async function runKitRound(declaration: LoopDeclaration, deps: RoundDeps 
       /* 命名是装饰性的 — 会话照常跑 */
     }
     try {
-      await waitForRoundSettle(session, buildRoundPrompt(declaration, { sessionId: realSessionId }), declaration.maxMinutes * 60_000);
+      await waitForRoundSettle(
+        session,
+        buildRoundPrompt(declaration, { sessionId: realSessionId }),
+        declaration.maxMinutes * 60_000,
+        { stallMs: declaration.stallMinutes * 60_000, stallCheckMs: deps.stallCheckMs },
+      );
     } catch (error) {
-      // 超时/销毁/prompt 错误：destroy() 定向中止在飞 prompt（abortBash 按执行
+      // 天花板/停滞/销毁/prompt 错误：destroy() 定向中止在飞 prompt（abortBash 按执行
       // 进程组杀）；reaper 默认 no-op —— 共享宿主禁止按 cwd 收割（spec §5.4），
       // 注入点保留给测试/独立宿主，残余孤儿交由恢复期只读探测报告。
       try {
@@ -219,6 +262,10 @@ export interface SpawnerDeps {
   now?: () => Date;
   /** 恢复门禁（默认真实现）：该 loop 有未确认中断记录时跳过起轮（spec §5.4）。 */
   pendingInterruption?: (workspacePath: string, loopName: string) => Promise<boolean>;
+  /** 宿主运行集合快照（默认 registry）：幽灵锁兜底探测用——busy 时若锁带
+   *  sessionId、过宽限期、且会话不在运行集合（web 重启丢 settle 监听的场景）
+   *  → 放锁并同 tick 重试。缺省或探测失败保守不判（维持 busy）。 */
+  runningSessionIds?: () => Promise<string[]>;
   /** 轮登记（默认 markRoundActive/clearRoundMark）：关停时据此写中断记录。 */
   markActive?: (sessionId: string, info: { loopName: string; workspacePath: string; dir: string; startedAt: number }) => void;
   clearActive?: (sessionId: string) => void;
@@ -242,6 +289,7 @@ export class LoopKitSpawner implements HostJob {
       pendingInterruption:
         deps.pendingInterruption
         ?? (async (workspacePath, loopName) => (await listPendingExecutionRecords(workspacePath, loopName)).length > 0),
+      runningSessionIds: deps.runningSessionIds ?? (async () => getRunningRpcSessionIds()),
       markActive: deps.markActive ?? markRoundActive,
       clearActive: deps.clearActive ?? clearRoundMark,
     };
@@ -269,8 +317,8 @@ export class LoopKitSpawner implements HostJob {
         // 不起新轮，直到记录被「重新检查并恢复」流程 resolve。
         if (await Promise.resolve(this.deps.pendingInterruption(workspace.path, declaration.loopName))) continue;
         const holder = { pid: process.pid, host: hostname(), kind: "daemon" as const };
-        try {
-          await runDueRound(
+        const fireOnce = () =>
+          runDueRound(
             declaration,
             holder,
             async () => {
@@ -282,6 +330,20 @@ export class LoopKitSpawner implements HostJob {
             },
             { now: this.deps.now },
           );
+        try {
+          const result = await fireOnce();
+          if (result === "busy") {
+            // 幽灵锁兜底：手动轮锁随 web 重启丢失活性监听后只能等 stale 窗
+            // （maxMinutes+15min），期间心跳槽全被吃。锁带 sessionId、过宽限期、
+            // 会话不在宿主运行集合 → 轮已死，放锁并同 tick 重试（真跑着的手动轮
+            // 会话在运行集合内，不误清）。beat/启动窗口锁不适用；探测失败保守不判；
+            // 恢复门禁在本循环上方、不受放锁影响。
+            const lock = readRoundLock(declaration.dir);
+            if (await isPhantomRoundLock(lock, { runningSessionIds: this.deps.runningSessionIds })) {
+              releaseRoundLock(declaration.dir);
+              await fireOnce();
+            }
+          }
         } catch (error) {
           console.error(`[loop-kit] round failed for ${workspace.id}/${declaration.loopName}:`, error);
         }

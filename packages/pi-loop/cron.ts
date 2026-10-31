@@ -1,4 +1,4 @@
-/** Vixie-cron matching + next-due computation（design: docs/pi-loop-host-design.md §5 纯逻辑层）。
+/** Vixie-cron matching + next-due computation（design: knowledge/designs/pi-loop-host-design.md §5 纯逻辑层）。
  *  Originally the v3 loop scheduler's matcher (moved out ahead of the v3 teardown,
  *  then into the pi-loop package); pure, no daemon deps — daemon spawner 与 beat CLI
  *  共用。契约：畸形输入「返回 false/undefined、永不抛」。 */

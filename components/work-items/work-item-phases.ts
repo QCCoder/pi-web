@@ -46,6 +46,16 @@ export const STATUS_LABELS: Record<WorkItemStatus, string> = {
   cancelled: "已取消",
 };
 
+/** 状态点/强调色（状态卡板列头 + 列表行状态点共用）：open 灰蓝 /
+ *  in_progress 蓝 / blocked 红 / done 绿 / cancelled 浅灰。 */
+export const STATUS_DOT_COLORS: Record<WorkItemStatus, string> = {
+  open: "#64748b",
+  in_progress: "#2563eb",
+  blocked: "#dc2626",
+  done: "#16a34a",
+  cancelled: "#94a3b8",
+};
+
 /** 全量 phase 标签（含老流程子阶段与 complete）：看板卡片上老项显示
  * 原始 phase 标签（不谎报它已进入标准列），列表行同表。 */
 export const PHASE_LABELS: Record<WorkItemPhase, string> = {

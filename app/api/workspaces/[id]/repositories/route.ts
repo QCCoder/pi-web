@@ -25,12 +25,15 @@ function errorResponse(error: unknown): NextResponse {
 }
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
-    return NextResponse.json({ repositories: await listWorkspaceRepositories(id) });
+    // ?refresh=1 绕过读缓存（外部 clone 后想立刻看到自动登记时用；常规打开
+    // 走 30s TTL 缓存——见 service.ts 仓库列表读缓存）。
+    const refresh = new URL(req.url).searchParams.has("refresh");
+    return NextResponse.json({ repositories: await listWorkspaceRepositories(id, undefined, { refresh }) });
   } catch (error) {
     return errorResponse(error);
   }

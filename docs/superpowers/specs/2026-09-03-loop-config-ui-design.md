@@ -2,7 +2,7 @@
 
 日期：2026-09-03
 状态：已与用户逐节确认（范围 C / 落位 B / 方案一）
-关联：`docs/pi-loop-kit-design.md`、`docs/pi-loop-host-design.md`、`kit/README.md`
+关联：`knowledge/designs/pi-loop-kit-design.md`、`knowledge/designs/pi-loop-host-design.md`、`kit/README.md`
 
 ## 1. 背景与动机
 

@@ -7,6 +7,7 @@ import {
   isRoundLockStale,
   readRoundLock,
   releaseRoundLock,
+  releaseRoundLockIfOwner,
   updateRoundLock,
   type RoundLockHolder,
   type RoundLockRecord,
@@ -73,11 +74,11 @@ export const PHANTOM_LOCK_GRACE_MS = 2 * 60_000;
  *  轮收尾/会话空闲被逐出后锁仍活——表现为最长 maxMinutes+15min 的假「运行
  *  中」（运行按钮禁用 + 409 误报 + 心跳槽被吃）。活性接管把这个窗口收窄
  *  到「探测可证」即清。beat 锁（无 sessionId，pid 治理）与启动窗口锁不判。 */
-async function isPhantomRoundLock(
-  lock: RoundLockRecord,
+export async function isPhantomRoundLock(
+  lock: RoundLockRecord | undefined,
   deps: { runningSessionIds?: () => Promise<string[]> },
 ): Promise<boolean> {
-  if (!lock.sessionId || lock.kind === "beat") return false;
+  if (!lock?.sessionId || lock.kind === "beat") return false;
   if (Date.now() - lock.startedAt <= PHANTOM_LOCK_GRACE_MS) return false;
   if (!deps.runningSessionIds) return false;
   try {
@@ -98,13 +99,20 @@ export interface LaunchRoundDeps {
   /** facade runningStatus().ids 包装——幽灵锁活性接管用（可选：缺省或探测
    *  失败都退化为 RoundBusyError，不接管）。 */
   runningSessionIds?: () => Promise<string[]>;
+  /** turn settle 监听（可选；缺省不监听 = 旧 stale 窗行为）：手动轮 prompt 发出
+   *  后挂 detached 监听，turn 收尾（prompt_done / destroy / 错误 / max_minutes
+   *  天花板超时）即放锁——锁的活性化：锁活 = turn 活，收养/新轮只发生在干净
+   *  交接点，人手事后插话旧会话由轮合同冗余副本守卫让位。超时不 destroy
+   *  会话（人在场，UI 可见可手动停）。run 路由经 facade.waitForSessionSettle 注入。 */
+  awaitSettle?: (sessionId: string, timeoutMs: number) => Promise<void>;
 }
 
 /** 手动起一轮（spec §4，S3）：acquire 锁（kind daemon，pid=web 进程）→ 写
  *  .lastrun（避免下一心跳立即重跑，host §4）→ 建会话 → 回填锁内 sessionId →
- *  命名 → 发合同（daemon 形态，含 sessionId 行）。成功后锁**保持持有**——无人
- *  await 轮结束，靠 stale 窗口（maxMinutes+15min）兜底回收，至多丢一个后续
- *  心跳槽（anacron-lite 不放大）；stop 路由会主动释放。失败路径释放锁 +
+ *  命名 → 发合同（daemon 形态，含 sessionId 行）。锁生命周期看 deps.awaitSettle：
+ *  注入时 detached 监听 turn 收尾即放锁（锁活 = turn 活，stale 窗只剩崩溃兜底）；
+ *  缺省时锁保持持有，靠 stale 窗口（maxMinutes+15min）兜底回收，至多丢后续
+ *  心跳槽（anacron-lite 不放大）。stop 路由会主动释放。失败路径释放锁 +
  *  best-effort destroy 半建会话。无 D9 钩子（人在场，不自动归档）。 */
 export async function launchManualRound(
   declaration: LoopDeclaration,
@@ -144,6 +152,15 @@ export async function launchManualRound(
         ...(opts.itemKey ? { extraInstructions: `本轮优先处理工作项 ${opts.itemKey}（人手动指定）。` } : {}),
       }),
     });
+    if (deps.awaitSettle) {
+      const owner = sessionId;
+      // settle 即放锁（锁活性化）：prompt_done/destroy/错误/天花板超时任一收尾
+      // 路径都放；releaseRoundLockIfOwner 防迟到监听误抢——stale 抢占后他者
+      // 已重取的锁不得由旧轮监听删除。监听永不抛（catch 吞、finally 放锁）。
+      void deps.awaitSettle(owner, declaration.maxMinutes * 60_000)
+        .catch(() => { /* 收尾即放锁，失败语义相同 */ })
+        .finally(() => releaseRoundLockIfOwner(declaration.dir, owner));
+    }
     return { sessionId, cwd: created.cwd, sessionFile: created.sessionFile };
   } catch (error) {
     if (sessionId) {

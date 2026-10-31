@@ -19,7 +19,7 @@
 - **返工过渡单一实现**：reviewer rework(code) / checks failed / 原 verifier 失败路径 共用 `reworkTransition(item, "implementation")`；rework(spec) 与人工 `rework target=design` 共用 `reworkTransition(item, "design")`——不许出现第二份清下游证据的代码。
 - `events.jsonl` 只追加；`expectedRevision` 乐观并发；conversationId 自链接（reviewer submit/fail/ask 透传 sessionId）。
 - 范围守恒：`role-grants.ts`、`role-session.ts`（除 `AnyDeliveryRole` 类型若需）、`attention.ts`、`worktrees.ts` 不改逻辑；`checks.ts` 只读复用。
-- 每任务以可运行测试结尾并提交；conventional 前缀；只暂存任务文件（工作树含用户 WIP：`components/WorkspaceManager.tsx`、`components/work-items/WorkItemsPage.tsx`、`AGENTS.md`、`docs/reference/*`、`docs/architecture.md` 编辑不提交）。
+- 每任务以可运行测试结尾并提交；conventional 前缀；只暂存任务文件（工作树含用户 WIP：`components/WorkspaceManager.tsx`、`components/work-items/WorkItemsPage.tsx`、`AGENTS.md`、`knowledge/reference/*`、`knowledge/architecture.md` 编辑不提交）。
 
 ### 本计划引入的默认选择（请用户复核）
 
@@ -127,7 +127,7 @@ export async function runChecksStep(workspacePath: string, key: string, deps?): 
 - Modify: `components/WorkspaceManager.tsx`（交付块增「评审阶段」开关 → `stages.review.enabled`；角色表随词表四行——**用户 WIP，编辑不提交**）
 - Modify: `components/work-items/work-item-execution.test.mjs` 等既有测试同步（若用户 WIP 则编辑不提交）
 - Modify: `AGENTS.md`（规则：verifier 退役、checks 是 system 步且唯一机器证据、reviewer 裁定与 checks 结果不计预算、返工过渡单一实现 `reworkTransition`——编辑不提交）
-- Modify: `docs/reference/work-items.md` / `file-map.md` / `architecture.md`（编辑不提交）
+- Modify: `knowledge/reference/work-items.md` / `file-map.md` / `architecture.md`（编辑不提交）
 
 - [ ] **Step 1: 测试/手测**——执行卡 system 徽标与 checkResults；review 块渲染三态；设置开关 round-trip；文档 grep：`verifier` 仅出现在 legacy 说明处。
 - [ ] **Step 2–4 同前** → **Step 5: Commit** `feat: review record and system-checks display with stages.review setting`

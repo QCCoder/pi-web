@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** pi-loop CLI — kit loop 的心跳宿主（design: docs/pi-loop-host-design.md §4）。 */
+/** pi-loop CLI — kit loop 的心跳宿主（design: knowledge/designs/pi-loop-host-design.md §4）。 */
 import { writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { hostname } from "node:os";

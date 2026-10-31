@@ -23,8 +23,11 @@ export interface GrillQuestion {
   options?: string[];
   /** 推荐项（必须是 options 之一或任意短句） */
   recommended?: string;
-  /** 超时分钟数（watcher 代答窗口；缺省 2） */
+  /** 超时分钟数（代答窗口；缺省 2） */
   deadlineMin?: number;
+  /** 超时自动按 recommended 代答（web 前端执行；须与 recommended 并用，
+   *  无推荐项则不代答）。高风险卡不带此字段——等人，见 LOOP.md 超时分流。 */
+  autoApprove?: boolean;
 }
 
 export interface ParsedGrillMessage {
@@ -62,12 +65,16 @@ export function parseGrillMessage(text: string): ParsedGrillMessage | null {
     options: options.length > 0 ? options : ["是", "否"],
     recommended: typeof grill.recommended === "string" ? grill.recommended : undefined,
     deadlineMin: typeof grill.deadlineMin === "number" && grill.deadlineMin > 0 ? grill.deadlineMin : GRILL_TIMEOUT_MIN_DEFAULT,
+    autoApprove: grill.autoApprove === true ? true : undefined,
   };
   const end = match.index + match[0].length;
   return { grill: normalized, before: text.slice(0, match.index), after: text.slice(end) };
 }
 
-/** 卡片答复统一话术：会话（LLM）靠它把答复映射回 GRILL.md 对应条目。 */
-export function grillReplyText(question: string, value: string): string {
-  return `【grill 答复】${question}：${value}`;
+/** 卡片答复统一话术：会话（LLM）靠它把答复映射回 GRILL.md 对应条目。
+ *  超时自动代答带「超时自动」尾标——落档据此把该项誊录为 timeout-default
+ *  来源而非人确认（LOOP.md §四.3）；人工点击不带尾标，格式不变。 */
+export function grillReplyText(question: string, value: string, opts?: { auto?: boolean }): string {
+  const marker = opts?.auto ? "（超时自动按推荐）" : "";
+  return `【grill 答复】${question}：${value}${marker}`;
 }

@@ -33,12 +33,22 @@ test("parseLoopDeclaration full frontmatter", () => {
   assert.ok(decl.body.includes("本轮合同指针"));
 });
 
-test("defaults: level L1, max_minutes 30, timezone = local, explicit pattern wins", () => {
+test("defaults: level L1, max_minutes 30, stall_minutes 15, timezone = local, explicit pattern wins", () => {
   const decl = parseLoopDeclaration("---\ncron: \"* * * * *\"\npattern: dev-loop\n---\nbody", "/ws/loops/x", "/ws");
   assert.equal(decl.level, "L1");
   assert.equal(decl.maxMinutes, 30);
+  assert.equal(decl.stallMinutes, 15);
   assert.equal(decl.pattern, "dev-loop");
   assert.equal(decl.timezone, localTimezone());
+});
+
+test("stall_minutes: explicit positive number wins; non-positive/non-number falls back to default", () => {
+  const explicit = parseLoopDeclaration("---\ncron: \"* * * * *\"\nstall_minutes: 7\n---\nbody", "/ws/loops/x", "/ws");
+  assert.equal(explicit.stallMinutes, 7);
+  const zero = parseLoopDeclaration("---\ncron: \"* * * * *\"\nstall_minutes: 0\n---\nbody", "/ws/loops/x", "/ws");
+  assert.equal(zero.stallMinutes, 15);
+  const junk = parseLoopDeclaration("---\ncron: \"* * * * *\"\nstall_minutes: soon\n---\nbody", "/ws/loops/x", "/ws");
+  assert.equal(junk.stallMinutes, 15);
 });
 
 test("frontmatter name wins over directory name; pattern defaults to loopName (README contract)", () => {

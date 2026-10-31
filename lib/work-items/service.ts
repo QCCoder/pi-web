@@ -34,6 +34,7 @@ import {
   type UpdateWorkItemContentInput,
   type UpdateWorkItemInput,
   type WorkItemActor,
+  type WorkItemBranchRef,
   type WorkItemDetail,
   type WorkItemEvent,
   type WorkItemExternalRef,
@@ -104,6 +105,22 @@ function parseExternalRef(value: unknown): WorkItemExternalRef {
     ...(typeof record.url === "string" && record.url ? { url: record.url } : {}),
     lastSyncedAt: requireText(record.last_synced_at ?? record.lastSyncedAt, "external.lastSyncedAt"),
   };
+}
+
+function parseBranches(value: unknown): WorkItemBranchRef[] {
+  if (!Array.isArray(value)) {
+    throw new WorkItemValidationError("branches must be an array");
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new WorkItemValidationError("Each branches entry must be an object");
+    }
+    const record = entry as Record<string, unknown>;
+    return {
+      repositoryId: requireText(record.repository_id ?? record.repositoryId, "branches.repositoryId"),
+      branch: requireText(record.branch, "branches.branch"),
+    };
+  });
 }
 
 function requireEnum<T extends string>(
@@ -180,6 +197,9 @@ export function serializeWorkItem(item: WorkItemRecord): string {
     phase: item.phase,
     priority: item.priority,
     repositories: item.repositories,
+    ...(item.branches?.length
+      ? { branches: item.branches.map((entry) => ({ repository_id: entry.repositoryId, branch: entry.branch })) }
+      : {}),
     tags: item.tags,
     conversations: item.conversations,
     related_items: item.relatedItems,
@@ -227,6 +247,9 @@ export function parseWorkItem(value: unknown): WorkItemRecord {
     phase: requireEnum(record.phase, WORK_ITEM_PHASES, "phase"),
     priority: requireEnum(record.priority, WORK_ITEM_PRIORITIES, "priority"),
     repositories: requireStringArray(record.repositories, "repositories"),
+    ...(record.branches !== undefined && record.branches !== null
+      ? { branches: parseBranches(record.branches) }
+      : {}),
     tags: requireStringArray(record.tags, "tags"),
     conversations: requireStringArray(record.conversations, "conversations"),
     relatedItems: requireStringArray(record.related_items, "related_items"),
@@ -351,6 +374,39 @@ function validateRepositorySelection(manifest: WorkspaceManifest, repositories: 
       throw new WorkItemValidationError(`Unknown Workspace repository: ${repository}`);
     }
   }
+}
+
+/** Normalize + validate the branch registry against the item's repository
+ *  scope (not the manifest — the item may legitimately narrow its scope).
+ *  Empty input clears (returns undefined so never-set items don't drift). */
+function normalizeBranchSelection(
+  repositories: string[],
+  branches: WorkItemBranchRef[] | undefined,
+): WorkItemBranchRef[] | undefined {
+  if (branches === undefined) return undefined;
+  if (!Array.isArray(branches)) {
+    throw new WorkItemValidationError("branches must be an array");
+  }
+  const allowed = new Set(repositories);
+  const seen = new Set<string>();
+  const normalized: WorkItemBranchRef[] = [];
+  for (const entry of branches) {
+    if (!entry || typeof entry !== "object") {
+      throw new WorkItemValidationError("Each branches entry must be an object");
+    }
+    const repositoryId = requireText(entry.repositoryId, "branches.repositoryId");
+    if (!allowed.has(repositoryId)) {
+      throw new WorkItemValidationError(
+        `branches.repositoryId ${repositoryId} is not in the item's repositories`,
+      );
+    }
+    if (seen.has(repositoryId)) {
+      throw new WorkItemValidationError(`Duplicate branches entry for repository ${repositoryId}`);
+    }
+    seen.add(repositoryId);
+    normalized.push({ repositoryId, branch: requireText(entry.branch, "branches.branch") });
+  }
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 /** Assemble a WorkItemDetail from an explicit item DIRECTORY: parse item.yaml,
@@ -511,6 +567,7 @@ export async function createWorkItem(
   const description = requireText(input.originalDescription, "originalDescription");
   const repositories = requireStringArray(input.repositories, "repositories");
   validateRepositorySelection(manifest, repositories);
+  const branches = normalizeBranchSelection(repositories, input.branches);
   const tags = requireStringArray(input.tags, "tags");
   const loop = typeof input.loop === "string" && input.loop.trim() ? input.loop.trim() : undefined;
   const external = input.external === undefined ? undefined : parseExternalRef(input.external);
@@ -557,6 +614,7 @@ export async function createWorkItem(
       phase: "intake",
       priority,
       repositories,
+      ...(branches ? { branches } : {}),
       tags,
       conversations: input.conversationId ? [input.conversationId] : [],
       relatedItems: [],
@@ -603,6 +661,7 @@ function changedFields(before: WorkItemRecord, after: WorkItemRecord): Record<st
     "phase",
     "priority",
     "repositories",
+    "branches",
     "tags",
     "conversations",
     "relatedItems",
@@ -632,7 +691,7 @@ export async function updateWorkItem(
         "Standard-flow items change phase/status only through delivery actions");
     }
     // 已发布基线冻结：仅展示性字段（spec §7.3）
-    if (current.item.phase === "released" && (input.repositories !== undefined || input.loop !== undefined)) {
+    if (current.item.phase === "released" && (input.repositories !== undefined || input.branches !== undefined || input.loop !== undefined)) {
       throw new WorkItemValidationError("Released baseline is frozen — create a follow-up item instead");
     }
     if (input.expectedRevision !== current.item.revision) {
@@ -649,6 +708,14 @@ export async function updateWorkItem(
     if (input.repositories !== undefined) {
       next.repositories = requireStringArray(input.repositories, "repositories");
       validateRepositorySelection(manifest, next.repositories);
+    }
+    if (input.branches !== undefined) {
+      // 按合并后的 repositories 校验（PATCH 可同时收窄仓库范围并登记分支）。
+      next.branches = normalizeBranchSelection(next.repositories, input.branches);
+    } else if (input.repositories !== undefined && next.branches?.length) {
+      // 收窄仓库范围时同步剪掉越界的分支登记，维持 branches ⊆ repositories。
+      const scope = new Set(next.repositories);
+      next.branches = next.branches.filter((entry) => scope.has(entry.repositoryId));
     }
     if (input.tags !== undefined) next.tags = requireStringArray(input.tags, "tags");
     if (input.conversations !== undefined) next.conversations = requireStringArray(input.conversations, "conversations");

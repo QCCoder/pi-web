@@ -266,28 +266,46 @@ html.pi-keyboard-open.pi-kb-squeeze body {
 html.pi-keyboard-open.pi-kb-squeeze body {
   transform: translateY(var(--app-lift, 0px));
 }
-/* 键盘开启时底部无导航条（2026-09 树抽屉重构：底部 tab 栏已删，导航在抽屉
-   /常驻树，工具栏在顶部键盘盖不住）——无额外处理。 */
+/* 键盘开启时与底部 tab 栏（2026-10 底部 tab 改版，MobileTabShell）：聊天页是
+   推入页、不渲染 tab 栏，composer 独占底边——键盘场景下无 tab 栏可藏，无额外
+   处理；Skill/设置 tab 根面上的搜索框弹键盘时 tab 栏随 --app-vh 压缩的布局
+   一起上浮（可接受，无需内核分叉）。 */
 
-/* 移动端导航抽屉（docs/mobile-drawer-design.md §6）：scrim 淡入 + 面板滑入。 */
-@keyframes pi-nav-scrim-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+/* 手机壳底部 tab 栏（MobileTabShell；唯一定期导航，任何推入页都隐藏它）。
+   高度由内容决定、底部让出安全区；外层容器走 --app-vh 链（见上），这里不写
+   任何 app-height 变量（AGENTS.md 硬规则）。 */
+.mobile-tabbar {
+  display: flex;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding: 5px 6px calc(2px + env(safe-area-inset-bottom, 0px));
 }
-@keyframes pi-nav-drawer-in {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(0); }
+.mobile-tabbar-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 48px;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s;
 }
-.mobile-nav-scrim {
-  animation: pi-nav-scrim-in 0.18s ease-out;
-}
-.mobile-nav-drawer {
-  animation: pi-nav-drawer-in 0.2s ease-out;
+.mobile-tabbar-item.is-active {
+  color: var(--accent);
+  font-weight: 500;
 }
 @media (prefers-reduced-motion: reduce) {
-  .mobile-nav-scrim,
-  .mobile-nav-drawer {
-    animation: none;
+  .mobile-tabbar-item {
+    transition: none;
   }
 }
 
@@ -1253,7 +1271,8 @@ span.token.table {
 
 /* Right panel: animate width. Width is drag-resizable (handle between the
    center column and the panel): --pi-right-panel-width (px, set inline by
-   DesktopShell) overrides the 42% default; unset → the CSS fallback. Children
+   DesktopShell) overrides the min-width default; unset → the CSS fallback
+   (336px = 36 rail + 300 panel, 2026-10 用户反馈「打开默认最小」). Children
    track the same var so they don't reflow during the open/close animation. */
 @media (min-width: 641px) {
   .right-panel-container {
@@ -1263,13 +1282,14 @@ span.token.table {
     /* the panel measures itself for the dock module-tab collapse below */
     container-type: inline-size;
   }
-  /* 2026-10 rail 改版：右坞 = 44px 常驻图标列 + 展开面板。宽度语义 = 整个
-     右坞（rail + 面板）：展开态沿用 --pi-right-panel-width（px，拖拽把手
-     写入）/ 42% 默认，min 344 = 44 rail + 300 面板；收起态固定 44px——
-     只剩 rail，图标列永不消失（收起 = 点已激活图标 toggle）。 */
+  /* 2026-10 rail 改版 + 用户反馈：右坞 = 36px 常驻纯 icon 图标列 + 展开面板。
+     宽度语义 = 整个右坞（rail + 面板）：展开态 = --pi-right-panel-width（px，
+     拖拽把手写入）/ **336px 默认（= min）**；min 336 = 36 rail + 300 面板；
+     收起态固定 36px——只剩 rail，图标列永不消失（收起 = 点已激活图标
+     toggle；缺省即收起，见 useAppShellState dockRailFor）。 */
   .right-panel-container.right-panel-open {
-    width: var(--pi-right-panel-width, 42%);
-    min-width: 344px;
+    width: var(--pi-right-panel-width, 336px);
+    min-width: 336px;
     /* keep the center chat area usable (≥620px) even if the stored px width
        was set on a larger window (min-width still wins below 920px windows) */
     /* 上限必须扣掉侧栏实际宽度（--pi-sidebar-width 由 DesktopShell 设在三栏
@@ -1279,18 +1299,18 @@ span.token.table {
     max-width: calc(100vw - var(--pi-sidebar-width, 300px) - 632px);
   }
   .right-panel-container.right-panel-closed {
-    width: 44px;
-    min-width: 44px;
+    width: 36px;
+    min-width: 36px;
   }
   /* while actively dragging, jump instantly instead of animating each move */
   .right-panel-container.right-panel-resizing {
     transition: none !important;
   }
   /* keep inner content at fixed width so it doesn't reflow during animation
-     （rail 固定 44px；面板 = 总宽 - 44，与展开态宽度一致——收起动画期间
+     （rail 固定 36px；面板 = 总宽 - 36，与展开态宽度一致——收起动画期间
      面板内容不重排，仅被容器 overflow hidden 裁掉） */
   .right-panel-container > .dock-panel {
-    width: calc(var(--pi-right-panel-width, 42vw) - 44px);
+    width: calc(var(--pi-right-panel-width, 336px) - 36px);
     min-width: 300px;
   }
   /* Right dock module tabs are PINNED primary nav — they never scroll away
@@ -1308,13 +1328,14 @@ span.token.table {
   }
 }
 
-/* Right dock rail (2026-10 改版, IDEA 形态): 44px vertical icon column —
-   文件/Loops/工作项/知识库/终端，贴窗口最右缘常驻（capability 门控由
-   DesktopShell 控制条目渲染）。容器 flex-direction: row-reverse + DOM
-   [rail][panel]：rail 钉右缘；收起态（容器 44px）被 overflow 裁掉的是
-   面板左缘——rail 永远可见。点已激活图标 = 收起/展开 toggle。 */
+/* Right dock rail (2026-10 改版 + 同月用户反馈收窄): 36px vertical icon
+   column — 文件/Loops/工作项/知识库/终端，**纯 icon 无文字标签**（hover
+   title 提示），贴窗口最右缘常驻（capability 门控由 DesktopShell 控制条目
+   渲染）。容器 flex-direction: row-reverse + DOM [rail][panel]：rail 钉右
+   缘；收起态（容器 36px）被 overflow 裁掉的是面板左缘——rail 永远可见。
+   点已激活图标 = 收起/展开 toggle。 */
 .dock-rail {
-  width: 44px;
+  width: 36px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -1325,11 +1346,9 @@ span.token.table {
 }
 .dock-rail-icon {
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  height: 48px;
+  height: 40px;
   background: transparent;
   border: none;
   border-right: 2px solid transparent;
@@ -1347,11 +1366,6 @@ span.token.table {
   background: var(--bg);
   color: var(--text);
   border-right-color: var(--accent);
-}
-.dock-rail-icon-label {
-  font-size: 10px;
-  line-height: 1;
-  white-space: nowrap;
 }
 .dock-panel {
   display: flex;
@@ -1410,8 +1424,8 @@ span.token.table {
     --pi-sidebar-btn-fs: 13px;
     --pi-sidebar-btn-h: 40px;
   }
-  /* The mobile drawer is gone (bottom-tab navigation, MobileShell) — only
-     touch-density helpers for the shared panels remain in this block. */
+  /* 手机壳导航（底部 tab 栏 .mobile-tabbar）的样式在文件上方独立成段；本块
+     只放共享面板的触控密度辅助规则。 */
   .directory-picker-back,
   .directory-picker-entry,
   .directory-picker-action {

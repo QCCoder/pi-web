@@ -6,7 +6,7 @@ import type { SessionInfo } from "./types";
 /** The sessions-list payload shared by `GET /api/sessions` and the SSR
  *  prefetch in `app/page.tsx` (方案二：首帧即真数据——SSR HTML 不再渲染
  *  「尚无工作区/加载中」假态，消除加载期的两次整体跳变；诊断记录见
- *  AGENTS.md 导航章 + docs/global-session-sidebar-design.md）。
+ *  AGENTS.md 导航章 + knowledge/designs/global-session-sidebar-design.md）。
  *
  *  Live merge is best-effort: disk list (persistent session index) is the
  *  source of truth; the in-process live merge only adds not-yet-flushed

@@ -26,8 +26,8 @@ import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promi
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { withWorkspaceWriteLock } from "./workspaces/service";
-import { skillMessageTitle } from "./skill-message";
+import { withWorkspaceWriteLock } from "./workspaces/service.ts";
+import { skillMessageTitle } from "./skill-message.ts";
 
 // v2: firstMessage is now skill-wrapper-reduced BEFORE truncation. v1 entries
 // truncated a `/skill:` expansion mid-wrapper — the surviving `<skill name=…>`

@@ -21,6 +21,7 @@ import {
   type StartSessionOptions,
 } from "./registry.ts";
 import type { StalledSessionInfo } from "./heartbeat.ts";
+import { waitForTurnSettle } from "./turn-settle.ts";
 import { resolveSessionPath } from "../session-reader.ts";
 import { generateSessionTitle } from "../session-title.ts";
 
@@ -156,6 +157,15 @@ export function liveSessions(): LiveRpcSessionInfo[] {
 
 export function runningStatus(): { ids: string[]; stalled: StalledSessionInfo[] } {
   return { ids: getRunningRpcSessionIds(), stalled: getStalledSessionSnapshot() };
+}
+
+/** 手动轮锁活性化（run 路由经 deps.awaitSettle 注入 rounds.ts）：被动等一个
+ *  在飞 turn 收尾。会话已不在运行集合 = 已收尾，立即 resolve（web 重启后旧
+ *  轮监听丢失的场景由 spawner tick 的幽灵锁探测兜底）。 */
+export function waitForSessionSettle(sessionId: string, timeoutMs: number): Promise<void> {
+  const live = getRpcSession(sessionId);
+  if (!live?.isAlive()) return Promise.resolve();
+  return waitForTurnSettle(live, timeoutMs);
 }
 
 export async function getSubagentRunStatus(sessionId: string): Promise<unknown> {

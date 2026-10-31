@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { grillReplyText, type GrillQuestion } from "@/lib/grill-card";
 import { MarkdownBody } from "./MarkdownBody";
@@ -20,15 +20,22 @@ interface Props {
 /**
  * grill 交互确认卡：dev-loop 执行会话在 assistant 消息里嵌 ```grill 块（lib/grill-card.ts
  * 解析），本组件渲染为选项按钮 + 倒计时 + 自由输入。点击把答复作为普通用户消息
- * 经既有发送路径送回会话——会话侧合同零改动。超时后 watcher（scripts/grill-watch.py）
- * 会按推荐代答；过期后点击仍有效（迟到的意见走插话语义）。
+ * 经既有发送路径送回会话——会话侧合同零改动。带 autoApprove 的卡在倒计时走完的
+ * 瞬间按推荐项自动代答（本组件执行，答复带「超时自动按推荐」尾标，落档据此誊为
+ * timeout-default 来源）；仅在挂载期间亲眼看到到点才代答——挂载时已过期的卡
+ * （历史消息 / 页面中途才打开）只显示过期，绝不补发，防滚动旧会话误发陈旧答复。
+ * 迟到的手动作答仍有效（走插话语义）。
  */
 export function GrillMessageContent({ grill, before, after, messageTimestamp, cwd, onOpenFile, onSend }: Props) {
   const { t } = useI18n();
-  const [answered, setAnswered] = useState<string | null>(null);
+  const [answered, setAnswered] = useState<{ value: string; auto: boolean } | null>(null);
   const [custom, setCustom] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  // 是否在挂载期间见过「未到期」——自动代答只发生在挂载中的到点跃迁，
+  // 挂载即过期的卡（历史/迟到打开）不代答（防旧卡补发陈旧答复）。
+  const sawAlive = useRef(false);
 
+  const autoValue = grill.autoApprove && grill.recommended ? grill.recommended : undefined;
   const deadline = useMemo(
     () => (typeof messageTimestamp === "number" ? messageTimestamp + (grill.deadlineMin ?? 2) * 60_000 : null),
     [messageTimestamp, grill.deadlineMin],
@@ -37,14 +44,29 @@ export function GrillMessageContent({ grill, before, after, messageTimestamp, cw
 
   useEffect(() => {
     if (deadline === null || answered) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const timer = setInterval(() => {
+      const remaining = deadline - Date.now();
+      if (remaining > 0) sawAlive.current = true;
+      setNow(Date.now());
+      // 自动代答：亲眼见证的到点跃迁 + 有发送路径 + 有推荐可代 + 没在打字 + 还没答。
+      if (
+        remaining <= 0
+        && sawAlive.current
+        && onSend !== undefined
+        && autoValue !== undefined
+        && custom.trim() === ""
+      ) {
+        setAnswered({ value: autoValue, auto: true });
+        onSend?.(grillReplyText(grill.question, autoValue, { auto: true }));
+      }
+    }, 1000);
     return () => clearInterval(timer);
-  }, [deadline, answered]);
+  }, [deadline, answered, autoValue, custom, grill.question, onSend]);
 
   const send = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed || answered) return;
-    setAnswered(trimmed);
+    setAnswered({ value: trimmed, auto: false });
     onSend?.(grillReplyText(grill.question, trimmed));
   };
 
@@ -75,12 +97,12 @@ export function GrillMessageContent({ grill, before, after, messageTimestamp, cw
           )}
           {!answered && countdownSec !== null && !expired && (
             <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
-              {t("grill.countdown", { sec: countdownSec })}
+              {t(autoValue !== undefined ? "grill.countdown" : "grill.countdownPlain", { sec: countdownSec })}
             </span>
           )}
           {!answered && expired && (
             <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--warning, #f9c22e)" }}>
-              {t("grill.expired")}
+              {t(autoValue !== undefined ? "grill.expiredAuto" : "grill.expiredPlain")}
             </span>
           )}
         </div>
@@ -88,18 +110,22 @@ export function GrillMessageContent({ grill, before, after, messageTimestamp, cw
         <div style={{ fontSize: 14, lineHeight: 1.55, marginBottom: 10 }}>{grill.question}</div>
 
         {answered ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-            <span style={{ color: "var(--text-dim)" }}>{t("grill.answered")}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, flexWrap: "wrap" }}>
+            <span style={{ color: "var(--text-dim)" }}>
+              {answered.auto ? t("grill.autoAnswered") : t("grill.answered")}
+            </span>
             <span
               style={{
                 padding: "2px 10px",
                 borderRadius: 999,
-                background: "color-mix(in srgb, var(--accent) 18%, transparent)",
-                color: "var(--accent)",
+                background: answered.auto
+                  ? "color-mix(in srgb, var(--warning, #f9c22e) 16%, transparent)"
+                  : "color-mix(in srgb, var(--accent) 18%, transparent)",
+                color: answered.auto ? "var(--warning, #f9c22e)" : "var(--accent)",
                 fontSize: 12,
               }}
             >
-              {answered}
+              {answered.value}
             </span>
           </div>
         ) : onSend !== undefined ? (

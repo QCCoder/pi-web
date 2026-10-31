@@ -314,17 +314,21 @@ test("WorkItemExecution renders submitted attempt candidates summary (repo@commi
   assert.doesNotMatch(html, /repo-alpha@abcd1234567890ef/, "full commit sha not dumped");
 });
 
-test("WorkspaceManager 配置区编辑 developer profile（与 designer 同形，round-trip 保真）", () => {
+test("WorkspaceManager 配置区角色表：四角色同形（剧本下拉 + 模型覆写 + 状态），round-trip 保真", () => {
   const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
-  // developer 同形行：独立草稿 state + 表单行。
-  assert.match(source, /deliveryDeveloperProfile/);
-  assert.match(source, /Developer Profile/);
+  // Seam-repositioning Task 4：designer/developer 双文本框 → 四行角色表
+  // （DELIVERY_ROLES 序）——per-role 剧本草稿（"" = 同名缺省，不写 profile 键）。
+  assert.match(source, /deliveryRoleProfiles/);
+  assert.match(source, /DELIVERY_ROLES\.map/);
+  assert.match(source, /同名（\{role\}\.md）/);
   // GET 播种与保存回填都读 roles.developer.profile。
   const seedMatches = source.match(/roles\.developer\?\.profile \?\? ""/g) ?? [];
   assert.ok(seedMatches.length >= 2, "load seed + post-save re-seed both read roles.developer.profile");
-  // PUT round-trip：保留既有 developer model 覆写（designer 同款习语）。
-  assert.match(source, /deliveryConfig\.roles\.developer/);
-  assert.match(source, /existingDeveloper/);
+  // PUT round-trip：词表循环拼四键，保留既有 model 覆写（未触碰角色字节保真）。
+  assert.match(source, /for \(const role of DELIVERY_ROLES\)/);
+  assert.match(source, /deliveryConfig\.roles\[role\]/);
+  // PUT 体 v2。
+  assert.match(source, /schemaVersion: 2/);
 });
 
 // --------------------------- Phase-4 T5: verifier 徽标 + 检查证据 + checks 配置编辑器
@@ -338,14 +342,138 @@ const checkResult = (overrides = {}) => ({
   ...overrides,
 });
 
-test("WorkItemExecution renders the verifier role badge on the claim (Phase-4 T5)", () => {
+test("WorkItemExecution renders the legacy verifier role badge as-is (已退役，旧 attempts 原样可读)", () => {
   const html = renderToStaticMarkup(
     React.createElement(WorkItemExecution, props({
       execution: execution({ claim: claim({ role: "verifier" }) }),
     })),
   );
-  assert.match(html, /verifier/, "verifier role label rendered");
+  assert.match(html, /verifier/, "legacy role label rendered verbatim (no mapping)");
   assert.match(html, /停止执行/, "claim card still complete");
+});
+
+// --------------------- final-arch step-3 T5: system 检查步 + review 判定徽章
+
+test("WorkItemExecution renders the system claim as 系统检查运行中 + 系统检查 badge + checkResults", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        claim: claim({
+          role: "system",
+          sessionId: "system:01JXSYS0000000000000000",
+          checkContexts: [
+            { name: "unit", repositoryId: "01JXWT000000000000000000", command: "npm test", timeout_seconds: 300 },
+          ],
+          checkResults: [checkResult()],
+        }),
+      }),
+    })),
+  );
+  assert.match(html, /系统检查运行中/, "system claim card title (引擎检查步，非角色会话)");
+  assert.match(html, /系统检查/, "system badge (词表唯一翻译点)");
+  assert.match(html, /npm test/, "frozen command from checkContexts in title");
+  assert.match(html, /unit\.log/, "check evidence rows still rendered as today");
+});
+
+test("WorkItemExecution renders system attempt verificationOutcome 徽章三态（unverified → 环境未就绪）", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        recentAttempts: [
+          attempt({ role: "system", outcome: "submitted", verificationOutcome: "verified" }),
+          attempt({ attemptId: "01JS2", sessionId: "sys-2", role: "system", outcome: "submitted", verificationOutcome: "rework" }),
+          attempt({ attemptId: "01JS3", sessionId: "sys-3", role: "system", outcome: "submitted", verificationOutcome: "unverified" }),
+        ],
+      }),
+    })),
+  );
+  assert.match(html, /已验证/, "verified badge");
+  assert.match(html, /需返工/, "rework badge");
+  assert.match(html, /环境未就绪/, "unverified badge（blocked 等人修环境，不自动重试）");
+});
+
+test("WorkItemExecution renders the reviewer verdict badge on attempts（评审通过 / 返工（code|spec））", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemExecution, props({
+      execution: execution({
+        recentAttempts: [
+          attempt({
+            role: "reviewer",
+            outcome: "submitted",
+            review: {
+              outcome: "pass",
+              notes: "",
+              candidateDigest: "c".repeat(64),
+              at: "2026-10-26T00:00:00.000Z",
+              attemptId: "01JR1",
+            },
+          }),
+          attempt({
+            attemptId: "01JR2",
+            sessionId: "rev-2",
+            role: "reviewer",
+            outcome: "submitted",
+            review: {
+              outcome: "rework",
+              source: "code",
+              notes: "登录态处理有竞态，请修复后重新提交。",
+              candidateDigest: "c".repeat(64),
+              at: "2026-10-26T01:00:00.000Z",
+              attemptId: "01JR2",
+            },
+          }),
+        ],
+      }),
+    })),
+  );
+  assert.match(html, /评审通过/, "pass verdict badge");
+  assert.match(html, /返工（code）/, "rework badge with source (spec 同形)");
+  assert.match(html, /title="评审意见：登录态处理有竞态[^"]*"/, "review notes surfaced via title");
+});
+
+test("WorkspaceManager 阶段开关：stages 三键进客户端镜像且 PUT 回传（UI 保存不丢手设开关）", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  // 客户端镜像类型带 stages 三键（服务端 parse 后必有——缺块回填全关）：
+  // review = 先审后跑；integrate = 集成命令（command 可选——关闭时保留）；
+  // acceptance = 验收门（final-arch step-4）。
+  assert.match(source, /review: \{ enabled: boolean \};/);
+  assert.match(source, /integrate: \{ enabled: boolean; command\?: string \};/);
+  assert.match(source, /acceptance: \{ enabled: boolean \};/);
+  // 默认镜像播种三开关全关；GET 播种直读（integrate.command 缺省映射空串）。
+  assert.match(
+    source,
+    /review: \{ enabled: false \},\s*\n\s*integrate: \{ enabled: false \},\s*\n\s*acceptance: \{ enabled: false \},/,
+  );
+  const seeds = source.match(/setDeliveryReviewEnabled\(/g) ?? [];
+  assert.ok(seeds.length >= 3, "GET seed + PUT 回填 + 清理复位都走同一 state");
+  const integrateSeeds = source.match(/setDeliveryIntegrateEnabled\(/g) ?? [];
+  assert.ok(integrateSeeds.length >= 3, "integrate 开关同款三处播种（GET/回填/复位）");
+  const acceptanceSeeds = source.match(/setDeliveryAcceptanceEnabled\(/g) ?? [];
+  assert.ok(acceptanceSeeds.length >= 3, "acceptance 开关同款三处播种（GET/回填/复位）");
+  // PUT 体带 stages 三键（不带 = 手设的开关被保存打回缺省 false）。
+  assert.match(source, /review: \{ enabled: deliveryReviewEnabled \},/);
+  assert.match(source, /enabled: deliveryIntegrateEnabled,/);
+  assert.match(source, /acceptance: \{ enabled: deliveryAcceptanceEnabled \},/);
+  // 集成开启而命令空白 → 客户端拦截（文案与服务端 parseStages 一致）。
+  assert.match(source, /stages\.integrate\.command is required when integrate is enabled/);
+  // UI 控件在场：评审阶段 / 集成命令输入 / 验收门开关。
+  assert.match(source, /评审阶段/);
+  assert.match(source, /集成命令/);
+  assert.match(source, /验收门/);
+});
+
+// backlog-clearing T2（2026-10-27）：attention 阈值 round-trip——客户端镜像带
+// attention（服务端 parse 后必有）、默认镜像播种 3/7、PUT 体原样回传。此前
+// PUT 不带 attention，服务端 parseAttention 打回缺省 3/7——手设 nudge/park
+// 每次保存即丢（stages 同款「不带 = 保存打回缺省」病）。
+test("WorkspaceManager attention 阈值 round-trip：镜像必带 + PUT 回传（保存不丢手设阈值）", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  // 客户端镜像类型带 attention（服务端 config.ts parseAttention 缺块回填 3/7）。
+  assert.match(source, /attention: \{ nudgeAfterDays: number; parkAfterDays: number \};/);
+  // 默认镜像播种缺省 3/7（GET {config:null} 契约的表单播种路径同样带阈值）。
+  assert.match(source, /attention: \{ nudgeAfterDays: 3, parkAfterDays: 7 \},/);
+  // PUT 体原样回传（不带 = 服务端打回缺省）。
+  assert.match(source, /attention: deliveryConfig\.attention,/);
 });
 
 test("WorkItemExecution renders claim checkResults rows（名称/outcome 徽章/exitCode/duration/日志名）", () => {
@@ -494,6 +622,98 @@ test("WorkItemDetailView renders verification checks evidence 摘要（命令+�
   assert.match(html, /title="delivery\/artifacts\/verification-logs\/01JXEC0000000009\/unit\.log"/, "full logRef in title");
 });
 
+test("WorkItemDetailView renders the 评审 block（结论徽章 + 源头 + 意见 + 时间 + 候选摘要短码）", async () => {
+  const reviewed = {
+    schemaVersion: 1,
+    id: "01J1",
+    key: "REQ-0010",
+    revision: 5,
+    type: "requirement",
+    title: "评审示例",
+    status: "open",
+    phase: "verification",
+    priority: "P2",
+    repositories: [],
+    tags: [],
+    conversations: [],
+    relatedItems: [],
+    designs: [],
+    plans: [],
+    delivery: {
+      protocolVersion: 1,
+      mode: "manual",
+      review: {
+        outcome: "rework",
+        source: "spec",
+        notes: "验收条件缺性能线，请补齐后重新确认设计。",
+        candidateDigest: "d".repeat(64),
+        at: "2026-10-26T02:00:00.000Z",
+        attemptId: "01JREV1",
+      },
+    },
+    archivedAt: null,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  };
+  const { WorkItemDetailView } = await jiti.import("./WorkItemDetailView.tsx");
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemDetailView, {
+      workspaceId: "ws",
+      item: reviewed,
+      repositories: [],
+      onOpenConversation: noop,
+    }),
+  );
+  assert.match(html, /评审 /, "review block header with time");
+  assert.match(html, /返工（spec）/, "rework badge carries the source");
+  assert.match(html, /候选摘要 dddddddd<\/span>/, "candidate digest shortened to 8 chars (full digest only in title)");
+  assert.match(html, /验收条件缺性能线/, "review notes rendered");
+});
+
+test("WorkItemDetailView renders the 验收 block（意见 + 候选摘要短码 + 时间）", async () => {
+  const accepted = {
+    schemaVersion: 1,
+    id: "01J2",
+    key: "REQ-0011",
+    revision: 6,
+    type: "requirement",
+    title: "验收示例",
+    status: "open",
+    phase: "release_ready",
+    priority: "P2",
+    repositories: [],
+    tags: [],
+    conversations: [],
+    relatedItems: [],
+    designs: [],
+    plans: [],
+    delivery: {
+      protocolVersion: 1,
+      mode: "manual",
+      acceptance: {
+        notes: "按验收清单逐项核对通过，允许发布。",
+        candidateDigest: "a".repeat(64),
+        at: "2026-10-26T03:00:00.000Z",
+      },
+    },
+    archivedAt: null,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  };
+  const { WorkItemDetailView } = await jiti.import("./WorkItemDetailView.tsx");
+  const html = renderToStaticMarkup(
+    React.createElement(WorkItemDetailView, {
+      workspaceId: "ws",
+      item: accepted,
+      repositories: [],
+      onOpenConversation: noop,
+    }),
+  );
+  assert.match(html, /验收 /, "acceptance block header with time");
+  assert.match(html, /候选摘要 aaaaaaaa<\/span>/, "candidate digest shortened to 8 chars (full digest only in title)");
+  assert.match(html, /按验收清单逐项核对通过，允许发布。/, "acceptance notes rendered");
+});
+
 test("WorkspaceManager 配置区 checks 编辑器：四列（name/repositoryId/command/timeout_seconds）+ 增删行 + 空态引导", () => {
   const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
   // 草稿行 state + 客户端镜像形状（timeout_seconds）。
@@ -584,4 +804,45 @@ test("WorkItemExecution attempt 行不带 releasePlan 时零渲染（非 release
   );
   assert.doesNotMatch(html, /发布材料/, "no releasePlan summary without a releasePlan");
   assert.doesNotMatch(html, /含回滚|未附回滚/);
+});
+
+// ------------------- final-arch step-6 Task 3: init 向导 + 就绪清单 + 模板漂移
+
+test("WorkspaceManager 初始化区：POST init 带 from/checks 草稿与 stages 三开关，响应渲染动作清单与建议", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  // POST …/delivery/init：from 缺省省键、checks 草稿空行丢弃半行拦、开关取当前表单值。
+  assert.match(source, /delivery\/init/);
+  assert.match(source, /\.\.\.\(deliveryInitFrom\.trim\(\) \? \{ from: deliveryInitFrom\.trim\(\) \} : \{\}\)/);
+  assert.match(source, /stagesReview: deliveryReviewEnabled/);
+  assert.match(source, /acceptance: \{ enabled: deliveryAcceptanceEnabled \}/);
+  // 草稿预填跟随最近一次 init 响应的 suggestedChecks；「采用为验证命令」进
+  // checks 编辑器（不自动保存）。
+  assert.match(source, /setDeliveryInitChecks\(/);
+  assert.match(source, /adoptSuggestedChecks\(/);
+  assert.match(source, /采用为验证命令/);
+  // 动作清单渲染。
+  assert.match(source, /deliveryInitResult\.actions\.map/);
+});
+
+test("WorkspaceManager 就绪清单常驻：GET readiness 三个时机刷新、空 = 已就绪，无新定时器", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  assert.match(source, /delivery\/readiness/);
+  // 刷新时机：load（角色摘要同 effect）/ 保存成功 / init 成功——无 setInterval。
+  const calls = source.match(/loadDeliveryReadiness\(/g) ?? [];
+  assert.ok(calls.length >= 3, "load + post-save + post-init refresh sites");
+  assert.doesNotMatch(source, /setInterval/);
+  assert.match(source, /已就绪/);
+  assert.match(source, /deliveryReadiness\.items\.map/);
+});
+
+test("WorkspaceManager 模板漂移：seeded_from 版本落后 readiness 时提示 + 另存新模板（409 = 副本已存在）", () => {
+  const source = readFileSync(new URL("../WorkspaceManager.tsx", import.meta.url), "utf8");
+  // 漂移判定：seededFrom "<role>@<n>" 且 n < currentTemplateVersion。
+  assert.match(source, /seededVersion < deliveryReadiness\.currentTemplateVersion/);
+  assert.match(source, /模板已更新 v\{seededVersion\}→v\{deliveryReadiness\.currentTemplateVersion\}/);
+  // 另存 POST …/roles/[role]/template；成功提示路径、409 提示副本已存在。
+  assert.match(source, /delivery\/roles\/\$\{encodeURIComponent\(role\)\}\/template/);
+  assert.match(source, /另存新模板/);
+  assert.match(source, /templateError\.status === 409/);
+  assert.match(source, /副本已存在/);
 });

@@ -4,20 +4,21 @@ import { workspaceForSession } from "./home-quick-switch.ts";
 import type { Tab } from "./tab-types";
 
 /**
- * 会话 tab 模型的纯逻辑层（docs/session-tabs-design.md Phase 1）。
+ * 会话 tab 模型的纯逻辑层（knowledge/designs/session-tabs-design.md Phase 1）。
  *
  * tab 的粒度是「会话」而非「工作区」：每个 tab 自带工作区上下文（环境解析
- * 链 activeWorkspace = activeTab.workspace 保持不变），三种 kind ——
+ * 链 activeWorkspace = activeTab.workspace 保持不变），两种 kind ——
  *   session        一个真实会话（id = s:<sessionId>，全局唯一 = U1 去重键）
  *   new-session    composer-only 占位（id = new:<uuid>，首条消息后才转正；
  *                  U1 豁免：同工作区可并存多个，草稿键按 tab id 隔离）
- *   workspace-home 工作区「家」tab = 总览 dashboard（id = ws:<workspaceId>，
- *                  每工作区一个 = U1）
+ * 工作区总览不是 tab：它是中央区整页（CenterPage kind "overview"，
+ * knowledge/designs/overview-center-page-design.md）——2026-10 把原 workspace-home 家 tab
+ * 除名，tab 条回归纯「打开的会话」。
  *
  * 本文件只放纯函数 + 类型；React 状态与 handler 在 components/shell/useAppShellState.ts。
  */
 
-export type SessionTabKind = "session" | "new-session" | "workspace-home";
+export type SessionTabKind = "session" | "new-session";
 
 export interface SessionTabState {
   id: string;
@@ -34,10 +35,6 @@ export interface SessionTabState {
 
 export function sessionTabId(sessionId: string): string {
   return `s:${sessionId}`;
-}
-
-export function homeTabId(workspaceId: string): string {
-  return `ws:${workspaceId}`;
 }
 
 export function newSessionTabId(seed: string): string {
@@ -69,42 +66,16 @@ export function createNewSessionTab(workspace: WorkspaceSummary, id: string): Se
   };
 }
 
-export function createHomeTab(workspace: WorkspaceSummary): SessionTabState {
-  return {
-    id: homeTabId(workspace.id),
-    kind: "workspace-home",
-    workspace,
-    session: null,
-    fileTabs: [],
-    activeFileTabId: null,
-    // 右栏默认关闭：打开工作区/会话不自动展开文件区（太乱），只在用户显式
-    // 操作时展开——右上角开关、点开文件、或总览行点仓库/知识库/工作项/Loops。
-    rightPanelOpen: false,
-  };
-}
-
 /**
  * C1 分派：会话列表普通点击落在哪。活动 tab 是会话/占位 → 原地变身
- * （morph）；活动 tab 是家 tab → 开新会话 tab（家 tab 是枢纽锚点，不被
- * 导航吃掉）；无活动 tab（首页上下文）→ 走首页管道（from-home）。
+ * （morph）；无活动 tab（首页上下文 / 总览整页打开）→ 走首页管道
+ * （from-home = 开新会话 tab，总览不被导航吃掉）。
  */
-export type OpenSessionTarget = "morph" | "new-tab" | "from-home";
+export type OpenSessionTarget = "morph" | "from-home";
 
 export function resolveOpenSessionTarget(activeTab: SessionTabState | null): OpenSessionTarget {
   if (!activeTab) return "from-home";
-  if (activeTab.kind === "workspace-home") return "new-tab";
   return "morph";
-}
-
-/**
- * 新建会话分派（2026-09）：活动 tab 是家 tab（= 工作区详情页，新建会话
- * 的主要入口所在）→ 原地变身（morph，不新增 tab——详情页点「新建会话」
- * 不该膨胀 tab 条，用户反馈）；活动 tab 是会话/占位（或首页上下文）→
- * 开新占位 tab（不吃掉正在看的会话）。tab 条「＋」是显式的加 tab 按钮，
- * 不经此分派（调用方直接 openNewSessionTab）。
- */
-export function resolveNewSessionTarget(activeTab: SessionTabState | null): "morph" | "new-tab" {
-  return activeTab?.kind === "workspace-home" ? "morph" : "new-tab";
 }
 
 /**
@@ -178,11 +149,10 @@ export function nextActiveAfterBatchClose(
  * URL 投影（语法与旧工作区 tab 时代完全一致，applyUrlToTabs 只重映射）：
  *   会话 tab → workspace=<id>&view=chat&session=<sid>
  *   占位 tab → workspace=<id>&view=chat
- *   家 tab   → workspace=<id>&view=overview
+ * （总览整页 workspace=<id>&view=overview 不是 tab，由 shell 自己写 URL。）
  */
 export function tabQuery(tab: SessionTabState): string {
   const workspacePart = `workspace=${encodeURIComponent(tab.workspace.id)}`;
-  if (tab.kind === "workspace-home") return `${workspacePart}&view=overview`;
   if (tab.kind === "session" && tab.session) {
     return `${workspacePart}&view=chat&session=${encodeURIComponent(tab.session.id)}`;
   }
@@ -215,9 +185,9 @@ export function serializeTabs(tabs: SessionTabState[], activeTabId: string | nul
       if (tab.session) stored.push({ kind: "session", sessionId: tab.session.id });
     } else if (tab.kind === "new-session") {
       stored.push({ kind: "new-session", workspaceId: tab.workspace.id, id: tab.id });
-    } else {
-      stored.push({ kind: "workspace-home", workspaceId: tab.workspace.id });
     }
+    // 其它 kind 不进存储（2026-10 家 tab 退役；防御 HMR 期间残留的旧形态内存
+    // tab 被误序列化成占位 tab、刷新后变成幽灵「新会话」）。
   }
   return { v: 1, tabs: stored, activeTabId };
 }
@@ -227,11 +197,12 @@ export function parseStoredTabs(raw: string | null): StoredSessionTabs | null {
   try {
     const parsed = JSON.parse(raw) as Partial<StoredSessionTabs>;
     if (parsed?.v !== 1 || !Array.isArray(parsed.tabs)) return null;
+    // 2026-10 之前存储里可能有 kind "workspace-home"（家 tab）——该 kind 已
+    // 退役，这里按形态损坏静默剔除即可，无需 v2 迁移。
     const tabs = parsed.tabs.filter((entry): entry is StoredSessionTab => {
       if (!entry || typeof entry !== "object") return false;
       if (entry.kind === "session") return typeof entry.sessionId === "string";
       if (entry.kind === "new-session") return typeof entry.workspaceId === "string";
-      if (entry.kind === "workspace-home") return typeof entry.workspaceId === "string";
       return false;
     });
     const activeTabId = typeof parsed.activeTabId === "string" ? parsed.activeTabId : null;
@@ -265,7 +236,7 @@ export function restoreTabs(
       const workspace = session ? workspaceForSession(session, workspaces) ?? null : null;
       // 会话不在列表（已删/已归档）或归属工作区不可用 → 跳过（失效 id 静默跳过）。
       if (session && workspace) tab = createSessionTab(workspace, session);
-    } else if (entry.kind === "new-session") {
+    } else {
       const workspace = workspaces.find((w) => w.id === entry.workspaceId && w.available) ?? null;
       if (workspace) {
         // 保留原 id（草稿键续命）；存储里的 id 不像 new:* 时给确定性兜底。
@@ -274,9 +245,6 @@ export function restoreTabs(
           : newSessionTabId(`restored-${fallbackSeed++}`);
         tab = createNewSessionTab(workspace, id);
       }
-    } else {
-      const workspace = workspaces.find((w) => w.id === entry.workspaceId && w.available) ?? null;
-      if (workspace) tab = createHomeTab(workspace);
     }
     if (!tab || seen.has(tab.id)) {
       skipped += 1;

@@ -21,6 +21,13 @@ export type WorkItemPhase =
 export type WorkItemPriority = "P0" | "P1" | "P2" | "P3";
 export type WorkItemActor = "user" | "agent" | "system" | "external";
 
+/** 开发分支登记（每关联仓库至多一条）：只存分支名；是否已合入 develop /
+ *  master 等合并状态永远实时计算（/git 端点），不落盘、不进 events。 */
+export interface WorkItemBranchRef {
+  repositoryId: string;
+  branch: string;
+}
+
 export interface WorkItemRecord {
   schemaVersion: typeof WORK_ITEM_SCHEMA_VERSION;
   id: string;
@@ -32,6 +39,7 @@ export interface WorkItemRecord {
   phase: WorkItemPhase;
   priority: WorkItemPriority;
   repositories: string[];
+  branches?: WorkItemBranchRef[];
   tags: string[];
   conversations: string[];
   relatedItems: string[];
@@ -94,6 +102,7 @@ export interface CreateWorkItemInput {
   originalDescription: string;
   priority?: WorkItemPriority;
   repositories?: string[];
+  branches?: WorkItemBranchRef[];
   tags?: string[];
   actor?: WorkItemActor;
   conversationId?: string;
@@ -121,6 +130,8 @@ export interface UpdateWorkItemInput {
   phase?: WorkItemPhase;
   priority?: WorkItemPriority;
   repositories?: string[];
+  /** 开发分支登记；空数组 = 清空。repositoryId 必须属于该项 repositories。 */
+  branches?: WorkItemBranchRef[];
   tags?: string[];
   conversations?: string[];
   relatedItems?: string[];
